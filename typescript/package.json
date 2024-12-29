@@ -1,0 +1,14 @@
+{
+  "name": "dat",
+  "module": "src/analyzeReplay.ts",
+  "type": "module",
+  "devDependencies": {
+    "bun-types": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  }
+}
