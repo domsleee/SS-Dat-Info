@@ -23,6 +23,22 @@ export interface AnalyzeResult {
   // distanceBreaksAfterFinish: number;
   // speedBreaksBeforeFinish: number;
   // speedBreaksAfterFinish: number;
+
+  coords?: CoordinateData;
+}
+
+export interface CoordinateData {
+  rows: Array<RowData>;
+}
+
+interface RowData {
+  x: number;
+  y: number;
+  z: number;
+  rx: number;
+  rw: number;
+  ry: number;
+  rz:number;
 }
 
 export interface TimingDataFromHeader {

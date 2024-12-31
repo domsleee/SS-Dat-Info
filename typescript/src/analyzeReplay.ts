@@ -1,8 +1,8 @@
 import { readFile } from "fs/promises";
-import { AnalyzeResult, TimingDataFromHeader } from "./types";
+import { AnalyzeResult, CoordinateData, TimingDataFromHeader } from "./types";
 
 const BLOCK_SEP = "00003f48e1fa3e00000000";
-export async function analyzeReplay(filepath: string): Promise<AnalyzeResult> {
+export async function analyzeReplay(filepath: string, includeCoords?: boolean): Promise<AnalyzeResult> {
   const content = await readFile(filepath);
   const hexData = Buffer.from(content.buffer).toString("hex");
 
@@ -35,6 +35,8 @@ export async function analyzeReplay(filepath: string): Promise<AnalyzeResult> {
     recordingMs: timingData.totalRecordingTimeMs,
 
     checkpoint1Ms: timingData.checkpoint1TotalMs - timingData.crossStartPlusStartDelayMs,
+
+    ...includeCoords ? { coords: getCoordinateData(hexData) } : {},
   };
 }
 
@@ -42,7 +44,7 @@ function getTrackName(hexData: string): string {
   const firstBlock = hexData.split(BLOCK_SEP).at(1)!;
 
   const prefixes = {
-    "Alpine EasyMediumOrHard": "81ad2044d1",
+    "Alpine EasyMediumOrHard": "81ad2044d1a4",
     "Forest Easy": "1b97034427",
     "Forest MediumOrHard": "face01443",
     "Village Easy": "cd94374498",
@@ -97,6 +99,11 @@ function parseLittleEndian16(hexData: string) {
   return (high << 8) | low;
 }
 
+function parseLittleEndianFloat32(hexData: string) {
+  // 32-bit little endian. e.g. face0144 is 519.234
+  return new Float32Array(new Uint32Array([parseInt(hexData.match(/../g)!.reverse().join(''), 16)]).buffer)[0]
+}
+
 function countSame(hexData: string): number {
   const blocks = getDataBlocks(hexData);
   for (let i = 1; i < blocks.length - 1; ++i) {
@@ -107,13 +114,33 @@ function countSame(hexData: string): number {
   throw new Error("unreachable");
 }
 
-function getDataBlocks(hex: string): Array<string> {
-  const spl = hex.split(BLOCK_SEP);
-  const s = spl.slice(1).join(BLOCK_SEP);
-  if (!s) throw new Error("Corrupt, no separator found");
-  const blocks = [spl[0]];
-  for (let i = 0; i < s.length; i += 218) {
-    blocks.push(s.slice(i, i + 218));
+export function getDataBlocks(hex: string): Array<string> {
+  const headerInd = hex.indexOf(BLOCK_SEP);
+  if (headerInd === -1) throw new Error("Corrupt, no separator found");
+  const blocks = [hex.slice(0, headerInd)];
+  for (let i = headerInd; i < hex.length; i += 218) {
+    blocks.push(hex.slice(i, i + 218));
   }
   return blocks;
 }
+
+function getCoordinateData(hex: string): CoordinateData {
+  const blocks = getDataBlocks(hex);
+  const coordinateData: CoordinateData = { rows: [] };
+  for (const block of blocks.slice(1)) {
+    const data = {
+      x: parseLittleEndianFloat32(block.slice(22, 30)),
+      y: parseLittleEndianFloat32(block.slice(30, 38)),
+      z: parseLittleEndianFloat32(block.slice(38, 46)),
+      rx: parseLittleEndianFloat32(block.slice(46, 54)),
+      rw: parseLittleEndianFloat32(block.slice(54, 62)),
+      ry: parseLittleEndianFloat32(block.slice(62, 70)),
+      rz: parseLittleEndianFloat32(block.slice(70, 78)),
+    };
+    coordinateData.rows.push(data);
+  }
+  return coordinateData;
+}
+
+// 1: 3
+// 37: 75
