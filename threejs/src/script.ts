@@ -1,6 +1,8 @@
 import * as THREE from "three";
 import { getDomAH } from './data';
 import { setupVideo } from "./video";
+import { createIcons } from "lucide";
+
 
 const offsetSeconds = 23;//0.3; // smaller number = threejs plays earlier
 const videoTarget = setupVideo();
@@ -15,16 +17,19 @@ function main() {
   const playPauseButton = document.getElementById("playPauseButton")!;
 
   playPauseButton.onclick = () => {
+    console.log(playerState)
     if (playerState.isPlaying) {
       playerState.isPlaying = false;
-      playPauseButton.innerHTML = playerState.isPlaying ? "Pause" : "Play";
       videoTarget.videoTarget?.pauseVideo();
     } else {
       playerState.resumedFrame = performance.now() - 10 * playerState.lastFrameRendered;
       playerState.isPlaying = true;
       videoTarget.videoTarget?.playVideo();
-      playPauseButton.innerHTML = playerState.isPlaying ? "Pause" : "Play";
     }
+    
+    
+    playPauseButton.innerHTML = `<i data-lucide="${playerState.isPlaying ? 'pause' : 'play'}"></i>`;
+    createIcons();
   };
 
   const preText = document.getElementById("preText")!;
