@@ -1,7 +1,6 @@
 import { readFile } from "fs/promises";
 import { AnalyzeResult, CoordinateData, TimingDataFromHeader } from "./types";
 
-const BLOCK_SEP = "00003f48e1fa3e00000000";
 export async function analyzeReplay(filepath: string, includeCoords?: boolean): Promise<AnalyzeResult> {
   const content = await readFile(filepath);
   const hexData = Buffer.from(content.buffer).toString("hex");
@@ -41,20 +40,24 @@ export async function analyzeReplay(filepath: string, includeCoords?: boolean): 
 }
 
 function getTrackName(hexData: string): string {
-  const firstBlock = hexData.split(BLOCK_SEP).at(1)!;
-
   const prefixes = {
-    "Alpine EasyMediumOrHard": "81ad2044d1a4",
-    "Forest Easy": "1b97034427",
-    "Forest MediumOrHard": "face01443",
-    "Village Easy": "cd94374498",
-    "Village Medium": "b87e49443b",
-    "Village Hard": "c1aad84308",
+    "Alpine EasyMediumOrHard": "81ad2044d1a452c49585c342e9fc",
+    "Forest Easy": "1b9703442763afc497505342f8ff",
+    "Forest MediumOrHard": "face01443167c2c4df4f56427eff",
+    "Forest MediumOrHard v2": "face01443267c2c4df4f56427dff",
+    "Village Easy": "cd9437449815e7c333d36143fcff",
+    "Village Easy v2": "cd9437449815e7c333d36143fdff",
+    "Village Medium": "b87e49443ba4f2c3e1ba9143ffff",
+    "Village Medium v2": "b87e49443ba4f2c3e1ba9143feff",
+    "Village Hard": "c1aad843088b00c44a7bc04211dc",
+    "Village Hard v2": "c1aad843088b00c44a7bc04214dc",
   };
-
+  
+  const firstBlock = getDataBlocks(hexData)[1];
   for (const [k, v] of Object.entries(prefixes)) {
-    if (firstBlock.startsWith(v)) {
-      return k;
+    const sli = firstBlock.slice(88, 88+28);
+    if (sli === v.slice(0,28)) {
+      return k.replace(" v2", "").replace(" v3", "").replace(" v4", "");
     }
   }
 
@@ -108,17 +111,17 @@ function countSame(hexData: string): number {
   const blocks = getDataBlocks(hexData);
   for (let i = 1; i < blocks.length - 1; ++i) {
     if (blocks[i] !== blocks[i + 1]) {
-      return 1 + i;
+      return i;
     }
   }
   throw new Error("unreachable");
 }
 
 export function getDataBlocks(hex: string): Array<string> {
-  const headerInd = hex.indexOf(BLOCK_SEP);
-  if (headerInd === -1) throw new Error("Corrupt, no separator found");
-  const blocks = [hex.slice(0, headerInd)];
-  for (let i = headerInd; i < hex.length; i += 218) {
+  const { playerName, endNameAddr } = readName(hex);
+  const offset = 26;
+  const blocks = [hex.slice(0, endNameAddr + offset)];
+  for (let i = endNameAddr + offset; i < hex.length; i += 218) {
     blocks.push(hex.slice(i, i + 218));
   }
   return blocks;
@@ -128,14 +131,15 @@ function getCoordinateData(hex: string): CoordinateData {
   const blocks = getDataBlocks(hex);
   const coordinateData: CoordinateData = { rows: [] };
   for (const block of blocks.slice(1)) {
+    const offset = 88;
     const data = {
-      x: parseLittleEndianFloat32(block.slice(22, 30)),
-      y: parseLittleEndianFloat32(block.slice(30, 38)),
-      z: parseLittleEndianFloat32(block.slice(38, 46)),
-      rx: parseLittleEndianFloat32(block.slice(46, 54)),
-      rw: parseLittleEndianFloat32(block.slice(54, 62)),
-      ry: parseLittleEndianFloat32(block.slice(62, 70)),
-      rz: parseLittleEndianFloat32(block.slice(70, 78)),
+      x: parseLittleEndianFloat32(block.slice(offset, offset+8)),
+      y: parseLittleEndianFloat32(block.slice(offset + 8, offset + 2*8)),
+      z: parseLittleEndianFloat32(block.slice(offset + 2*8, offset + 3*8)),
+      rx: parseLittleEndianFloat32(block.slice(offset + 3*8, offset + 4*8)),
+      rw: parseLittleEndianFloat32(block.slice(offset + 4*8, offset + 5*8)),
+      ry: parseLittleEndianFloat32(block.slice(offset + 5*8, offset + 6*8)),
+      rz: parseLittleEndianFloat32(block.slice(offset + 6*8, offset + 7*8)),
     };
     coordinateData.rows.push(data);
   }

@@ -51,7 +51,7 @@ program
     const d = await analyzeReplay(filepath, true);
     console.log("x,y,z,rx,rw,ry,rz");
     for (const c of d.coords!.rows) {
-        console.log(`${c.x},${c.y},${c.z},${c.rx},${c.rw},${c.ry},${c.rz}`);
+        console.log(`${c.x},${c.y},${c.z},${c.rx.toFixed(5)},${c.rw.toFixed(5)},${c.ry.toFixed(5)},${c.rz.toFixed(5)}`);
     }
   });
 program.parse();

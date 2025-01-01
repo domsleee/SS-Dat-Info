@@ -23,7 +23,16 @@ export function setupVideo(): { videoTarget: VideoTarget | undefined } {
         width: '480 ',
         videoId: 'HOSM3c2Zdf0',
         playerVars: {
-          'playsinline': 1
+          'playsinline': 1,
+          'rel': 0,            // Disable related videos
+          'modestbranding': 1, // Minimal YouTube branding
+          'controls': 0,       // Show video controls
+          'showinfo': 0,       // Hide video title and uploader
+          'fs': 1,            // Allow fullscreen
+          'cc_load_policy': 0, // Don't show closed captions by default
+          'iv_load_policy': 3, // Hide video annotations
+          'autohide': 1,       // Hide video controls when playing
+          'enablejsapi': 1     // Enable JavaScript API
         },
         events: {
           'onReady': onPlayerReady,

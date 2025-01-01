@@ -10,4 +10,39 @@ html {
 .controls {
   background: white;
   padding: 1em;
+  border-radius: 5px;
+  display: flex;
+  gap: 10px;
+}
+
+button {
+  appearance: none;
+  border: none;
+  background: none;
+  cursor: pointer!important;
+  padding: 8px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+button:hover {
+  background: #f3f4f6;
+}
+
+#container {
+  display: flex;
+}
+
+.controlsContainer {
+  width: 100%;
+  margin: auto;
+  padding: 1em;
+  align-items: center;
+  box-sizing: border-box;
+}
+
+.controls {
+  align-items: center;
 }
