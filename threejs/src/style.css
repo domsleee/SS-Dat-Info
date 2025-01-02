@@ -5,11 +5,22 @@ body {
 
 html {
   background: #eee;
+  font-family: Arial, sans-serif;
+}
+
+#preText {
+  margin: 0;
+}
+
+h1 {
+  margin: 0;
+  margin-bottom: 5px;
+  text-align: center;
 }
 
 .controls {
   background: white;
-  padding: 1em;
+  padding: 0 5px;
   border-radius: 5px;
   display: flex;
   gap: 10px;
@@ -20,11 +31,16 @@ button {
   border: none;
   background: none;
   cursor: pointer!important;
-  padding: 8px;
+  padding: 0 8px;
   border-radius: 5px;
   display: flex;
   align-items: center;
   justify-content: center;
+  border: 1px solid #ccc;
+}
+
+button.iconButton {
+  padding: 8px;
 }
 
 button:hover {
@@ -38,11 +54,17 @@ button:hover {
 .controlsContainer {
   width: 100%;
   margin: auto;
-  padding: 1em;
+  padding: 5px;
   align-items: center;
   box-sizing: border-box;
 }
 
 .controls {
   align-items: center;
+  padding: 5px;
+}
+
+.mainContainer {
+  margin: auto;
+  width: 960px;
 }

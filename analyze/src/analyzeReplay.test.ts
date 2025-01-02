@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { analyzeReplay } from "./analyzeReplay";
+import { analyzeReplay } from "./analyzeReplayFs";
 import { readdir, stat } from "fs/promises";
 import { relative, join, basename } from "path";
 

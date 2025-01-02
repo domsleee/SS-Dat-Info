@@ -1,10 +1,6 @@
-import { readFile } from "fs/promises";
 import { AnalyzeResult, CoordinateData, TimingDataFromHeader } from "./types";
 
-export async function analyzeReplay(filepath: string, includeCoords?: boolean): Promise<AnalyzeResult> {
-  const content = await readFile(filepath);
-  const hexData = Buffer.from(content.buffer).toString("hex");
-
+export function analyzeReplayHex(hexData: string, includeCoords?: boolean): AnalyzeResult {
   const trackName = getTrackName(hexData);
 
   const { playerName, endNameAddr } = readName(hexData);
@@ -35,7 +31,7 @@ export async function analyzeReplay(filepath: string, includeCoords?: boolean): 
 
     checkpoint1Ms: timingData.checkpoint1TotalMs - timingData.crossStartPlusStartDelayMs,
 
-    ...includeCoords ? { coords: getCoordinateData(hexData) } : {},
+    ...(includeCoords ? { coords: getCoordinateData(hexData) } : {}),
   };
 }
 
@@ -52,11 +48,11 @@ function getTrackName(hexData: string): string {
     "Village Hard": "c1aad843088b00c44a7bc04211dc",
     "Village Hard v2": "c1aad843088b00c44a7bc04214dc",
   };
-  
+
   const firstBlock = getDataBlocks(hexData)[1];
   for (const [k, v] of Object.entries(prefixes)) {
-    const sli = firstBlock.slice(88, 88+28);
-    if (sli === v.slice(0,28)) {
+    const sli = firstBlock.slice(88, 88 + 28);
+    if (sli === v.slice(0, 28)) {
       return k.replace(" v2", "").replace(" v3", "").replace(" v4", "");
     }
   }
@@ -78,8 +74,6 @@ function readName(hexData: string): { playerName: string; endNameAddr: number } 
   }
   return { playerName, endNameAddr: i };
 }
-
-
 
 function getTimingData(hexData: string, endNameAddr: number): TimingDataFromHeader {
   // for FM Matt 54.35
@@ -104,7 +98,7 @@ function parseLittleEndian16(hexData: string) {
 
 function parseLittleEndianFloat32(hexData: string) {
   // 32-bit little endian. e.g. face0144 is 519.234
-  return new Float32Array(new Uint32Array([parseInt(hexData.match(/../g)!.reverse().join(''), 16)]).buffer)[0]
+  return new Float32Array(new Uint32Array([parseInt(hexData.match(/../g)!.reverse().join(""), 16)]).buffer)[0];
 }
 
 function countSame(hexData: string): number {
@@ -133,13 +127,13 @@ function getCoordinateData(hex: string): CoordinateData {
   for (const block of blocks.slice(1)) {
     const offset = 88;
     const data = {
-      x: parseLittleEndianFloat32(block.slice(offset, offset+8)),
-      y: parseLittleEndianFloat32(block.slice(offset + 8, offset + 2*8)),
-      z: parseLittleEndianFloat32(block.slice(offset + 2*8, offset + 3*8)),
-      rx: parseLittleEndianFloat32(block.slice(offset + 3*8, offset + 4*8)),
-      rw: parseLittleEndianFloat32(block.slice(offset + 4*8, offset + 5*8)),
-      ry: parseLittleEndianFloat32(block.slice(offset + 5*8, offset + 6*8)),
-      rz: parseLittleEndianFloat32(block.slice(offset + 6*8, offset + 7*8)),
+      x: parseLittleEndianFloat32(block.slice(offset, offset + 8)),
+      y: parseLittleEndianFloat32(block.slice(offset + 8, offset + 2 * 8)),
+      z: parseLittleEndianFloat32(block.slice(offset + 2 * 8, offset + 3 * 8)),
+      rx: parseLittleEndianFloat32(block.slice(offset + 3 * 8, offset + 4 * 8)),
+      rw: parseLittleEndianFloat32(block.slice(offset + 4 * 8, offset + 5 * 8)),
+      ry: parseLittleEndianFloat32(block.slice(offset + 5 * 8, offset + 6 * 8)),
+      rz: parseLittleEndianFloat32(block.slice(offset + 6 * 8, offset + 7 * 8)),
     };
     coordinateData.rows.push(data);
   }

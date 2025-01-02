@@ -7,35 +7,38 @@
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
   </head>
   <body>
-    <div id="info">
-      <pre id="preText">
-        Loading...
-      </pre>
-    </div>
     <script type="module"  src="src/script.ts"></script>
-    <div style="width: 960px">
-      
-      <div id="container">
-        <div id="player" style="float:right"></div>
-      </div>
-      <div class="controlsContainer" display="flex">
-        <input id="playerRange" type="range" style="width: 100%;" class="time-slider" id="timeSlider" value="0" min="0" max="100">
-        <div class="controls">
-          <button id="playPauseButton">
-            <i data-lucide="pause"></i>
-          </button>
-          <button id="backButton">
-            <i data-lucide="skip-back"></i>
-          </button>
-          <button id="forwardButton">
-            <i data-lucide="skip-forward"></i>
-          </button>
-          <p id="frameInfo" style="display:inline;margin:0"></p>
-          <button id="setCameraToFrame">
-            <p>Set camera to frame</p>
-          </button>
+    <div class="mainContainer">
+      <h1>Supreme Snowboarding Demo Viewer</h1>
+      <div style="width: 960px">
+        
+        <div id="container">
+          <div id="player" style="float:right"></div>
         </div>
+        <div class="controlsContainer" display="flex">
+          <input id="playerRange" type="range" style="width: 100%;" class="time-slider" id="timeSlider" value="0" min="0" max="100">
+          <div class="controls">
+            <button id="playPauseButton" class="iconButton">
+              <i data-lucide="pause"></i>
+            </button>
+            <button id="backButton" class="iconButton">
+              <i data-lucide="skip-back"></i>
+            </button>
+            <button id="forwardButton" class="iconButton">
+              <i data-lucide="skip-forward"></i>
+            </button>
+            <p id="frameInfo" style="display:inline;margin:0"></p>
+            <button id="setCameraToFrame">
+              <p>Set camera to frame</p>
+            </button>
+          </div>
 
+        </div>
+      </div>
+      <div id="info">
+        <pre id="preText">
+          Loading...
+        </pre>
       </div>
     </div>
   </body>

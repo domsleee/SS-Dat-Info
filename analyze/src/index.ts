@@ -1,7 +1,8 @@
 import { Command } from "commander";
 import { existsSync, writeFile, writeFileSync } from "fs";
-import { analyzeReplay, getDataBlocks } from "./analyzeReplay";
+import { analyzeReplay } from "./analyzeReplayFs";
 import { readFile } from "fs/promises";
+import { getDataBlocks } from "./analyzeReplay";
 
 const program = new Command();
 

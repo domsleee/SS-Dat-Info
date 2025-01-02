@@ -15,8 +15,13 @@
         "vite-plugin-glsl": "^1.0.0"
     },
     "dependencies": {
+        "analyze": "../analyze",
         "async-preloader": "^8.0.0",
+        "buffer": "^6.0.3",
+        "dat": "../analyze",
         "lucide": "^0.469.0",
+        "serve-static": "^1.16.2",
+        "sirv": "^3.0.0",
         "stats.js": "^0.17.0",
         "three": "^0.167.1",
         "tweakpane": "^4.0.1"

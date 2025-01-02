@@ -31,7 +31,7 @@ export interface CoordinateData {
   rows: Array<RowData>;
 }
 
-interface RowData {
+export interface RowData {
   x: number;
   y: number;
   z: number;

@@ -6,7 +6,12 @@ interface VideoTarget {
     pauseVideo(): void;
   }
 
-export function setupVideo(): { videoTarget: VideoTarget | undefined } {
+export const videoIds = {
+  ah: 'HOSM3c2Zdf0',
+  vm: '_DC0g90k6eE'
+}
+
+export function setupVideo(videoId: string): { videoTarget: VideoTarget | undefined } {
     console.log("ESTUP VIDEO")
     const tag = document.createElement('script');
     const result = { videoTarget: undefined as VideoTarget | undefined };
@@ -21,12 +26,12 @@ export function setupVideo(): { videoTarget: VideoTarget | undefined } {
       player = new YT.Player('player', {
         height: '360',
         width: '480 ',
-        videoId: 'HOSM3c2Zdf0',
+        videoId: videoId,
         playerVars: {
           'playsinline': 1,
           'rel': 0,            // Disable related videos
           'modestbranding': 1, // Minimal YouTube branding
-          'controls': 0,       // Show video controls
+          'controls': 1,       // Show video controls
           'showinfo': 0,       // Hide video title and uploader
           'fs': 1,            // Allow fullscreen
           'cc_load_policy': 0, // Don't show closed captions by default
