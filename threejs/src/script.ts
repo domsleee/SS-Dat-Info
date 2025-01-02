@@ -1,9 +1,13 @@
 import * as THREE from "three";
 import { getDomAH, getDomVM } from "./data";
 import { setupVideo, videoIds } from "./video";
-
+import { calculateAcceleration, getSpeed } from './coordUtil';
 import { Buffer } from "buffer";
 import { RowData } from "analyze/src/types";
+import { SnowboardTrackAnalyzer } from "./snowboardTrackAnalyzer";
+import { createCameraSetup } from "./cameraSetup";
+import { createCharacterGroup } from "./characterGroup";
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 window.Buffer = Buffer;
 
@@ -69,43 +73,46 @@ async function main() {
     0.01,
     1000
   );
-
+  
   const scene = new THREE.Scene();
-  const axesHelper = new THREE.AxesHelper(1000);
-  scene.add(axesHelper);
+  const cameraSystem = createCameraSetup(camera, scene);
+
+  const analyzer = new SnowboardTrackAnalyzer(data.map(c => transformPosition(c)), { accelerationThreshold: 0.05});
+  const slopeMesh = analyzer.createSlopeMesh({ playerYOffset: 0.4});
+  const jumpMarkers = analyzer.createJumpMarkers({ });
+
+  scene.add(slopeMesh);
+  console.log(jumpMarkers)
+  jumpMarkers.forEach(marker => scene.add(marker));
 
   const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-  directionalLight.position.set(5, 5, 5);
   directionalLight.castShadow = true;
   scene.add(directionalLight);
-
-  const pointLight1 = new THREE.PointLight(0x2196f3, 1, 10);
-  pointLight1.position.set(-2, 2, -2);
-  scene.add(pointLight1);
-
-  const pointLight2 = new THREE.PointLight(0xff9800, 1, 10);
-  pointLight2.position.set(2, 2, 2);
-  scene.add(pointLight2);
+//   const ambientLight = new THREE.AmbientLight(0x404040, 0.9); // 0.5 intensity
+// scene.add(ambientLight);
 
   const firstRow = data[0];
-  setCameraToRow(camera, firstRow, axesHelper);
+  // setCameraToRow(camera, firstRow, axesHelper);
   setCameraToRowEl!.onclick = () => {
-    setCameraToRow(camera, data[playerState.lastFrameRendered], axesHelper);
+    setCameraToRow(camera, data[playerState.lastFrameRendered]);
     renderFrame(0, playerState.lastFrameRendered);
   };
 
   const characterGroup = createCharacterGroup();
-  // const geometry = new THREE.CapsuleGeometry(10/4, 15/4, 4, 8);  // radius, length, capSegments, radialSegments
-  const material = new THREE.MeshNormalMaterial();
-
-  // const mesh = new THREE.Mesh(characterGroup, material);
   setMeshPosition(characterGroup, firstRow);
   scene.add(characterGroup);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(480, 360);
   renderer.setAnimationLoop(renderFrame);
+  renderer.shadowMap.enabled = true;
   document.getElementById("container")!.prepend(renderer.domElement);
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true; // Optional - adds smooth damping effect
+  controls.dampingFactor = 0.05;
+  controls.minDistance = 1;  // Minimum zoom distance
+  controls.maxDistance = 50; // Maximum zoom distance
 
   // range
   playerRange.addEventListener("click", (e) => {
@@ -123,6 +130,8 @@ async function main() {
 
     const frameToRender =
       frame ?? Math.floor((time - playerState.resumedFrame) / 10) % data.length;
+
+    if (frameToRender < 0 || frameToRender > data.length - 1) return;
     const row = data[frameToRender];
     // best is w,y,x,z
     const [x, w, y, z] = [
@@ -133,16 +142,30 @@ async function main() {
     ];
     // const [w, x, y, z] = [1, 0, 0, 1];
     const quaternion = new THREE.Quaternion(x, y, z, w);
-    characterGroup.setRotationFromQuaternion(quaternion);
+    const offsetQuat = new THREE.Quaternion();
+    offsetQuat.setFromEuler(new THREE.Euler(
+      Math.PI/8,            // Lean forwarding a bit
+      -Math.PI/16,          // Face right a bit
+      0           // and here
+    ));
+    const finalQuat = new THREE.Quaternion();
+    finalQuat.multiplyQuaternions(offsetQuat, quaternion);
+    characterGroup.setRotationFromQuaternion(finalQuat);
 
     setMeshPosition(characterGroup, row);
+    const speed = getSpeed(data, frameToRender);
+    if (frameToRender > 0) {
+      cameraSystem.updateCamera(data[frameToRender], data[frameToRender-1], characterGroup, speed);
+    }
 
     const drift = getDriftSeconds(frameToRender);
     const newHtml = `frame: ${frameToRender} / ${data.length}
 x: ${characterGroup.position.x}
 y: ${characterGroup.position.y}
 z: ${characterGroup.position.z}
-speed (km/h): ${getSpeed(data, frameToRender).toFixed(0)}
+accel(y): ${calculateAcceleration(data, frameToRender).toFixed(1)}
+falling?: ${calculateAcceleration(data, frameToRender) > 4.5}
+speed (km/h): ${speed.toFixed(0)}
 drift (s): ${
   drift
     ? (drift.actualSeconds - drift.expectedSeconds).toFixed(3)
@@ -173,109 +196,8 @@ quaternion.y
   }
 }
 
-function createCharacterGroup(scale = 0.2) {
-  // Default to half size (0.5)
-  const characterGroup = new THREE.Group();
 
-  // Base dimensions (at scale = 1.0)
-  const BASE = {
-    headRadius: 4,
-    neckRadius: 2,
-    neckHeight: 6,
-    bodyWidth: 5,
-    bodyHeight: 12.5,
-    bodyDepth: 7.5,
-    boardWidth: 6.25,
-    boardHeight: 0.5,
-    boardLength: 20,
-    // Y positions
-    headY: 15,
-    neckY: 9,
-    boardY: -7,
-  };
-
-  // Create front and back of head using half spheres
-  const headRadius = BASE.headRadius * scale;
-  const headSegments = 32;
-
-  // Front of head (green)
-  const frontHeadGeometry = new THREE.SphereGeometry(
-    headRadius,
-    headSegments,
-    headSegments,
-    0,
-    Math.PI,
-    0,
-    Math.PI
-  );
-  const frontHeadMaterial = new THREE.MeshBasicMaterial({
-    color: 0x00ff00,
-    side: THREE.DoubleSide,
-  });
-  const frontHeadMesh = new THREE.Mesh(frontHeadGeometry, frontHeadMaterial);
-
-  // Back of head (red)
-  const backHeadGeometry = new THREE.SphereGeometry(
-    headRadius,
-    headSegments,
-    headSegments,
-    Math.PI,
-    Math.PI,
-    0,
-    Math.PI
-  );
-  const backHeadMaterial = new THREE.MeshBasicMaterial({
-    color: 0xff0000,
-    side: THREE.DoubleSide,
-  });
-  const backHeadMesh = new THREE.Mesh(backHeadGeometry, backHeadMaterial);
-
-  // Group for the complete head
-  const headGroup = new THREE.Group();
-  headGroup.add(frontHeadMesh);
-  headGroup.add(backHeadMesh);
-  headGroup.position.y = BASE.headY * scale;
-
-  // Neck
-  const neckGeometry = new THREE.CylinderGeometry(
-    BASE.neckRadius * scale,
-    BASE.neckRadius * scale,
-    BASE.neckHeight * scale,
-    32
-  );
-  const neckMaterial = new THREE.MeshNormalMaterial();
-  const neckMesh = new THREE.Mesh(neckGeometry, neckMaterial);
-  neckMesh.position.y = BASE.neckY * scale;
-
-  // Body
-  const bodyGeometry = new THREE.BoxGeometry(
-    BASE.bodyWidth * scale,
-    BASE.bodyHeight * scale,
-    BASE.bodyDepth * scale
-  );
-  const bodyMaterial = new THREE.MeshNormalMaterial();
-  const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
-
-  // Snowboard
-  const boardGeometry = new THREE.BoxGeometry(
-    BASE.boardWidth * scale,
-    BASE.boardHeight * scale,
-    BASE.boardLength * scale
-  );
-  const boardMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 });
-  const boardMesh = new THREE.Mesh(boardGeometry, boardMaterial);
-  boardMesh.position.y = BASE.boardY * scale;
-
-  // Add all meshes to the group
-  characterGroup.add(bodyMesh);
-  characterGroup.add(neckMesh);
-  characterGroup.add(headGroup);
-  characterGroup.add(boardMesh);
-
-  return characterGroup;
-}
-
-function setCameraToRow(camera, row: RowData, axesHelper) {
+function setCameraToRow(camera, row: RowData) {
   camera.position.x = -row.x - 1;
   camera.position.y = -row.y + 10;
   camera.position.z = row.z - 3;
@@ -283,33 +205,9 @@ function setCameraToRow(camera, row: RowData, axesHelper) {
   const lookAtDistance = 8; // Distance to look ahead
   camera.lookAt(new THREE.Vector3(-row.x, -row.y, row.z + lookAtDistance));
 
-  axesHelper.position.x = -row.x;
-  axesHelper.position.y = -row.y - 5;
-  axesHelper.position.z = row.z;
-
   camera.position.y -= 4;
 }
 
-function getSpeed(
-  data: Array<RowData>,
-  frameToRender: number,
-  frameRate: number = 100
-) {
-  if (frameToRender === 0) return 0;
-
-  const r0 = data[frameToRender - 1];
-  const r1 = data[frameToRender];
-
-  const dx = r1.x - r0.x;
-  const dy = r1.y - r0.y;
-  const dz = r1.z - r0.z;
-  const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-
-  const timeBetweenFramesHours = 1 / (frameRate * 3600);
-  const speed = distance / 1000 / timeBetweenFramesHours;
-
-  return speed;
-}
 
 function tryResync(frameToRender) {
   if (videoTarget.videoTarget === undefined) {
@@ -338,9 +236,18 @@ function getDriftSeconds(
 }
 
 function setMeshPosition(mesh, row: RowData) {
-  mesh.position.x = -row.x;
-  mesh.position.y = -row.y;
-  mesh.position.z = row.z;
+  const transformed = transformPosition(row);
+  mesh.position.x = transformed.x;
+  mesh.position.y = transformed.y;
+  mesh.position.z = transformed.z;
+}
+
+function transformPosition(position) {
+  return {
+    x: -position.x,
+    y: -position.y,
+    z: position.z,
+  }
 }
 
 main();
