@@ -1,4 +1,5 @@
-import { AnalyzeResult, CoordinateData, TimingDataFromHeader } from "./types";
+import { classifyMessage } from "./classifyMessage";
+import { AnalyzeResult, CoordinateData, MovementState, TimingDataFromHeader } from "./types";
 
 export function analyzeReplayHex(hexData: string, includeCoords?: boolean): AnalyzeResult {
   const trackName = getTrackName(hexData);
@@ -124,8 +125,10 @@ export function getDataBlocks(hex: string): Array<string> {
 function getCoordinateData(hex: string): CoordinateData {
   const blocks = getDataBlocks(hex);
   const coordinateData: CoordinateData = { rows: [] };
-  for (const block of blocks.slice(1)) {
+  for (let index = 1; index < blocks.length; ++index) {
+    const block = blocks[index];
     const offset = 88;
+    const state = classifyMessage(block);
     const data = {
       x: parseLittleEndianFloat32(block.slice(offset, offset + 8)),
       y: parseLittleEndianFloat32(block.slice(offset + 8, offset + 2 * 8)),
@@ -134,11 +137,21 @@ function getCoordinateData(hex: string): CoordinateData {
       rw: parseLittleEndianFloat32(block.slice(offset + 4 * 8, offset + 5 * 8)),
       ry: parseLittleEndianFloat32(block.slice(offset + 5 * 8, offset + 6 * 8)),
       rz: parseLittleEndianFloat32(block.slice(offset + 6 * 8, offset + 7 * 8)),
+      ...state,
+      ex: block.slice(202, 208),
+      raw: block
     };
+    // if (index === 302) {
+    //   console.log(block);
+    //   console.log("SKIB", block[214])
+    //   console.log(block.slice(214));
+    //   console.log(data, coordinateData.rows.length)
+    // }
     coordinateData.rows.push(data);
   }
   return coordinateData;
 }
+
 
 // 1: 3
 // 37: 75

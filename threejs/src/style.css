@@ -68,3 +68,46 @@ button:hover {
   margin: auto;
   width: 960px;
 }
+
+/* key controls */
+
+#info {
+  display: flex;
+  justify-content: space-between;
+  padding: 20px;
+  font-family: monospace;
+}
+
+.keyControls {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.arrows {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+}
+
+.key {
+  padding: 10px;
+  background: #ddd;
+  border: 1px solid #666;
+  color: black;
+  text-align: center;
+  border-radius: 4px;
+}
+
+.key.pressed {
+  background: #bbb;
+}
+
+.empty {
+  visibility: hidden;
+}

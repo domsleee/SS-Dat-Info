@@ -29,6 +29,11 @@ async function main() {
   )! as HTMLInputElement;
   const frameInfo = document.getElementById("frameInfo")! as HTMLDivElement;
   const setCameraToRowEl = document.getElementById("setCameraToFrame");
+  const keys = {
+    left: document.getElementsByClassName("keyLeft")[0] as HTMLElement,
+    right: document.getElementsByClassName("keyRight")[0] as HTMLElement,
+    shift: document.getElementsByClassName("keyShift")[0] as HTMLElement,
+  }
 
   playPauseButton.onclick = () => {
     if (playerState.isPlaying) {
@@ -172,10 +177,31 @@ drift (s): ${
     : "N/A"
 }
 
+left: ${row.left}
+movementState: ${row.movementState}
 quaternion (w,x,y,z): ${quaternion.w}, ${quaternion.x}, ${
 quaternion.y
 }, ${quaternion.z}
     `;
+
+    if (row.left) {
+      keys.left.classList.add("pressed");
+    } else {
+      keys.left.classList.remove("pressed");
+    }
+    
+    if (row.right) {
+      keys.right.classList.add("pressed");
+    } else {
+      keys.right.classList.remove("pressed");
+    }
+
+    if (row.shift) {
+      keys.shift.classList.add("pressed");
+    } else {
+      keys.shift.classList.remove("pressed");
+    }
+
     playerRange.value = frameToRender.toString();
     frameInfo.innerHTML = `Frame: ${frameToRender} / ${data.length}`;
 

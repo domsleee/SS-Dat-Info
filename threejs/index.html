@@ -7,16 +7,24 @@
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
   </head>
   <body>
-    <script type="module"  src="src/script.ts"></script>
+    <script type="module" src="src/script.ts"></script>
     <div class="mainContainer">
       <h1>Supreme Snowboarding Replay Viewer</h1>
       <div style="width: 960px">
-        
         <div id="container">
-          <div id="player" style="float:right"></div>
+          <div id="player" style="float: right"></div>
         </div>
         <div class="controlsContainer" display="flex">
-          <input id="playerRange" type="range" style="width: 100%;" class="time-slider" id="timeSlider" value="0" min="0" max="100">
+          <input
+            id="playerRange"
+            type="range"
+            style="width: 100%"
+            class="time-slider"
+            id="timeSlider"
+            value="0"
+            min="0"
+            max="100"
+          />
           <div class="controls">
             <button id="playPauseButton" class="iconButton">
               <i data-lucide="pause"></i>
@@ -27,21 +35,36 @@
             <button id="forwardButton" class="iconButton">
               <i data-lucide="skip-forward"></i>
             </button>
-            <p id="frameInfo" style="display:inline;margin:0"></p>
+            <p id="frameInfo" style="display: inline; margin: 0"></p>
             <button id="setCameraToFrame">
               <p>Set camera to frame</p>
             </button>
           </div>
-
         </div>
       </div>
       <div id="info">
         <pre id="preText">
           Loading...
         </pre>
+
+        <div class="keyControls">
+          <div class="arrows">
+            <div class="empty">.</div>
+            <div class="keyUp key">↑</div>
+            <div class="empty">.</div>
+            <div class="keyLeft key">←</div>
+            <div class="keyDown key">↓</div>
+            <div class="keyRight key">→</div>
+          </div>
+          <div class="actions">
+            <div class="keyShift key">SHIFT</div>
+            <div class="keyJump key">JUMP</div>
+          </div>
+        </div>
       </div>
     </div>
   </body>
-  <script>lucide.createIcons()</script>
-
+  <script>
+    lucide.createIcons();
+  </script>
 </html>

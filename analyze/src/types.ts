@@ -39,6 +39,22 @@ export interface RowData {
   rw: number;
   ry: number;
   rz:number;
+  raw: string;
+  movementState: MovementState;
+  left: boolean;
+  right: boolean;
+  forward: boolean;
+  shift: boolean;
+}
+
+
+export enum MovementState {
+  NOPRESS = "NOPRESS",
+  FORWARD = "FORWARD",
+  LEFT = "LEFT",
+  RIGHT = "RIGHT",
+  FORLEFT = "FORLEFT",
+  FORRIGHT = "FORRIGHT",
 }
 
 export interface TimingDataFromHeader {
@@ -47,3 +63,6 @@ export interface TimingDataFromHeader {
   checkpoint1TotalMs: number;
   totalTimeToFinishMs: number;
 }
+
+export const REPLAY_FOLDER = "../replays";
+
