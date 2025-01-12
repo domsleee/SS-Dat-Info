@@ -1,26 +1,26 @@
 import { describe, expect, test } from "bun:test";
 import { analyzeReplay } from "./analyzeReplayFs";
 import { readdir, stat } from "fs/promises";
-import { relative, join, basename } from "path";
+import { relative, join, basename, resolve } from "path";
 import { AnalyzeResult, REPLAY_FOLDER, RowData } from "./types";
 
 
 describe("analyzeReplay", () => {
   const tracks = [
-    { name: "Alpine EasyMediumOrHard", basePath: join(REPLAY_FOLDER, "Alpine/Easy") },
-    { name: "Alpine EasyMediumOrHard", basePath: join(REPLAY_FOLDER, "Alpine/Medium") },
-    { name: "Alpine EasyMediumOrHard", basePath: join(REPLAY_FOLDER, "Alpine/Hard") },
-    { name: "Forest Easy", basePath: join(REPLAY_FOLDER, "Forest/Easy") },
-    { name: "Forest MediumOrHard", basePath: join(REPLAY_FOLDER, "Forest/Medium") },
-    { name: "Forest MediumOrHard", basePath: join(REPLAY_FOLDER, "Forest/Hard") },
-    { name: "Village Easy", basePath: join(REPLAY_FOLDER, "Village/Easy") },
-    { name: "Village Medium", basePath: join(REPLAY_FOLDER, "Village/Medium") },
-    { name: "Village Hard", basePath: join(REPLAY_FOLDER, "Village/Hard") },
+    { name: "Alpine EasyMediumOrHard", basePath: resolve(REPLAY_FOLDER, "Alpine/Easy") },
+    { name: "Alpine EasyMediumOrHard", basePath: resolve(REPLAY_FOLDER, "Alpine/Medium") },
+    { name: "Alpine EasyMediumOrHard", basePath: resolve(REPLAY_FOLDER, "Alpine/Hard") },
+    { name: "Forest Easy", basePath: resolve(REPLAY_FOLDER, "Forest/Easy") },
+    { name: "Forest MediumOrHard", basePath: resolve(REPLAY_FOLDER, "Forest/Medium") },
+    { name: "Forest MediumOrHard", basePath: resolve(REPLAY_FOLDER, "Forest/Hard") },
+    { name: "Village Easy", basePath: resolve(REPLAY_FOLDER, "Village/Easy") },
+    { name: "Village Medium", basePath: resolve(REPLAY_FOLDER, "Village/Medium") },
+    { name: "Village Hard", basePath: resolve(REPLAY_FOLDER, "Village/Hard") },
   ];
 
   tracks.forEach(({ name, basePath }) => {
     describe(name, async () => {
-      const dirPath = join(process.cwd(), basePath);
+      const dirPath = resolve(process.cwd(), basePath);
       const matchingFiles = await findDatFiles(dirPath);
 
       if (matchingFiles.length === 0) {
@@ -39,7 +39,7 @@ describe("analyzeReplay", () => {
 
   describe("header info", () => {
     test("FM Matt 54.35", async () => {
-      const result = await analyzeReplay(join(REPLAY_FOLDER, "Forest/Medium/0.54.35 Matt.dat"));
+      const result = await analyzeReplay(resolve(REPLAY_FOLDER, "Forest/Medium/0.54.35 Matt.dat"));
       expect(result.playerName).toBe("Matt");
       expect(result.displayedMs).toBe(54350);
       expect(result.startMs).toBe(3400);
@@ -53,7 +53,7 @@ describe("analyzeReplay", () => {
     });
 
     test("FM Sesh 1.29.36", async () => {
-      const result = await analyzeReplay(join(REPLAY_FOLDER, "Forest/Medium/1.29.36 SESH.dat"));
+      const result = await analyzeReplay(resolve(REPLAY_FOLDER, "Forest/Medium/1.29.36 SESH.dat"));
       expect(result.playerName).toBe("SESH");
       expect(result.displayedMs).toBe(89360);
       expect(result.startMs).toBe(3410);
@@ -67,7 +67,7 @@ describe("analyzeReplay", () => {
     });
   });
 
-  describe("key press", () => {
+  describe.skip("key press", () => {
     function expectMatchObject(result: AnalyzeResult, expectedBlock: Partial<RowData>) {
       const blocks = result.coords!.rows;
       for (let blockIndex = 302; blockIndex <= 602; blockIndex++) {

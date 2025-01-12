@@ -8,11 +8,28 @@
   </head>
   <body>
     <script type="module" src="src/script.ts"></script>
-    <div class="mainContainer">
+    <div id="mainContainer">
       <h1>Supreme Snowboarding Replay Viewer</h1>
-      <div style="width: 960px">
+      <div style="width: 100%">
         <div id="container">
           <div id="player" style="float: right"></div>
+          <div id="keyControls">
+            <table>
+              <tr>
+                <td class="keyShift key">SHIFT</td>
+                <td></td>
+                <td></td>
+                <td class="keyUp key">↑</td>
+              </tr>
+              <tr>
+                <td class="keyJump key">CTRL</td>
+                <td class="keyAlt key">ALT</td>
+                <td class="keyLeft key">←</td>
+                <td class="keyDown key">↓</td>
+                <td class="keyRight key">→</td>
+              </tr>
+            </table>
+          </div>
         </div>
         <div class="controlsContainer" display="flex">
           <input
@@ -36,7 +53,7 @@
               <i data-lucide="skip-forward"></i>
             </button>
             <p id="frameInfo" style="display: inline; margin: 0"></p>
-            <button id="setCameraToFrame">
+            <button id="setCameraToFrame" style="display: none;">
               <p>Set camera to frame</p>
             </button>
           </div>
@@ -46,20 +63,9 @@
         <pre id="preText">
           Loading...
         </pre>
-
-        <div class="keyControls">
-          <div class="arrows">
-            <div class="empty">.</div>
-            <div class="keyUp key">↑</div>
-            <div class="empty">.</div>
-            <div class="keyLeft key">←</div>
-            <div class="keyDown key">↓</div>
-            <div class="keyRight key">→</div>
-          </div>
-          <div class="actions">
-            <div class="keyShift key">SHIFT</div>
-            <div class="keyJump key">JUMP</div>
-          </div>
+        <div>
+          Replay Info
+          <pre id="headerInfo"></pre>
         </div>
       </div>
     </div>

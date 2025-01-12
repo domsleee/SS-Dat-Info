@@ -8,27 +8,27 @@ interface VideoTarget {
 
 export const videoIds = {
   ah: 'HOSM3c2Zdf0',
-  vm: '_DC0g90k6eE'
+  vm: '_DC0g90k6eE',
+  vm109: 'Ja3OmVZS2jQ',
 }
 
-export function setupVideo(videoId: string): { videoTarget: VideoTarget | undefined } {
-    console.log("ESTUP VIDEO")
+export function setupVideo(videoId: string, dimensions: {width: number, height: number}): { videoTarget: VideoTarget | undefined } {
+    console.log("Setup Video")
     const tag = document.createElement('script');
     const result = { videoTarget: undefined as VideoTarget | undefined };
   
     tag.src = "https://www.youtube.com/iframe_api";
-    var firstScriptTag = document.getElementsByTagName('script')[0];
-    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+    let firstScriptTag = document.getElementsByTagName('script')[0]!;
+    firstScriptTag.parentNode!.insertBefore(tag, firstScriptTag);
   
-    var player;
+    let player;
     window.onYouTubeIframeAPIReady = () => {
-      console.log("onYouTubeIframeAPIReady");
       player = new YT.Player('player', {
-        height: '360',
-        width: '480 ',
+        ...dimensions,
         videoId: videoId,
         playerVars: {
           'playsinline': 1,
+          'autoplay': 1,       // Auto-play the video on load
           'rel': 0,            // Disable related videos
           'modestbranding': 1, // Minimal YouTube branding
           'controls': 1,       // Show video controls
@@ -41,6 +41,7 @@ export function setupVideo(videoId: string): { videoTarget: VideoTarget | undefi
         },
         events: {
           'onReady': onPlayerReady,
+          'onStateChange': onPlayerStateChange
         }
       });
     }
@@ -49,6 +50,14 @@ export function setupVideo(videoId: string): { videoTarget: VideoTarget | undefi
       console.log("onPlayerReady", event.target);
       event.target.playVideo();
       result.videoTarget = event.target; 
+    }
+
+    function onPlayerStateChange(event) {
+      // YT.PlayerState.ENDED = 0
+      if (event.data === 0) {
+        player.seekTo(0);
+        player.playVideo();
+      }
     }
 
     return result;

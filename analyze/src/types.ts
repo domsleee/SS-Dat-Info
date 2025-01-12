@@ -1,3 +1,6 @@
+import { fileURLToPath } from "bun";
+import { dirname, resolve } from "path";
+
 export interface AnalyzeResult {
   playerName: string;
   trackName: string;
@@ -35,10 +38,7 @@ export interface RowData {
   x: number;
   y: number;
   z: number;
-  rx: number;
-  rw: number;
-  ry: number;
-  rz:number;
+  rotation3x3: Array<Array<number>>;
   raw: string;
   movementState: MovementState;
   left: boolean;
@@ -64,5 +64,4 @@ export interface TimingDataFromHeader {
   totalTimeToFinishMs: number;
 }
 
-export const REPLAY_FOLDER = "../replays";
-
+export const REPLAY_FOLDER = resolve(import.meta.dir, "../../threejs/public/replays");

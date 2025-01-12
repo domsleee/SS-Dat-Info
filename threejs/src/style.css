@@ -12,6 +12,10 @@ html {
   margin: 0;
 }
 
+pre {
+  margin: 0;
+}
+
 h1 {
   margin: 0;
   margin-bottom: 5px;
@@ -49,6 +53,7 @@ button:hover {
 
 #container {
   display: flex;
+  position: relative;
 }
 
 .controlsContainer {
@@ -64,9 +69,8 @@ button:hover {
   padding: 5px;
 }
 
-.mainContainer {
+#mainContainer {
   margin: auto;
-  width: 960px;
 }
 
 /* key controls */
@@ -74,38 +78,34 @@ button:hover {
 #info {
   display: flex;
   justify-content: space-between;
-  padding: 20px;
+  padding: 0 20px;
   font-family: monospace;
+  position: relative;
 }
 
-.keyControls {
+#keyControls {
   display: flex;
-  flex-direction: column;
-  gap: 20px;
+  opacity: 0.7;
+  position: absolute;
 }
 
-.arrows {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 5px;
-}
-
-.actions {
-  display: flex;
-  gap: 10px;
+.key.keyLeft, .key.keyRight, .key.keyUp, .key.keyDown {
+  font-size: 1.8em;
 }
 
 .key {
   padding: 10px;
-  background: #ddd;
+  background: rgba(33, 33, 33, 0.8);
   border: 1px solid #666;
-  color: black;
+  color: white;
   text-align: center;
   border-radius: 4px;
+  width: 48px;
+  height: 48px;
 }
 
 .key.pressed {
-  background: #bbb;
+  background: rgba(100, 0, 0, 0.8);
 }
 
 .empty {

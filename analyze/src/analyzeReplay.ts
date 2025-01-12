@@ -97,7 +97,7 @@ function parseLittleEndian16(hexData: string) {
   return (high << 8) | low;
 }
 
-function parseLittleEndianFloat32(hexData: string) {
+export function parseLittleEndianFloat32(hexData: string) {
   // 32-bit little endian. e.g. face0144 is 519.234
   return new Float32Array(new Uint32Array([parseInt(hexData.match(/../g)!.reverse().join(""), 16)]).buffer)[0];
 }
@@ -127,26 +127,28 @@ function getCoordinateData(hex: string): CoordinateData {
   const coordinateData: CoordinateData = { rows: [] };
   for (let index = 1; index < blocks.length; ++index) {
     const block = blocks[index];
-    const offset = 88;
+    const posOffset = 88;
+    const matrixOffset = posOffset + 3 * 8;
     const state = classifyMessage(block);
+
+    const rotation3x3: Array<Array<number>> = [];
+    for (let row = 0; row < 3; row++) {
+      const rowData: number[] = [];
+      for (let col = 0; col < 3; col++) {
+        const offset = matrixOffset + (row * 3 + col) * 8;
+        rowData.push(parseLittleEndianFloat32(block.slice(offset, offset + 8)));
+      }
+      rotation3x3.push(rowData);
+    }
     const data = {
-      x: parseLittleEndianFloat32(block.slice(offset, offset + 8)),
-      y: parseLittleEndianFloat32(block.slice(offset + 8, offset + 2 * 8)),
-      z: parseLittleEndianFloat32(block.slice(offset + 2 * 8, offset + 3 * 8)),
-      rx: parseLittleEndianFloat32(block.slice(offset + 3 * 8, offset + 4 * 8)),
-      rw: parseLittleEndianFloat32(block.slice(offset + 4 * 8, offset + 5 * 8)),
-      ry: parseLittleEndianFloat32(block.slice(offset + 5 * 8, offset + 6 * 8)),
-      rz: parseLittleEndianFloat32(block.slice(offset + 6 * 8, offset + 7 * 8)),
+      x: parseLittleEndianFloat32(block.slice(posOffset, posOffset + 8)),
+      y: parseLittleEndianFloat32(block.slice(posOffset + 8, posOffset + 2 * 8)),
+      z: parseLittleEndianFloat32(block.slice(posOffset + 2 * 8, posOffset + 3 * 8)),
+      rotation3x3,
       ...state,
       ex: block.slice(202, 208),
       raw: block
     };
-    // if (index === 302) {
-    //   console.log(block);
-    //   console.log("SKIB", block[214])
-    //   console.log(block.slice(214));
-    //   console.log(data, coordinateData.rows.length)
-    // }
     coordinateData.rows.push(data);
   }
   return coordinateData;
