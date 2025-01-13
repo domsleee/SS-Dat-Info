@@ -1,10 +1,8 @@
-
-interface VideoTarget {
-    seekTo(seconds: number, allowSeekAhead?: boolean): void;
-    getCurrentTime(): number;
-    playVideo(): void;
-    pauseVideo(): void;
+declare global {
+  interface Window {
+    onYouTubeIframeAPIReady: () => void;
   }
+}
 
 export const videoIds = {
   ah: 'HOSM3c2Zdf0',
@@ -12,10 +10,10 @@ export const videoIds = {
   vm109: 'Ja3OmVZS2jQ',
 }
 
-export function setupVideo(videoId: string, dimensions: {width: number, height: number}): { videoTarget: VideoTarget | undefined } {
+export function setupVideo(videoId: string, dimensions: {width: number, height: number}): { videoTarget: YT.Player | undefined } {
     console.log("Setup Video")
     const tag = document.createElement('script');
-    const result = { videoTarget: undefined as VideoTarget | undefined };
+    const result = { videoTarget: undefined as YT.Player | undefined };
   
     tag.src = "https://www.youtube.com/iframe_api";
     let firstScriptTag = document.getElementsByTagName('script')[0]!;
@@ -40,24 +38,18 @@ export function setupVideo(videoId: string, dimensions: {width: number, height: 
           'enablejsapi': 1     // Enable JavaScript API
         },
         events: {
-          'onReady': onPlayerReady,
-          'onStateChange': onPlayerStateChange
+          'onReady': (event) => {
+            event.target.playVideo();
+            result.videoTarget = event.target; 
+          },
+          'onStateChange': (event) => {
+            if (event.data === YT.PlayerState.ENDED) {
+              player.seekTo(0);
+              player.playVideo();
+            }
+          }
         }
       });
-    }
-  
-    function onPlayerReady(event) {
-      console.log("onPlayerReady", event.target);
-      event.target.playVideo();
-      result.videoTarget = event.target; 
-    }
-
-    function onPlayerStateChange(event) {
-      // YT.PlayerState.ENDED = 0
-      if (event.data === 0) {
-        player.seekTo(0);
-        player.playVideo();
-      }
     }
 
     return result;

@@ -77,7 +77,7 @@ button:hover {
 
 #info {
   display: flex;
-  justify-content: space-between;
+  gap: 50px;
   padding: 0 20px;
   font-family: monospace;
   position: relative;

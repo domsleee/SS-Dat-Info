@@ -16,6 +16,7 @@
     },
     "dependencies": {
         "@types/three": "^0.171.0",
+        "@types/youtube": "^0.1.0",
         "analyze": "../analyze",
         "async-preloader": "^8.0.0",
         "buffer": "^6.0.3",

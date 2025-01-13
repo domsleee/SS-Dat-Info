@@ -14,9 +14,13 @@ const dimensions = {
   width: 480*2,
   height: 360*2,
 }
+const videoSetup = {
+  offsetSeconds: -1.05, // smaller number = threejs plays earlier
+  videoId: videoIds.vm109,
+};
+const SYNC_THRESHOLD = 0.02;
 
-const offsetSeconds = 0 - 1.05; //0.2 for VM, 0.3 for AH; // smaller number = threejs plays earlier
-const videoTarget = setupVideo(videoIds.vm109, dimensions);
+const videoTarget = setupVideo(videoSetup.videoId, dimensions);
 const playerState = {
   isPlaying: true,
   resumedTime: 0,
@@ -126,7 +130,7 @@ async function main() {
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(dimensions.width, dimensions.height);
-  renderer.setAnimationLoop(renderFrame);
+  renderer.setAnimationLoop((time) => renderFrame(time));
   renderer.shadowMap.enabled = true;
   document.getElementById("container")!.prepend(renderer.domElement);
 
@@ -168,8 +172,7 @@ async function main() {
 y: ${characterGroup.position.y}
 z: ${characterGroup.position.z}
 accel(y): ${calculateAcceleration(data, frameToRender).toFixed(1)}
-falling?: ${calculateAcceleration(data, frameToRender) > 4.5}
-drift (s): ${
+drift(s): ${
   drift
     ? (drift.actualSeconds - drift.expectedSeconds).toFixed(3)
     : "N/A"
@@ -198,6 +201,7 @@ ${getRawString(row.raw)}`;
       Math.abs(playerState.lastFrameChecked - frameToRender) > 100
     ) {
       tryResync(frameToRender);
+      playerState.lastFrameChecked = frameToRender;
     }
 
     playerState.lastFrameRendered = frameToRender;
@@ -271,7 +275,7 @@ function getRawString(raw: string) {
     );
   }
 
-  return `${raw.length/2} bytes, ${arr.length} 4-byte floats:\n` + rows.join('\n');
+  return `frame: ${raw.length/2} bytes, ${arr.length} 4-byte floats:\n` + rows.join('\n');
 }
 
 function updateCharacterRotation(characterGroup: THREE.Group, row: RowData) {
@@ -300,6 +304,7 @@ function updateCharacterRotation(characterGroup: THREE.Group, row: RowData) {
   characterGroup.setRotationFromMatrix(fixedMatrix);
 }
 
+let resyncCount = 0;
 function tryResync(frameToRender) {
   if (videoTarget.videoTarget === undefined) {
     return;
@@ -308,9 +313,10 @@ function tryResync(frameToRender) {
   const driftInfo = getDriftSeconds(frameToRender);
   if (
     driftInfo &&
-    Math.abs(driftInfo.actualSeconds - driftInfo.expectedSeconds) > 0.1
+    Math.abs(driftInfo.actualSeconds - driftInfo.expectedSeconds) > SYNC_THRESHOLD
   ) {
-    const expectedFrame = (driftInfo.actualSeconds - offsetSeconds)  * 100;
+    console.log(`Synced video to replay, precision: ${SYNC_THRESHOLD}, times: ${++resyncCount}.`);
+    const expectedFrame = (driftInfo.actualSeconds - videoSetup.offsetSeconds)  * 100;
     playerState.resumedTime = performance.now() - 10 * expectedFrame;
   }
 }
@@ -318,7 +324,7 @@ function tryResync(frameToRender) {
 function getDriftSeconds(
   frameToRender: number
 ): { expectedSeconds: number; actualSeconds: number } | undefined {
-  const expectedSeconds = offsetSeconds + frameToRender / 100;
+  const expectedSeconds = videoSetup.offsetSeconds + frameToRender / 100;
   if (!videoTarget.videoTarget) {
     return undefined;
   }
@@ -348,6 +354,9 @@ Player: ${analyzeResult.playerName}
 Track : ${analyzeResult.trackName}
 Time  : ${msToHumanReadable(analyzeResult.displayedMs)}
 CP1   : ${msToHumanReadable(analyzeResult.checkpoint1Ms)}
+
+Config
+setup : ${JSON.stringify(videoSetup, null, 2)}
 `;
 }
 
