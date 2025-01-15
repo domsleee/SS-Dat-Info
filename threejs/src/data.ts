@@ -8,7 +8,7 @@ export async function getDomVM() {
   return await getFromFilename("replays/Village/Medium/VM 1.09.08 Dom.dat");
 }
 
-async function getFromFilename(filename: string): Promise<AnalyzeResult> {
+export async function getFromFilename(filename: string): Promise<AnalyzeResult> {
   const response = await fetch(filename);
   const arrayBuffer = await response.arrayBuffer();
   const hexData = Buffer.from(arrayBuffer).toString("hex");

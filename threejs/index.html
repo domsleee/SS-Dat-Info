@@ -64,6 +64,41 @@
           Replay Info
           <pre id="headerInfo"></pre>
         </div>
+        <div>
+          Config
+          <table>
+            <tr>
+              <td>Preset</td>
+              <td><select id="presetSelector"></select></td>
+            </tr>
+            <tr>
+              <td></td>
+              <td>
+                <div class="form-check">
+                  <input type="checkbox" id="syncWithVideo" name="syncWithVideo">
+                  <label for="syncWithVideo">Sync with video</label>
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td>Offset (s)</td>
+              <td><input type="number" id="offsetSeconds" value="0" /></td>
+            </tr>
+            <tr>
+              <td>Youtube ID</td>
+              <td><input type="text" id="videoId" value="0" /></td>
+            </tr>
+            <tr>
+              <td>Replay file</td>
+              <td  id="dropzone" class="dropzone">
+                <input type="file" id="replayFile" hidden>
+                <label id="dropzoneLabel" for="replayFile">
+                  Drag and drop replay file here
+                </label>
+              </td>
+            </tr>
+          </table>
+        </div>
       </div>
     </div>
   </body>

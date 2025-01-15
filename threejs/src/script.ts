@@ -1,26 +1,31 @@
-import './polyfills'
+import "./polyfills";
 import * as THREE from "three";
 import { getDomVM } from "./data";
 import { setupVideo, videoIds } from "./video";
-import { calculateAcceleration, getSpeed } from './coordUtil';
+import { calculateAcceleration, getSpeed } from "./coordUtil";
 import { AnalyzeResult, RowData } from "analyze/src/types";
 import { SnowboardTrackAnalyzer } from "./snowboardTrackAnalyzer";
 import { createCameraSetup } from "./cameraSetup";
 import { createCharacterGroup } from "./characterGroup";
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { parseLittleEndianFloat32 } from "analyze/src/analyzeReplay";
+import { setupConfig, updateConfigDOM } from "./config";
+import { AnalyzeResultContainer, Config, MainLoopContainer, TextFields } from "./types";
+import { createPresets } from "./presets";
 
 const dimensions = {
-  width: 480*2,
-  height: 360*2,
-}
-const videoSetup = {
+  width: 480 * 2,
+  height: 360 * 2,
+};
+
+const config: Config = {
   offsetSeconds: -1.05, // smaller number = threejs plays earlier
   videoId: videoIds.vm109,
+  syncWithVideo: true,
 };
 const SYNC_THRESHOLD = 0.02;
 
-const videoTarget = setupVideo(videoSetup.videoId, dimensions);
+const videoTarget = setupVideo(config.videoId, dimensions);
+
 const playerState = {
   isPlaying: true,
   resumedTime: 0,
@@ -29,7 +34,30 @@ const playerState = {
 };
 
 async function main() {
-  document.getElementById("mainContainer")!.style.width = `${dimensions.width * 2}px`;
+  document.getElementById("mainContainer")!.style.width = `${
+    dimensions.width * 2
+  }px`;
+  const textFields = createTextFields();
+  const analyzeResult = await getDomVM();
+  const mainLoopContainer: MainLoopContainer = { textFields, analyzeResult };
+
+  let last: { dispose: () => void } | undefined;  
+  const processAnalyzeResult = (analyzeResult: AnalyzeResult) => {
+    last?.dispose();
+    mainLoopContainer.analyzeResult = analyzeResult;
+    last = mainLoop(mainLoopContainer);
+  };
+  createPresets(config, videoTarget, processAnalyzeResult);
+  setupConfig(config, videoTarget, processAnalyzeResult);
+  processAnalyzeResult(analyzeResult);
+}
+
+function mainLoop(mainLoopContainer: MainLoopContainer) {
+  const { textFields, analyzeResult } = mainLoopContainer;
+  updateConfigDOM(config);
+
+  textFields.nameText.textContent = analyzeResult.playerName;
+  textFields.timeText.textContent = getHumanReadableTime(analyzeResult, 0)
 
   const playPauseButton = document.getElementById("playPauseButton")!;
   const backButton = document.getElementById("backButton")!;
@@ -42,17 +70,24 @@ async function main() {
     left: document.getElementsByClassName("keyLeft")[0] as HTMLElement,
     right: document.getElementsByClassName("keyRight")[0] as HTMLElement,
     shift: document.getElementsByClassName("keyShift")[0] as HTMLElement,
-  }
+  };
 
   playPauseButton.onclick = () => {
     if (playerState.isPlaying) {
       playerState.isPlaying = false;
-      videoTarget.videoTarget?.pauseVideo();
+      if (config.syncWithVideo) {
+        videoTarget.videoTarget?.pauseVideo();
+        const { expectedFrame } = resync();
+        renderFrame(0, Math.floor(expectedFrame));
+      }
     } else {
       playerState.resumedTime =
         performance.now() - 10 * playerState.lastFrameRendered;
       playerState.isPlaying = true;
-      videoTarget.videoTarget?.playVideo();
+
+      if (config.syncWithVideo) {
+        videoTarget.videoTarget?.playVideo();
+      }
     }
 
     playPauseButton.innerHTML = `<i data-lucide="${
@@ -75,10 +110,9 @@ async function main() {
   };
 
   const preText = document.getElementById("preText")!;
-  const analyzeResult = await getDomVM();
-  document.getElementById("headerInfo")!.innerText = getHeaderText(analyzeResult)
-  const data = analyzeResult.coords!.rows;
-
+  const data = analyzeResult.coords!.rows.slice(0, -1);
+  document.getElementById("headerInfo")!.innerText =
+    getHeaderText(analyzeResult);
   playerRange.min = "0";
   playerRange.max = data.length.toString();
 
@@ -88,35 +122,24 @@ async function main() {
     0.01,
     1000
   );
-  
-  const scene = new THREE.Scene();
-  const topOffset = 42 / 540 * dimensions.height;
-  const topOffset2 = 124 / 540 * dimensions.height;
-  const topOffset3 = 152 / 540 * dimensions.height;
-  const leftTimeOffset = 22 / 720 * dimensions.width;
-  const leftSpeedOffset = 20 / 720 * dimensions.width;
-  const fontSize = 22 / 540 * dimensions.height;
-  const paddingSize = 10 / 540 * dimensions.height;
-  
-  const nameText = createText(analyzeResult.playerName, { top: `${topOffset}px`, right: `${dimensions.width + leftTimeOffset}px`, fontSize: `${fontSize}px` });
-  const timeText = createText(getHumanReadableTime(analyzeResult, 0), { top: `${topOffset + leftTimeOffset}px`, right: `${dimensions.width + leftTimeOffset}px`, fontSize: `${fontSize}px` });
-  // const speedText = createText("Speed (km/h)", { top: '24px', left: '20px' });
-  const speedValue = createText("000km/h", { top: `${topOffset3}px`, right: `${dimensions.width + leftTimeOffset}px`, fontSize: `${fontSize}px` });
-  const speedValue2 = createText("000km/h", { top: `${topOffset2}px` , left: `${dimensions.width + leftSpeedOffset}px`, backgroundColor: 'black', letterSpacing: '1px', padding: `0 ${paddingSize}px`, fontSize: `${fontSize}px` });
 
-  const keyControls = document.getElementById('keyControls')!;
-  keyControls.style.bottom = '0';
+  const scene = new THREE.Scene();
+
+  const keyControls = document.getElementById("keyControls")!;
+  keyControls.style.bottom = "0";
   keyControls.style.right = `${dimensions.width}px`;
 
   const cameraSystem = createCameraSetup(camera, scene);
 
-  const analyzer = new SnowboardTrackAnalyzer(data.map(c => transformPosition(c)), { accelerationThreshold: 0.05});
-  const slopeMesh = analyzer.createSlopeMesh({ playerYOffset: 0.4});
-  const jumpMarkers = analyzer.createJumpMarkers({ });
+  const analyzer = new SnowboardTrackAnalyzer(
+    data.map((c) => transformPosition(c)),
+    { accelerationThreshold: 0.05 }
+  );
+  const slopeMesh = analyzer.createSlopeMesh({ playerYOffset: 0.4 });
+  const jumpMarkers = analyzer.createJumpMarkers({});
 
   scene.add(slopeMesh);
-  console.log(jumpMarkers)
-  jumpMarkers.forEach(marker => scene.add(marker));
+  jumpMarkers.forEach((marker) => scene.add(marker));
 
   const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
   directionalLight.castShadow = true;
@@ -134,17 +157,14 @@ async function main() {
   renderer.shadowMap.enabled = true;
   document.getElementById("container")!.prepend(renderer.domElement);
 
-  const controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true; // Optional - adds smooth damping effect
-  controls.dampingFactor = 0.05;
-  controls.minDistance = 1;  // Minimum zoom distance
-  controls.maxDistance = 50; // Maximum zoom distance
-
-  // range
   playerRange.addEventListener("click", (e) => {
     const clickPosition = e.offsetX / playerRange.offsetWidth;
     const frame = Math.floor(clickPosition * data.length);
     playerState.resumedTime = performance.now() - 10 * frame;
+    if (config.syncWithVideo) {
+      videoTarget.videoTarget?.seekTo(frame / 100 + config.offsetSeconds, true);
+    }
+    playerState.lastFrameChecked = frame;
     renderFrame(0, frame);
   });
 
@@ -154,9 +174,8 @@ async function main() {
       return;
     }
 
-    const frameToRender =
-      frame ?? Math.floor((time - playerState.resumedTime) / 10) % data.length;
-
+    const frameToRender = frame ?? Math.floor((time - playerState.resumedTime) / 10) % data.length;
+    
     if (frameToRender < 0 || frameToRender > data.length - 1) return;
     const row = data[frameToRender];
     updateCharacterRotation(characterGroup, row);
@@ -164,7 +183,12 @@ async function main() {
     setMeshPosition(characterGroup, row);
     const speed = getSpeed(data, frameToRender);
     if (frameToRender > 0) {
-      cameraSystem.updateCamera(data[frameToRender], data[frameToRender-1], characterGroup, speed);
+      cameraSystem.updateCamera(
+        data[frameToRender],
+        data[frameToRender - 1],
+        characterGroup,
+        speed
+      );
     }
 
     const drift = getDriftSeconds(frameToRender);
@@ -173,24 +197,24 @@ y: ${characterGroup.position.y}
 z: ${characterGroup.position.z}
 accel(y): ${calculateAcceleration(data, frameToRender).toFixed(1)}
 drift(s): ${
-  drift
-    ? (drift.actualSeconds - drift.expectedSeconds).toFixed(3)
-    : "N/A"
-}
+      drift ? (drift.actualSeconds - drift.expectedSeconds).toFixed(3) : "N/A"
+    }
 rotation3x3:
 [
-  ${row.rotation3x3[0].map(n => n.toFixed(3)).join(', ')}
-  ${row.rotation3x3[1].map(n => n.toFixed(3)).join(', ')}
-  ${row.rotation3x3[2].map(n => n.toFixed(3)).join(', ')}
+  ${row.rotation3x3[0].map((n) => n.toFixed(3)).join(", ")}
+  ${row.rotation3x3[1].map((n) => n.toFixed(3)).join(", ")}
+  ${row.rotation3x3[2].map((n) => n.toFixed(3)).join(", ")}
 ]
 ${getRawString(row.raw)}`;
 
     setKeyInputState(keys, row);
     playerRange.value = frameToRender.toString();
     frameInfo.innerHTML = `Frame: ${frameToRender} / ${data.length}`;
-    timeText.textContent = getHumanReadableTime(analyzeResult, frameToRender);
-    speedValue.textContent = `${Math.floor(getSpeed(data, frameToRender)).toFixed(0).padStart(3, '0')} km/h`;;
-    speedValue2.textContent = speedValue.textContent.replace(' ', '')
+    textFields.timeText.textContent = getHumanReadableTime(analyzeResult, frameToRender);
+    textFields.speedText1.textContent = `${Math.floor(getSpeed(data, frameToRender))
+      .toFixed(0)
+      .padStart(3, "0")} km/h`;
+      textFields.speedText2.textContent = textFields.speedText1.textContent.replace(" ", "");
 
     if (newHtml !== preText.innerHTML) {
       preText.innerHTML = newHtml;
@@ -207,6 +231,52 @@ ${getRawString(row.raw)}`;
     playerState.lastFrameRendered = frameToRender;
     renderer.render(scene, camera);
   }
+
+  return {
+    dispose: () => {
+      console.log("DISPOSE!!!!");
+      renderer.domElement.remove();
+      renderer.dispose();
+    },
+  };
+}
+
+
+function createTextFields(): TextFields {
+  const topOffset = (42 / 540) * dimensions.height;
+  const topOffset2 = (124 / 540) * dimensions.height;
+  const topOffset3 = (152 / 540) * dimensions.height;
+  const leftTimeOffset = (22 / 720) * dimensions.width;
+  const leftSpeedOffset = (20 / 720) * dimensions.width;
+  const fontSize = (22 / 540) * dimensions.height;
+  const paddingSize = (10 / 540) * dimensions.height;
+
+  const nameText = createText("", {
+    top: `${topOffset}px`,
+    right: `${dimensions.width + leftTimeOffset}px`,
+    fontSize: `${fontSize}px`,
+  });
+  const timeText = createText("", {
+    top: `${topOffset + leftTimeOffset}px`,
+    right: `${dimensions.width + leftTimeOffset}px`,
+    fontSize: `${fontSize}px`,
+  });
+  // const speedText = createText("Speed (km/h)", { top: '24px', left: '20px' });
+  const speedText1 = createText("000km/h", {
+    top: `${topOffset3}px`,
+    right: `${dimensions.width + leftTimeOffset}px`,
+    fontSize: `${fontSize}px`,
+  });
+  const speedText2 = createText("000km/h", {
+    top: `${topOffset2}px`,
+    left: `${dimensions.width + leftSpeedOffset}px`,
+    backgroundColor: "black",
+    letterSpacing: "1px",
+    padding: `0 ${paddingSize}px`,
+    fontSize: `${fontSize}px`,
+  });
+
+  return { nameText, timeText, speedText1, speedText2 };
 }
 
 function setKeyInputState(keys: any, row: RowData) {
@@ -216,7 +286,7 @@ function setKeyInputState(keys: any, row: RowData) {
   } else {
     keys.left.classList.remove("pressed");
   }
-  
+
   if (row.right) {
     keys.right.classList.add("pressed");
   } else {
@@ -231,25 +301,27 @@ function setKeyInputState(keys: any, row: RowData) {
 }
 
 function createText(text: string, style?: Partial<CSSStyleDeclaration>) {
-  const textDiv = document.createElement('div');
-  textDiv.style.position = 'absolute';
-  textDiv.style.color = 'white';
-  textDiv.style.fontSize = '22px';  
+  const textDiv = document.createElement("div");
+  textDiv.style.position = "absolute";
+  textDiv.style.color = "white";
+  textDiv.style.fontSize = "22px";
   Object.assign(textDiv.style, style);
   textDiv.textContent = text;
   document.getElementById("container")!.appendChild(textDiv);
   return textDiv;
 }
 
-
 function getHumanReadableTime(analyzeResult: AnalyzeResult, frame: number) {
-  let actualMs = Math.max(0, 10 * frame - ((analyzeResult.lagBeforeStartMs + analyzeResult.startMs)));
+  let actualMs = Math.max(
+    0,
+    10 * frame - (analyzeResult.lagBeforeStartMs + analyzeResult.startMs)
+  );
   actualMs = Math.min(actualMs, analyzeResult.displayedMs);
   return msToHumanReadable(actualMs);
 }
 
 function msToHumanReadable(ms: number) {
-  return new Date(ms).toISOString().slice(14, 22).replace('.', ':');
+  return new Date(ms).toISOString().slice(14, 22).replace(".", ":");
 }
 
 function getRawString(raw: string) {
@@ -262,20 +334,23 @@ function getRawString(raw: string) {
   const itemsPerRow = Math.ceil(arr.length / rowCount);
 
   // Format numbers to fixed width
-  let formattedNumbers = arr.map(n => n.toFixed(3));
-  const maxWidth = Math.max(...formattedNumbers.map(n => n.length));
-  formattedNumbers = formattedNumbers.map(value => value.padStart(maxWidth, ' ')).map((value, index) => index >= 11 && index <= 22 ? `<mark>${value}</mark>` : value);
+  let formattedNumbers = arr.map((n) => n.toFixed(3));
+  const maxWidth = Math.max(10, ...formattedNumbers.map((n) => n.length));
+  formattedNumbers = formattedNumbers
+    .map((value) => value.padStart(maxWidth, " "))
+    .map((value, index) =>
+      index >= 11 && index <= 22 ? `<mark>${value}</mark>` : value
+    );
 
   const rows = new Array<string>();
   for (let i = 0; i < arr.length; i += itemsPerRow) {
-    rows.push(
-      formattedNumbers
-        .slice(i, i + itemsPerRow)
-        .join(', ')
-    );
+    rows.push(formattedNumbers.slice(i, i + itemsPerRow).join(", "));
   }
 
-  return `frame: ${raw.length/2} bytes, ${arr.length} 4-byte floats:\n` + rows.join('\n');
+  return (
+    `frame: ${raw.length / 2} bytes, ${arr.length} 4-byte floats:\n` +
+    rows.join("\n")
+  );
 }
 
 function updateCharacterRotation(characterGroup: THREE.Group, row: RowData) {
@@ -283,14 +358,26 @@ function updateCharacterRotation(characterGroup: THREE.Group, row: RowData) {
 
   // Convert the 3×3 to a full 4×4 matrix
   const matrix = new THREE.Matrix4().set(
-    rotation3x3[0][0], rotation3x3[0][1], rotation3x3[0][2], 0,
-    rotation3x3[1][0], rotation3x3[1][1], rotation3x3[1][2], 0,
-    rotation3x3[2][0], rotation3x3[2][1], rotation3x3[2][2], 0,
-    0,                0,                0,                1
+    rotation3x3[0][0],
+    rotation3x3[0][1],
+    rotation3x3[0][2],
+    0,
+    rotation3x3[1][0],
+    rotation3x3[1][1],
+    rotation3x3[1][2],
+    0,
+    rotation3x3[2][0],
+    rotation3x3[2][1],
+    rotation3x3[2][2],
+    0,
+    0,
+    0,
+    0,
+    1
   );
 
   // Extract Euler angles from that matrix (assuming an XYZ rotation order)
-  const euler = new THREE.Euler().setFromRotationMatrix(matrix, 'XYZ');
+  const euler = new THREE.Euler().setFromRotationMatrix(matrix, "XYZ");
 
   // --- Fix pitch (looking "up" instead of "down") ---
   euler.x = -euler.x;
@@ -310,21 +397,32 @@ function tryResync(frameToRender) {
     return;
   }
 
+  if (!config.syncWithVideo) return;
+
   const driftInfo = getDriftSeconds(frameToRender);
   if (
     driftInfo &&
-    Math.abs(driftInfo.actualSeconds - driftInfo.expectedSeconds) > SYNC_THRESHOLD
+    Math.abs(driftInfo.actualSeconds - driftInfo.expectedSeconds) >
+      SYNC_THRESHOLD
   ) {
-    console.log(`Synced video to replay, precision: ${SYNC_THRESHOLD}, times: ${++resyncCount}.`);
-    const expectedFrame = (driftInfo.actualSeconds - videoSetup.offsetSeconds)  * 100;
-    playerState.resumedTime = performance.now() - 10 * expectedFrame;
+    console.log(
+      `Synced video to replay, precision: ${SYNC_THRESHOLD}, times: ${++resyncCount}.`
+    );
+    resync(driftInfo.actualSeconds);
   }
+}
+
+function resync(actualSeconds?: number): { expectedFrame: number } {
+  actualSeconds = actualSeconds ?? videoTarget.videoTarget!.getCurrentTime();
+  const expectedFrame = (actualSeconds! - config.offsetSeconds) * 100;
+  playerState.resumedTime = performance.now() - 10 * expectedFrame;
+  return { expectedFrame };
 }
 
 function getDriftSeconds(
   frameToRender: number
 ): { expectedSeconds: number; actualSeconds: number } | undefined {
-  const expectedSeconds = videoSetup.offsetSeconds + frameToRender / 100;
+  const expectedSeconds = config.offsetSeconds + frameToRender / 100;
   if (!videoTarget.videoTarget) {
     return undefined;
   }
@@ -345,7 +443,7 @@ function transformPosition(position) {
     x: -position.x,
     y: -position.y,
     z: position.z,
-  }
+  };
 }
 
 function getHeaderText(analyzeResult: AnalyzeResult) {
@@ -353,11 +451,7 @@ function getHeaderText(analyzeResult: AnalyzeResult) {
 Player: ${analyzeResult.playerName}
 Track : ${analyzeResult.trackName}
 Time  : ${msToHumanReadable(analyzeResult.displayedMs)}
-CP1   : ${msToHumanReadable(analyzeResult.checkpoint1Ms)}
-
-Config
-setup : ${JSON.stringify(videoSetup, null, 2)}
-`;
+CP1   : ${msToHumanReadable(analyzeResult.checkpoint1Ms)}`
 }
 
 main();
