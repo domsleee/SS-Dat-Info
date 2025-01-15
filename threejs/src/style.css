@@ -1,0 +1,137 @@
+body {
+  height: 100vh;
+  margin: 0;
+}
+
+html {
+  background: #eee;
+  font-family: Arial, sans-serif;
+}
+
+#preText {
+  margin: 0;
+}
+
+pre {
+  margin: 0;
+}
+
+h1 {
+  margin: 0;
+  margin-bottom: 5px;
+  text-align: center;
+}
+
+.controls {
+  background: white;
+  padding: 0 5px;
+  border-radius: 5px;
+  display: flex;
+  gap: 10px;
+}
+
+button {
+  appearance: none;
+  border: none;
+  background: none;
+  cursor: pointer!important;
+  padding: 0 8px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #ccc;
+}
+
+button.iconButton {
+  padding: 8px;
+}
+
+button:hover {
+  background: #f3f4f6;
+}
+
+#container {
+  display: flex;
+  position: relative;
+}
+
+.controlsContainer {
+  width: 100%;
+  margin: auto;
+  padding: 5px;
+  align-items: center;
+  box-sizing: border-box;
+}
+
+.controls {
+  align-items: center;
+  padding: 5px;
+}
+
+#mainContainer {
+  margin: auto;
+}
+
+/* key controls */
+
+#info {
+  display: flex;
+  gap: 50px;
+  padding: 0 20px;
+  font-family: monospace;
+  position: relative;
+}
+
+#keyControls {
+  display: flex;
+  opacity: 0.7;
+  position: absolute;
+}
+
+.key.keyLeft, .key.keyRight, .key.keyUp, .key.keyDown {
+  font-size: 1.8em;
+}
+
+.key {
+  padding: 10px;
+  background: rgba(33, 33, 33, 0.8);
+  border: 1px solid #666;
+  color: white;
+  text-align: center;
+  border-radius: 4px;
+  width: 48px;
+  height: 48px;
+}
+
+.key.pressed {
+  background: rgba(100, 0, 0, 0.8);
+}
+
+.empty {
+  visibility: hidden;
+}
+
+table {
+  border-spacing: 0 2px;
+}
+
+/* dropzone */
+.dropzone {
+  padding: 20px;
+  border: 2px dashed #ccc;
+  cursor: pointer;
+}
+
+.dropzone.dragover {
+  border-color: #4a90e2;
+  background: rgba(74, 144, 226, 0.1);
+}
+
+.dropzone.error {
+  border-color: #e74c3c;
+}
+
+.dropzone-label {
+  cursor: pointer;
+}

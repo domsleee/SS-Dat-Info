@@ -1,3 +1,6 @@
+import { fileURLToPath } from "bun";
+import { dirname, resolve } from "path";
+
 export interface AnalyzeResult {
   playerName: string;
   trackName: string;
@@ -23,6 +26,35 @@ export interface AnalyzeResult {
   // distanceBreaksAfterFinish: number;
   // speedBreaksBeforeFinish: number;
   // speedBreaksAfterFinish: number;
+
+  coords?: CoordinateData;
+}
+
+export interface CoordinateData {
+  rows: Array<RowData>;
+}
+
+export interface RowData {
+  x: number;
+  y: number;
+  z: number;
+  rotation3x3: Array<Array<number>>;
+  raw: string;
+  movementState: MovementState;
+  left: boolean;
+  right: boolean;
+  forward: boolean;
+  shift: boolean;
+}
+
+
+export enum MovementState {
+  NOPRESS = "NOPRESS",
+  FORWARD = "FORWARD",
+  LEFT = "LEFT",
+  RIGHT = "RIGHT",
+  FORLEFT = "FORLEFT",
+  FORRIGHT = "FORRIGHT",
 }
 
 export interface TimingDataFromHeader {
@@ -31,3 +63,5 @@ export interface TimingDataFromHeader {
   checkpoint1TotalMs: number;
   totalTimeToFinishMs: number;
 }
+
+export const REPLAY_FOLDER = resolve(import.meta.dir, "../../threejs/public/replays");
