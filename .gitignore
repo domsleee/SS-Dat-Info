@@ -1,0 +1,8 @@
+hiddenData/
+
+# Not sure if these replays are public ;)
+replays/**/*Thomas*.dat
+replays/**/*Alex*.dat
+replays/**/*Clark*.dat
+
+.DS_Store
