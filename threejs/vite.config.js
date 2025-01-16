@@ -3,7 +3,8 @@ import { defineConfig } from 'vite';
 import path from 'path';
 import { readdir } from 'fs/promises';
 
-export default defineConfig({
+export default defineConfig(({ command, mode }) => ({
+  base: command === 'serve' ? '/' : '/SS-Dat-Info/',
   server: {
     port: '8080',
     fs: {
@@ -37,4 +38,4 @@ export default defineConfig({
   optimizeDeps: {
     include: ['buffer']
   }
-});
+}));
