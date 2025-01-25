@@ -448,10 +448,17 @@ function transformPosition(position) {
 
 function getHeaderText(analyzeResult: AnalyzeResult) {
   return `\
-Player: ${analyzeResult.playerName}
-Track : ${analyzeResult.trackName}
-Time  : ${msToHumanReadable(analyzeResult.displayedMs)}
-CP1   : ${msToHumanReadable(analyzeResult.checkpoint1Ms)}`
+Player    : ${analyzeResult.playerName}
+Track     : ${analyzeResult.trackName}
+Time      : ${msToHumanReadable(analyzeResult.displayedMs)}
+CP1       : ${msToHumanReadable(analyzeResult.checkpoint1Ms)}
+CP2       : todo
+Total Time: ${msToHumanReadable(analyzeResult.totalMs)}
+
+Lag before start: ${msToHumanReadable(analyzeResult.lagBeforeStartMs)}
+Leg after finish: ${msToHumanReadable(analyzeResult.lagAfterFinishMs)}
+Rrecording time : ${msToHumanReadable(analyzeResult.recordingMs)}
+`
 }
 
 main();

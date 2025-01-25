@@ -4,6 +4,7 @@ import { analyzeReplay } from "./analyzeReplayFs";
 import { readFile } from "fs/promises";
 import { getDataBlocks } from "./analyzeReplay";
 import { debugKeypress } from "./debugKeypress";
+import { dumpObjects } from "./dumpObjects";
 
 const program = new Command();
 
@@ -69,6 +70,15 @@ program
   .description("Output data for keypress ideas")
   .action(async () => {
     return await debugKeypress();
+  })
+
+program
+  .command("dump-objects")
+  .argument("<filepath>", "path to Object_Data.txt file")
+  .argument("[objectNames...]", "Names of object to dump (optional)")
+  .description("Dump the data from Object_Data.txt in json")
+  .action(async (filepath: string, objectNames: Array<string>) => {
+    await dumpObjects(filepath, objectNames);
   })
 
 program.parse();
