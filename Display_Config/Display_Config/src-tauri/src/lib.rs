@@ -1,10 +1,10 @@
 use tauri::Manager;
 
+mod inject;
 mod path_util;
 mod rd_config;
-mod trainer;
 
-// Very confusing that this is needed!
+// fixme: is this really needed?
 #[tauri::command]
 fn kill_exit_1() -> String {
     std::process::exit(1);
@@ -23,7 +23,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             show_window,
-            trainer::run_trainer,
+            inject::run_inject,
             rd_config::read_rd_config,
             rd_config::write_rd_config,
             kill_exit_1

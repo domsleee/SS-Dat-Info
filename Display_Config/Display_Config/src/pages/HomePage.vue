@@ -36,7 +36,9 @@ async function handlePlay() {
     console.log(await invoke('write_rd_config', { config: getAsRdConfig() }));
     const { trainerSettings } = useTrainerSettingsStore();
     if (trainerSettings.changeFov || trainerSettings.use4xFonts) {
-      const r2 = await invoke('run_trainer', { trainerSettings });
+      const r2 = await invoke('run_inject', { trainerSettings });
+      const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+      await sleep(3*1000); // race condition maybe
       console.log(r2);
     }
     playLoading.value = false;
