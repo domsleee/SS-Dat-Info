@@ -6,7 +6,7 @@ export const useTrainerSettingsStore = defineStore(
   "trainerForm",
   () => {
     const settings = ref<TrainerSettings>({
-      changeFov: true,
+      changeFov: false,
       use4xFonts: false,
       fovWidth: 1920,
       fovHeight: 1080,

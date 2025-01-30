@@ -8,7 +8,7 @@ export const useRenderSettingsStore = defineStore(
     const settings = ref<RenderSettings>({
       renderer: "OpenGL",
       cardId: 0,
-      resolution: "2560x1440",
+      resolution: "1600x1200",
       colourDepth: "32bit",
       fullscreen: false,
     });
