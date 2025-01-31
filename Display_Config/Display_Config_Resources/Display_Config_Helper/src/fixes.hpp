@@ -21,10 +21,12 @@ void DoFovFix(int fovWidth, int fovHeight) {
         fNewCameraHFOV = ((float)fovWidth / (float)fovHeight) / (4.0f / 3.0f);
 
         static SafetyHookMid CameraHFOVInstructionMidHook{};
+        Log("DoFovFix: Applying FOV fix");
         CameraHFOVInstructionMidHook = safetyhook::create_mid(CameraHFOVInstructionScanResult + 0x8, [](SafetyHookContext& ctx)
         {
             *reinterpret_cast<float*>(ctx.esp + 0x2D0) = fNewCameraHFOV;
         });
+        Log("DoFovFix: FOV fix applied");
     }
     else {
         Log("DoFovFix: Couldn't find");
@@ -44,6 +46,7 @@ void Do4xFont() {
         Log(std::format("Do4xFont: Address is HMG_3DE.dll+{:x}", getTextureScanResult + 0x8 - (std::uint8_t*)module));
 
         static SafetyHookMid fontMidHook{};
+        Log("Do4xFont: Applying 4x font fix");
         fontMidHook = safetyhook::create_mid(getTextureScanResult + 0x8, [](SafetyHookContext& ctx)
         {
             if (ctx.eax == 32 && *(uint32_t*)(ctx.esp + 0x20) == 32)
@@ -53,6 +56,7 @@ void Do4xFont() {
                 *(uint32_t*)(ctx.esp + 0x24) = 128;
             }
         });
+        Log("Do4xFont: 4x font fix applied");
     }
     else {
         Log("Do4xFont: Couldn't find program text");

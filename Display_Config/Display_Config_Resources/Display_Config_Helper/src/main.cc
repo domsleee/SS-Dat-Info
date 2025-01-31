@@ -6,20 +6,14 @@
 #include <fstream>
 using json = nlohmann::json;
 
-BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
-    if (reason != DLL_PROCESS_ATTACH)
-    {
-        Log("Ignored...");
-        return TRUE;
-    }
-
-    Log("hello?");
+void run() {
+    Log("Processing");
 
     auto jsonPath = GetInResourceDir("Display_Config_Helper.json");
     if (!std::filesystem::exists(jsonPath)) {
-		Log("Display_Config_Helper.json not found");
-		return TRUE;
-	}
+        Log("Display_Config_Helper.json not found");
+        return;
+    }
 
     std::ifstream jsonFile(jsonPath);
     auto data = json::parse(jsonFile);
@@ -35,6 +29,16 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
         Log("Applying 4x font fix");
         Do4xFont();
     }
+}
 
+BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
+    if (reason != DLL_PROCESS_ATTACH)
+    {
+        Log("Ignored...");
+        return TRUE;
+    }
+
+    run();
+    Log("Finished.");
     return TRUE;
 }

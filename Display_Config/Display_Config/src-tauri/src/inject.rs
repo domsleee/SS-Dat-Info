@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::{os::windows::process::CommandExt, path::PathBuf, process::Command};
 
 use serde::{Deserialize, Serialize};
 
@@ -20,17 +20,41 @@ pub async fn run_inject(trainer_settings: TrainerSettings) -> Result<String, Str
     let settings_path = display_config_resources.join("Display_Config_Helper.json");
     let settings_file = std::fs::File::create(settings_path).unwrap();
 
+    let log_path = display_config_resources.join("Display_Config_Helper.log");
+    if log_path.exists() {
+        std::fs::remove_file(&log_path).expect("Failed to remove log file");
+    }
+
     let writer = std::io::BufWriter::new(&settings_file);
     serde_json::to_writer_pretty(writer, &trainer_settings).unwrap();
 
     let injector_path = display_config_resources.join("Injector.exe");
     let status = Command::new(injector_path)
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW (https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags)
         .current_dir(&display_config_resources)
         .status()
         .map_err(|err| format!("Failed to spawn process: {err}"))?;
-    if status.success() {
-        Ok("seems good".to_string())
-    } else {
-        Err("Failed to inject".to_string())
+
+    if !status.success() {
+        return Err("Failed to inject".to_string());
     }
+
+    wait_for_finished_log(&log_path)
+}
+
+fn wait_for_finished_log(log_path: &PathBuf) -> Result<String, String> {
+    let start_time = std::time::Instant::now();
+    let timeout_duration = std::time::Duration::from_secs(5);
+
+    while start_time.elapsed() < timeout_duration {
+        if let Ok(log_contents) = std::fs::read_to_string(log_path) {
+            if log_contents.contains("Finished.") {
+                return Ok("Finished".to_string());
+            }
+        }
+        // Ignore error case and continue waiting
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    Err("Timeout waiting for 'Finished.' in log".to_string())
 }

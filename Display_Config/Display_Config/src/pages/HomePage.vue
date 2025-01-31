@@ -4,7 +4,7 @@
       <RenderOptions :formIsLoading="playLoading" />
       <TrainerOptions :formIsLoading="playLoading" class="mt-2" />
       <Autostart @auto-play="handleAutoplay()" />
-      <LanguageSelect />
+      <!-- <LanguageSelect /> -->
       <div class="mt-2 ga-2 d-flex justify-end">
         <v-btn size="x-large" color="indigo-darken-3" :loading="playLoading" @click="handlePlay">Play</v-btn>
         <v-btn size="x-large" color="" @click="handleExit">Exit</v-btn>
@@ -38,8 +38,6 @@ async function handlePlay() {
     const { trainerSettings } = useTrainerSettingsStore();
     if (trainerSettings.changeFov || trainerSettings.use4xFonts) {
       const r2 = await invoke('run_inject', { trainerSettings });
-      const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-      await sleep(3*1000); // race condition maybe
       console.log(r2);
     }
     playLoading.value = false;

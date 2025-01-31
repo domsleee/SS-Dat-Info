@@ -1,0 +1,24 @@
+set shell := ["pwsh.exe", "-NoProfile", "-c"]
+
+display_config:
+    cd Display_Config && bun tauri build
+    if (!(Test-Path ./output)) { mkdir output > $null }
+    cp Display_Config\src-tauri\target\release\*.exe ./output/
+
+display_config_helper:
+    $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath; \
+    Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"; \
+    Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation; \
+    msbuild .\Display_Config_Resources\Display_Config_Helper\Display_Config_Helper.vcxproj /v:minimal /p:Configuration=Release; \
+    msbuild .\Display_Config_Resources\Injector\Injector.vcxproj /v:minimal /p:Configuration=Release
+
+    if (!(Test-Path ./output)) { mkdir output > $null }
+    cp .\Display_Config_Resources\Display_Config_Helper\Release\Display_Config_Helper.dll ./output/
+    cp .\Display_Config_Resources\Injector\Release\Injector.exe ./output/
+
+clean:
+    if (Test-Path .\output) { Remove-Item .\output -Recurse -Force }
+
+all:
+	just clean
+	task build
