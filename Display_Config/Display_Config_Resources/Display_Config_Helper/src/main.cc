@@ -18,16 +18,21 @@ void run() {
     std::ifstream jsonFile(jsonPath);
     auto data = json::parse(jsonFile);
 
-    if (data["changeFov"]) {
+    if (data.value("changeFov", false)) {
         int fovWidth = data["fovWidth"];
         int fovHeight = data["fovHeight"];
         Log(std::format("Changing FOV to {}x{}", fovWidth, fovHeight));
         DoFovFix(fovWidth, fovHeight);
     }
 
-    if (data["use4xFonts"]) {
+    if (data.value("use4xFonts", false)) {
         Log("Applying 4x font fix");
         Do4xFont();
+    }
+
+    if (data.value("enableLogging", false)) {
+        Log("Enable logging");
+        EnableLogging();
     }
 }
 
@@ -38,7 +43,13 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
         return TRUE;
     }
 
-    run();
+    try {
+        run();
+    }
+	catch (const std::exception& e) {
+		Log(std::format("Error: {}", e.what()));
+        return TRUE;
+	}
     Log("Finished.");
     return TRUE;
 }

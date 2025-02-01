@@ -11,6 +11,7 @@ pub struct TrainerSettings {
     pub change_fov: bool,
     pub fov_width: Option<i32>,
     pub fov_height: Option<i32>,
+    pub enable_logging: bool,
 }
 
 #[tauri::command]
@@ -56,5 +57,7 @@ fn wait_for_finished_log(log_path: &PathBuf) -> Result<String, String> {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    Err("Timeout waiting for 'Finished.' in log".to_string())
+    Err(format!(
+        "Timeout waiting for 'Finished.' in log {log_path:?}"
+    ))
 }

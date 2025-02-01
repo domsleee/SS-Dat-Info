@@ -16,4 +16,5 @@ export interface TrainerSettings {
   changeFov: boolean;
   fovWidth?: number;
   fovHeight?: number;
+  enableLogging: boolean;
 }

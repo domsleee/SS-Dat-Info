@@ -15,7 +15,6 @@ export const useRenderSettingsStore = defineStore(
 
     return { renderSettings: settings };
   },
-  // @ts-expect-error will fix
   { persist: true }
 );
 

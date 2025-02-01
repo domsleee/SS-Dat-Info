@@ -38,11 +38,11 @@ watch(() => autostart.autostart, (newValue) => {
 function getLabel() {
   if (autostart.autostart) {
     if (isRunning.value) {
-      return "auto start: " + formatTime(timeLeft.value);
+      return "Auto start: " + formatTime(timeLeft.value);
     }
-    return "auto start: will run on restart";
+    return "Auto start: will run on restart";
   }
-  return "auto start";;
+  return "Auto start";;
 }
 
 function formatTime(time: number) {

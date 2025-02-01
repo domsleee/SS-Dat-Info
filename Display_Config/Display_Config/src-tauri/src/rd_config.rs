@@ -66,8 +66,8 @@ pub fn read_rd_config() -> String {
 #[tauri::command]
 pub fn write_rd_config(config: RdConfig) -> Result<(), String> {
     let rd_config = get_supreme_folder().join("rd_config.txt");
-    let mut file =
-        File::create(&rd_config).map_err(|e| format!("Failed to create config file: {}", e))?;
+    let mut file = File::create(&rd_config)
+        .map_err(|e| format!("Failed to create config file: {rd_config:?} {}", e))?;
 
     let configs = [
         format!("api_name = \"{}\";", config.api_name),

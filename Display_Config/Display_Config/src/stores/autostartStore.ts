@@ -7,6 +7,5 @@ export const useAutostartStore = defineStore(
     const autostart = ref<boolean>(false);
     return { autostart };
   },
-  // @ts-expect-error will fix
   { persist: true }
 );

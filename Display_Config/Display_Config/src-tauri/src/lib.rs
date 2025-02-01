@@ -1,5 +1,6 @@
 use tauri::Manager;
 
+mod file_commands;
 mod inject;
 mod path_util;
 mod rd_config;
@@ -26,10 +27,16 @@ pub fn run() {
             inject::run_inject,
             rd_config::read_rd_config,
             rd_config::write_rd_config,
+            file_commands::open_log_file,
             kill_exit_1
         ])
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();
+            let package_info = app.package_info();
+            window.set_title(&format!(
+                "Supreme Snowboarding Config {}",
+                package_info.version
+            ))?;
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();

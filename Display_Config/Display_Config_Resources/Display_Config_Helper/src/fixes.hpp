@@ -14,8 +14,7 @@ void DoFovFix(int fovWidth, int fovHeight) {
 
     std::uint8_t* CameraHFOVInstructionScanResult = Memory::PatternScan(module, "8D 94 24 A8 02 00 00 52 8D 94 24 D0 02 00 00 8D 8C 24 AC 02 00 00");
 
-    if (CameraHFOVInstructionScanResult)
-    {
+    if (CameraHFOVInstructionScanResult) {
         Log(std::format("Camera HFOV Instruction: Address is Supreme_Game.dll+{:x}", CameraHFOVInstructionScanResult + 0x8 - (std::uint8_t*)module));
 
         fNewCameraHFOV = ((float)fovWidth / (float)fovHeight) / (4.0f / 3.0f);
@@ -41,8 +40,7 @@ void Do4xFont() {
     }
 
     std::uint8_t* getTextureScanResult = Memory::PatternScan(module, "85 C0 74 04 89 44 24 24 8D 54 24 20 52 8B CF FF 15 10 53");
-    if (getTextureScanResult)
-    {
+    if (getTextureScanResult) {
         Log(std::format("Do4xFont: Address is HMG_3DE.dll+{:x}", getTextureScanResult + 0x8 - (std::uint8_t*)module));
 
         static SafetyHookMid fontMidHook{};
@@ -60,5 +58,23 @@ void Do4xFont() {
     }
     else {
         Log("Do4xFont: Couldn't find program text");
+    }
+}
+
+void EnableLogging() {
+    auto module = GetModuleHandleA("HMG_Kernel.dll");
+    if (!module) {
+        Log("Failed to find HMG_Kernel.dll");
+        return;
+    }
+
+    typedef void (__fastcall *ToggleLoggingFunc)(bool);
+    ToggleLoggingFunc toggleLogging = (ToggleLoggingFunc)GetProcAddress(module, "?Toggle_Logging@Kernel@Housemarque@@YIX_N@Z");
+
+    if (toggleLogging) {
+        toggleLogging(true);
+        Log("EnableLogging: Logging enabled");
+    } else {
+        Log("EnableLogging: Failed to find Toggle_Logging function");
     }
 }

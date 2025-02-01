@@ -36,7 +36,9 @@ async function handlePlay() {
     console.log (await invoke('read_rd_config'));
     console.log(await invoke('write_rd_config', { config: getAsRdConfig() }));
     const { trainerSettings } = useTrainerSettingsStore();
-    if (trainerSettings.changeFov || trainerSettings.use4xFonts) {
+    if (trainerSettings.changeFov || trainerSettings.use4xFonts || trainerSettings.enableLogging) {
+      if (typeof trainerSettings.fovHeight === 'string') trainerSettings.fovHeight = parseInt(trainerSettings.fovHeight);
+      if (typeof trainerSettings.fovWidth === 'string') trainerSettings.fovWidth = parseInt(trainerSettings.fovWidth);
       const r2 = await invoke('run_inject', { trainerSettings });
       console.log(r2);
     }

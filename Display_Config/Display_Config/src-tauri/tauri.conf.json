@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tauri-app",
-  "version": "0.1.0",
-  "identifier": "com.tauri-app.app",
+  "productName": "display-config",
+  "version": "0.2.1",
+  "identifier": "com.display-config.app",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -12,11 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "Supreme Snowboarding Config",
+        "title": "Supreme Snowboarding Config {{version}}",
         "label": "main",
         "visible": false,
         "width": 400,
-        "height": 510
+        "height": 530
       }
     ],
     "security": {

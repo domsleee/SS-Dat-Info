@@ -1,7 +1,7 @@
 <template>
   <v-card>
     <v-card-title>Graphics Options</v-card-title>
-    <v-card-text>
+    <v-card-text class="pb-2">
       <div class="d-flex ga-2 flex-column">
         <v-select
           v-model="renderSettings.renderer"
