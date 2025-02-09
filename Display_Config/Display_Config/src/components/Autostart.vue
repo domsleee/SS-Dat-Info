@@ -9,7 +9,7 @@ import { useAutostartStore } from '../stores/autostartStore';
 const emit = defineEmits(["auto-play"]);
 const autostart = useAutostartStore();
 const isRunning = ref(false);
-const timeLeft = ref(2500);
+const timeLeft = ref(1500);
 let interval: NodeJS.Timeout | undefined = undefined;
 
 if (autostart.autostart) {

@@ -34,6 +34,8 @@ void run() {
         Log("Enable logging");
         EnableLogging();
     }
+
+    DoGhostOpaqueFix();
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
