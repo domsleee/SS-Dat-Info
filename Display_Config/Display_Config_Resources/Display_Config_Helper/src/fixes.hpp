@@ -61,7 +61,7 @@ void Do4xFont() {
     }
 }
 
-void DoGhostOpaqueFix() {
+void DoMakeGhostsOpaque() {
     auto module = GetModuleHandleA("Supreme_Game.dll");
     if (!module) {
         Log("Failed to find Supreme_Game.dll");

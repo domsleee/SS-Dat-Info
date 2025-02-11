@@ -1,22 +1,24 @@
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { ref, type Ref } from 'vue';
 import type { RenderSettings } from '../services/types';
+import { getPersistentSettings } from './persistentStoreHelper';
 
 export const useRenderSettingsStore = defineStore(
   'renderSettings',
-  () => {
-    const settings = ref<RenderSettings>({
-      renderer: "OpenGL",
-      cardId: 0,
-      resolution: "1600x1200",
-      colourDepth: "32bit",
-      fullscreen: false,
-    });
-
-    return { renderSettings: settings };
-  },
-  { persist: true }
+  getDefaultRenderSettings,
+  getPersistentSettings(getDefaultRenderSettings)
 );
+
+function getDefaultRenderSettings(): { renderSettings: Ref<RenderSettings> } {
+  const settings = ref<RenderSettings>({
+    renderer: "OpenGL",
+    cardId: 0,
+    resolution: "1600x1200",
+    colourDepth: "32bit",
+    fullscreen: false,
+  });
+  return { renderSettings: settings };
+}
 
 interface RdConfig {
   apiName: string;

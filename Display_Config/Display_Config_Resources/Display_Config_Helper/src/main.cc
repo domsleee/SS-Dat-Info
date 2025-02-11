@@ -35,7 +35,10 @@ void run() {
         EnableLogging();
     }
 
-    DoGhostOpaqueFix();
+    if (data.value("makeGhostsOpaque", false)) {
+        Log("Make ghosts opaque");
+        DoMakeGhostsOpaque();
+    }
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {

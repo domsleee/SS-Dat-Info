@@ -1,6 +1,6 @@
 <template>
   <v-tooltip
-    text="The game will create more logs in Supreme/HMGEHLOG.TXT"
+    text="The game will create more logs in Supreme/HMGEHLOG.TXT, same as ori cheat"
     location="bottom"
   >
     <template v-slot:activator="{ props }">

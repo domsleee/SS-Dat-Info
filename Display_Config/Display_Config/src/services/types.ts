@@ -17,4 +17,5 @@ export interface TrainerSettings {
   fovWidth?: number;
   fovHeight?: number;
   enableLogging: boolean;
+  makeGhostsOpaque: boolean;
 }

@@ -12,6 +12,7 @@ pub struct TrainerSettings {
     pub fov_width: Option<i32>,
     pub fov_height: Option<i32>,
     pub enable_logging: bool,
+    pub make_ghosts_opaque: bool,
 }
 
 #[tauri::command]

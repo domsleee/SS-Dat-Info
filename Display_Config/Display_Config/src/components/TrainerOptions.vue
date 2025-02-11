@@ -29,9 +29,10 @@
         <p class="align-self-center">{{ getFovFactor() }}</p>
       </div>
       <div class="d-flex ga-2" style="align-items: center">
-          <v-checkbox v-model="trainerSettings.enableLogging" label="Enable Logging" />
-          <EnableLoggingTooltip />
+        <v-checkbox v-model="trainerSettings.enableLogging" label="Enable Logging" />
+        <EnableLoggingTooltip />
       </div>
+      <v-checkbox v-model="trainerSettings.makeGhostsOpaque" label="Make replay ghosts opaque" />
     </v-card-text>
   </v-card>
 </template>

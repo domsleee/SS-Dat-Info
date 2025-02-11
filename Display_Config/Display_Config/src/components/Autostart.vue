@@ -1,21 +1,24 @@
 <template>
-  <v-checkbox v-model="autostart.autostart" :label="getLabel()" />
+  <div class="d-flex align-center ga-2">
+    <v-checkbox v-model="settings.autostart" :label="getLabel()" />
+    <v-checkbox v-model="settings.autoCloseOthers" label="Auto close others" />
+  </div>
 </template>
 
 <script lang="ts" setup>
 import { ref, watch } from "vue";
 import { useAutostartStore } from '../stores/autostartStore';
+import { invoke } from "@tauri-apps/api/core";
 
 const emit = defineEmits(["auto-play"]);
-const autostart = useAutostartStore();
+const { settings } = useAutostartStore();
 const isRunning = ref(false);
-const timeLeft = ref(1500);
+const timeLeft = ref(1200);
 let interval: NodeJS.Timeout | undefined = undefined;
 
-if (autostart.autostart) {
+if (settings.autostart) {
   isRunning.value = true;
   interval = setInterval(() => {
-    console.log("HEY")
     timeLeft.value -= 50;
     if (timeLeft.value <= 0) {
       clearInterval(interval);
@@ -25,7 +28,11 @@ if (autostart.autostart) {
   }, 50);
 }
 
-watch(() => autostart.autostart, (newValue) => {
+if (settings.autoCloseOthers) {
+  invoke("close_others");
+}
+
+watch(() => settings.autostart, (newValue) => {
   if (!newValue) {
     isRunning.value = false;
     if (interval) {
@@ -36,13 +43,13 @@ watch(() => autostart.autostart, (newValue) => {
 });
 
 function getLabel() {
-  if (autostart.autostart) {
+  if (settings.autostart) {
     if (isRunning.value) {
       return "Auto start: " + formatTime(timeLeft.value);
     }
-    return "Auto start: will run on restart";
+    return "Auto start (next open)";
   }
-  return "Auto start";;
+  return "Auto start";
 }
 
 function formatTime(time: number) {
