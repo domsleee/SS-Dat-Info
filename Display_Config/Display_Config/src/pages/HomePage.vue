@@ -9,6 +9,7 @@
         <v-btn size="x-large" color="indigo-darken-3" :loading="playLoading" @click="handlePlay">Play</v-btn>
         <v-btn size="x-large" color="" @click="handleExit">Exit</v-btn>
       </div>
+      <ErrorDialog />
     </v-form>
   </v-container>
 </template>
@@ -21,8 +22,10 @@ import { getAsRdConfig } from '@/stores/renderSettings';
 import Autostart from '@/components/Autostart.vue';
 import { useTrainerSettingsStore } from '@/stores/trainerSettings';
 import { exit } from '@tauri-apps/plugin-process';
+import { useErrorStore } from '@/stores/errorStore';
 
 const playLoading = ref(false);
+const errorStore = useErrorStore();
 
 async function handleAutoplay() {
   if (!playLoading.value) {
@@ -46,8 +49,18 @@ async function handlePlay() {
     await getCurrentWindow().setFocus();
     await exit(0);
   } catch (e) {
+    if (e instanceof Error || typeof e === 'string') {
+      const errorString = e instanceof Error ? e.message : e;
+      if (errorString.startsWith(`Timeout waiting for 'Finished.' in log`)) {
+        const logData = await invoke<string[]>('get_log_data');
+        errorStore.setError(e, {logData});
+      } else {
+        errorStore.setError(e);
+      }
+    } else {
+      alert(e);
+    }
     playLoading.value = false;
-    alert(e);
   }
 }
 

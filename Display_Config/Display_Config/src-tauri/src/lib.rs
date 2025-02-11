@@ -2,6 +2,7 @@ use tauri::Manager;
 
 mod close_others;
 mod file_commands;
+mod get_log_data;
 mod inject;
 mod path_util;
 mod rd_config;
@@ -30,6 +31,7 @@ pub fn run() {
             rd_config::write_rd_config,
             file_commands::open_log_file,
             close_others::close_others,
+            get_log_data::get_log_data,
             kill_exit_1
         ])
         .setup(|app| {

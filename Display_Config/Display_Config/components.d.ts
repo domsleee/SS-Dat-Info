@@ -9,6 +9,7 @@ declare module 'vue' {
   export interface GlobalComponents {
     Autostart: typeof import('./src/components/Autostart.vue')['default']
     EnableLoggingTooltip: typeof import('./src/components/EnableLoggingTooltip.vue')['default']
+    ErrorDialog: typeof import('./src/components/ErrorDialog.vue')['default']
     LanguageSelect: typeof import('./src/components/LanguageSelect.vue')['default']
     RenderOptions: typeof import('./src/components/RenderOptions.vue')['default']
     TrainerOptions: typeof import('./src/components/TrainerOptions.vue')['default']

@@ -22,7 +22,7 @@ pub async fn run_inject(trainer_settings: TrainerSettings) -> Result<String, Str
     let settings_path = display_config_resources.join("Display_Config_Helper.json");
     let settings_file = std::fs::File::create(settings_path).unwrap();
 
-    let log_path = display_config_resources.join("Display_Config_Helper.log");
+    let log_path = get_log_path();
     if log_path.exists() {
         std::fs::remove_file(&log_path).expect("Failed to remove log file");
     }
@@ -38,10 +38,17 @@ pub async fn run_inject(trainer_settings: TrainerSettings) -> Result<String, Str
         .map_err(|err| format!("Failed to spawn process: {err}"))?;
 
     if !status.success() {
-        return Err("Failed to inject".to_string());
+        return Err("Injector.exe failed.\nDid you run using Supreme.exe?".to_string());
     }
 
     wait_for_finished_log(&log_path)
+}
+
+pub fn get_log_path() -> PathBuf {
+    let supreme_folder = get_supreme_folder();
+    let display_config_resources = supreme_folder.join("Display_Config_Resources");
+    let log_path = display_config_resources.join("Display_Config_Helper.log");
+    log_path
 }
 
 fn wait_for_finished_log(log_path: &PathBuf) -> Result<String, String> {
@@ -58,7 +65,8 @@ fn wait_for_finished_log(log_path: &PathBuf) -> Result<String, String> {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
+    let formatted_log_path = log_path.display().to_string().replace("\\", "/");
     Err(format!(
-        "Timeout waiting for 'Finished.' in log {log_path:?}"
+        "Timeout waiting for 'Finished.' in log {formatted_log_path}"
     ))
 }
