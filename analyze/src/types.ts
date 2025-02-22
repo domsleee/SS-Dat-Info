@@ -3,7 +3,7 @@ import { dirname, resolve } from "path";
 
 export interface AnalyzeResult {
   playerName: string;
-  trackName: string;
+  trackName: string | undefined;
 
   // timing
   displayedMs: number;

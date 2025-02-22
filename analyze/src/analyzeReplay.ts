@@ -36,7 +36,7 @@ export function analyzeReplayHex(hexData: string, includeCoords?: boolean): Anal
   };
 }
 
-function getTrackName(hexData: string): string {
+function getTrackName(hexData: string): string | undefined {
   const prefixes = {
     "Alpine EasyMediumOrHard": "81ad2044d1a452c49585c342e9fc",
     "Forest Easy": "1b9703442763afc497505342f8ff",
@@ -58,7 +58,7 @@ function getTrackName(hexData: string): string {
     }
   }
 
-  throw new Error("track name could not be determined");
+  return undefined;
 }
 
 function readName(hexData: string): { playerName: string; endNameAddr: number } {
