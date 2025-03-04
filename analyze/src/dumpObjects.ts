@@ -34,7 +34,7 @@ melt_height	= 0;
 */
 
 import { readFile } from 'fs/promises';
-import { GameConfigParser } from './GameConfigParser';
+import { GameConfigParser } from './GameConfigParser/parser';
 
 export async function dumpObjects(filepath: string, typeFilter?: Array<string>) {
     const file = await readFile(filepath, 'utf8');
