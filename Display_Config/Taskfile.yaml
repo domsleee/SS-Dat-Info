@@ -1,0 +1,9 @@
+version: '3'
+
+tasks:
+  display_config: just display_config
+  display_config_helper: just display_config_helper
+
+  build:
+    desc: Run in parallel
+    deps: [display_config, display_config_helper] 

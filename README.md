@@ -1,5 +1,7 @@
 # SS Dat Info
 
+Live link: https://domsleee.github.io/SS-Dat-Info/
+
 Gets information from *.dat replay files of [Supreme Snowboarding](https://en.wikipedia.org/wiki/Supreme_Snowboarding).
 
 Based on the awesome [DAT Analyzer by Oleg M](http://lohec.ho.ua/bonus.htm).
