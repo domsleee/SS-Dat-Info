@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en" class="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Checkpoint Circle Tool</title>
+    <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
+    
+    <style>
+      .code-textarea {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+        line-height: 1.5;
+        tab-size: 4;
+        white-space: pre;
+        padding: 0.75rem;
+      }
+
+      /* Base theme styles */
+      :root {
+        color-scheme: light;
+      }
+
+      html.dark {
+        color-scheme: dark;
+      }
+
+      /* Remove all transitions for instant theme change */
+
+      /* Standard dark mode styles */
+      html.dark body {
+        background-color: #111827; /* bg-gray-900 */
+        color: #f9fafb; /* text-gray-50 */
+      }
+
+      html.dark .card {
+        background-color: #1f2937; /* bg-gray-800 */
+      }
+
+      html.dark input,
+      html.dark textarea,
+      html.dark select {
+        background-color: #374151; /* bg-gray-700 */
+        color: #f9fafb; /* text-gray-50 */
+        border-color: #4b5563; /* border-gray-600 */
+      }
+
+      html.dark .copy-button {
+        background-color: #1f2937; /* bg-gray-800 */
+        color: #e5e7eb; /* text-gray-200 */
+        border-color: #4b5563; /* border-gray-600 */
+      }
+
+      html.dark .copy-button:hover {
+        background-color: #374151; /* bg-gray-700 */
+      }
+
+      html.dark ::placeholder {
+        color: #9ca3af; /* text-gray-400 */
+      }
+    </style>
+    <script type="module" crossorigin src="/SS-Dat-Info/assets/circleTool-71d19f6d.js"></script>
+    <link rel="modulepreload" crossorigin href="/SS-Dat-Info/assets/modulepreload-polyfill-3cfb730f.js">
+  </head>
+  <body class="bg-gray-100 text-gray-900">
+    <div class="fixed top-4 right-4 z-50">
+      <button
+        id="themeToggle"
+        class="p-2 rounded-full bg-indigo-600 text-white shadow-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 dark:focus:ring-offset-gray-900"
+      >
+        <svg
+          class="w-5 h-5 hidden dark:block"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"
+          ></path>
+        </svg>
+        <svg
+          class="w-5 h-5 block dark:hidden"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"
+          ></path>
+        </svg>
+      </button>
+    </div>
+    <div class="container mx-auto max-w-3xl p-4 md:p-6">
+      <div class="card bg-white rounded-lg shadow-md p-4">
+        <h1
+          class="text-xl font-bold text-center text-indigo-600 dark:text-indigo-400 mb-4"
+        >
+          Checkpoint Circle Tool
+        </h1>
+
+        <div class="mb-6">
+          <h2
+            class="text-lg font-semibold mb-3 pb-1 border-b-2 border-indigo-500 dark:border-indigo-400 inline-block"
+          >
+            Input
+          </h2>
+
+          <div class="space-y-3">
+            <!-- Objects textarea - full width -->
+            <div>
+              <label class="block font-medium mb-1 text-sm">Objects</label>
+              <textarea
+                id="inputObjects"
+                class="w-full h-60 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 code-textarea text-sm"
+                placeholder="Enter objects here..."
+>
+Check_Point_2 {
+uniform_scale	= 1;
+loc	= {248.844,-45.5154,1096.15};
+level_inclusion_mask	= -1;
+offset	= {0,0,0};
+quat	= {1,{0,0,0}};
+melt_height	= 0;
+};</textarea
+              >
+            </div>
+
+            <!-- Controls in a flexbox layout -->
+            <div class="flex flex-wrap gap-4">
+              <!-- Class dropdown/combobox -->
+              <div class="flex-1 min-w-[45%]">
+                <label class="block font-medium mb-1 text-sm">Object name</label>
+                <div class="relative">
+                  <select
+                    id="selectObjectName"
+                    class="w-full px-2 py-1 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 appearance-none"
+                    onchange="handleClassChange(this.value)"
+                  >
+                    <option value="Audience_4">Audience_4</option>
+                    <!-- <option value="Light_Flare">Light_Flare</option> -->
+                  </select>
+                  <div
+                    class="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none text-gray-400 dark:text-gray-300"
+                  >
+                    <svg
+                      class="w-4 h-4"
+                      fill="currentColor"
+                      viewBox="0 0 20 20"
+                    >
+                      <path
+                        fill-rule="evenodd"
+                        d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                        clip-rule="evenodd"
+                      ></path>
+                    </svg>
+                  </div>
+                </div>
+                <input
+                  type="text"
+                  id="customClassInput"
+                  placeholder="Enter class name"
+                  class="w-full mt-2 px-2 py-1 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 hidden"
+                />
+              </div>
+
+              <div class="flex-1 min-w-[45%]">
+                <label class="block font-medium mb-1 text-sm">Circle radius</label>
+                <input
+                  type="number"
+                  id="radiusValue"
+                  min="1"
+                  value="90"
+                  class="w-full px-2 py-1 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+                />
+              </div>
+
+              <div class="flex-1 min-w-[45%]">
+                <label class="block font-medium mb-1 text-sm"># Objects per circle</label>
+                <input
+                  type="number"
+                  id="numObjectsValue"
+                  min="1"
+                  value="4000"
+                  class="w-full px-2 py-1 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+                />
+              </div>
+              
+              <div class="flex-1 min-w-[45%]">
+                <label class="block font-medium mb-1 text-sm">Uniform_scale</label>
+                <input
+                  type="number"
+                  id="uniformScaleValue"
+                  min="0.01"
+                  step="0.01"
+                  value="0.2"
+                  class="w-full px-2 py-1 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+                />
+              </div>
+            </div>
+            
+            <!-- Generate Button on its own line -->
+            <div class="mt-4">
+              <button
+                id="generate"
+                class="w-full px-4 py-2 bg-indigo-600 text-white font-medium text-sm rounded-md hover:bg-indigo-700 dark:bg-indigo-700 dark:hover:bg-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800"
+              >
+                Generate Circle
+              </button>
+            </div>
+            </div>
+          </div>
+          <!-- Output section -->
+          <div class="mt-6">
+            <h2
+              class="text-lg font-semibold mb-3 pb-1 border-b-2 border-indigo-500 dark:border-indigo-400 inline-block"
+            >
+              Output
+            </h2>
+  
+            <p id="outputStatus">Waiting...</p>
+            <div class="relative">
+              <textarea
+                id="outputResult"
+                class="w-full h-60 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 bg-gray-50 dark:bg-gray-700 code-textarea text-sm"
+                readonly
+              ></textarea>
+              <button
+                id="copyToClipboard"
+                class="copy-button absolute top-4 right-4 px-2 py-1 text-xs border border-gray-300 rounded bg-white text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-1 focus:ring-indigo-500 shadow-sm"
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </body>
+</html>
