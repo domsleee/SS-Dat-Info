@@ -5,11 +5,20 @@ import { readdir } from 'fs/promises';
 
 export default defineConfig(({ command, mode }) => ({
   base: command === 'serve' ? '/' : '/SS-Dat-Info/',
+  appType: 'mpa',
   server: {
     port: '8080',
     fs: {
       allow: ['..', '../replays']
     },
+  },
+  build: {
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, 'index.html'),
+        circleTool: path.resolve(__dirname, 'circleTool/index.html')
+      }
+    }
   },
   publicDir: {
     '/replays': '../replays'
