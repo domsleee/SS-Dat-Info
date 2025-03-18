@@ -35,13 +35,18 @@ melt_height	= 0;
 
 import { readFile } from 'fs/promises';
 import { GameConfigParser } from './GameConfigParser/parser';
+import { toString } from './GameConfigParser/stringify';
 
-export async function dumpObjects(filepath: string, typeFilter?: Array<string>) {
+export async function dumpObjects(filepath: string, typeFilter: Array<string> | undefined, options?: any) {
     const file = await readFile(filepath, 'utf8');
     let objects = new GameConfigParser(file).parse();
     if (typeFilter?.length) {
         objects = objects.filter((object) => typeFilter.includes(object.type));
     }
-    console.log(JSON.stringify(objects, null, 2));
+    if (options?.format === 'json') {
+        console.log(JSON.stringify(objects, null, 2));
+    } else {
+        console.log(toString(objects))
+    }
     return objects;
 }

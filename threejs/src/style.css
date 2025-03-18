@@ -121,11 +121,50 @@ table {
   border-spacing: 0 2px;
 }
 
+table th {
+  text-align: left;
+}
+
+[data-tooltip] {
+  position: relative;
+  cursor: help;
+}
+
+[data-tooltip]:after {
+  content: attr(data-tooltip);
+  position: absolute;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  background: #fff;
+  padding: 5px;
+  border: 1px solid #ccc;
+  box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
+  z-index: 100;
+  margin-left: 5px;
+  color: black;
+  left: 100%;        /* Position to the right of the element */
+  top: 50%;          /* Align with vertical middle */
+  transform: translateY(-50%);  /* Perfect vertical centering */
+}
+
+[data-tooltip]:hover:after {
+  opacity: 1;
+}
+
+#scoreInfo table, #scoreInfo th, #scoreInfo td {
+  border: 1px solid #ccc;
+  border-spacing: 0px;
+}
+
 /* dropzone */
 .dropzone {
   padding: 20px;
   border: 2px dashed #ccc;
   cursor: pointer;
+}
+
+.dropzone, #headerInfo {
+  margin-bottom: 15px;
 }
 
 .dropzone.dragover {

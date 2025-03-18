@@ -3,7 +3,7 @@ import * as THREE from "three";
 import { getDomVM } from "./data";
 import { setupVideo, videoIds } from "./video";
 import { calculateAcceleration, getSpeed } from "./coordUtil";
-import { AnalyzeResult, RowData } from "analyze/src/types";
+import { AnalyzeResult, RowData, UNKNOWN_TRACK } from "analyze/src/types";
 import { SnowboardTrackAnalyzer } from "./snowboardTrackAnalyzer";
 import { createCameraSetup } from "./cameraSetup";
 import { createCharacterGroup } from "./characterGroup";
@@ -11,6 +11,10 @@ import { parseLittleEndianFloat32 } from "analyze/src/analyzeReplay";
 import { setupConfig, updateConfigDOM } from "./config";
 import { AnalyzeResultContainer, Config, MainLoopContainer, TextFields } from "./types";
 import { createPresets } from "./presets";
+import { PlaneCollisionInfo } from "analyze/src/PlaneUtil/types";
+import { minBy } from "lodash-es";
+import { getMsDiff, getScoreBreakdown, MAX_SCORE, PLANE_RADIUS } from "analyze/src/PlaneUtil/scoreTrack";
+import { ArrowLeft, createIcons, Info, Pause, Play, SkipBack, SkipForward } from 'lucide';
 
 const dimensions = {
   width: 480,
@@ -94,8 +98,7 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
       playerState.isPlaying ? "pause" : "play"
     }"></i>`;
 
-    // @ts-expect-error its fine.
-    lucide.createIcons();
+    refreshLucideIcons();
   };
 
   forwardButton.onclick = () => {
@@ -111,8 +114,12 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
 
   const preText = document.getElementById("preText")!;
   const data = analyzeResult.coords!.rows.slice(0, -1);
-  document.getElementById("headerInfo")!.innerText =
-    getHeaderText(analyzeResult);
+  document.getElementById("headerInfo")!.innerHTML =
+    getHeaderHtml(analyzeResult);
+  document.getElementById("scoreInfo")!.innerHTML =
+    getScoreHtml(analyzeResult);
+  refreshLucideIcons();
+
   playerRange.min = "0";
   playerRange.max = data.length.toString();
 
@@ -192,8 +199,8 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
     }
 
     const drift = getDriftSeconds(frameToRender);
-    const newHtml = `x: ${-characterGroup.position.x}
-y: ${-characterGroup.position.y}
+    const newHtml = `x: ${characterGroup.position.x}
+y: ${characterGroup.position.y}
 z: ${characterGroup.position.z}
 accel(y): ${calculateAcceleration(data, frameToRender).toFixed(1)}
 drift(s): ${
@@ -446,19 +453,176 @@ function transformPosition(position) {
   };
 }
 
-function getHeaderText(analyzeResult: AnalyzeResult) {
-  return `\
-Player    : ${analyzeResult.playerName}
-Track     : ${analyzeResult.trackName}
-Time      : ${msToHumanReadable(analyzeResult.displayedMs)}
-CP1       : ${msToHumanReadable(analyzeResult.checkpoint1Ms)}
-CP2       : todo
-Total Time: ${msToHumanReadable(analyzeResult.totalMs)}
+function getHeaderHtml(analyzeResult: AnalyzeResult) {
+  const {timingDataFromHeader } = analyzeResult;
+  const didFinishRun = timingDataFromHeader.totalTimeToFinishMs !== 0;
+  const cp1String = timingDataFromHeader.checkpoint1TotalMs !== 0
+    ? msToHumanReadable(analyzeResult.checkpoint1Ms - 10)
+    : "N/A (No CP1 data recorded)"
+  const cp2 = getCheckpoint2Collision(analyzeResult);
+  const cp2String = cp2
+    ? msToHumanReadable(cp2.frame2 * 10 - analyzeResult.timingDataFromHeader.crossStartPlusStartDelayMs)
+    : (analyzeResult.trackName === UNKNOWN_TRACK ? "N/A (Unknown Track)" : "N/A (Could not find CP2)");
+  const levelScore = analyzeResult.trackName !== UNKNOWN_TRACK
+    ? analyzeResult.trackScoreData?.levelScores[0]
+    : undefined;
 
-Lag before start: ${msToHumanReadable(analyzeResult.lagBeforeStartMs)}
+  const timeString = didFinishRun
+    ? msToHumanReadable(analyzeResult.displayedMs)
+    : "N/A (Did not finish)";
+  const startTime = msToHumanReadable(analyzeResult.startMs);
+  const totalTime = didFinishRun
+    ? msToHumanReadable(analyzeResult.totalMs)
+    : "N/A (Did not finish)";
+
+  console.log(analyzeResult);
+  const allCollisions = [levelScore?.scoreData.firstValidCheckPoint1Collision, cp2, levelScore?.scoreData.firstValidFinishPointCollision];
+
+  const invalidRunReason = getInvalidRunReason(analyzeResult);
+
+  return `\
+Player: ${analyzeResult.playerName}
+Track : ${analyzeResult.trackName}
+CP1   : ${cp1String}${getCollisionText(allCollisions, levelScore?.scoreData.firstValidCheckPoint1Collision, "Distance to Check_Point_1, must be ≤90m")}
+CP2   : ${cp2String}${getCollisionText(allCollisions, cp2, "Distance to Check_Point_2, must be ≤90m")}
+Time  : ${timeString}${getCollisionText(allCollisions, levelScore?.scoreData.firstValidFinishPointCollision, "Distance to Finish_Point, must be ≤90m")}
+
+Legitimate Run? : ${invalidRunReason ? `<span style='color:red'>No (${invalidRunReason})</span>` : "Yes"}
+Start Time      : ${startTime}${getCollisionText([], levelScore?.scoreData.firstValidStartPointCollision, "Distance to Start_Point, must be ≤90m")}
+Total Time      : ${totalTime}
+Lag before start: ${msToHumanReadable(analyzeResult.lagBeforeStartMs)}${getNearestStartPlaneText(analyzeResult)}
 Leg after finish: ${msToHumanReadable(analyzeResult.lagAfterFinishMs)}
 Recording time  : ${msToHumanReadable(analyzeResult.recordingMs)}
 `
 }
 
+function getInvalidRunReason(analyzer: AnalyzeResult): string | undefined {
+  if (analyzer.trackName === UNKNOWN_TRACK) return "UnknownTrack";
+  const score = analyzer.trackScoreData?.levelScores[0].score;
+  if (score !== MAX_SCORE) {
+    return `Score ${score} is not max score of ${MAX_SCORE}`;
+  }
+  return undefined;
+}
+
+function getCheckpoint2Collision(analyzeResult: AnalyzeResult): PlaneCollisionInfo | undefined {
+  if (analyzeResult.trackName === UNKNOWN_TRACK) return undefined;
+
+  const levelScore = analyzeResult.trackScoreData?.levelScores[0];
+  if (!levelScore) return undefined;
+
+  const { scoreData } = levelScore;
+  const validCheckpoint2 = levelScore.scoreData.validCheckPoint2Collisions?.at(0);
+  if (validCheckpoint2) {
+    return validCheckpoint2;
+  }
+
+  const { firstValidStartPointCollision, firstValidCheckPoint1Collision, firstValidFinishPointCollision} = scoreData;
+  const candidateCheckpoint2Collisions = levelScore.scoreData.allCheckPoint2Collisions
+    .filter(t => !firstValidStartPointCollision || firstValidStartPointCollision.frame2 <= t.frame1)
+    .filter(t => !firstValidCheckPoint1Collision || firstValidCheckPoint1Collision.frame2 <= t.frame1)
+    .filter(t => !firstValidFinishPointCollision || t.frame2 <= firstValidFinishPointCollision.frame2);
+  return minBy(candidateCheckpoint2Collisions, t => t.distance);
+}
+
+function getCollisionText(allCollisions: Array<PlaneCollisionInfo | undefined>, collision: PlaneCollisionInfo | undefined, caption: string) {
+  if (!collision) return "";
+  const maxLength = Math.max(...allCollisions.map(t => t?.distance.toFixed(2).length ?? 0));
+  const style = collision.distance <= PLANE_RADIUS
+    ? "color:green"
+    : "color:darkorange";
+  return ` <span style='${style}'>(${collision.distance.toFixed(2).padStart(maxLength, ' ')}m)</span>${getCaption(caption)}`;
+}
+
+function getNearestStartPlaneText(analyzeResult: AnalyzeResult) {
+  if (analyzeResult.trackName === UNKNOWN_TRACK) return "";
+  const levelScore = analyzeResult.trackScoreData?.levelScores[0];
+  return ` <span style='color:green'>(${levelScore?.scoreData.nearestStartDist.toFixed(2)}m)</span>${getCaption("Distance to nearest Start_Point, must be ≤2m")}`;
+}
+
+function getCaption(caption: string) {
+  return `<span data-tooltip='${caption}'> <i data-lucide="info" style='width:12px; height:12px; vertical-align:middle'></i></span>`
+}
+
+function getScoreHtml(analyzeResult: AnalyzeResult) {
+  const levelScores = analyzeResult.trackScoreData?.levelScores;
+  const scores = [...new Set(analyzeResult.trackScoreData?.levelScores.map(t => t.score))].sort((a,b) => b-a);
+
+
+  const table1 = `
+  <table>
+    <thead>
+      <th>Score</th>
+      <th style='text-align: left'>Track</th>
+    </thead>
+    <tbody>
+      ${scores
+        .map((score) => {
+          return `<tr>
+            <td>${score}</td>
+            <td>${levelScores?.filter(t => t.score === score).map(t => t.name).sort().join(", ")}</td>
+          </tr>`;
+        })
+        .join("")}
+    </tbody>
+  </table>`;
+
+  const table2 = getScoreBreakdownTable(analyzeResult);
+  const highTimes = getHighTimes(analyzeResult);
+  return table1 + table2 + highTimes;
+}
+
+function getHighTimes(analyzeResult: AnalyzeResult) {
+  if (analyzeResult.trackName === UNKNOWN_TRACK) return "";
+  const levelScore = analyzeResult.trackScoreData?.levelScores[0];
+  if (levelScore?.score !== 5) return "";
+
+  const cp2 = getCheckpoint2Collision(analyzeResult);
+  const formatMsForHighTimes = (ms: number) => (ms/1000).toFixed(2);
+  const highTimesString = [
+    `"${analyzeResult.playerName}"`,
+    formatMsForHighTimes(analyzeResult.checkpoint1Ms),
+    formatMsForHighTimes(cp2!.frame2 * 10 - analyzeResult.timingDataFromHeader.crossStartPlusStartDelayMs),
+    formatMsForHighTimes(analyzeResult.displayedMs),
+    "2025/1/1",
+    0
+  ];
+  return `
+    <div style='margin-top:15px'>High Times</div>
+    <pre>${highTimesString.join(",")},</pre>
+`
+}
+
+function getScoreBreakdownTable(analyzeResult: AnalyzeResult) {
+  if (analyzeResult.trackName === UNKNOWN_TRACK) return "";
+  const levelScore = analyzeResult.trackScoreData?.levelScores[0];
+  if (!levelScore) return "";
+
+  const scoreData = levelScore.scoreData;
+  const breakdown = getScoreBreakdown(scoreData);
+  const table = `
+
+  <div style='margin-top:15px'>Score breakdown for ${levelScore.name}</div>
+  <table>
+    <thead>
+      <th>Metric</th>
+      <th>Value</th>
+    </thead>
+    <tbody>
+      ${breakdown.map((item) => `<tr><td>${item[0]}</td><td>${item[1].valid ? '✔️' : '❌'}</td></tr>`).join("")}
+    </tbody>
+  </table>
+  <div style='font-size:10px'>Explanation of the track logic is in <a target='_blank' href='https://github.com/domsleee/SS-Dat-Info/wiki/Dat%E2%80%90Info-design-notes#determining-trackname-of-a-dat-file'>the wiki</a>.</div>`;
+  return table;
+}
+
+function refreshLucideIcons() {
+  try {
+    createIcons({icons: {Play, Pause, SkipBack, SkipForward, Info}});
+  } catch (e) {
+    console.error(e);
+  }
+}
+
 main();
+createIcons();

@@ -4,7 +4,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="src/style.css" />
-    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
   </head>
   <body>
     <script type="module" src="src/script.ts"></script>
@@ -58,12 +57,23 @@
       </div>
       <div id="info">
         <div>
-          Replay Info
+          <div id="dropzone" class="dropzone">
+            <input type="file" id="replayFile" hidden>
+            <label id="dropzoneLabel" for="replayFile">
+              Drag and drop replay file here<br /><span id="dropZoneSubLabel" style="font-size: 10px"></span>
+            </label>
+          </div>
+          Replay Data
           <pre id="headerInfo"></pre>
+          Scoring Logic
+          <div id="scoreInfo"></div>
         </div>
-        <pre id="preText">
-          Loading...
-        </pre>
+        <div>
+          Frame Data
+          <pre id="preText">
+            Loading...
+          </pre>
+        </div>
         <div>
           Config
           <table>
@@ -87,15 +97,6 @@
             <tr>
               <td>Youtube ID</td>
               <td><input type="text" id="videoId" value="0" /></td>
-            </tr>
-            <tr>
-              <td>Replay file</td>
-              <td  id="dropzone" class="dropzone">
-                <input type="file" id="replayFile" hidden>
-                <label id="dropzoneLabel" for="replayFile">
-                  Drag and drop replay file here
-                </label>
-              </td>
             </tr>
           </table>
         </div>

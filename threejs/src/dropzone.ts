@@ -3,14 +3,15 @@ export function setupDropzone({ processCallback }: DropzoneConfig): void {
   const dropzone = getElementOrThrow<HTMLTableCellElement>("dropzone");
   const fileInput = getElementOrThrow<HTMLInputElement>("replayFile");
   const label = getElementOrThrow<HTMLLabelElement>("dropzoneLabel");
+  const subLabel = getElementOrThrow<HTMLLabelElement>("dropZoneSubLabel");
 
   // Update text with error handling
   function updateDropzoneText(message: string, isError = false): void {
-    label.textContent = message;
+    subLabel.textContent = message;
     if (isError) {
       dropzone.classList.add("error");
       setTimeout(() => {
-        label.textContent = "Drag and drop replay file here";
+        subLabel.textContent = "Drag and drop replay file here";
         dropzone.classList.remove("error");
       }, 3000);
     }
@@ -25,7 +26,7 @@ export function setupDropzone({ processCallback }: DropzoneConfig): void {
       const hexData = Buffer.from(new Uint8Array(arrayBuffer)).toString("hex");
 
       await processCallback(hexData);
-      updateDropzoneText(`File ${file.name} processed successfully!`);
+      updateDropzoneText(`Processed ${file.name}`);
     } catch (err) {
       console.error("Error processing file:", err);
       updateDropzoneText("Error processing file", true);
