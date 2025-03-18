@@ -1,7 +1,9 @@
 import { classifyMessage } from "./classifyMessage";
-import { AnalyzeResult, CoordinateData, MovementState, TimingDataFromHeader } from "./types";
+import { getPlaneCollisions } from "./PlaneUtil/getPlaneCollisions";
+import { getTrackScore } from "./PlaneUtil/scoreTrack";
+import { AnalyzeReplayOptions, AnalyzeResult, CoordinateData, MovementState, TimingDataFromHeader } from "./types";
 
-export function analyzeReplayHex(hexData: string, includeCoords?: boolean): AnalyzeResult {
+export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions): AnalyzeResult {
   const trackName = getTrackName(hexData);
 
   const { playerName, endNameAddr } = readName(hexData);
@@ -12,7 +14,7 @@ export function analyzeReplayHex(hexData: string, includeCoords?: boolean): Anal
   const startMs = timingData.crossStartPlusStartDelayMs - lagBeforeStartMs;
   const finishDelayMs = timingData.totalRecordingTimeMs - timingData.totalTimeToFinishMs;
 
-  return {
+  const result: AnalyzeResult = {
     playerName,
     trackName,
 
@@ -31,9 +33,18 @@ export function analyzeReplayHex(hexData: string, includeCoords?: boolean): Anal
     recordingMs: timingData.totalRecordingTimeMs,
 
     checkpoint1Ms: timingData.checkpoint1TotalMs - timingData.crossStartPlusStartDelayMs,
-
-    ...(includeCoords ? { coords: getCoordinateData(hexData) } : {}),
   };
+
+  if (!options || !options.skipCoords) {
+    const coords = getCoordinateData(hexData);
+    result.coords = coords;
+    result.trackScoreData = getTrackScore(result);
+    console.log(result.trackScoreData.allCollisions[2])
+    console.log(result.trackScoreData.everyLevelScored)
+    result.trackName = result.trackScoreData!.everyLevelScored[0].name;
+  }
+
+  return result;
 }
 
 function getTrackName(hexData: string): string | undefined {
@@ -153,7 +164,3 @@ function getCoordinateData(hex: string): CoordinateData {
   }
   return coordinateData;
 }
-
-
-// 1: 3
-// 37: 75

@@ -5,6 +5,7 @@ import { readFile } from "fs/promises";
 import { getDataBlocks } from "./analyzeReplay";
 import { debugKeypress } from "./debugKeypress";
 import { dumpObjects } from "./dumpObjects";
+import { printCheckpoints } from "./printCheckpoints";
 
 const program = new Command();
 
@@ -76,9 +77,16 @@ program
   .command("dump-objects")
   .argument("<filepath>", "path to Object_Data.txt file")
   .argument("[objectNames...]", "Names of object to dump (optional)")
+  .option("-f, --format <format>", "Specify a format (original, json)")
   .description("Dump the data from Object_Data.txt in json")
-  .action(async (filepath: string, objectNames: Array<string>) => {
+  .action(async (filepath: string, objectNames: Array<string> | undefined, options: {format?: string}) => {
     await dumpObjects(filepath, objectNames);
+  })
+
+program
+  .command('checkpoints')
+  .action(async () => {
+    printCheckpoints();
   })
 
 program.parse();

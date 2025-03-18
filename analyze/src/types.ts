@@ -1,5 +1,6 @@
 import { fileURLToPath } from "bun";
 import { dirname, resolve } from "path";
+import { PlaneCollisionInfo, TrackScoreData } from "./PlaneUtil/types";
 
 export interface AnalyzeResult {
   playerName: string;
@@ -28,6 +29,7 @@ export interface AnalyzeResult {
   // speedBreaksAfterFinish: number;
 
   coords?: CoordinateData;
+  trackScoreData?: TrackScoreData;
 }
 
 export interface CoordinateData {
@@ -65,3 +67,7 @@ export interface TimingDataFromHeader {
 }
 
 export const REPLAY_FOLDER = resolve(import.meta.dir, "../../threejs/public/replays");
+
+export interface AnalyzeReplayOptions {
+  skipCoords: boolean;
+}

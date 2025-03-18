@@ -1,0 +1,134 @@
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {734.325,-460.014,225.825};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {732.656,-460.272,225.498};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {731.102,-460.376,225.306};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {729.35,-460.331,225.105};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {727.888,-460.164,225};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {726.347,-459.888,224.9};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {724.721,-459.527,224.837};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {722.926,-488.169,224.73};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Check_Point_1 {
+  uniform_scale        = 1;
+  loc                  = {490.509,-285.257,607.774};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Finish_Point {
+  uniform_scale        = 1;
+  loc                  = {430.776,738.915,2657.77};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Start_Point {
+  uniform_scale        = 1;
+  loc                  = {729.527,-460.087,231.772};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Check_Point_2 {
+  uniform_scale        = 1;
+  loc                  = {432.812,191.242,1832};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Check_Point_2 {
+  uniform_scale        = 1;
+  loc                  = {547.317,256.281,1833.49};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Check_Point_2 {
+  uniform_scale        = 1;
+  loc                  = {250,191.242,1832};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Check_Point_2 {
+  uniform_scale        = 1;
+  loc                  = {130,191.242,1832};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};

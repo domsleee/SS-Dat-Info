@@ -1,6 +1,5 @@
 import { expect } from "bun:test";
 
-
 expect.extend({
   toBeCloseToStructure(received: any, expected: any, precision = 10) {
     const compare = (a: any, b: any): boolean => {
