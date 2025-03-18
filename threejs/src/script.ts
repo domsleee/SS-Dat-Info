@@ -13,8 +13,8 @@ import { AnalyzeResultContainer, Config, MainLoopContainer, TextFields } from ".
 import { createPresets } from "./presets";
 
 const dimensions = {
-  width: 480 * 2,
-  height: 360 * 2,
+  width: 480,
+  height: 360,
 };
 
 const config: Config = {
@@ -330,7 +330,7 @@ function getRawString(raw: string) {
     arr.push(parseLittleEndianFloat32(raw.slice(i, i + 8)));
   }
 
-  const rowCount = 4; // Number of rows to display
+  const rowCount = 7; // Number of rows to display
   const itemsPerRow = Math.ceil(arr.length / rowCount);
 
   // Format numbers to fixed width
