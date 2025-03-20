@@ -16,15 +16,6 @@ export function generateCircle(
 
   let result: Array<CircleEntry> = [];
   
-  // Extract quaternion components
-  const baseW = config.quat.w;
-  const baseY = config.quat.y;
-  
-  // The correct rotation angle for a left-handed system
-  // We NEGATE the y component to get the proper tilt direction
-  const halfAngle = Math.asin(-baseY);
-  const fullAngle = 2 * halfAngle;
-  
   for (let i = 0; i < config.count; i++) {
     // Position around the circle
     const angle = (i / config.count) * 2 * Math.PI;
@@ -34,42 +25,32 @@ export function generateCircle(
     const localY = config.radius * Math.sin(angle);
     const localZ = 0;
     
-    // Apply y-axis rotation using the left-handed formula:
-    // x' = x*cos(θ) - z*sin(θ)
-    // z' = x*sin(θ) + z*cos(θ)
-    const rotatedX = localX * Math.cos(fullAngle) - localZ * Math.sin(fullAngle);
-    const rotatedY = localY;
-    const rotatedZ = localX * Math.sin(fullAngle) + localZ * Math.cos(fullAngle);
+    // Apply quaternion rotation to the offset
+    // Use the base quaternion to rotate the offset points
+    const rotatedOffset = rotatePointByQuaternion(
+      { x: localX, y: localY, z: localZ }, 
+      config.quat
+    );
     
-    // Calculate the correct facing quaternion (tangential to circle)
-    // For a tangential direction, we need a 90 degree offset from the position
-    let facingAngle = angle + Math.PI/2;
-    
-    // Normalize the angle to 0-2π range for consistent quaternion calculation
-    facingAngle = ((facingAngle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-    
-    // Calculate the quaternion that combines both the base y-rotation and the facing direction
-    // First, create the z-rotation quaternion
-    const halfFacingAngle = facingAngle / 2;
+    // Calculate the facing quaternion (tangential to circle)
+    const facingAngle = angle + Math.PI/2;
     const zRotQuat = {
-      w: Math.cos(halfFacingAngle),
+      w: Math.cos(facingAngle / 2),
       x: 0,
       y: 0,
-      z: Math.sin(halfFacingAngle)
+      z: Math.sin(facingAngle / 2)
     };
     
-    // Multiply the z-rotation quaternion with the base quaternion
-    // Using quaternion multiplication formula
+    // Combine the base quaternion with the facing rotation
     const facingQuat = multiplyQuaternions(config.quat, zRotQuat);
     
-    // Round values to match expected precision
+    // Round values for precision
     const offset = {
-      x: roundZero(roundThousandth(rotatedX)),
-      y: roundZero(roundThousandth(rotatedY)),
-      z: roundZero(roundThousandth(rotatedZ))
+      x: roundZero(roundThousandth(rotatedOffset.x)),
+      y: roundZero(roundThousandth(rotatedOffset.y)),
+      z: roundZero(roundThousandth(rotatedOffset.z))
     };
     
-    // Ensure small values are exactly zero
     const roundedQuat = {
       w: roundZero(facingQuat.w),
       x: roundZero(facingQuat.x),
@@ -87,6 +68,30 @@ export function generateCircle(
   }
 
   return result;
+}
+
+// Rotate a point using a quaternion
+function rotatePointByQuaternion(
+  point: {x: number, y: number, z: number}, 
+  q: Quaternion
+): {x: number, y: number, z: number} {
+  // Convert point to quaternion form (w=0)
+  const pointQuat = { w: 0, x: point.x, y: point.y, z: point.z };
+  
+  // q * point * q^-1
+  const qInv = {
+    w: q.w,
+    x: -q.x,
+    y: -q.y,
+    z: -q.z
+  };
+  
+  const rotated = multiplyQuaternions(
+    multiplyQuaternions(q, pointQuat),
+    qInv
+  );
+  
+  return { x: rotated.x, y: rotated.y, z: rotated.z };
 }
 
 // Quaternion multiplication function
@@ -109,7 +114,7 @@ function roundZero(num: number, epsilon = 1e-12): number {
   return Math.abs(num) < epsilon ? 0 : num;
 }
 
-interface CircleEntry {
+export interface CircleEntry {
   name: string;
   loc: {x: number, y: number, z: number};
   quat: {w: number, x: number, y: number, z: number};
@@ -125,59 +130,3 @@ interface Config {
   quat: Quaternion;
   uniform_scale: number;
 }
-
-export function circleToString(circle: Array<CircleEntry>): string {
-  return circle.map((entry) => {
-    return `${entry.name} {
-uniform_scale = ${entry.uniform_scale.toFixed(3)};
-loc = {${entry.loc.x}, ${entry.loc.y}, ${entry.loc.z}};
-level_inclusion_mask = -1;
-offset = {${entry.offset.x.toFixed(3)}, ${entry.offset.y.toFixed(3)}, ${entry.offset.z.toFixed(3)}};
-quat = {${entry.quat.w.toFixed(6)}, {${entry.quat.x.toFixed(6)}, ${entry.quat.y.toFixed(6)}, ${entry.quat.z.toFixed(6)}}};
-melt_height = 0;
-};`}).join("\n\n");
-}
-
-
-/*
-Finish_Point {
-uniform_scale	= 1;
-loc	= {211.158,285.281,1897.36};
-level_inclusion_mask	= -1;
-offset	= {0,0,0};
-quat	= {1,{0,0,0}};
-melt_height	= 0;
-};
-*/
-
-/*
-
-VM
-Finish_Point {
-uniform_scale	= 1;
-loc	= {605.56,1116.02,2583.45};
-level_inclusion_mask	= -1;
-offset	= {0,0,0};
-quat	= {0.999118,{0,-0.0419877,0}};
-melt_height	= 0;
-};
-
-Finish_Point {
-uniform_scale	= 1;
-loc	= {562.33,1199.33,2580.01};
-level_inclusion_mask	= -1;
-offset	= {0,0,0};
-quat	= {1,{0,0,0}};
-melt_height	= 0;
-};
-
-Finish_Point {
-uniform_scale	= 1;
-loc	= {661.13,-517.818,2589.11};
-level_inclusion_mask	= -1;
-offset	= {0,0,0};
-quat	= {1,{0,0,0}};
-melt_height	= 0;
-};
-*/
-// console.log(circleToString(generateCircle({ centerLoc: {x: 605.56, y: 1116.02, z:2583.45}, count: 4, uniform_scale: 4, quat: { w: 0.966, x: 0, y: -0.259, z: 0} })));
