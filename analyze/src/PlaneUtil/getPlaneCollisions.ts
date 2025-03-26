@@ -10,23 +10,27 @@ export function getPlaneCollisions(rows: Array<RowData>): Array<LevelPlaneCollis
   const result: Array<LevelPlaneCollision> = [];
 
   for (const level of getLevels()) {
+    if (level.name !== 'AlpineMedium') continue
     const planeTypes = ['Check_Point_1', 'Check_Point_2', 'Start_Point', 'Finish_Point'];
     const planeGameObjects = level.objects.filter(t => planeTypes.includes(t.type));
     const levelPlaneCollision: LevelPlaneCollision = {name: level.name, collisions: []};
     
-    for (let i = 0; i < rows.length - 2; ++i) {
+    for (let i = 2304; i < rows.length - 2; i+=1e9) {
       for (const planeGameObject of planeGameObjects) {
+        if (planeGameObject.type !== 'Check_Point_1') continue;
         const plane = getPlaneFromGameObject(planeGameObject);
         const p1: PositionXYZ = { x: rows[i].x, y: rows[i].y, z: rows[i].z };
-        const p2: PositionXYZ = { x: rows[i + 1].x, y: rows[i + 1].y, z: rows[i + 1].z };
+        const frame2 = i + 4;
+        const p2: PositionXYZ = { x: rows[frame2].x, y: rows[frame2].y, z: rows[frame2].z };
         const collision = doesLineSegmentCollideWithPlane(plane, { p1, p2 });
+        console.log(planeGameObject.type, plane, p1, p2, collision)
         if (collision !== undefined) {
           levelPlaneCollision.collisions.push({
             ...collision,
             p1,
             p2,
             frame1: i,
-            frame2: i + 1,
+            frame2,
             objectName: planeGameObject.type,
             gameObject: planeGameObject,
             plane: plane

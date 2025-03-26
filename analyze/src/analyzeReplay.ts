@@ -40,7 +40,7 @@ export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions
     result.coords = coords;
     result.trackScoreData = getTrackScore(result);
     console.log(result.trackScoreData.allCollisions[2])
-    console.log(result.trackScoreData.everyLevelScored)
+    // console.log(result.trackScoreData.everyLevelScored)
     result.trackName = result.trackScoreData!.everyLevelScored[0].name;
   }
 
