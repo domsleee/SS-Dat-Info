@@ -29,6 +29,7 @@
           />
         </div>
         <v-checkbox v-model="renderSettings.fullscreen" label="Full screen"></v-checkbox>
+        <LanguageSelect />
       </div>
     </v-card-text>
   </v-card>

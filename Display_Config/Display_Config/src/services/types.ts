@@ -9,6 +9,7 @@ export interface RenderSettings {
   resolution?: string;
   colourDepth?: string;
   fullscreen: boolean;
+  language: string;
 }
 
 export interface TrainerSettings {

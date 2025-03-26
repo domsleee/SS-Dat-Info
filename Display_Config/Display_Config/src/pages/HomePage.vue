@@ -4,7 +4,6 @@
       <RenderOptions :formIsLoading="playLoading" />
       <TrainerOptions :formIsLoading="playLoading" class="mt-2" />
       <Autostart @auto-play="handleAutoplay()" />
-      <!-- <LanguageSelect /> -->
       <div class="mt-2 ga-2 d-flex justify-end">
         <v-btn size="x-large" color="indigo-darken-3" :loading="playLoading" @click="handlePlay">Play</v-btn>
         <v-btn size="x-large" color="" @click="handleExit">Exit</v-btn>
@@ -18,7 +17,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { ref } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { getAsRdConfig } from '@/stores/renderSettings';
+import { getAsRdConfig, useRenderSettingsStore } from '@/stores/renderSettings';
 import Autostart from '@/components/Autostart.vue';
 import { useTrainerSettingsStore } from '@/stores/trainerSettings';
 import { exit } from '@tauri-apps/plugin-process';
@@ -34,10 +33,12 @@ async function handleAutoplay() {
 }
 
 async function handlePlay() {
+  console.log(useRenderSettingsStore().renderSettings);
   playLoading.value = true;
   try {
     console.log (await invoke('read_rd_config'));
     console.log(await invoke('write_rd_config', { config: getAsRdConfig() }));
+    console.log(await invoke('write_language', { language: useRenderSettingsStore().renderSettings.language }));
     const { trainerSettings } = useTrainerSettingsStore();
     if (trainerSettings.changeFov || trainerSettings.use4xFonts || trainerSettings.enableLogging || trainerSettings.makeGhostsOpaque) {
       if (typeof trainerSettings.fovHeight === 'string') trainerSettings.fovHeight = parseInt(trainerSettings.fovHeight);

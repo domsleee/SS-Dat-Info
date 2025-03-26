@@ -16,6 +16,7 @@ function getDefaultRenderSettings(): { renderSettings: Ref<RenderSettings> } {
     resolution: "1600x1200",
     colourDepth: "32bit",
     fullscreen: false,
+    language: "English",
   });
   return { renderSettings: settings };
 }

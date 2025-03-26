@@ -47,8 +47,8 @@ pub async fn run_inject(trainer_settings: TrainerSettings) -> Result<String, Str
 pub fn get_log_path() -> PathBuf {
     let supreme_folder = get_supreme_folder();
     let display_config_resources = supreme_folder.join("Display_Config_Resources");
-    let log_path = display_config_resources.join("Display_Config_Helper.log");
-    log_path
+
+    display_config_resources.join("Display_Config_Helper.log")
 }
 
 fn wait_for_finished_log(log_path: &PathBuf) -> Result<String, String> {

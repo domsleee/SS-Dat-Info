@@ -13,7 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 const emit = defineEmits(["auto-play"]);
 const { settings } = useAutostartStore();
 const isRunning = ref(false);
-const timeLeft = ref(1200);
+const timeLeft = ref(1500);
 let interval: NodeJS.Timeout | undefined = undefined;
 
 if (settings.autostart) {

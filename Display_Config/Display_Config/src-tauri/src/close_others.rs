@@ -16,8 +16,7 @@ fn get_pids(system: &System) -> Vec<(String, Pid)> {
     let current_pid = std::process::id();
     let parent_pid = system
         .process(sysinfo::Pid::from_u32(current_pid))
-        .and_then(|p| p.parent())
-        .map(|p| p.clone());
+        .and_then(|p| p.parent());
 
     let targets = ["Supreme.exe", "Supreme_v1.035.exe"];
 

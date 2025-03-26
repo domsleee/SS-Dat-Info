@@ -4,6 +4,7 @@ mod close_others;
 mod file_commands;
 mod get_log_data;
 mod inject;
+mod language;
 mod path_util;
 mod rd_config;
 
@@ -32,6 +33,7 @@ pub fn run() {
             file_commands::open_log_file,
             close_others::close_others,
             get_log_data::get_log_data,
+            language::write_language,
             kill_exit_1
         ])
         .setup(|app| {
