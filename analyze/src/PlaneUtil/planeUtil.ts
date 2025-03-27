@@ -1,8 +1,6 @@
 import type { Plane, PositionXYZ, LineSegment } from "../generateCircle/types";
-import { calculateDistance } from "./distanceUtil";
-import { PlaneLineSegmentCollision } from "./types";
 
-export function doesLineSegmentCollideWithPlane(plane: Plane, segment: LineSegment): PlaneLineSegmentCollision | undefined {
+export function doesLineSegmentCollideWithPlane(plane: Plane, segment: LineSegment): PositionXYZ | undefined {
   // Extract normal from quaternion (transform the world up vector by quaternion)
   const normal = {
     x: 2 * (plane.quat.x * plane.quat.z + plane.quat.w * plane.quat.y),
@@ -52,9 +50,6 @@ export function doesLineSegmentCollideWithPlane(plane: Plane, segment: LineSegme
     z: segment.p1.z + t * direction.z,
   };
 
-  return {
-    intersection,
-    distance: calculateDistance(intersection, plane.position)
-  }
+  return intersection;
 }
 

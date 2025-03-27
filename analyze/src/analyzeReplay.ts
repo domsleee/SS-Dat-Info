@@ -39,8 +39,9 @@ export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions
     const coords = getCoordinateData(hexData);
     result.coords = coords;
     result.trackScoreData = getTrackScore(result);
-    console.log(result.trackScoreData.allCollisions[2])
-    // console.log(result.trackScoreData.everyLevelScored)
+    // console.log(result.trackScoreData.everyLevelScored);
+    console.log(result.trackScoreData.allCollisions.filter(t => t.name === 'AlpineMedium')[0].collisions[1])
+    // console.log(result.trackScoreData.everyLevelScored.filter(t => t.name === "AlpineMedium")[0].scoreData)
     result.trackName = result.trackScoreData!.everyLevelScored[0].name;
   }
 
