@@ -192,8 +192,8 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
     }
 
     const drift = getDriftSeconds(frameToRender);
-    const newHtml = `x: ${characterGroup.position.x}
-y: ${characterGroup.position.y}
+    const newHtml = `x: ${-characterGroup.position.x}
+y: ${-characterGroup.position.y}
 z: ${characterGroup.position.z}
 accel(y): ${calculateAcceleration(data, frameToRender).toFixed(1)}
 drift(s): ${
@@ -457,7 +457,7 @@ Total Time: ${msToHumanReadable(analyzeResult.totalMs)}
 
 Lag before start: ${msToHumanReadable(analyzeResult.lagBeforeStartMs)}
 Leg after finish: ${msToHumanReadable(analyzeResult.lagAfterFinishMs)}
-Rrecording time : ${msToHumanReadable(analyzeResult.recordingMs)}
+Recording time  : ${msToHumanReadable(analyzeResult.recordingMs)}
 `
 }
 
