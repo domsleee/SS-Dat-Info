@@ -3865,5 +3865,5 @@ Total Time: ${Cn(i.totalMs)}
 
 Lag before start: ${Cn(i.lagBeforeStartMs)}
 Leg after finish: ${Cn(i.lagAfterFinishMs)}
-Recording time : ${Cn(i.recordingMs)}
+Recording time  : ${Cn(i.recordingMs)}
 `}Wp();
