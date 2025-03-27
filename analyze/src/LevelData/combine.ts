@@ -33,7 +33,7 @@ export async function combine() {
         entries[textFileName.replace(".txt", "")] = data;
     }
 
-    console.log(entries);
+    // console.log(entries);
     writeFileSync(join(__dirname, "levelData.json"), JSON.stringify(entries, null, 2));
 }
 

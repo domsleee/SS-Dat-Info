@@ -4,7 +4,6 @@ import { getTrackScore } from "./PlaneUtil/scoreTrack";
 import { AnalyzeReplayOptions, AnalyzeResult, CoordinateData, MovementState, TimingDataFromHeader } from "./types";
 
 export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions): AnalyzeResult {
-  const trackName = getTrackName(hexData);
 
   const { playerName, endNameAddr } = readName(hexData);
   const timingData = getTimingData(hexData, endNameAddr);
@@ -16,7 +15,7 @@ export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions
 
   const result: AnalyzeResult = {
     playerName,
-    trackName,
+    trackName: "Unknown Track",
 
     // for FM Matt 54.35
     // 63.78 (total recording time)
@@ -41,7 +40,7 @@ export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions
     const trackScoreData = getTrackScore(result);
     result.trackScoreData = trackScoreData;
     // console.log(result.trackScoreData.everyLevelScored);
-    console.log(result.trackScoreData.allCollisions.filter(t => t.name === 'VillageHard')[0].collisions);
+    // console.log(result.trackScoreData.allCollisions.filter(t => t.name === 'VillageHard')[0].collisions);
     // console.log(result.trackScoreData.everyLevelScored.filter(t => t.name === "AlpineMedium")[0].scoreData)
     const topScore = trackScoreData.everyLevelScored[0].score;
     
@@ -52,38 +51,12 @@ export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions
       } else if (topScoring.length === 1) {
         result.trackName = topScoring[0];
       } else {
-        console.log(topScoring);
         result.trackName = "UnknownTrack"
       }
     }
   }
 
   return result;
-}
-
-function getTrackName(hexData: string): string | undefined {
-  const prefixes = {
-    "Alpine EasyMediumOrHard": "81ad2044d1a452c49585c342e9fc",
-    "Forest Easy": "1b9703442763afc497505342f8ff",
-    "Forest MediumOrHard": "face01443167c2c4df4f56427eff",
-    "Forest MediumOrHard v2": "face01443267c2c4df4f56427dff",
-    "Village Easy": "cd9437449815e7c333d36143fcff",
-    "Village Easy v2": "cd9437449815e7c333d36143fdff",
-    "Village Medium": "b87e49443ba4f2c3e1ba9143ffff",
-    "Village Medium v2": "b87e49443ba4f2c3e1ba9143feff",
-    "Village Hard": "c1aad843088b00c44a7bc04211dc",
-    "Village Hard v2": "c1aad843088b00c44a7bc04214dc",
-  };
-
-  const firstBlock = getDataBlocks(hexData)[1];
-  for (const [k, v] of Object.entries(prefixes)) {
-    const sli = firstBlock.slice(88, 88 + 28);
-    if (sli === v.slice(0, 28)) {
-      return k.replace(" v2", "").replace(" v3", "").replace(" v4", "");
-    }
-  }
-
-  return undefined;
 }
 
 function readName(hexData: string): { playerName: string; endNameAddr: number } {

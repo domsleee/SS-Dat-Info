@@ -1785,7 +1785,7 @@
       }
     },
     {
-      "name": "Check_Point_2",
+      "name": "Player_Start_Location",
       "uniform_scale": 1,
       "position": {
         "x": 440.243988,
@@ -1800,7 +1800,7 @@
       }
     },
     {
-      "name": "Check_Point_1",
+      "name": "Player_Start_Location",
       "uniform_scale": 1,
       "position": {
         "x": 442.778015,
@@ -1808,14 +1808,14 @@
         "z": 93.335999
       },
       "quat": {
-        "w": 0.962966,
+        "w": 1,
         "x": 0,
-        "y": -0.269621,
+        "y": 0,
         "z": 0
       }
     },
     {
-      "name": "Start_Point",
+      "name": "Check_Point_2",
       "uniform_scale": 1,
       "position": {
         "x": 248.843994,
@@ -1830,7 +1830,7 @@
       }
     },
     {
-      "name": "Finish_Point",
+      "name": "Check_Point_1",
       "uniform_scale": 1,
       "position": {
         "x": 276.050995,
@@ -1838,14 +1838,14 @@
         "z": 464.118011
       },
       "quat": {
-        "w": 1,
+        "w": 0.962966,
         "x": 0,
-        "y": 0,
+        "y": -0.269621,
         "z": 0
       }
     },
     {
-      "name": "Player_Start_Location",
+      "name": "Start_Point",
       "uniform_scale": 1,
       "position": {
         "x": 439.385986,
@@ -1860,7 +1860,7 @@
       }
     },
     {
-      "name": "Player_Start_Location",
+      "name": "Finish_Point",
       "uniform_scale": 1,
       "position": {
         "x": 211.158005,
@@ -1911,21 +1911,6 @@
         "x": 444.868011,
         "y": -513.97467,
         "z": 93.357101
-      },
-      "quat": {
-        "w": 1,
-        "x": 0,
-        "y": 0,
-        "z": 0
-      }
-    },
-    {
-      "name": "Player_Start_Location",
-      "uniform_scale": 1,
-      "position": {
-        "x": 57,
-        "y": -534.975159,
-        "z": 45
       },
       "quat": {
         "w": 1,
