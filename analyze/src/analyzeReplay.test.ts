@@ -3,8 +3,14 @@ import { analyzeReplay } from "./analyzeReplayFs";
 import { readdir, stat } from "fs/promises";
 import { relative, join, basename, resolve } from "path";
 import { AnalyzeResult, REPLAY_FOLDER, RowData } from "./types";
+import { sleep } from "bun";
+import { afterAll } from "bun:test";
 
-
+// await sleep(20*1000);
+// console.log("20 more")
+// await sleep(20*1000);
+// console.log("5 more");
+// await sleep(5*1000);
 describe("analyzeReplay - tracks", () => {
   const tracks = [
     { name: "AlpineEasy", basePath: resolve(REPLAY_FOLDER, "Alpine/Easy") },
@@ -29,7 +35,7 @@ describe("analyzeReplay - tracks", () => {
       }
 
       matchingFiles.forEach((filepath) => {
-        if (!filepath.includes("1.15.01")) return;
+        // if (!filepath.includes("1.15.01")) return;
         test(`identifies "${basename(filepath)}" as ${name}`, async () => {
           const result = await analyzeReplay(filepath, {skipCoords: false});
           expect(result.trackName).toBe(name);
@@ -42,7 +48,10 @@ describe("analyzeReplay - tracks", () => {
       });
     });
   });
+
+  // afterAll(async () => await sleep(5000*1000));
 });
+
 
 function getCollisionTime()
 

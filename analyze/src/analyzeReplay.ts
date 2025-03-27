@@ -95,9 +95,22 @@ function parseLittleEndian16(hexData: string) {
   return (high << 8) | low;
 }
 
-export function parseLittleEndianFloat32(hexData: string) {
+export function parseLittleEndianFloat32Old(hexData: string) {
   // 32-bit little endian. e.g. face0144 is 519.234
   return new Float32Array(new Uint32Array([parseInt(hexData.match(/../g)!.reverse().join(""), 16)]).buffer)[0];
+}
+
+const u32Array = new Uint32Array(1);
+const f32Array = new Float32Array(u32Array.buffer);
+
+export function parseLittleEndianFloat32(hexData: string): number {
+  let reversedHex = "";
+  for (let i = hexData.length - 2; i >= 0; i -= 2) {
+    reversedHex += hexData.substring(i, i + 2);
+  }
+  
+  u32Array[0] = parseInt(reversedHex, 16);
+  return f32Array[0];
 }
 
 function countSame(hexData: string): number {

@@ -2,8 +2,8 @@ import { GameConfigParser, GameObject } from "../GameConfigParser"
 import { existsSync,readdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { readFile } from 'fs/promises';
-import { getPlaneFromGameObject } from "../PlaneUtil/getPlaneCollisions";
 import { LevelDataEntry } from "./types";
+import { Plane } from "../generateCircle/types";
 
 export async function combine() {
     const entries: Record<string, Array<LevelDataEntry>> = {};
@@ -44,3 +44,12 @@ function getFromGameObject(object: GameObject): LevelDataEntry {
         ...getPlaneFromGameObject(object),
     }
 }
+
+function getPlaneFromGameObject(obj: GameObject): Plane {
+    const loc = obj.properties["loc"] as Array<string>;
+    const quat = obj.properties["quat"] as [string, [string, string, string]];
+    return {
+      position: { x: parseFloat(loc[0]), y: parseFloat(loc[1]), z: parseFloat(loc[2]) },
+      quat: { w: parseFloat(quat[0]), x: parseFloat(quat[1][0]), y: parseFloat(quat[1][1]), z: parseFloat(quat[1][2]) },
+    };
+  }
