@@ -11,7 +11,6 @@ export interface PlaneCollisionInfo {
   distance: number;
   intersection: PositionXYZ;
   plane: Plane;
-  gameObject: GameObject;
   p1: PositionXYZ;
   p2: PositionXYZ;
   frame1: number;
@@ -34,4 +33,13 @@ export interface TrackScoreData {
   everyLevelScored: ScoreEveryLevel;
 }
 
-export type ScoreEveryLevel = Array<{name: string, scoreData: unknown, score: number}>;
+export interface ScoreData {
+  nearestStartDist: number;
+  startPlaneDiffMs: number | undefined;
+  checkpoint1DiffMs: number | undefined;
+  finishPointDiffMs: number | undefined;
+  levelCollisions: Array<PlaneCollisionInfo>;
+}
+
+
+export type ScoreEveryLevel = Array<{name: string, scoreData: ScoreData, score: number}>;

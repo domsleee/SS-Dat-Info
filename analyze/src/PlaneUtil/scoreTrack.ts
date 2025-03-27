@@ -1,10 +1,9 @@
-import { GameObject } from "../GameConfigParser";
 import { PositionXYZ } from "../generateCircle/types";
 import { getLevels } from "../LevelData/levels";
 import { AnalyzeResult, RowData } from "../types";
 import { calculateDistance } from "./distanceUtil";
 import { getPlaneCollisions } from "./getPlaneCollisions";
-import { LevelPlaneCollision, PlaneCollisionInfo, ScoreEveryLevel, TrackScoreData } from "./types";
+import { LevelPlaneCollision, PlaneCollisionInfo, ScoreData, ScoreEveryLevel, TrackScoreData } from "./types";
 
 export function getTrackScore(analyzeResult: AnalyzeResult): TrackScoreData {
   const allCollisions = getPlaneCollisions(analyzeResult.coords!.rows);
@@ -13,9 +12,9 @@ export function getTrackScore(analyzeResult: AnalyzeResult): TrackScoreData {
   return { allCollisions, everyLevelScored };
 }
 
-function scoreEveryLevel(analyzeResult: AnalyzeResult, planeCollisions: Array<LevelPlaneCollision>): ScoreEveryLevel {
+function scoreEveryLevel(analyzeResult: AnalyzeResult, levelPlaneCollisions: Array<LevelPlaneCollision>): ScoreEveryLevel {
   let levelScores: ScoreEveryLevel = [];
-  for (const level of planeCollisions) {
+  for (const level of levelPlaneCollisions) {
     const nearestStartPoint = getNearestPlayerStartLocation(level.name, analyzeResult.coords!.rows);
 
     const levelCollisions: Array<PlaneCollisionInfo> = [];
@@ -51,7 +50,7 @@ function getMsDiff(analyzeResult: AnalyzeResult, levelCollisions: Array<PlaneCol
         return Math.abs(collision.frame2 * 10 - crossStartPlusStartDelayMs);
     }
     if (objectName === 'Check_Point_1') {
-        return Math.abs(collision.frame2 * 10 - (crossStartPlusStartDelayMs + analyzeResult.checkpoint1Ms))
+        return collision.frame2 * 10 - (crossStartPlusStartDelayMs + analyzeResult.checkpoint1Ms)
     }
     if (objectName === 'Finish_Point') {
         return Math.abs(collision.frame2 * 10 - (crossStartPlusStartDelayMs + analyzeResult.displayedMs))
@@ -66,8 +65,8 @@ function getNearestPlayerStartLocation(levelName: string, rows: Array<RowData>) 
         throw new Error(`Expected to find only one level with levelName: ${levelName}, found ${levelData.length}`)
     }
 
-    const objects = levelData[0].objects;
-    const startLocations = objects.filter(t => t.type === 'Player_Start_Location');
+    const entries = levelData[0].entries;
+    const startLocations = entries.filter(t => t.name === 'Player_Start_Location');
     if (startLocations.length === 0) {
         throw new Error("No start locations");
     }
@@ -75,8 +74,8 @@ function getNearestPlayerStartLocation(levelName: string, rows: Array<RowData>) 
     let nearest = startLocations[0];
     const replayStartPos: PositionXYZ = {x: rows[0].x, y: rows[0].y, z: rows[0].z};
     for (const startLocation of startLocations) {
-        const pos1 = getLocationFromGameObject(nearest);
-        const pos2 = getLocationFromGameObject(startLocation);
+        const pos1 = nearest.position;
+        const pos2 = startLocation.position;
         const d1 = calculateDistance(replayStartPos, pos1);
         const d2 = calculateDistance(replayStartPos, pos2);
         if (d2 < d1) {
@@ -84,18 +83,13 @@ function getNearestPlayerStartLocation(levelName: string, rows: Array<RowData>) 
         }
     }
 
-    const pos = getLocationFromGameObject(nearest);
+    const pos = nearest.position;
     const dist = calculateDistance(replayStartPos, pos);
     return {
         gameObject: nearest,
         pos,
         dist
     }
-}
-
-function getLocationFromGameObject(gameObject: GameObject): PositionXYZ {
-    const loc = gameObject.properties["loc"] as Array<string>;
-    return { x: parseFloat(loc[0]), y: parseFloat(loc[1]), z: parseFloat(loc[2]) }
 }
 
 function getObjectNameScore(objectName: string) {
@@ -115,15 +109,7 @@ function getObjectNameScore(objectName: string) {
 
 function getScore(scoreData: ScoreData) {
     return (scoreData.nearestStartDist <= 5 ? 1 : 0)
-        + (scoreData.startPlaneDiffMs !== undefined && scoreData.startPlaneDiffMs <= 10 ? 1 : 0)
-        + (scoreData.checkpoint1DiffMs !== undefined && scoreData.checkpoint1DiffMs <= 10 ? 1 : 0)
-        + (scoreData.finishPointDiffMs !== undefined && scoreData.finishPointDiffMs <= 10 ? 1 : 0)
-}
-
-interface ScoreData {
-    nearestStartDist: number;
-    startPlaneDiffMs: number | undefined;
-    checkpoint1DiffMs: number | undefined;
-    finishPointDiffMs: number | undefined;
-    levelCollisions: Array<PlaneCollisionInfo>;
+        + (scoreData.startPlaneDiffMs !== undefined && Math.abs(scoreData.startPlaneDiffMs) <= 10 ? 1 : 0)
+        + (scoreData.checkpoint1DiffMs !== undefined && Math.abs(scoreData.checkpoint1DiffMs) <= 10 ? 1 : 0)
+        + (scoreData.finishPointDiffMs !== undefined && Math.abs(scoreData.finishPointDiffMs) <= 10 ? 1 : 0)
 }

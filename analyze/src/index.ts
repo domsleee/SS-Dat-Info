@@ -6,6 +6,7 @@ import { getDataBlocks } from "./analyzeReplay";
 import { debugKeypress } from "./debugKeypress";
 import { dumpObjects } from "./dumpObjects";
 import { printCheckpoints } from "./printCheckpoints";
+import { combine } from "./LevelData/combine";
 
 const program = new Command();
 
@@ -87,6 +88,12 @@ program
   .command('checkpoints')
   .action(async () => {
     printCheckpoints();
+  })
+
+program
+  .command("combine")
+  .action(async () => {
+    await combine();
   })
 
 program.parse();

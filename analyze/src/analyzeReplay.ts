@@ -38,11 +38,24 @@ export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions
   if (!options || !options.skipCoords) {
     const coords = getCoordinateData(hexData);
     result.coords = coords;
-    result.trackScoreData = getTrackScore(result);
+    const trackScoreData = getTrackScore(result);
+    result.trackScoreData = trackScoreData;
     // console.log(result.trackScoreData.everyLevelScored);
-    console.log(result.trackScoreData.allCollisions.filter(t => t.name === 'AlpineMedium')[0].collisions[1])
+    console.log(result.trackScoreData.allCollisions.filter(t => t.name === 'VillageHard')[0].collisions);
     // console.log(result.trackScoreData.everyLevelScored.filter(t => t.name === "AlpineMedium")[0].scoreData)
-    result.trackName = result.trackScoreData!.everyLevelScored[0].name;
+    const topScore = trackScoreData.everyLevelScored[0].score;
+    
+    if (topScore !== 0) {
+      const topScoring = trackScoreData.everyLevelScored.filter(t => t.score === topScore).map(t => t.name).sort();
+      if (topScoring.length === 2 && topScoring[0] === "ForestHard" && topScoring[1] === "ForestMedium") {
+        result.trackName = "Forest MediumOrHard";
+      } else if (topScoring.length === 1) {
+        result.trackName = topScoring[0];
+      } else {
+        console.log(topScoring);
+        result.trackName = "UnknownTrack"
+      }
+    }
   }
 
   return result;

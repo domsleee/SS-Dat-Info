@@ -1,16 +1,16 @@
-import { GameConfigParser, GameObject } from "../GameConfigParser";
-import { LEVELS } from "./levelData";
+import { LevelDataEntry } from "./types";
+import levelData from "../LevelData/levelData.json"
 
-type ParsedLevels = Array<{ name: string; objects: Array<GameObject> }>;
+type ParsedLevels = Array<{name: string, entries: Array<LevelDataEntry>}>;
 
 let levels: ParsedLevels | undefined = undefined;
 export function getLevels(): ParsedLevels {
   if (!levels) {
     levels = [];
-    for (const level of LEVELS) {
+    for (const [k, v] of Object.entries(levelData)) {
       levels.push({
-        name: level.name,
-        objects: new GameConfigParser(level.raw).parse(),
+        name: k,
+        entries: v,
       });
     }
   }

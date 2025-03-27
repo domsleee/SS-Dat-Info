@@ -12,12 +12,12 @@ export function getPlaneCollisions(rows: Array<RowData>): Array<LevelPlaneCollis
 
   for (const level of getLevels()) {
     const planeTypes = ['Check_Point_1', 'Check_Point_2', 'Start_Point', 'Finish_Point'];
-    const planeGameObjects = level.objects.filter(t => planeTypes.includes(t.type));
+    const planeEntries = level.entries.filter(t => planeTypes.includes(t.name));
     const levelPlaneCollision: LevelPlaneCollision = {name: level.name, collisions: []};
     
     for (let i = 0; i < rows.length - 2; i++) {
-      for (const planeGameObject of planeGameObjects) {
-        const plane = getPlaneFromGameObject(planeGameObject);
+      for (const planeEntry of planeEntries) {
+        const plane: Plane = { position: planeEntry.position, quat: planeEntry.quat };
         const p1: PositionXYZ = { x: rows[i].x, y: rows[i].y, z: rows[i].z };
         const frame2 = i + 1;
         const p2: PositionXYZ = { x: rows[frame2].x, y: rows[frame2].y, z: rows[frame2].z };
@@ -30,8 +30,7 @@ export function getPlaneCollisions(rows: Array<RowData>): Array<LevelPlaneCollis
             p2,
             frame1: i,
             frame2,
-            objectName: planeGameObject.type,
-            gameObject: planeGameObject,
+            objectName: planeEntry.name,
             plane: plane
           });
         }
@@ -43,7 +42,7 @@ export function getPlaneCollisions(rows: Array<RowData>): Array<LevelPlaneCollis
   return result;
 }
 
-function getPlaneFromGameObject(obj: GameObject): Plane {
+export function getPlaneFromGameObject(obj: GameObject): Plane {
   const loc = obj.properties["loc"] as Array<string>;
   const quat = obj.properties["quat"] as [string, [string, string, string]];
   return {

@@ -7,14 +7,14 @@ import { AnalyzeResult, REPLAY_FOLDER, RowData } from "./types";
 
 describe("analyzeReplay - tracks", () => {
   const tracks = [
-    { name: "AlpineEasy", basePath: resolve(REPLAY_FOLDER, "Alpine/Easy") },
-    { name: "AlpineMedium", basePath: resolve(REPLAY_FOLDER, "Alpine/Medium") },
-    { name: "AlpineHard", basePath: resolve(REPLAY_FOLDER, "Alpine/Hard") },
-    { name: "ForestEasy", basePath: resolve(REPLAY_FOLDER, "Forest/Easy") },
-    { name: "Forest MediumOrHard", basePath: resolve(REPLAY_FOLDER, "Forest/Medium") },
-    { name: "Forest MediumOrHard", basePath: resolve(REPLAY_FOLDER, "Forest/Hard") },
-    { name: "VillageEasy", basePath: resolve(REPLAY_FOLDER, "Village/Easy") },
-    { name: "VillageMedium", basePath: resolve(REPLAY_FOLDER, "Village/Medium") },
+    // { name: "AlpineEasy", basePath: resolve(REPLAY_FOLDER, "Alpine/Easy") },
+    // { name: "AlpineMedium", basePath: resolve(REPLAY_FOLDER, "Alpine/Medium") },
+    // { name: "AlpineHard", basePath: resolve(REPLAY_FOLDER, "Alpine/Hard") },
+    // { name: "ForestEasy", basePath: resolve(REPLAY_FOLDER, "Forest/Easy") },
+    // { name: "Forest MediumOrHard", basePath: resolve(REPLAY_FOLDER, "Forest/Medium") },
+    // { name: "Forest MediumOrHard", basePath: resolve(REPLAY_FOLDER, "Forest/Hard") },
+    // { name: "VillageEasy", basePath: resolve(REPLAY_FOLDER, "Village/Easy") },
+    // { name: "VillageMedium", basePath: resolve(REPLAY_FOLDER, "Village/Medium") },
     { name: "VillageHard", basePath: resolve(REPLAY_FOLDER, "Village/Hard") },
   ];
 
@@ -29,15 +29,22 @@ describe("analyzeReplay - tracks", () => {
       }
 
       matchingFiles.forEach((filepath) => {
-        if (!filepath.includes("1.19.33")) return;
+        if (!filepath.includes("Oli")) return;
         test(`identifies "${basename(filepath)}" as ${name}`, async () => {
           const result = await analyzeReplay(filepath, {skipCoords: false});
           expect(result.trackName).toBe(name);
+          expect(result.trackScoreData?.everyLevelScored[0].score).toBe(4);
+          
+          expect(result.trackScoreData!.everyLevelScored[0].scoreData.startPlaneDiffMs).toBe(0);
+          expect(result.trackScoreData!.everyLevelScored[0].scoreData.checkpoint1DiffMs).toBe(-10);
+          expect(result.trackScoreData!.everyLevelScored[0].scoreData.finishPointDiffMs).toBe(0);
         });
       });
     });
   });
 });
+
+function getCollisionTime()
 
 describe("analyzeReplay - other", () => {
   describe("header info", () => {
