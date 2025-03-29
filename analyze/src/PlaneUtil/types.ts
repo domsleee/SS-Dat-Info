@@ -17,20 +17,20 @@ export interface PlaneCollisionInfo {
   frame2: number;
 }
 
-export interface LevelScore {
-  levelName: string;
-  score: number;
-  planeCollisionInfos: Array<PlaneCollisionInfo>;
-}
-
 export interface LevelPlaneCollision {
   name: string;
   collisions: Array<PlaneCollisionInfo>;
 }
 
-export interface TrackScoreData {
+export interface EveryLevelScoredData {
   allCollisions: Array<LevelPlaneCollision>;
-  everyLevelScored: ScoreEveryLevel;
+  levelScores: Array<LevelScore>;
+}
+
+export interface LevelScore {
+  name: string;
+  scoreData: ScoreData;
+  score: number;
 }
 
 export interface ScoreData {
@@ -38,8 +38,11 @@ export interface ScoreData {
   startPlaneDiffMs: number | undefined;
   checkpoint1DiffMs: number | undefined;
   finishPointDiffMs: number | undefined;
-  levelCollisions: Array<PlaneCollisionInfo>;
+  checkpoint2Exists: boolean;
+
+  firstValidStartPointCollision: PlaneCollisionInfo | undefined;
+  firstValidCheckPoint1Collision: PlaneCollisionInfo | undefined;
+  firstValidFinishPointCollision: PlaneCollisionInfo | undefined;
+  allCheckPoint2Collisions: Array<PlaneCollisionInfo>;
+  validCheckPoint2Collisions: Array<PlaneCollisionInfo>;
 }
-
-
-export type ScoreEveryLevel = Array<{name: string, scoreData: ScoreData, score: number}>;

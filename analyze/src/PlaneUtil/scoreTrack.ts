@@ -3,67 +3,75 @@ import { getLevels } from "../LevelData/levels";
 import { AnalyzeResult, RowData } from "../types";
 import { calculateDistance } from "./distanceUtil";
 import { getPlaneCollisions } from "./getPlaneCollisions";
-import { LevelPlaneCollision, PlaneCollisionInfo, ScoreData, ScoreEveryLevel, TrackScoreData } from "./types";
+import { LevelPlaneCollision as LevelPlaneCollisionGroup, LevelScore, PlaneCollisionInfo, ScoreData, EveryLevelScoredData } from "./types";
 
-export function getTrackScore(analyzeResult: AnalyzeResult): TrackScoreData {
-  const allCollisions = getPlaneCollisions(analyzeResult.coords!.rows);
+export const PLANE_RADIUS = 90;
+export const MAX_SCORE = 5;
 
-  const everyLevelScored = scoreEveryLevel(analyzeResult, allCollisions);
-  return { allCollisions, everyLevelScored };
+export function getEveryLevelScored(analyzeResult: AnalyzeResult): EveryLevelScoredData {
+  const levelPlaneCollisionGroups = getPlaneCollisions(analyzeResult.coords!.rows);
+  const levelScores = scoreEveryLevel(analyzeResult, levelPlaneCollisionGroups);
+  return { allCollisions: levelPlaneCollisionGroups, levelScores };
 }
 
 function scoreEveryLevel(
   analyzeResult: AnalyzeResult,
-  levelPlaneCollisions: Array<LevelPlaneCollision>
-): ScoreEveryLevel {
-  let levelScores: ScoreEveryLevel = [];
-  for (const level of levelPlaneCollisions) {
-    const nearestStartPoint = getNearestPlayerStartLocation(level.name, analyzeResult.coords!.rows);
+  levelPlaneCollisionGroups: Array<LevelPlaneCollisionGroup>
+): Array<LevelScore> {
+  let levelScores: Array<LevelScore> = [];
+  for (const levelPlaneCollisionGroup of levelPlaneCollisionGroups) {
+    const nearestStartPoint = getNearestPlayerStartLocation(levelPlaneCollisionGroup.name, analyzeResult.coords!.rows);
 
-    const levelCollisions: Array<PlaneCollisionInfo> = [];
-    let largestObjectNameScore = 0;
-    for (const collision of level.collisions) {
-      const objectNameScore = getObjectNameScore(collision.objectName);
-      if (collision.distance <= 90 && objectNameScore > largestObjectNameScore) {
-        largestObjectNameScore = objectNameScore;
-        levelCollisions.push(collision);
-      }
-    }
+    const firstValidStartPointCollision = getValidCollisions(levelPlaneCollisionGroup, "Start_Point")?.at(0);
+    const firstValidCheckPoint1Collision = getValidCollisions(levelPlaneCollisionGroup, "Check_Point_1")?.at(0);
+    const firstValidFinishPointCollision = getValidCollisions(levelPlaneCollisionGroup, "Finish_Point")?.at(0);
+    const allCheckPoint2Collisions = levelPlaneCollisionGroup.collisions.filter((t) => t.objectName === "Check_Point_2");
+    const validCheckPoint2Collisions = allCheckPoint2Collisions
+      .filter(t => t.distance <= PLANE_RADIUS)
+      .filter(t => !firstValidStartPointCollision || firstValidStartPointCollision.frame2 <= t.frame1)
+      .filter(t => !firstValidCheckPoint1Collision || firstValidCheckPoint1Collision.frame2 <= t.frame1)
+      .filter(t => !firstValidFinishPointCollision || t.frame2 <= firstValidFinishPointCollision.frame2);
 
     const scoreData: ScoreData = {
       nearestStartDist: nearestStartPoint.dist,
-      startPlaneDiffMs: getMsDiff(analyzeResult, levelCollisions, "Start_Point"),
-      checkpoint1DiffMs: getMsDiff(analyzeResult, levelCollisions, "Check_Point_1"),
-      finishPointDiffMs: getMsDiff(analyzeResult, levelCollisions, "Finish_Point"),
-      levelCollisions,
+      startPlaneDiffMs: getMsDiff(analyzeResult, firstValidStartPointCollision, "Start_Point"),
+      checkpoint1DiffMs: getMsDiff(analyzeResult, firstValidCheckPoint1Collision, "Check_Point_1"),
+      finishPointDiffMs: getMsDiff(analyzeResult, firstValidFinishPointCollision, "Finish_Point"),
+      checkpoint2Exists: validCheckPoint2Collisions.length > 0,
+      firstValidStartPointCollision,
+      firstValidCheckPoint1Collision,
+      firstValidFinishPointCollision,
+      allCheckPoint2Collisions,
+      validCheckPoint2Collisions
     };
-    levelScores.push({ name: level.name, scoreData, score: getScore(scoreData) });
+
+    levelScores.push({ name: levelPlaneCollisionGroup.name, scoreData,  score: getScore(scoreData) });
   }
 
   levelScores = levelScores.sort((a, b) => b.score - a.score);
   return levelScores;
 }
 
-function getMsDiff(
+function getValidCollisions(
+  levelPlaneCollisionGroup: LevelPlaneCollisionGroup,
+  objectName: string
+): Array<PlaneCollisionInfo> {
+  return levelPlaneCollisionGroup.collisions.filter((t) => t.objectName === objectName && t.distance <= PLANE_RADIUS);
+}
+
+export function getMsDiff(
   analyzeResult: AnalyzeResult,
-  levelCollisions: Array<PlaneCollisionInfo>,
+  collision: PlaneCollisionInfo | undefined,
   objectName: string
 ): number | undefined {
-  const collision = levelCollisions.filter((t) => t.objectName === objectName)?.at(0);
   if (!collision) return undefined;
 
-  const crossStartPlusStartDelayMs = analyzeResult.lagBeforeStartMs + analyzeResult.startMs;
-  if (objectName === "Start_Point") {
-    return Math.abs(collision.frame2 * 10 - crossStartPlusStartDelayMs);
+  switch (objectName) {
+    case "Start_Point": return Math.abs(collision.frame2 * 10 - analyzeResult.timingDataFromHeader.crossStartPlusStartDelayMs);
+    case "Check_Point_1": return collision.frame2 * 10 - (analyzeResult.timingDataFromHeader.crossStartPlusStartDelayMs + analyzeResult.checkpoint1Ms);
+    case "Finish_Point": return Math.abs(collision.frame2 * 10 - (analyzeResult.timingDataFromHeader.crossStartPlusStartDelayMs + analyzeResult.displayedMs));
+    default: throw new Error(`Unhandled ${objectName}`);
   }
-  if (objectName === "Check_Point_1") {
-    return collision.frame2 * 10 - (crossStartPlusStartDelayMs + analyzeResult.checkpoint1Ms);
-  }
-  if (objectName === "Finish_Point") {
-    return Math.abs(collision.frame2 * 10 - (crossStartPlusStartDelayMs + analyzeResult.displayedMs));
-  }
-
-  throw new Error(`Unhandled ${objectName}`);
 }
 
 function getNearestPlayerStartLocation(levelName: string, rows: Array<RowData>) {
@@ -99,26 +107,12 @@ function getNearestPlayerStartLocation(levelName: string, rows: Array<RowData>) 
   };
 }
 
-function getObjectNameScore(objectName: string) {
-  switch (objectName) {
-    case "Start_Point":
-      return 1;
-    case "Check_Point_1":
-      return 2;
-    case "Check_Point_2":
-      return 3;
-    case "Finish_Point":
-      return 4;
-    default:
-      return 0;
-  }
-}
-
 function getScore(scoreData: ScoreData) {
   return (
     (scoreData.nearestStartDist <= 2 ? 1 : 0) +
     (scoreData.startPlaneDiffMs !== undefined && Math.abs(scoreData.startPlaneDiffMs) <= 10 ? 1 : 0) +
     (scoreData.checkpoint1DiffMs !== undefined && Math.abs(scoreData.checkpoint1DiffMs) <= 10 ? 1 : 0) +
-    (scoreData.finishPointDiffMs !== undefined && Math.abs(scoreData.finishPointDiffMs) <= 10 ? 1 : 0)
+    (scoreData.finishPointDiffMs !== undefined && Math.abs(scoreData.finishPointDiffMs) <= 10 ? 1 : 0) +
+    (scoreData.checkpoint2Exists ? 1 : 0)
   );
 }

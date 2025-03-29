@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { analyzeReplay } from "./analyzeReplayFs";
 import { readdir, stat } from "fs/promises";
 import { relative, join, basename, resolve } from "path";
-import { AnalyzeResult, REPLAY_FOLDER, RowData } from "./types";
+import { AnalyzeResult, RowData } from "./types";
 import { sleep } from "bun";
 import { afterAll } from "bun:test";
+import { MAX_SCORE } from "./PlaneUtil/scoreTrack";
+import { REPLAY_FOLDER } from "./types.node";
 
 // await sleep(20*1000);
 // console.log("20 more")
@@ -39,11 +41,11 @@ describe("analyzeReplay - tracks", () => {
         test(`identifies "${basename(filepath)}" as ${name}`, async () => {
           const result = await analyzeReplay(filepath, {skipCoords: false});
           expect(result.trackName).toBe(name);
-          expect(result.trackScoreData?.everyLevelScored[0].score).toBe(4);
+          expect(result.trackScoreData?.levelScores[0].score).toBe(MAX_SCORE);
           
-          expect(result.trackScoreData!.everyLevelScored[0].scoreData.startPlaneDiffMs).toBe(0);
-          expect(result.trackScoreData!.everyLevelScored[0].scoreData.checkpoint1DiffMs).toBe(-10);
-          expect(result.trackScoreData!.everyLevelScored[0].scoreData.finishPointDiffMs).toBe(0);
+          expect(result.trackScoreData!.levelScores[0].scoreData.startPlaneDiffMs).toBe(0);
+          expect(result.trackScoreData!.levelScores[0].scoreData.checkpoint1DiffMs).toBe(-10);
+          expect(result.trackScoreData!.levelScores[0].scoreData.finishPointDiffMs).toBe(0);
         });
       });
     });
@@ -52,8 +54,6 @@ describe("analyzeReplay - tracks", () => {
   // afterAll(async () => await sleep(5000*1000));
 });
 
-
-function getCollisionTime()
 
 describe("analyzeReplay - other", () => {
   describe("header info", () => {

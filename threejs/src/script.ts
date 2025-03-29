@@ -3,7 +3,7 @@ import * as THREE from "three";
 import { getDomVM } from "./data";
 import { setupVideo, videoIds } from "./video";
 import { calculateAcceleration, getSpeed } from "./coordUtil";
-import { AnalyzeResult, RowData } from "analyze/src/types";
+import { AnalyzeResult, RowData, UNKNOWN_TRACK } from "analyze/src/types";
 import { SnowboardTrackAnalyzer } from "./snowboardTrackAnalyzer";
 import { createCameraSetup } from "./cameraSetup";
 import { createCharacterGroup } from "./characterGroup";
@@ -11,6 +11,9 @@ import { parseLittleEndianFloat32 } from "analyze/src/analyzeReplay";
 import { setupConfig, updateConfigDOM } from "./config";
 import { AnalyzeResultContainer, Config, MainLoopContainer, TextFields } from "./types";
 import { createPresets } from "./presets";
+import { PlaneCollisionInfo } from "analyze/src/PlaneUtil/types";
+import { minBy } from "lodash-es";
+import { getMsDiff, PLANE_RADIUS } from "analyze/src/PlaneUtil/scoreTrack";
 
 const dimensions = {
   width: 480,
@@ -111,7 +114,7 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
 
   const preText = document.getElementById("preText")!;
   const data = analyzeResult.coords!.rows.slice(0, -1);
-  document.getElementById("headerInfo")!.innerText =
+  document.getElementById("headerInfo")!.innerHTML =
     getHeaderText(analyzeResult);
   playerRange.min = "0";
   playerRange.max = data.length.toString();
@@ -447,18 +450,51 @@ function transformPosition(position) {
 }
 
 function getHeaderText(analyzeResult: AnalyzeResult) {
+  const cp2 = getCheckpoint2Collision(analyzeResult);
+  const levelScore = analyzeResult.trackName !== UNKNOWN_TRACK
+    ? analyzeResult.trackScoreData?.levelScores[0]
+    : undefined;
+
   return `\
 Player    : ${analyzeResult.playerName}
 Track     : ${analyzeResult.trackName}
 Time      : ${msToHumanReadable(analyzeResult.displayedMs)}
-CP1       : ${msToHumanReadable(analyzeResult.checkpoint1Ms)}
-CP2       : todo
-Total Time: ${msToHumanReadable(analyzeResult.totalMs)}
+CP1       : ${msToHumanReadable(analyzeResult.checkpoint1Ms)}${getCollisionText(levelScore?.scoreData.firstValidCheckPoint1Collision)}
+CP2       : ${cp2 ? msToHumanReadable(cp2.frame2 * 10 - analyzeResult.timingDataFromHeader.checkpoint1TotalMs) : "N/A"}${getCollisionText(cp2)}
+Total Time: ${msToHumanReadable(analyzeResult.totalMs)}${getCollisionText(levelScore?.scoreData.firstValidFinishPointCollision)}
 
-Lag before start: ${msToHumanReadable(analyzeResult.lagBeforeStartMs)}
+Lag before start: ${msToHumanReadable(analyzeResult.lagBeforeStartMs)}${getCollisionText(levelScore?.scoreData.firstValidStartPointCollision)}
 Leg after finish: ${msToHumanReadable(analyzeResult.lagAfterFinishMs)}
 Recording time  : ${msToHumanReadable(analyzeResult.recordingMs)}
 `
+}
+
+function getCheckpoint2Collision(analyzeResult: AnalyzeResult): PlaneCollisionInfo | undefined {
+  if (analyzeResult.trackName === UNKNOWN_TRACK) return undefined;
+
+  const levelScore = analyzeResult.trackScoreData?.levelScores[0];
+  if (!levelScore) return undefined;
+
+  const { scoreData } = levelScore;
+  const validCheckpoint2 = levelScore.scoreData.validCheckPoint2Collisions?.at(0);
+  if (validCheckpoint2) {
+    return validCheckpoint2;
+  }
+
+  const { firstValidStartPointCollision, firstValidCheckPoint1Collision, firstValidFinishPointCollision} = scoreData;
+  const candidateCheckpoint2Collisions = levelScore.scoreData.allCheckPoint2Collisions
+    .filter(t => !firstValidStartPointCollision || firstValidStartPointCollision.frame2 <= t.frame1)
+    .filter(t => !firstValidCheckPoint1Collision || firstValidCheckPoint1Collision.frame2 <= t.frame1)
+    .filter(t => !firstValidFinishPointCollision || t.frame2 <= firstValidFinishPointCollision.frame2);
+  return minBy(candidateCheckpoint2Collisions, t => t.distance);
+}
+
+function getCollisionText(collision: PlaneCollisionInfo | undefined) {
+  if (!collision) return "N/A";
+  const style = collision.distance <= PLANE_RADIUS
+    ? "color:green"
+    : "color:darkorange";
+  return ` <span style='${style}'>(${collision.distance.toFixed(2)})</span>`;
 }
 
 main();

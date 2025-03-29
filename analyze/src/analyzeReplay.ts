@@ -1,21 +1,20 @@
 import { classifyMessage } from "./classifyMessage";
-import { getPlaneCollisions } from "./PlaneUtil/getPlaneCollisions";
-import { getTrackScore } from "./PlaneUtil/scoreTrack";
-import { AnalyzeReplayOptions, AnalyzeResult, CoordinateData, MovementState, TimingDataFromHeader } from "./types";
+import { getEveryLevelScored } from "./PlaneUtil/scoreTrack";
+import { AnalyzeReplayOptions, AnalyzeResult, CoordinateData, MovementState, TimingDataFromHeader, UNKNOWN_TRACK } from "./types";
 
 export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions): AnalyzeResult {
 
   const { playerName, endNameAddr } = readName(hexData);
-  const timingData = getTimingData(hexData, endNameAddr);
-  const displayedMs = timingData.totalTimeToFinishMs - timingData.crossStartPlusStartDelayMs;
+  const timingDataFromHeader = getTimingDataFromHeader(hexData, endNameAddr);
+  const displayedMs = timingDataFromHeader.totalTimeToFinishMs - timingDataFromHeader.crossStartPlusStartDelayMs;
 
   const lagBeforeStartMs = countSame(hexData) * 10;
-  const startMs = timingData.crossStartPlusStartDelayMs - lagBeforeStartMs;
-  const finishDelayMs = timingData.totalRecordingTimeMs - timingData.totalTimeToFinishMs;
+  const startMs = timingDataFromHeader.crossStartPlusStartDelayMs - lagBeforeStartMs;
+  const finishDelayMs = timingDataFromHeader.totalRecordingTimeMs - timingDataFromHeader.totalTimeToFinishMs;
 
   const result: AnalyzeResult = {
     playerName,
-    trackName: "Unknown Track",
+    trackName: UNKNOWN_TRACK,
 
     // for FM Matt 54.35
     // 63.78 (total recording time)
@@ -29,23 +28,24 @@ export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions
 
     lagBeforeStartMs: lagBeforeStartMs,
     lagAfterFinishMs: finishDelayMs,
-    recordingMs: timingData.totalRecordingTimeMs,
+    recordingMs: timingDataFromHeader.totalRecordingTimeMs,
 
-    checkpoint1Ms: timingData.checkpoint1TotalMs - timingData.crossStartPlusStartDelayMs,
+    checkpoint1Ms: timingDataFromHeader.checkpoint1TotalMs - timingDataFromHeader.crossStartPlusStartDelayMs,
+    timingDataFromHeader
   };
 
   if (!options || !options.skipCoords) {
     const coords = getCoordinateData(hexData);
     result.coords = coords;
-    const trackScoreData = getTrackScore(result);
+    const trackScoreData = getEveryLevelScored(result);
     result.trackScoreData = trackScoreData;
     // console.log(result.trackScoreData.everyLevelScored);
     // console.log(result.trackScoreData.allCollisions.filter(t => t.name === 'VillageHard')[0].collisions);
     // console.log(result.trackScoreData.everyLevelScored.filter(t => t.name === "AlpineMedium")[0].scoreData)
-    const topScore = trackScoreData.everyLevelScored[0].score;
+    const topScore = trackScoreData.levelScores[0].score;
     
     if (topScore !== 0) {
-      const topScoring = trackScoreData.everyLevelScored.filter(t => t.score === topScore).map(t => t.name).sort();
+      const topScoring = trackScoreData.levelScores.filter(t => t.score === topScore).map(t => t.name).sort();
       if (topScoring.length === 2 && topScoring[0] === "ForestHard" && topScoring[1] === "ForestMedium") {
         result.trackName = "Forest MediumOrHard";
       } else if (topScoring.length === 1) {
@@ -74,7 +74,7 @@ function readName(hexData: string): { playerName: string; endNameAddr: number } 
   return { playerName, endNameAddr: i };
 }
 
-function getTimingData(hexData: string, endNameAddr: number): TimingDataFromHeader {
+function getTimingDataFromHeader(hexData: string, endNameAddr: number): TimingDataFromHeader {
   // for FM Matt 54.35
   // 63.78 (total recording time)
   // 6.41  (cross start + start delay)
