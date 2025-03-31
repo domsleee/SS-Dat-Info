@@ -31,3 +31,11 @@ jobs:
       - run: cd threejs && bun install
       - run: cd threejs && bun run lint
       - run: cd threejs && bun run typecheck
+  displayConfigBuild:
+    name: displayConfig:build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: cd Display_Config/Display_Config && bun install
+      - run: cd Display_Config/Display_Config && bun tauri build
