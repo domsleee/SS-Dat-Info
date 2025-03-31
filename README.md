@@ -1,5 +1,7 @@
 # SS Dat Info
 
+![ci](https://github.com/domsleee/SS-Dat-Info/actions/workflows/ci.yaml/badge.svg)
+
 This repository has the source code of a few tools:
 
 | Tool                                                                         | Description                                                                                    |
