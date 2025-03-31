@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: cd Display_Config/Display_Config/src-tauri && cargo fmt --all --check
-      - run: cd Display_Config/Display_Config/src-tauri && cargo clippy
+      - run: cd Display_Config/Display_Config/src-tauri && cargo clippy -- -Dwarnings
   displayConfigLintVue:
     name: displayConfig:lintVue
     runs-on: windows-latest
