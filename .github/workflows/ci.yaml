@@ -11,5 +11,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - run: cd analyze && bun install
       - run: cd analyze && bun run lint
       - run: cd analyze && bun run typecheck
