@@ -3943,4 +3943,4 @@ Recording time  : ${nn(n.recordingMs)}
       ${i.map(o=>`<tr><td>${o[0]}</td><td>${o[1].valid?"✔️":"❌"}</td></tr>`).join("")}
     </tbody>
   </table>
-  <div style='font-size:10px'>Explanation of the track logic is in <a target='_blank' href='https://github.com/domsleee/SS-Dat-Info/wiki/Dat%E2%80%90Info#determining-trackname-of-a-dat-file'>the wiki</a>.</div>`}function Cc(){try{Bl({icons:{Play:Fv,Pause:Nv,SkipBack:Ov,SkipForward:Bv,Info:Uv}})}catch(n){console.error(n)}}zv();Bl()});export default Jv();
+  <div style='font-size:10px'>Explanation of the track logic is in <a target='_blank' href='https://github.com/domsleee/SS-Dat-Info/wiki/Dat%E2%80%90Info-design-notes#determining-trackname-of-a-dat-file'>the wiki</a>.</div>`}function Cc(){try{Bl({icons:{Play:Fv,Pause:Nv,SkipBack:Ov,SkipForward:Bv,Info:Uv}})}catch(n){console.error(n)}}zv();Bl()});export default Jv();
