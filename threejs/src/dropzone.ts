@@ -2,7 +2,6 @@ export function setupDropzone({ processCallback }: DropzoneConfig): void {
   // Get DOM elements with proper typing
   const dropzone = getElementOrThrow<HTMLTableCellElement>("dropzone");
   const fileInput = getElementOrThrow<HTMLInputElement>("replayFile");
-  const label = getElementOrThrow<HTMLLabelElement>("dropzoneLabel");
   const subLabel = getElementOrThrow<HTMLLabelElement>("dropZoneSubLabel");
 
   // Update text with error handling

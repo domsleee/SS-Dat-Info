@@ -32,7 +32,7 @@ export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions
     timingDataFromHeader
   };
 
-  if (!options || !options.skipCoords) {
+  if (!options?.skipCoords) {
     const coords = getCoordinateData(hexData, timingDataFromHeader);
     result.coords = coords;
     const trackScoreData = getEveryLevelScored(result);

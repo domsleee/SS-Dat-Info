@@ -58,8 +58,6 @@ export function createCameraSetup(
   function updateCamera(
     row: Position,
     prevRow?: Position,
-    characterGroup?: THREE.Group,
-    speed?: number
   ): void {
     // Calculate direction, with fallback to last valid direction
     const newDirection = new THREE.Vector3();

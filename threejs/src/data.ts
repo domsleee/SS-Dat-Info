@@ -12,6 +12,6 @@ export async function getFromFilename(filename: string): Promise<AnalyzeResult> 
   const response = await fetch(filename);
   const arrayBuffer = await response.arrayBuffer();
   const hexData = Buffer.from(arrayBuffer).toString("hex");
-  const replayData = analyzeReplayHex(hexData, true);
+  const replayData = analyzeReplayHex(hexData);
   return replayData;
 }

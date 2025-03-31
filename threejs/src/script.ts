@@ -9,12 +9,12 @@ import { createCameraSetup } from "./cameraSetup";
 import { createCharacterGroup } from "./characterGroup";
 import { parseLittleEndianFloat32 } from "analyze/src/analyzeReplay";
 import { setupConfig, updateConfigDOM } from "./config";
-import { AnalyzeResultContainer, Config, MainLoopContainer, TextFields } from "./types";
+import { Config, MainLoopContainer, TextFields } from "./types";
 import { createPresets } from "./presets";
 import { PlaneCollisionInfo } from "analyze/src/PlaneUtil/types";
 import { minBy } from "lodash-es";
-import { getMsDiff, getScoreBreakdown, MAX_SCORE, PLANE_RADIUS } from "analyze/src/PlaneUtil/scoreTrack";
-import { ArrowLeft, createIcons, Info, Pause, Play, SkipBack, SkipForward } from 'lucide';
+import { getScoreBreakdown, MAX_SCORE, PLANE_RADIUS } from "analyze/src/PlaneUtil/scoreTrack";
+import { createIcons, Info, Pause, Play, SkipBack, SkipForward } from 'lucide';
 
 const dimensions = {
   width: 480,
@@ -204,8 +204,8 @@ y: ${characterGroup.position.y}
 z: ${characterGroup.position.z}
 accel(y): ${calculateAcceleration(data, frameToRender).toFixed(1)}
 drift(s): ${
-      drift ? (drift.actualSeconds - drift.expectedSeconds).toFixed(3) : "N/A"
-    }
+  drift ? (drift.actualSeconds - drift.expectedSeconds).toFixed(3) : "N/A"
+}
 rotation3x3:
 [
   ${row.rotation3x3[0].map((n) => n.toFixed(3)).join(", ")}
@@ -221,7 +221,7 @@ ${getRawString(row.raw)}`;
     textFields.speedText1.textContent = `${Math.floor(getSpeed(data, frameToRender))
       .toFixed(0)
       .padStart(3, "0")} km/h`;
-      textFields.speedText2.textContent = textFields.speedText1.textContent.replace(" ", "");
+    textFields.speedText2.textContent = textFields.speedText1.textContent.replace(" ", "");
 
     if (newHtml !== preText.innerHTML) {
       preText.innerHTML = newHtml;
@@ -286,25 +286,25 @@ function createTextFields(): TextFields {
   return { nameText, timeText, speedText1, speedText2 };
 }
 
-function setKeyInputState(keys: any, row: RowData) {
+function setKeyInputState(keys: unknown, row: RowData) {
   return; // todo
-  if (row.left) {
-    keys.left.classList.add("pressed");
-  } else {
-    keys.left.classList.remove("pressed");
-  }
+  // if (row.left) {
+  //   keys.left.classList.add("pressed");
+  // } else {
+  //   keys.left.classList.remove("pressed");
+  // }
 
-  if (row.right) {
-    keys.right.classList.add("pressed");
-  } else {
-    keys.right.classList.remove("pressed");
-  }
+  // if (row.right) {
+  //   keys.right.classList.add("pressed");
+  // } else {
+  //   keys.right.classList.remove("pressed");
+  // }
 
-  if (row.shift) {
-    keys.shift.classList.add("pressed");
-  } else {
-    keys.shift.classList.remove("pressed");
-  }
+  // if (row.shift) {
+  //   keys.shift.classList.add("pressed");
+  // } else {
+  //   keys.shift.classList.remove("pressed");
+  // }
 }
 
 function createText(text: string, style?: Partial<CSSStyleDeclaration>) {
