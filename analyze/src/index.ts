@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { existsSync, writeFile, writeFileSync } from "fs";
+import { existsSync, writeFileSync } from "fs";
 import { analyzeReplay } from "./analyzeReplayFs";
 import { readFile } from "fs/promises";
 import { getDataBlocks } from "./analyzeReplay";
@@ -63,7 +63,7 @@ program
   .option("-f, --format <format>", "Specify a format (original, json)")
   .description("Dump the data from Object_Data.txt in json")
   .action(async (filepath: string, objectNames: Array<string> | undefined, options: {format?: string}) => {
-    await dumpObjects(filepath, objectNames);
+    await dumpObjects(filepath, objectNames, options);
   })
 
 program

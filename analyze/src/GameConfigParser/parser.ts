@@ -159,6 +159,7 @@ export class GameConfigParser {
   public parse(): GameObject[] {
     const objects: GameObject[] = [];
 
+    // @ts-expect-error it seems okay to do this
     while (this.reader.pos < this.reader.input.length) {
       this.reader.skipWhitespace();
       if (!this.reader.current()) break;

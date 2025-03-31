@@ -1,5 +1,5 @@
 
-import type { Plane, PositionXYZ } from "../generateCircle/types";
+import type { PositionXYZ } from "../generateCircle/types";
 import { doesLineSegmentCollideWithPlane } from "../PlaneUtil/planeUtil";
 import { RowData } from "../types";
 import type { LevelPlaneCollision } from "./types";

@@ -1,8 +1,8 @@
 export class ParseError extends Error {
-    line: number;
+  line: number;
     
-    constructor(message: string, line: number) {
-        super(`Line ${line}: ${message}`);
-        this.line = line;
-    }
+  constructor(message: string, line: number) {
+    super(`Line ${line}: ${message}`);
+    this.line = line;
+  }
 }

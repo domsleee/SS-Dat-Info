@@ -1,4 +1,3 @@
-import { GameObject } from "../GameConfigParser";
 import type { Plane, PositionXYZ } from "../generateCircle/types";
 
 export interface PlaneLineSegmentCollision {

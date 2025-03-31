@@ -1,7 +1,7 @@
 import { CircleEntry } from "./generateCircle";
 
 export function circleToString(circle: Array<CircleEntry>): string {
-return circle.map((entry) => {
+  return circle.map((entry) => {
     return `${entry.name} {
 uniform_scale = ${entry.uniform_scale.toFixed(3)};
 loc = {${entry.loc.x}, ${entry.loc.y}, ${entry.loc.z}};

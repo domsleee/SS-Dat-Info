@@ -3,8 +3,7 @@ import { Quaternion } from "./types";
 export function generateCircle(
   _config: Partial<Config> = {}
 ): Array<CircleEntry> {
-  // Default configuration
-  let config = {
+  const config = {
     name: "Audience_4",
     count: 10,
     radius: 90,
@@ -14,7 +13,7 @@ export function generateCircle(
     ..._config
   };
 
-  let result: Array<CircleEntry> = [];
+  const result: Array<CircleEntry> = [];
   
   for (let i = 0; i < config.count; i++) {
     // Position around the circle
