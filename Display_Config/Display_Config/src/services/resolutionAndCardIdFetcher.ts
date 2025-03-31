@@ -1,8 +1,10 @@
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export async function fetchCardIds(renderer: string) {
   // await new Promise((resolve) => setTimeout(resolve, 1000));
   return ["0"];
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export async function fetchResolutions(renderer: string) {
   // await new Promise((resolve) => setTimeout(resolve, 1000));
   return [

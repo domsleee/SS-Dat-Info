@@ -4,7 +4,7 @@ import type { Ref } from "vue";
 
 export function getPersistentSettings<U>(getDefaultStoreValue: () => {[k in string]: Ref<U>}): { persist: { serializer: Serializer } } {
   return {
-      persist: {
+    persist: {
       serializer: {
         serialize: (value:  {[k in string]: Ref<U>}) => JSON.stringify(value),
         deserialize: (value: string) => {

@@ -39,3 +39,20 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: cd Display_Config/Display_Config && bun install
       - run: cd Display_Config/Display_Config && bun tauri build
+  displayConfigLintRust:
+    name: displayConfig:lintRust
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: cd Display_Config/Display_Config/src-tauri && cargo fmt --all --check
+      - run: cd Display_Config/Display_Config/src-tauri && cargo clippy
+  displayConfigLintVue:
+    name: displayConfig:lintVue
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: cd Display_Config/Display_Config && bun install
+      - run: cd Display_Config/Display_Config && bun run lint
+      - run: cd Display_Config/Display_Config && bun run typecheck
