@@ -3,18 +3,19 @@ import * as THREE from "three";
 import { getDomVM } from "./data";
 import { setupVideo, videoIds } from "./video";
 import { calculateAcceleration, getSpeed } from "./coordUtil";
-import { AnalyzeResult, RowData, UNKNOWN_TRACK } from "analyze/src/types";
+import { AnalyzeResult, RowData, UNKNOWN_TRACK } from "dat-analyze/src/types";
 import { SnowboardTrackAnalyzer } from "./snowboardTrackAnalyzer";
 import { createCameraSetup } from "./cameraSetup";
 import { createCharacterGroup } from "./characterGroup";
-import { parseLittleEndianFloat32 } from "analyze/src/analyzeReplay";
+import { parseLittleEndianFloat32 } from "dat-analyze/src/analyzeReplay";
 import { setupConfig, updateConfigDOM } from "./config";
 import { Config, MainLoopContainer, TextFields } from "./types";
 import { createPresets } from "./presets";
-import { PlaneCollisionInfo } from "analyze/src/PlaneUtil/types";
+import { PlaneCollisionInfo } from "dat-analyze/src/PlaneUtil/types";
 import { minBy } from "lodash-es";
-import { getScoreBreakdown, MAX_SCORE, PLANE_RADIUS } from "analyze/src/PlaneUtil/scoreTrack";
+import { getScoreBreakdown, MAX_SCORE, PLANE_RADIUS } from "dat-analyze/src/PlaneUtil/scoreTrack";
 import { createIcons, Info, Pause, Play, SkipBack, SkipForward } from 'lucide';
+import { PositionXYZ } from "dat-analyze/src/generateCircle/types";
 
 const dimensions = {
   width: 480,
@@ -176,7 +177,7 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
   });
 
   // animation
-  function renderFrame(time, frame: number | undefined = undefined) {
+  function renderFrame(time: number, frame: number | undefined = undefined) {
     if (frame === undefined && !playerState.isPlaying) {
       return;
     }
@@ -399,7 +400,7 @@ function updateCharacterRotation(characterGroup: THREE.Group, row: RowData) {
 }
 
 let resyncCount = 0;
-function tryResync(frameToRender) {
+function tryResync(frameToRender: number) {
   if (videoTarget.videoTarget === undefined) {
     return;
   }
@@ -438,14 +439,14 @@ function getDriftSeconds(
   return { expectedSeconds, actualSeconds };
 }
 
-function setMeshPosition(mesh, row: RowData) {
+function setMeshPosition(mesh: { position: PositionXYZ }, row: RowData) {
   const transformed = transformPosition(row);
   mesh.position.x = transformed.x;
   mesh.position.y = transformed.y;
   mesh.position.z = transformed.z;
 }
 
-function transformPosition(position) {
+function transformPosition(position: PositionXYZ): PositionXYZ {
   return {
     x: -position.x,
     y: -position.y,

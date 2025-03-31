@@ -1,4 +1,4 @@
-import { GameConfigParser, circleToString, generateCircle } from "analyze/src/exports";
+import { GameConfigParser, circleToString, generateCircle } from "dat-analyze/src/exports";
 
 document.addEventListener("DOMContentLoaded", function (): void {
   if (

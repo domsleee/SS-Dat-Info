@@ -5,20 +5,29 @@ on:
       - main
 name: ci
 jobs:
-  lint:
-    name: lint
+  analyzeLint:
+    name: analyze:lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: cd analyze && bun install
       - run: cd analyze && bun run lint
-      - run: cd analyze && bun run 
-  test:
-    name: test
+      - run: cd analyze && bun run typecheck
+  analyzeTest:
+    name: analyze:test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: cd analyze && bun install
       - run: cd analyze && bun test
+  threejsLint:
+    name: threejs:lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: cd threejs && bun install
+      - run: cd threejs && bun run lint
+      - run: cd threejs && bun run typecheck

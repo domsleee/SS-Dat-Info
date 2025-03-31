@@ -1,6 +1,6 @@
-import { analyzeReplayHex } from "analyze/src/analyzeReplay";
+import { analyzeReplayHex } from "dat-analyze/src/analyzeReplay";
 import { Config, VideoTarget } from "./types";
-import { AnalyzeResult } from "analyze/src/types";
+import { AnalyzeResult } from "dat-analyze/src/types";
 import { setupDropzone } from "./dropzone";
 
 export function setupConfig(

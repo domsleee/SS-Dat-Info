@@ -1,5 +1,5 @@
 {
-  "name": "dat",
+  "name": "dat-analyze",
   "module": "src/analyzeReplay.ts",
   "type": "module",
   "devDependencies": {

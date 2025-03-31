@@ -1,4 +1,4 @@
-import { AnalyzeResult, RowData } from "analyze/src/types";
+import { AnalyzeResult, RowData } from "dat-analyze/src/types";
 
 export interface Config {
   offsetSeconds: number;

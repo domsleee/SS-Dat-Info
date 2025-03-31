@@ -1,4 +1,4 @@
-import { AnalyzeResult } from "analyze/src/types";
+import { AnalyzeResult } from "dat-analyze/src/types";
 import { Config, VideoTarget } from "./types";
 import { getFromFilename } from "./data";
 

@@ -10,11 +10,12 @@
         "start": "bun dev",
         "deploy": "bun run build && bunx gh-pages -d dist",
         "lint": "bunx eslint .",
-        "typecheck": "bunx tsc --noEmit src/script.ts"
+        "typecheck": "bunx tsc"
     },
     "devDependencies": {
         "@eslint/js": "^9.23.0",
         "@stylistic/eslint-plugin": "^4.2.0",
+        "@types/lodash-es": "^4.17.12",
         "eslint": "^9.23.0",
         "sass": "^1.79.4",
         "typescript": "^5.8.2",
@@ -25,10 +26,9 @@
     "dependencies": {
         "@types/three": "^0.171.0",
         "@types/youtube": "^0.1.0",
-        "analyze": "../analyze",
         "async-preloader": "^8.0.0",
         "buffer": "^6.0.3",
-        "dat": "../analyze",
+        "dat-analyze": "../analyze/",
         "lodash-es": "^4.17.21",
         "lucide": "^0.485.0",
         "serve-static": "^1.16.2",

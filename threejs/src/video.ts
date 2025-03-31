@@ -21,7 +21,7 @@ export function setupVideo(videoId: string, dimensions: {width: number, height: 
   const firstScriptTag = document.getElementsByTagName('script')[0]!;
   firstScriptTag.parentNode!.insertBefore(tag, firstScriptTag);
 
-  let player;
+  let player: YT.Player | undefined = undefined;
   window.onYouTubeIframeAPIReady = () => {
     player = new YT.Player('player', {
       ...dimensions,
@@ -47,8 +47,8 @@ export function setupVideo(videoId: string, dimensions: {width: number, height: 
         },
         'onStateChange': (event) => {
           if (event.data === YT.PlayerState.ENDED) {
-            player.seekTo(0);
-            player.playVideo();
+            player!.seekTo(0, true);
+            player!.playVideo();
           }
         }
       }
