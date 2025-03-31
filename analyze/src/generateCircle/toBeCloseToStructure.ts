@@ -1,13 +1,13 @@
 import { expect } from "bun:test";
 
 expect.extend({
-  toBeCloseToStructure(received: any, expected: any, precision = 3) {
-    const compare = (a: any, b: any): boolean => {
+  toBeCloseToStructure(received: unknown, expected: unknown, precision = 3) {
+    const compare = (a: unknown, b: unknown): boolean => {
       if (Array.isArray(a) && Array.isArray(b)) {
         return a.length === b.length && a.every((item, i) => compare(item, b[i]));
       } else if (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null) {
         return Object.keys(b).every(key => 
-          Object.prototype.hasOwnProperty.call(a, key) && compare(a[key], b[key])
+          Object.prototype.hasOwnProperty.call(a, key) && compare((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])
         );
       } else if (typeof a === 'number' && typeof b === 'number') {
         return Math.abs(a - b) < Math.pow(10, -precision);
@@ -29,7 +29,7 @@ expect.extend({
 });
 
 declare module "bun:test" {
-  interface Matchers<T> {
-    toBeCloseToStructure(expected: any, precision?: number): void;
+  interface Matchers {
+    toBeCloseToStructure(expected: unknown, precision?: number): void;
   }
 }

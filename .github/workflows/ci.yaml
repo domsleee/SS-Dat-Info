@@ -1,0 +1,58 @@
+on:
+  pull_request:
+  push: # Run CI on the main branch after every merge. This is important to fill the GitHub Actions cache in a way that pull requests can see it
+    branches:
+      - main
+name: ci
+jobs:
+  analyzeLint:
+    name: analyze:lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: cd analyze && bun install
+      - run: cd analyze && bun run lint
+      - run: cd analyze && bun run typecheck
+  analyzeTest:
+    name: analyze:test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: cd analyze && bun install
+      - run: cd analyze && bun test
+  threejsLint:
+    name: threejs:lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: cd threejs && bun install
+      - run: cd threejs && bun run lint
+      - run: cd threejs && bun run typecheck
+  displayConfigBuild:
+    name: displayConfig:build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: cd Display_Config/Display_Config && bun install
+      - run: cd Display_Config/Display_Config && bun tauri build
+  displayConfigLintRust:
+    name: displayConfig:lintRust
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: cd Display_Config/Display_Config/src-tauri && cargo fmt --all --check
+      - run: cd Display_Config/Display_Config/src-tauri && cargo clippy -- -Dwarnings
+  displayConfigLintVue:
+    name: displayConfig:lintVue
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: cd Display_Config/Display_Config && bun install
+      - run: cd Display_Config/Display_Config && bun run lint
+      - run: cd Display_Config/Display_Config && bun run typecheck

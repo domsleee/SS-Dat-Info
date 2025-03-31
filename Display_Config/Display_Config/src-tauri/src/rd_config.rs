@@ -17,7 +17,7 @@ pub fn read_rd_config() -> String {
     };
 
     let reader = BufReader::new(file);
-    let lines: Vec<String> = reader.lines().filter_map(|line| line.ok()).collect();
+    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
     let mut config = HashMap::new();
 
     for line in lines {

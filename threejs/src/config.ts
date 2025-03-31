@@ -1,6 +1,6 @@
-import { analyzeReplayHex } from "analyze/src/analyzeReplay";
+import { analyzeReplayHex } from "dat-analyze/src/analyzeReplay";
 import { Config, VideoTarget } from "./types";
-import { AnalyzeResult } from "analyze/src/types";
+import { AnalyzeResult } from "dat-analyze/src/types";
 import { setupDropzone } from "./dropzone";
 
 export function setupConfig(
@@ -8,7 +8,7 @@ export function setupConfig(
   videoTarget: VideoTarget,
   processAnalyzeResult: (analyzeResult: AnalyzeResult) => void
 ) {
-  const { offsetSeconds, videoId, replayFile, syncWithVideo } = getDOMElements();
+  const { offsetSeconds, videoId, syncWithVideo } = getDOMElements();
   updateConfigDOM(config);
 
   videoId.addEventListener("change", () => {
@@ -26,7 +26,7 @@ export function setupConfig(
   
   setupDropzone({
     processCallback: async (hexData) => {
-      const analyzeResult = await analyzeReplayHex(hexData, true);
+      const analyzeResult = await analyzeReplayHex(hexData, { skipCoords: false });
       processAnalyzeResult(analyzeResult);
     }
   });
@@ -43,7 +43,7 @@ function getDOMElements() {
 }
 
 export function updateConfigDOM(config: Config) {
-  const { offsetSeconds, videoId, syncWithVideo, replayFile } = getDOMElements();
+  const { offsetSeconds, videoId, syncWithVideo } = getDOMElements();
   offsetSeconds.value = config.offsetSeconds.toString();
   videoId.value = config.videoId;
   syncWithVideo.checked = config.syncWithVideo;

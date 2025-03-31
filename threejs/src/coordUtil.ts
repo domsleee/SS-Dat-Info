@@ -1,4 +1,4 @@
-import { RowData } from "analyze/src/types";
+import { RowData } from "dat-analyze/src/types";
 
 export function calculateAcceleration(data: RowData[], currentIndex: number): number {
   if (currentIndex < 1 || currentIndex >= data.length - 1) return 0;

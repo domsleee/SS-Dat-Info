@@ -35,11 +35,7 @@ fn kill_recursive(system: &System, target_pid: Pid) {
     let children: Vec<Pid> = system
         .processes()
         .iter()
-        .filter(|(_, process)| {
-            process
-                .parent()
-                .map_or(false, |parent| parent == target_pid)
-        })
+        .filter(|(_, process)| process.parent() == Some(target_pid))
         .map(|(pid, _)| *pid)
         .collect();
 

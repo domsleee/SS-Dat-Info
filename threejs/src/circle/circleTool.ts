@@ -1,4 +1,4 @@
-import { GameConfigParser, circleToString, generateCircle } from "analyze/src/exports";
+import { GameConfigParser, circleToString, generateCircle } from "dat-analyze/src/exports";
 
 document.addEventListener("DOMContentLoaded", function (): void {
   if (
@@ -46,7 +46,7 @@ document.addEventListener("DOMContentLoaded", function (): void {
       const parser = new GameConfigParser(inputData ?? "");
       const objects = parser.parse();
   
-      let outputItems: Array<string> = [];
+      const outputItems: Array<string> = [];
       let totalObjects = 0;
       for (const object of objects) {
         const myObject = object.properties as unknown as ObjectProperties;

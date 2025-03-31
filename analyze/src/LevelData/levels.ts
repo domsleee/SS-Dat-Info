@@ -10,7 +10,7 @@ export function getLevels(): ParsedLevels {
     for (const [k, v] of Object.entries(levelData)) {
       levels.push({
         name: k,
-        entries: v,
+        entries: v as Array<LevelDataEntry>,
       });
     }
   }

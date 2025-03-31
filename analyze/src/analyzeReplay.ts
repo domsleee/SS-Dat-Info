@@ -32,7 +32,7 @@ export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions
     timingDataFromHeader
   };
 
-  if (!options || !options.skipCoords) {
+  if (!options?.skipCoords) {
     const coords = getCoordinateData(hexData, timingDataFromHeader);
     result.coords = coords;
     const trackScoreData = getEveryLevelScored(result);
@@ -122,7 +122,7 @@ function countSame(hexData: string): number {
 }
 
 export function getDataBlocks(hex: string): Array<string> {
-  const { playerName, endNameAddr } = readName(hex);
+  const { endNameAddr } = readName(hex);
   const offset = 26;
   const blocks = [hex.slice(0, endNameAddr + offset)];
   for (let i = endNameAddr + offset; i < hex.length; i += 218) {

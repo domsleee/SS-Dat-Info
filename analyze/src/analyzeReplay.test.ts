@@ -2,11 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { analyzeReplay } from "./analyzeReplayFs";
 import { readdir, stat } from "fs/promises";
 import { relative, join, basename, resolve } from "path";
-import { AnalyzeResult, RowData } from "./types";
-import { sleep } from "bun";
-import { afterAll } from "bun:test";
 import { MAX_SCORE } from "./PlaneUtil/scoreTrack";
 import { REPLAY_FOLDER } from "./types.node";
+// import { sleep } from "bun";
+// import { afterAll } from "bun:test";
 
 // await sleep(20*1000);
 // console.log("20 more")
@@ -86,70 +85,70 @@ describe("analyzeReplay - other", () => {
     });
   });
 
-  describe.skip("key press", () => {
-    function expectMatchObject(result: AnalyzeResult, expectedBlock: Partial<RowData>) {
-      const blocks = result.coords!.rows;
-      for (let blockIndex = 302; blockIndex <= 602; blockIndex++) {
-        const block = blocks[blockIndex]!;
-        expect(block, `BLOCK FAILED\n${block.movementState} ${block.ex}`).toMatchObject(expectedBlock)
-      }
-    }
+  // describe.skip("key press", () => {
+  //   function expectMatchObject(result: AnalyzeResult, expectedBlock: Partial<RowData>) {
+  //     const blocks = result.coords!.rows;
+  //     for (let blockIndex = 302; blockIndex <= 602; blockIndex++) {
+  //       const block = blocks[blockIndex]!;
+  //       expect(block, `BLOCK FAILED\n${block.movementState} ${block.ex}`).toMatchObject(expectedBlock)
+  //     }
+  //   }
 
-    const testCases: Record<string, Partial<RowData>> = {
-      "KFORRIGHT": {
-        left: false,
-        right: true,
-        forward: true,
-        shift: false,
-      },
-      "KFORLEFT": {
-        left: true,
-        right: false,
-        forward: true,
-      },
-      "NOPRESS": {
-        left: false,
-        right: false,
-        forward: false,
-        shift: false,
-      },
-      "KLEFT": {
-        left: true,
-        right: false,
-        forward: false,
-        shift: false,
-      },
-      "KRIGHT": {
-        left: false,
-        right: true,
-        forward: false,
-        shift: false,
-      },
-      "KSHIFTLEFT": {
-        left: true,
-        right: false,
-        forward: false,
-        shift: true,
-      },
-      "KSHIFTRIGHT": {
-        left: false,
-        right: true,
-        forward: false,
-        shift: true,
-      }
-    };
+  //   const testCases: Record<string, Partial<RowData>> = {
+  //     "KFORRIGHT": {
+  //       left: false,
+  //       right: true,
+  //       forward: true,
+  //       shift: false,
+  //     },
+  //     "KFORLEFT": {
+  //       left: true,
+  //       right: false,
+  //       forward: true,
+  //     },
+  //     "NOPRESS": {
+  //       left: false,
+  //       right: false,
+  //       forward: false,
+  //       shift: false,
+  //     },
+  //     "KLEFT": {
+  //       left: true,
+  //       right: false,
+  //       forward: false,
+  //       shift: false,
+  //     },
+  //     "KRIGHT": {
+  //       left: false,
+  //       right: true,
+  //       forward: false,
+  //       shift: false,
+  //     },
+  //     "KSHIFTLEFT": {
+  //       left: true,
+  //       right: false,
+  //       forward: false,
+  //       shift: true,
+  //     },
+  //     "KSHIFTRIGHT": {
+  //       left: false,
+  //       right: true,
+  //       forward: false,
+  //       shift: true,
+  //     }
+  //   };
     
-    Object.entries(testCases).forEach(([testName, expected]) => {
-      ['vm', 'ae'].forEach(trackname => {
-        test(`${testName}(${trackname})`, async () => {
-          expectMatchObject(
-            await analyzeReplay(join(REPLAY_FOLDER, `tests/keypress/${trackname}/${testName}.dat`), {skipCoords: false}),
-            expected
-          );
-        });
-      });
-    });
-  })
+  //   Object.entries(testCases).forEach(([testName, expected]) => {
+  //     ['vm', 'ae'].forEach(trackname => {
+  //       test(`${testName}(${trackname})`, async () => {
+  //         expectMatchObject(
+  //           await analyzeReplay(join(REPLAY_FOLDER, `tests/keypress/${trackname}/${testName}.dat`), {skipCoords: false}),
+  //           expected
+  //         );
+  //       });
+  //     });
+  //   });
+  // })
 });
 
 async function findDatFiles(dirPath: string): Promise<string[]> {

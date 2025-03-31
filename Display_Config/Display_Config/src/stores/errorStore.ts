@@ -20,5 +20,5 @@ export const useErrorStore = defineStore("errorStore", {
 });
 
 interface Options {
-    logData: string[];
+  logData: string[];
 }
