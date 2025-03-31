@@ -1,0 +1,143 @@
+Start_Point {
+  uniform_scale        = 1;
+  loc                  = {645.168,-817.75,110.084};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {642.711,-835.312,97.7609};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.999982,{0,-0.00600007,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {642.682,-841.532,100.324};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.999982,{0,-0.00600007,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {644.471,-837.246,100.343};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.999982,{0,-0.00600007,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {641.055,-845.086,100.379};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.999982,{0,-0.00600007,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {640.878,-822.946,97.9526};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.999982,{0,-0.00600007,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {642.988,2296.16,95.0994};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.999982,{0,-0.00600007,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {643.051,-843.92,92.4873};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.999982,{0,-0.00600007,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {641.125,-844.533,92.6212};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.999982,{0,-0.00600007,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {641.103,-852.428,95.2141};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.999982,{0,-0.00600007,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {645.038,-844.911,92.7801};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.999982,{0,-0.00600007,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {644.826,-843.154,95.2524};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.999982,{0,-0.00600007,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {644.746,-818.45,97.9398};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.999982,{0,-0.00600007,0}};
+  melt_height          = 0;
+};
+
+Check_Point_2 {
+  uniform_scale        = 1;
+  loc                  = {1051.06,25.3847,1590.11};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.9987,{0,0.0509779,0}};
+  melt_height          = 0;
+};
+
+Check_Point_1 {
+  uniform_scale        = 1;
+  loc                  = {637.556,-561.21,606.435};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Finish_Point {
+  uniform_scale        = 1;
+  loc                  = {1119.88,496.684,2291.78};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};

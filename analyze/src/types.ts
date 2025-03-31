@@ -1,5 +1,4 @@
-import { fileURLToPath } from "bun";
-import { dirname, resolve } from "path";
+import { EveryLevelScoredData } from "./PlaneUtil/types";
 
 export interface AnalyzeResult {
   playerName: string;
@@ -15,19 +14,10 @@ export interface AnalyzeResult {
   recordingMs: number;
 
   checkpoint1Ms: number;
-  // checkpoint2Ms: number;
-
-  // Speed
-  // routeLength: number;
-  // averageSpeed: number;
-  // maximumSpeed: number;
-
-  // distanceBreaksBeforeFinish: number;
-  // distanceBreaksAfterFinish: number;
-  // speedBreaksBeforeFinish: number;
-  // speedBreaksAfterFinish: number;
+  timingDataFromHeader: TimingDataFromHeader;
 
   coords?: CoordinateData;
+  trackScoreData?: EveryLevelScoredData;
 }
 
 export interface CoordinateData {
@@ -40,21 +30,6 @@ export interface RowData {
   z: number;
   rotation3x3: Array<Array<number>>;
   raw: string;
-  movementState: MovementState;
-  left: boolean;
-  right: boolean;
-  forward: boolean;
-  shift: boolean;
-}
-
-
-export enum MovementState {
-  NOPRESS = "NOPRESS",
-  FORWARD = "FORWARD",
-  LEFT = "LEFT",
-  RIGHT = "RIGHT",
-  FORLEFT = "FORLEFT",
-  FORRIGHT = "FORRIGHT",
 }
 
 export interface TimingDataFromHeader {
@@ -64,4 +39,8 @@ export interface TimingDataFromHeader {
   totalTimeToFinishMs: number;
 }
 
-export const REPLAY_FOLDER = resolve(import.meta.dir, "../../threejs/public/replays");
+export interface AnalyzeReplayOptions {
+  skipCoords: boolean;
+}
+
+export const UNKNOWN_TRACK = "Unknown Track";

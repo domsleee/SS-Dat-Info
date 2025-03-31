@@ -10,5 +10,8 @@
   },
   "dependencies": {
     "commander": "^12.1.0"
+  },
+  "scripts": {
+    "start": "bun src/index.ts"
   }
 }

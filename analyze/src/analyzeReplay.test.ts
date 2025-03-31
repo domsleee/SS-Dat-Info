@@ -2,20 +2,28 @@ import { describe, expect, test } from "bun:test";
 import { analyzeReplay } from "./analyzeReplayFs";
 import { readdir, stat } from "fs/promises";
 import { relative, join, basename, resolve } from "path";
-import { AnalyzeResult, REPLAY_FOLDER, RowData } from "./types";
+import { AnalyzeResult, RowData } from "./types";
+import { sleep } from "bun";
+import { afterAll } from "bun:test";
+import { MAX_SCORE } from "./PlaneUtil/scoreTrack";
+import { REPLAY_FOLDER } from "./types.node";
 
-
-describe("analyzeReplay", () => {
+// await sleep(20*1000);
+// console.log("20 more")
+// await sleep(20*1000);
+// console.log("5 more");
+// await sleep(5*1000);
+describe("analyzeReplay - tracks", () => {
   const tracks = [
-    { name: "Alpine EasyMediumOrHard", basePath: resolve(REPLAY_FOLDER, "Alpine/Easy") },
-    { name: "Alpine EasyMediumOrHard", basePath: resolve(REPLAY_FOLDER, "Alpine/Medium") },
-    { name: "Alpine EasyMediumOrHard", basePath: resolve(REPLAY_FOLDER, "Alpine/Hard") },
-    { name: "Forest Easy", basePath: resolve(REPLAY_FOLDER, "Forest/Easy") },
+    { name: "AlpineEasy", basePath: resolve(REPLAY_FOLDER, "Alpine/Easy") },
+    { name: "AlpineMedium", basePath: resolve(REPLAY_FOLDER, "Alpine/Medium") },
+    { name: "AlpineHard", basePath: resolve(REPLAY_FOLDER, "Alpine/Hard") },
+    { name: "ForestEasy", basePath: resolve(REPLAY_FOLDER, "Forest/Easy") },
     { name: "Forest MediumOrHard", basePath: resolve(REPLAY_FOLDER, "Forest/Medium") },
     { name: "Forest MediumOrHard", basePath: resolve(REPLAY_FOLDER, "Forest/Hard") },
-    { name: "Village Easy", basePath: resolve(REPLAY_FOLDER, "Village/Easy") },
-    { name: "Village Medium", basePath: resolve(REPLAY_FOLDER, "Village/Medium") },
-    { name: "Village Hard", basePath: resolve(REPLAY_FOLDER, "Village/Hard") },
+    { name: "VillageEasy", basePath: resolve(REPLAY_FOLDER, "Village/Easy") },
+    { name: "VillageMedium", basePath: resolve(REPLAY_FOLDER, "Village/Medium") },
+    { name: "VillageHard", basePath: resolve(REPLAY_FOLDER, "Village/Hard") },
   ];
 
   tracks.forEach(({ name, basePath }) => {
@@ -29,17 +37,28 @@ describe("analyzeReplay", () => {
       }
 
       matchingFiles.forEach((filepath) => {
+        // if (!filepath.includes("1.15.01")) return;
         test(`identifies "${basename(filepath)}" as ${name}`, async () => {
-          const result = await analyzeReplay(filepath);
+          const result = await analyzeReplay(filepath, {skipCoords: false});
           expect(result.trackName).toBe(name);
+          expect(result.trackScoreData?.levelScores[0].score).toBe(MAX_SCORE);
+          
+          expect(result.trackScoreData!.levelScores[0].scoreData.startPlaneDiffMs).toBe(0);
+          expect(result.trackScoreData!.levelScores[0].scoreData.checkpoint1DiffMs).toBe(-10);
+          expect(result.trackScoreData!.levelScores[0].scoreData.finishPointDiffMs).toBe(0);
         });
       });
     });
   });
 
+  // afterAll(async () => await sleep(5000*1000));
+});
+
+
+describe("analyzeReplay - other", () => {
   describe("header info", () => {
     test("FM Matt 54.35", async () => {
-      const result = await analyzeReplay(resolve(REPLAY_FOLDER, "Forest/Medium/0.54.35 Matt.dat"));
+      const result = await analyzeReplay(resolve(REPLAY_FOLDER, "Forest/Medium/0.54.35 Matt.dat"), {skipCoords: true});
       expect(result.playerName).toBe("Matt");
       expect(result.displayedMs).toBe(54350);
       expect(result.startMs).toBe(3400);
@@ -124,7 +143,7 @@ describe("analyzeReplay", () => {
       ['vm', 'ae'].forEach(trackname => {
         test(`${testName}(${trackname})`, async () => {
           expectMatchObject(
-            await analyzeReplay(join(REPLAY_FOLDER, `tests/keypress/${trackname}/${testName}.dat`), true),
+            await analyzeReplay(join(REPLAY_FOLDER, `tests/keypress/${trackname}/${testName}.dat`), {skipCoords: false}),
             expected
           );
         });

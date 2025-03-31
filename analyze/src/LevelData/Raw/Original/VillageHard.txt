@@ -1,0 +1,107 @@
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {433.334,-513.037,96.2408};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {435.204,-513.162,95.3752};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {437.582,-513.567,94.367};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {440.244,-513.762,93.8883};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {442.778,-513.983,93.336};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Check_Point_2 {
+  uniform_scale        = 1;
+  loc                  = {248.844,-45.5154,1096.15};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Check_Point_1 {
+  uniform_scale        = 1;
+  loc                  = {276.051,-276.866,464.118};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {0.962966,{0,-0.269621,0}};
+  melt_height          = 0;
+};
+
+Start_Point {
+  uniform_scale        = 1;
+  loc                  = {439.386,-501.649,114.804};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Finish_Point {
+  uniform_scale        = 1;
+  loc                  = {211.158,285.281,1897.36};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {449.298,-513.574,94.2647};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {447.555,-513.726,93.9497};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};
+
+Player_Start_Location {
+  uniform_scale        = 1;
+  loc                  = {444.868,-513.975,93.3571};
+  level_inclusion_mask = -1;
+  offset               = {0,0,0};
+  quat                 = {1,{0,0,0}};
+  melt_height          = 0;
+};

@@ -1,20 +1,18 @@
-import { classifyMessage } from "./classifyMessage";
-import { AnalyzeResult, CoordinateData, MovementState, TimingDataFromHeader } from "./types";
+import { getEveryLevelScored } from "./PlaneUtil/scoreTrack";
+import { AnalyzeReplayOptions, AnalyzeResult, CoordinateData, TimingDataFromHeader, UNKNOWN_TRACK } from "./types";
 
-export function analyzeReplayHex(hexData: string, includeCoords?: boolean): AnalyzeResult {
-  const trackName = getTrackName(hexData);
-
+export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions): AnalyzeResult {
   const { playerName, endNameAddr } = readName(hexData);
-  const timingData = getTimingData(hexData, endNameAddr);
-  const displayedMs = timingData.totalTimeToFinishMs - timingData.crossStartPlusStartDelayMs;
+  const timingDataFromHeader = getTimingDataFromHeader(hexData, endNameAddr);
+  const displayedMs = timingDataFromHeader.totalTimeToFinishMs - timingDataFromHeader.crossStartPlusStartDelayMs;
 
   const lagBeforeStartMs = countSame(hexData) * 10;
-  const startMs = timingData.crossStartPlusStartDelayMs - lagBeforeStartMs;
-  const finishDelayMs = timingData.totalRecordingTimeMs - timingData.totalTimeToFinishMs;
+  const startMs = timingDataFromHeader.crossStartPlusStartDelayMs - lagBeforeStartMs;
+  const finishDelayMs = timingDataFromHeader.totalRecordingTimeMs - timingDataFromHeader.totalTimeToFinishMs;
 
-  return {
+  const result: AnalyzeResult = {
     playerName,
-    trackName,
+    trackName: UNKNOWN_TRACK,
 
     // for FM Matt 54.35
     // 63.78 (total recording time)
@@ -28,37 +26,35 @@ export function analyzeReplayHex(hexData: string, includeCoords?: boolean): Anal
 
     lagBeforeStartMs: lagBeforeStartMs,
     lagAfterFinishMs: finishDelayMs,
-    recordingMs: timingData.totalRecordingTimeMs,
+    recordingMs: timingDataFromHeader.totalRecordingTimeMs,
 
-    checkpoint1Ms: timingData.checkpoint1TotalMs - timingData.crossStartPlusStartDelayMs,
-
-    ...(includeCoords ? { coords: getCoordinateData(hexData) } : {}),
-  };
-}
-
-function getTrackName(hexData: string): string | undefined {
-  const prefixes = {
-    "Alpine EasyMediumOrHard": "81ad2044d1a452c49585c342e9fc",
-    "Forest Easy": "1b9703442763afc497505342f8ff",
-    "Forest MediumOrHard": "face01443167c2c4df4f56427eff",
-    "Forest MediumOrHard v2": "face01443267c2c4df4f56427dff",
-    "Village Easy": "cd9437449815e7c333d36143fcff",
-    "Village Easy v2": "cd9437449815e7c333d36143fdff",
-    "Village Medium": "b87e49443ba4f2c3e1ba9143ffff",
-    "Village Medium v2": "b87e49443ba4f2c3e1ba9143feff",
-    "Village Hard": "c1aad843088b00c44a7bc04211dc",
-    "Village Hard v2": "c1aad843088b00c44a7bc04214dc",
+    checkpoint1Ms: timingDataFromHeader.checkpoint1TotalMs - timingDataFromHeader.crossStartPlusStartDelayMs,
+    timingDataFromHeader
   };
 
-  const firstBlock = getDataBlocks(hexData)[1];
-  for (const [k, v] of Object.entries(prefixes)) {
-    const sli = firstBlock.slice(88, 88 + 28);
-    if (sli === v.slice(0, 28)) {
-      return k.replace(" v2", "").replace(" v3", "").replace(" v4", "");
+  if (!options || !options.skipCoords) {
+    const coords = getCoordinateData(hexData, timingDataFromHeader);
+    result.coords = coords;
+    const trackScoreData = getEveryLevelScored(result);
+    result.trackScoreData = trackScoreData;
+    // console.log(result.trackScoreData.everyLevelScored);
+    // console.log(result.trackScoreData.allCollisions.filter(t => t.name === 'VillageHard')[0].collisions);
+    // console.log(result.trackScoreData.everyLevelScored.filter(t => t.name === "AlpineMedium")[0].scoreData)
+    const topScore = trackScoreData.levelScores[0].score;
+    
+    if (topScore !== 0) {
+      const topScoring = trackScoreData.levelScores.filter(t => t.score === topScore).map(t => t.name).sort();
+      if (topScoring.length === 2 && topScoring[0] === "ForestHard" && topScoring[1] === "ForestMedium") {
+        result.trackName = "Forest MediumOrHard";
+      } else if (topScoring.length === 1) {
+        result.trackName = topScoring[0];
+      } else {
+        result.trackName = "UnknownTrack"
+      }
     }
   }
 
-  return undefined;
+  return result;
 }
 
 function readName(hexData: string): { playerName: string; endNameAddr: number } {
@@ -76,7 +72,7 @@ function readName(hexData: string): { playerName: string; endNameAddr: number } 
   return { playerName, endNameAddr: i };
 }
 
-function getTimingData(hexData: string, endNameAddr: number): TimingDataFromHeader {
+function getTimingDataFromHeader(hexData: string, endNameAddr: number): TimingDataFromHeader {
   // for FM Matt 54.35
   // 63.78 (total recording time)
   // 6.41  (cross start + start delay)
@@ -97,9 +93,22 @@ function parseLittleEndian16(hexData: string) {
   return (high << 8) | low;
 }
 
-export function parseLittleEndianFloat32(hexData: string) {
+export function parseLittleEndianFloat32Old(hexData: string) {
   // 32-bit little endian. e.g. face0144 is 519.234
   return new Float32Array(new Uint32Array([parseInt(hexData.match(/../g)!.reverse().join(""), 16)]).buffer)[0];
+}
+
+const u32Array = new Uint32Array(1);
+const f32Array = new Float32Array(u32Array.buffer);
+
+export function parseLittleEndianFloat32(hexData: string): number {
+  let reversedHex = "";
+  for (let i = hexData.length - 2; i >= 0; i -= 2) {
+    reversedHex += hexData.substring(i, i + 2);
+  }
+  
+  u32Array[0] = parseInt(reversedHex, 16);
+  return f32Array[0];
 }
 
 function countSame(hexData: string): number {
@@ -122,14 +131,21 @@ export function getDataBlocks(hex: string): Array<string> {
   return blocks;
 }
 
-function getCoordinateData(hex: string): CoordinateData {
+function getCoordinateData(hex: string, timingDataFromHeader: TimingDataFromHeader): CoordinateData {
   const blocks = getDataBlocks(hex);
+  const footerExists = blocks.at(-1)?.match(/^[0]+$/);
   const coordinateData: CoordinateData = { rows: [] };
-  for (let index = 1; index < blocks.length; ++index) {
+
+  const totalCoordinateBlocks = blocks.length - 1 - (footerExists ? 1 : 0);
+  const numExpectedBlocks = timingDataFromHeader.totalRecordingTimeMs / 10;
+  if (totalCoordinateBlocks !== numExpectedBlocks) {
+    console.warn(`Warning: Expected ${numExpectedBlocks} coordinate blocks, but got ${totalCoordinateBlocks}`);
+  }
+
+  for (let index = 1; index < blocks.length - (footerExists ? 1 : 0); ++index) {
     const block = blocks[index];
     const posOffset = 88;
     const matrixOffset = posOffset + 3 * 8;
-    const state = classifyMessage(block);
 
     const rotation3x3: Array<Array<number>> = [];
     for (let row = 0; row < 3; row++) {
@@ -145,7 +161,6 @@ function getCoordinateData(hex: string): CoordinateData {
       y: parseLittleEndianFloat32(block.slice(posOffset + 8, posOffset + 2 * 8)),
       z: parseLittleEndianFloat32(block.slice(posOffset + 2 * 8, posOffset + 3 * 8)),
       rotation3x3,
-      ...state,
       ex: block.slice(202, 208),
       raw: block
     };
@@ -153,7 +168,3 @@ function getCoordinateData(hex: string): CoordinateData {
   }
   return coordinateData;
 }
-
-
-// 1: 3
-// 37: 75

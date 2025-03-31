@@ -1,7 +1,5 @@
-import { readdir } from "fs/promises";
-import { join, relative } from 'path';
-import { stat } from "fs/promises";
-import { REPLAY_FOLDER } from "./types";
+import { join } from 'path';
+import { REPLAY_FOLDER } from "./types.node";
 import { findDatFiles } from "./pathUtil";
 import { analyzeReplay } from "./analyzeReplayFs";
 
@@ -27,7 +25,7 @@ export async function debugKeypress() {
         if (relevant.includes(getName(file))) {
             const track = file.split('/').at(-2);
             const name = getName(file);
-            const coords = await analyzeReplay(file, true);
+            const coords = await analyzeReplay(file, { skipCoords: false });
             console.log(`${name} (${track})`)
             console.log(coords.coords?.rows[302].raw)
             console.log(coords.coords?.rows[402].raw);
