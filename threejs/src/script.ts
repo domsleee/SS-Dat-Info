@@ -287,6 +287,7 @@ function createTextFields(): TextFields {
   return { nameText, timeText, speedText1, speedText2 };
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function setKeyInputState(keys: unknown, row: RowData) {
   return; // todo
   // if (row.left) {
