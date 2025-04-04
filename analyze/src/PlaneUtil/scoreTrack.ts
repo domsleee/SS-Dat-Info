@@ -6,6 +6,7 @@ import { getPlaneCollisions } from "./getPlaneCollisions";
 import { LevelPlaneCollision as LevelPlaneCollisionGroup, LevelScore, PlaneCollisionInfo, ScoreData, EveryLevelScoredData } from "./types";
 
 export const PLANE_RADIUS = 90;
+export const NEAREST_START_POINT_DIST = 2;
 export const MAX_SCORE = 5;
 
 export function getEveryLevelScored(analyzeResult: AnalyzeResult): EveryLevelScoredData {
@@ -112,7 +113,7 @@ function getNearestPlayerStartLocation(levelName: string, rows: Array<RowData>) 
 
 function getScoreFlags(scoreData: ScoreData) {
   return {
-    hasPlayerStartLocation: scoreData.nearestStartDist <= 2,
+    hasPlayerStartLocation: scoreData.nearestStartDist <= NEAREST_START_POINT_DIST,
     hasStartPlane: scoreData.startPlaneDiffMs !== undefined && Math.abs(scoreData.startPlaneDiffMs) <= 10,
     hasCheckPoint1: scoreData.checkpoint1DiffMs !== undefined && Math.abs(scoreData.checkpoint1DiffMs) <= 10,
     hasFinishPoint: scoreData.finishPointDiffMs !== undefined && Math.abs(scoreData.finishPointDiffMs) <= 10,
@@ -123,10 +124,10 @@ function getScoreFlags(scoreData: ScoreData) {
 export function getScoreBreakdown(scoreData: ScoreData): Array<[string, { valid: boolean }]> {
   const flags = getScoreFlags(scoreData);
   const notes = [];
-  notes.push(["Has Player Start Location ≤2m", { valid: flags.hasPlayerStartLocation }]);
-  notes.push(["Has Start_Point ≤10ms, ≤90m", { valid: flags.hasStartPlane }]);
-  notes.push(["Has Check_Point_1 ≤10ms, ≤90m", { valid:flags.hasCheckPoint1 }]);
-  notes.push(["Has Finish_Point ≤10ms, ≤90m", { valid: flags.hasFinishPoint }]);
-  notes.push(["Has Check_Point_2 ≤90m", { valid: flags.hasCheckPoint2 }]);
+  notes.push([`Has Player Start Location ≤${NEAREST_START_POINT_DIST}m`, { valid: flags.hasPlayerStartLocation }]);
+  notes.push([`Has Start_Point ≤10ms, ≤${PLANE_RADIUS}m`, { valid: flags.hasStartPlane }]);
+  notes.push([`Has Check_Point_1 ≤10ms, ≤${PLANE_RADIUS}m`, { valid:flags.hasCheckPoint1 }]);
+  notes.push([`Has Finish_Point ≤10ms, ≤${PLANE_RADIUS}m`, { valid: flags.hasFinishPoint }]);
+  notes.push([`Has Check_Point_2 ≤${PLANE_RADIUS}m`, { valid: flags.hasCheckPoint2 }]);
   return notes as unknown as Array<[string, { valid: boolean }]>;
 }

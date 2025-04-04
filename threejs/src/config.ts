@@ -26,6 +26,7 @@ export function setupConfig(
   
   setupDropzone({
     processCallback: async (hexData) => {
+      syncWithVideo.checked = false; config.syncWithVideo = false;
       const analyzeResult = await analyzeReplayHex(hexData, { skipCoords: false });
       processAnalyzeResult(analyzeResult);
     }

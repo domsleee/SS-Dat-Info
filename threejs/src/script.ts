@@ -13,7 +13,7 @@ import { Config, MainLoopContainer, TextFields } from "./types";
 import { createPresets } from "./presets";
 import { PlaneCollisionInfo } from "dat-analyze/src/PlaneUtil/types";
 import { minBy } from "lodash-es";
-import { getScoreBreakdown, MAX_SCORE, PLANE_RADIUS } from "dat-analyze/src/PlaneUtil/scoreTrack";
+import { getScoreBreakdown, MAX_SCORE, PLANE_RADIUS, NEAREST_START_POINT_DIST } from "dat-analyze/src/PlaneUtil/scoreTrack";
 import { createIcons, Info, Pause, Play, SkipBack, SkipForward } from 'lucide';
 import { PositionXYZ } from "dat-analyze/src/generateCircle/types";
 
@@ -485,12 +485,12 @@ function getHeaderHtml(analyzeResult: AnalyzeResult) {
   return `\
 Player: ${analyzeResult.playerName}
 Track : ${analyzeResult.trackName}
-CP1   : ${cp1String}${getCollisionText(allCollisions, levelScore?.scoreData.firstValidCheckPoint1Collision, "Distance to Check_Point_1, must be ≤90m")}
-CP2   : ${cp2String}${getCollisionText(allCollisions, cp2, "Distance to Check_Point_2, must be ≤90m")}
-Time  : ${timeString}${getCollisionText(allCollisions, levelScore?.scoreData.firstValidFinishPointCollision, "Distance to Finish_Point, must be ≤90m")}
+CP1   : ${cp1String}${getCollisionText(allCollisions, levelScore?.scoreData.firstValidCheckPoint1Collision, `Distance to Check_Point_1, must be ≤${PLANE_RADIUS}m`)}
+CP2   : ${cp2String}${getCollisionText(allCollisions, cp2, `Distance to Check_Point_2, must be ≤${PLANE_RADIUS}m`)}
+Time  : ${timeString}${getCollisionText(allCollisions, levelScore?.scoreData.firstValidFinishPointCollision, `Distance to Finish_Point, must be ≤${PLANE_RADIUS}m`)}
 
 Legitimate Run? : ${invalidRunReason ? `<span style='color:red'>No (${invalidRunReason})</span>` : "Yes"}
-Start Time      : ${startTime}${getCollisionText([], levelScore?.scoreData.firstValidStartPointCollision, "Distance to Start_Point, must be ≤90m")}
+Start Time      : ${startTime}${getCollisionText([], levelScore?.scoreData.firstValidStartPointCollision, `Distance to Start_Point, must be ≤${PLANE_RADIUS}m`)}
 Total Time      : ${totalTime}
 Lag before start: ${msToHumanReadable(analyzeResult.lagBeforeStartMs)}${getNearestStartPlaneText(analyzeResult)}
 Leg after finish: ${msToHumanReadable(analyzeResult.lagAfterFinishMs)}
@@ -530,26 +530,28 @@ function getCheckpoint2Collision(analyzeResult: AnalyzeResult): PlaneCollisionIn
 function getCollisionText(allCollisions: Array<PlaneCollisionInfo | undefined>, collision: PlaneCollisionInfo | undefined, caption: string) {
   if (!collision) return "";
   const maxLength = Math.max(...allCollisions.map(t => t?.distance.toFixed(2).length ?? 0));
-  const style = collision.distance <= PLANE_RADIUS
-    ? "color:green"
-    : "color:darkorange";
-  return ` <span style='${style}'>(${collision.distance.toFixed(2).padStart(maxLength, ' ')}m)</span>${getCaption(caption)}`;
+  const text = ` (${collision.distance.toFixed(2).padStart(maxLength, ' ')}m)`;
+  return getTextWithCaption(text, caption, collision.distance > PLANE_RADIUS);
 }
 
 function getNearestStartPlaneText(analyzeResult: AnalyzeResult) {
   if (analyzeResult.trackName === UNKNOWN_TRACK) return "";
   const levelScore = analyzeResult.trackScoreData?.levelScores[0];
-  return ` <span style='color:green'>(${levelScore?.scoreData.nearestStartDist.toFixed(2)}m)</span>${getCaption("Distance to nearest Start_Point, must be ≤2m")}`;
+  const text = ` (${levelScore?.scoreData.nearestStartDist.toFixed(2)}m)`;
+  return getTextWithCaption(text, `Distance to nearest Start_Point, must be ≤${NEAREST_START_POINT_DIST}m`, (levelScore?.scoreData.nearestStartDist ?? 5) > 2);
 }
 
-function getCaption(caption: string) {
-  return `<span data-tooltip='${caption}'> <i data-lucide="info" style='width:12px; height:12px; vertical-align:middle'></i></span>`
+function getTextWithCaption(text: string, caption: string, isWarning: boolean) {
+  const style = isWarning
+    ? "color:darkorange"
+    : "color:green";
+  const iconCaptionSpan = `<span data-tooltip='${caption}'> <i data-lucide="info" style='width:12px; height:12px; vertical-align:middle'></i></span>`;
+  return `<span style='${style}'>${text}</span>${iconCaptionSpan}`;
 }
 
 function getScoreHtml(analyzeResult: AnalyzeResult) {
   const levelScores = analyzeResult.trackScoreData?.levelScores;
   const scores = [...new Set(analyzeResult.trackScoreData?.levelScores.map(t => t.score))].sort((a,b) => b-a);
-
 
   const table1 = `
   <table>
