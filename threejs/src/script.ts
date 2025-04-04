@@ -545,18 +545,13 @@ function getTextWithCaption(text: string, caption: string, isWarning: boolean) {
   const style = isWarning
     ? "color:darkorange"
     : "color:green";
-    return `<span style='${style}'>${text}</span>${getCaption(caption)}`;
-
-}
-
-function getCaption(caption: string) {
-  return `<span data-tooltip='${caption}'> <i data-lucide="info" style='width:12px; height:12px; vertical-align:middle'></i></span>`
+  const iconCaptionSpan = `<span data-tooltip='${caption}'> <i data-lucide="info" style='width:12px; height:12px; vertical-align:middle'></i></span>`;
+  return `<span style='${style}'>${text}</span>${iconCaptionSpan}`;
 }
 
 function getScoreHtml(analyzeResult: AnalyzeResult) {
   const levelScores = analyzeResult.trackScoreData?.levelScores;
   const scores = [...new Set(analyzeResult.trackScoreData?.levelScores.map(t => t.score))].sort((a,b) => b-a);
-
 
   const table1 = `
   <table>
