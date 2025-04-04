@@ -629,4 +629,3 @@ function refreshLucideIcons() {
 }
 
 main();
-createIcons();
