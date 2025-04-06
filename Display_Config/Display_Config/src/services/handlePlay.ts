@@ -2,29 +2,29 @@
 import { useTrainerUISettingsStore } from '../stores/trainerSettings';
 import { exit } from '@tauri-apps/plugin-process';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { getAsRdConfig, useRenderSettingsStore } from '../stores/renderSettings';
+import { getAsRdConfig, getAsDetailConfig, useRenderSettingsStore } from '../stores/renderSettings';
 import { invoke } from '@tauri-apps/api/core';
 import type { Ref } from 'vue';
 import { useErrorStore } from '@/stores/errorStore';
 import type { TrainerUISettings } from './types';
-
+import { tryParseInt } from '../services/stringUtil';
 
 export async function handlePlayAsync(playLoading: Ref<boolean>) {
   const errorStore = useErrorStore();
   console.log(useRenderSettingsStore().renderSettings);
   playLoading.value = true;
   try {
-    console.log (await invoke('read_rd_config'));
-    console.log(await invoke('write_rd_config', { config: getAsRdConfig() }));
+    console.log(await invoke('read_rd_config'));
+    console.log(await invoke('write_detail_config', { detailConfig: getAsDetailConfig() }));
+    console.log(await invoke('write_rd_config', { rdConfig: getAsRdConfig() }));
     console.log(await invoke('write_language', { language: useRenderSettingsStore().renderSettings.language }));
-    const trainerJsonSettings = getTrainerSEttings();
-    if (requiresInject(trainerJsonSettings)) {
-
-      const r2 = await invoke('run_inject', { trainerSettings: trainerJsonSettings });
+    const trainerSettings = getTrainerSettings();
+    if (requiresInject(trainerSettings)) {
+      const r2 = await invoke('run_inject', { trainerSettings });
       console.log(r2);
     }
-    playLoading.value = false;
     await getCurrentWindow().setFocus();
+    playLoading.value = false;
     await exit(0);
   } catch (e) {
     if (e instanceof Error || typeof e === 'string') {
@@ -46,7 +46,7 @@ function requiresInject(trainerSettings: TrainerSettings): boolean {
   return trainerSettings.changeFov || trainerSettings.use4xFonts || trainerSettings.enableLogging || trainerSettings.makeGhostsOpaque || trainerSettings.matchGhostSoundsToCharacter;
 }
 
-function getTrainerSEttings(): TrainerSettings {
+function getTrainerSettings(): TrainerSettings {
   const { trainerSettings } = useTrainerUISettingsStore();
   const changeFov = shouldChangeFov(trainerSettings);
 
@@ -73,11 +73,6 @@ function shouldChangeFov(trainerSettings: TrainerUISettings): boolean {
   return true;
 }
 
-function tryParseInt(value: string | number | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const parsedValue = parseInt((value as unknown as string) ?? '');
-  return isNaN(parsedValue) ? undefined : parsedValue;
-}
 
 interface TrainerSettings {
   use4xFonts: boolean;

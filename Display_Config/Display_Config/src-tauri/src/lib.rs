@@ -1,6 +1,7 @@
 use tauri::Manager;
 
 mod close_others;
+mod detail_config;
 mod file_commands;
 mod get_log_data;
 mod inject;
@@ -34,6 +35,7 @@ pub fn run() {
             close_others::close_others,
             get_log_data::get_log_data,
             language::write_language,
+            detail_config::write_detail_config,
             kill_exit_1
         ])
         .setup(|app| {

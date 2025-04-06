@@ -11,6 +11,11 @@
     }
   ],
   "settings": {
+    "editor.tabSize": 2,
+    "[rust]": {
+      "editor.tabSize": 4,
+      "editor.defaultFormatter": "rust-lang.rust-analyzer"
+    },
     "[typescript]": {
       "editor.defaultFormatter": "dbaeumer.vscode-eslint"
     },

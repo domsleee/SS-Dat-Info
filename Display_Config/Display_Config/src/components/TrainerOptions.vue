@@ -29,6 +29,5 @@ import EnableLoggingTooltip from "./EnableLoggingTooltip.vue";
 import FovSelectorRow from "./FovSelectorRow.vue";
 const { trainerSettings } = useTrainerUISettingsStore();
 
-// fixme: it should just use v-form disabled...
 const { formIsLoading } = defineProps<{ formIsLoading: boolean }>();
 </script>

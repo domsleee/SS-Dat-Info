@@ -2,6 +2,9 @@ import { defineStore } from 'pinia';
 import { ref, type Ref } from 'vue';
 import type { RenderSettings } from '../services/types';
 import { getPersistentSettings } from './persistentStoreHelper';
+import type { DetailConfig, RdConfig } from './types';
+import { tryParseInt } from '@/services/stringUtil';
+
 
 export const useRenderSettingsStore = defineStore(
   'renderSettings',
@@ -23,15 +26,6 @@ function getDefaultRenderSettings(): { renderSettings: Ref<RenderSettings> } {
   return { renderSettings: settings };
 }
 
-interface RdConfig {
-  apiName: string;
-  width: number;
-  height: number;
-  depth: number;
-  cardId: number;
-  fullscreen: boolean;
-}
-
 export function getAsRdConfig(): RdConfig {
   const { renderSettings } = useRenderSettingsStore();
   return {
@@ -41,5 +35,13 @@ export function getAsRdConfig(): RdConfig {
     depth: parseInt(renderSettings.colourDepth!.split('bit')[0]),
     cardId: renderSettings.cardId!,
     fullscreen: renderSettings.fullscreen,
+  }
+}
+
+export function getAsDetailConfig(): DetailConfig {
+  const { renderSettings } = useRenderSettingsStore();
+  return {
+    renderDistance: tryParseInt(renderSettings.renderDistance),
+    groundDetail: tryParseInt(renderSettings.groundDetail),
   }
 }
