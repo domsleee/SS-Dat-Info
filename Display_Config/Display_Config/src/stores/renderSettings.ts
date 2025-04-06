@@ -17,6 +17,8 @@ function getDefaultRenderSettings(): { renderSettings: Ref<RenderSettings> } {
     colourDepth: "32bit",
     fullscreen: false,
     language: "English",
+    renderDistance: 450,
+    groundDetail: 3,
   });
   return { renderSettings: settings };
 }

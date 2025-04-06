@@ -3,24 +3,29 @@
     <v-card-title>Graphics Options</v-card-title>
     <v-card-text class="pb-2">
       <div class="d-flex ga-2 flex-column">
-        <v-select
-          v-model="renderSettings.renderer"
-          label="Renderer"
-          :items="renderDevices"
-        />
-        <v-select
-          v-model="renderSettings.cardId"
-          label="Card ID"
-          :disabled="formIsLoading || getCardIds(renderSettings.renderer).isLoading"
-          :items="getCardIds(renderSettings.renderer).value"
-        />
+        <div class="d-flex ga-2">
+          <v-select
+            v-model="renderSettings.renderer"
+            label="Renderer"
+            style="flex-basis: 60%; flex-shrink: 0; flex-grow: 0;"
+            :items="renderDevices"
+          />
+          <v-select
+            v-model="renderSettings.cardId"
+            label="Card ID"
+            :disabled="formIsLoading || getCardIds(renderSettings.renderer).isLoading"
+            :items="getCardIds(renderSettings.renderer).value"
+          />
+
+        </div>
         <div class="d-flex ga-2">
           <v-combobox
             v-model="renderSettings.resolution"
-            style="min-width: 60%"
+            style="flex-basis: 60%; flex-shrink: 0; flex-grow: 0;"
             label="Resolution"
             :disabled="formIsLoading || getResolutions(renderSettings.renderer).isLoading"
             :items="getResolutions(renderSettings.renderer).value"
+            :rules="[(v: string) => validateResolution(v)]"
           />
           <v-select
             v-model="renderSettings.colourDepth"
@@ -28,8 +33,19 @@
             :items="colorDepths"
           />
         </div>
-        <v-checkbox v-model="renderSettings.fullscreen" label="Full screen"></v-checkbox>
         <LanguageSelect />
+        <RenderDistanceRow :formIsLoading="formIsLoading" />
+        <div class="d-flex ga-2">
+          <v-select
+            label="Ground Detail"
+            :items="groundDetailOptions"
+            item-title="text"
+            item-value="value"
+            style="flex-basis: 60%; flex-shrink: 0; flex-grow: 0;"
+            v-model="renderSettings.groundDetail"
+          />
+          <v-checkbox v-model="renderSettings.fullscreen" label="Full screen"></v-checkbox>
+        </div>
       </div>
     </v-card-text>
   </v-card>
@@ -43,7 +59,6 @@ import {
   fetchCardIds,
 } from "../services/resolutionAndCardIdFetcher";
 
-// fixme: it should just use v-form disabled...
 const { formIsLoading } = defineProps<{ formIsLoading: boolean }>();
 const { renderSettings } = useRenderSettingsStore();
 
@@ -61,6 +76,13 @@ function getResolutions(renderer?: string) {
   return resolutionData[renderer];
 }
 
+const groundDetailOptions = [
+  { text: '1 (Very Low)', value: 1 },
+  { text: '2 (Low)', value: 2 },
+  { text: '3 (Normal)', value: 3 },
+  { text: '4 (Maximum)', value: 4 }
+];
+
 const cardIdData: Record<string, SyncPromise<string[]>> = {};
 function getCardIds(renderer?: string) {
   if (!renderer) {
@@ -71,4 +93,17 @@ function getCardIds(renderer?: string) {
   }
   return cardIdData[renderer];
 }
+
+function validateResolution(resolution: string | undefined) {
+  if (!resolution) {
+    return 'required';
+  }
+  const spl = resolution.split("x");
+  if (spl.length !== 2) {
+    return 'invalid format';
+  }
+  const [width, height] = resolution.split("x").map(Number);
+  return !isNaN(width) && !isNaN(height) && width > 0 && height > 0;
+}
+
 </script>

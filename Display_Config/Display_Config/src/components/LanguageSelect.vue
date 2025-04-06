@@ -35,7 +35,7 @@ const { renderSettings } = useRenderSettingsStore();
 const countries = [
   { name: "English", code: "en", flag: "gb" },
   { name: "Finnish", code: "fi", flag: "fi" },
-  { name: "Italian", code: "it", flag: "it" },
+  // { name: "Italian", code: "it", flag: "it" },
   { name: "French", code: "fr", flag: "fr" },
   { name: "German", code: "de", flag: "de" },
 ];

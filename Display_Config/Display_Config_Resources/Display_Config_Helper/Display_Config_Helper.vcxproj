@@ -15,6 +15,7 @@
     <ClInclude Include="src\external\safetyhook.hpp" />
     <ClInclude Include="src\external\Zydis.h" />
     <ClInclude Include="src\fixes.hpp" />
+    <ClInclude Include="src\fixGhostSounds.hpp" />
     <ClInclude Include="src\helper.hpp" />
     <ClInclude Include="src\log.hpp" />
     <ClInclude Include="src\PathUtil.hpp" />

@@ -9,12 +9,13 @@ Example `Display_Config_Helper.json`:
   "fovWidth": 1920,
   "fovHeight": 1080,
   "enableLogging": true,
-  "makeGhostsOpaque": true
+  "makeGhostsOpaque": true,
+  "matchGhostSoundsToCharacter": true
 }
 ```
 
 Notes:
-* `use4xFonts` currently requires changing the font sprites yourself 
+* `use4xFonts` currently requires changing the font textures yourself 
 
 ## Building
 

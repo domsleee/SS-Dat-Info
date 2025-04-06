@@ -1,0 +1,30 @@
+{
+  "folders": [
+    {
+      "path": "analyze"
+    },
+    {
+      "path": "threejs"
+    },
+    {
+      "path": "Display_Config/Display_Config"
+    }
+  ],
+  "settings": {
+    "[typescript]": {
+      "editor.defaultFormatter": "dbaeumer.vscode-eslint"
+    },
+    "[vue]": {
+      "editor.defaultFormatter": "Vue.volar"
+    },
+    "eslint.format.enable": true,
+  },
+  "extensions": {
+    "recommendations": [
+      "dbaeumer.vscode-eslint",
+      "Vue.volar",
+      "tauri-apps.tauri-vscode",
+      "rust-lang.rust-analyzer"
+    ]
+  }
+}
