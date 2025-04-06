@@ -36,6 +36,7 @@ pub fn run() {
             get_log_data::get_log_data,
             language::write_language,
             detail_config::write_detail_config,
+            detail_config::read_detail_config,
             kill_exit_1
         ])
         .setup(|app| {

@@ -15,7 +15,7 @@ export async function handlePlayAsync(playLoading: Ref<boolean>) {
   playLoading.value = true;
   try {
     console.log(await invoke('read_rd_config'));
-    console.log(await invoke('write_detail_config', { detailConfig: getAsDetailConfig() }));
+    console.log(await writeDetailConfig());
     console.log(await invoke('write_rd_config', { rdConfig: getAsRdConfig() }));
     console.log(await invoke('write_language', { language: useRenderSettingsStore().renderSettings.language }));
     const trainerSettings = getTrainerSettings();
@@ -40,6 +40,10 @@ export async function handlePlayAsync(playLoading: Ref<boolean>) {
     }
     playLoading.value = false;
   }
+}
+
+export async function writeDetailConfig() {
+  return await invoke('write_detail_config', { detailConfig: getAsDetailConfig() })
 }
 
 function requiresInject(trainerSettings: TrainerSettings): boolean {

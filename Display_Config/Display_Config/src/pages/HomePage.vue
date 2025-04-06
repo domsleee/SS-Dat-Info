@@ -29,6 +29,7 @@ import { ref } from 'vue';
 import { handlePlayAsync } from '../services/handlePlay';
 import Autostart from '@/components/Autostart.vue';
 import { VForm } from 'vuetify/components';
+import { loadFromFiles, setupFileSync } from '../services/fileSyncService';
 
 const playLoading = ref(false);
 const form = ref<VForm | undefined>();
@@ -37,11 +38,12 @@ async function handleAutoplay() {
     await handlePlay();
   }
 }
+loadFromFiles();
+setupFileSync(form);
 
 async function handlePlay() {
   const { valid } = await form.value!.validate();
   if (!valid) return;
-  // playLoading.value = true; await sleep(3000); playLoading.value = false; return;
   await handlePlayAsync(playLoading);
 }
 
