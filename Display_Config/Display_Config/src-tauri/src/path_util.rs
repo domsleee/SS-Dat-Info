@@ -9,6 +9,6 @@ pub fn get_supreme_folder() -> PathBuf {
     if exe_dir.join("Supreme_Game.dll").exists() {
         exe_dir
     } else {
-        PathBuf::from(r"C:\Games\Supreme")
+        PathBuf::from(r"C:\Games\Supreme2")
     }
 }

@@ -1,22 +1,23 @@
 import { defineStore } from "pinia";
 import { ref, type Ref } from "vue";
-import type { TrainerSettings } from "../services/types";
+import type { TrainerUISettings } from "../services/types";
 import { getPersistentSettings } from './persistentStoreHelper';
 
-export const useTrainerSettingsStore = defineStore(
+export const useTrainerUISettingsStore = defineStore(
   "trainerForm",
-  getDefaultTrainerSettings,
-  getPersistentSettings(getDefaultTrainerSettings)
+  getDefaultTrainerUISettings,
+  getPersistentSettings(getDefaultTrainerUISettings)
 );
 
-function getDefaultTrainerSettings(): { trainerSettings: Ref<TrainerSettings> } {
-  const settings = ref<TrainerSettings>({
-    changeFov: false,
+function getDefaultTrainerUISettings(): { trainerSettings: Ref<TrainerUISettings> } {
+  const settings = ref<TrainerUISettings>({
+    fovType: "MatchRes",
     use4xFonts: false,
     fovWidth: 1920,
     fovHeight: 1080,
     enableLogging: false,
     makeGhostsOpaque: false,
+    matchGhostSoundsToCharacter: false,
   });
   return { trainerSettings: settings };
 }

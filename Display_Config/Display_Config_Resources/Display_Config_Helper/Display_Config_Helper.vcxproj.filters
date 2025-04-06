@@ -42,6 +42,9 @@
     <ClInclude Include="src\PathUtil.hpp">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\fixGhostSounds.hpp">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cc">

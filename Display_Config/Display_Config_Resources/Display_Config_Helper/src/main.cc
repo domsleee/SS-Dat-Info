@@ -1,6 +1,7 @@
 #include <windows.h>
 #include "log.hpp"
 #include "fixes.hpp"
+#include "matchGhostSoundsToCharacter.hpp"
 #include "external/json.hpp"
 #include "PathUtil.hpp"
 #include <fstream>
@@ -39,6 +40,11 @@ void run() {
         Log("Make ghosts opaque");
         DoMakeGhostsOpaque();
     }
+
+    if (data.value("matchGhostSoundsToCharacter", false)) {
+        Log("Match ghost sounds to character");
+        DoMatchGhostSoundsToCharacter();
+	}
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {

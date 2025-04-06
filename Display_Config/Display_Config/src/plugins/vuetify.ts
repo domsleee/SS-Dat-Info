@@ -36,6 +36,8 @@ export default createVuetify({
     },
     VTextField: {
       hideDetails: true,
+      hideSpinButtons: true,
+      persistentPlaceholder: true,
     }
   }
 })

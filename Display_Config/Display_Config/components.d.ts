@@ -10,7 +10,10 @@ declare module 'vue' {
     Autostart: typeof import('./src/components/Autostart.vue')['default']
     EnableLoggingTooltip: typeof import('./src/components/EnableLoggingTooltip.vue')['default']
     ErrorDialog: typeof import('./src/components/ErrorDialog.vue')['default']
+    FovSelectorRow: typeof import('./src/components/FovSelectorRow.vue')['default']
+    GhostSoundsTooltip: typeof import('./src/components/GhostSoundsTooltip.vue')['default']
     LanguageSelect: typeof import('./src/components/LanguageSelect.vue')['default']
+    RenderDistanceRow: typeof import('./src/components/RenderDistanceRow.vue')['default']
     RenderOptions: typeof import('./src/components/RenderOptions.vue')['default']
     TrainerOptions: typeof import('./src/components/TrainerOptions.vue')['default']
   }

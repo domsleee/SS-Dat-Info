@@ -102,3 +102,4 @@ void EnableLogging() {
         Log("EnableLogging: Failed to find Toggle_Logging function");
     }
 }
+

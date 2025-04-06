@@ -1,6 +1,8 @@
+import type { FovType } from "./fovOptions";
+
 export interface Config {
   renderSettings: RenderSettings;
-  trainerSettings: TrainerSettings;
+  trainerUISettings: TrainerUISettings;
 }
 
 export interface RenderSettings {
@@ -10,13 +12,17 @@ export interface RenderSettings {
   colourDepth?: string;
   fullscreen: boolean;
   language: string;
+  renderDistance: number;
+  groundDetail: number;
+  ghostPlayer: string;
 }
 
-export interface TrainerSettings {
+export interface TrainerUISettings {
   use4xFonts: boolean;
-  changeFov: boolean;
+  fovType: FovType;
   fovWidth?: number;
   fovHeight?: number;
   enableLogging: boolean;
   makeGhostsOpaque: boolean;
+  matchGhostSoundsToCharacter: boolean;
 }

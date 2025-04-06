@@ -1,11 +1,15 @@
 use tauri::Manager;
 
 mod close_others;
+mod config_parser;
+mod config_writer;
+mod detail_config;
 mod file_commands;
 mod get_log_data;
 mod inject;
 mod language;
 mod path_util;
+mod player_types;
 mod rd_config;
 
 // fixme: is this really needed?
@@ -31,9 +35,14 @@ pub fn run() {
             rd_config::read_rd_config,
             rd_config::write_rd_config,
             file_commands::open_log_file,
+            file_commands::open_player_types,
             close_others::close_others,
             get_log_data::get_log_data,
             language::write_language,
+            detail_config::write_detail_config,
+            detail_config::read_detail_config,
+            player_types::set_first_player_type,
+            player_types::get_first_player_type,
             kill_exit_1
         ])
         .setup(|app| {

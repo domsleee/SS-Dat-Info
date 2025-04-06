@@ -13,6 +13,7 @@ pub struct TrainerSettings {
     pub fov_height: Option<i32>,
     pub enable_logging: bool,
     pub make_ghosts_opaque: bool,
+    pub match_ghost_sounds_to_character: bool,
 }
 
 #[tauri::command]

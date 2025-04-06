@@ -64,18 +64,18 @@ pub fn read_rd_config() -> String {
 }
 
 #[tauri::command]
-pub fn write_rd_config(config: RdConfig) -> Result<(), String> {
-    let rd_config = get_supreme_folder().join("rd_config.txt");
-    let mut file = File::create(&rd_config)
-        .map_err(|e| format!("Failed to create config file: {rd_config:?} {}", e))?;
+pub fn write_rd_config(rd_config: RdConfig) -> Result<(), String> {
+    let rd_config_path = get_supreme_folder().join("rd_config.txt");
+    let mut file = File::create(&rd_config_path)
+        .map_err(|e| format!("Failed to create config file: {rd_config_path:?} {}", e))?;
 
     let configs = [
-        format!("api_name = \"{}\";", config.api_name),
-        format!("width = {};", config.width),
-        format!("height = {};", config.height),
-        format!("depth = {};", config.depth),
-        format!("card_id = {};", config.card_id),
-        format!("fullscreen = {};", if config.fullscreen { 1 } else { 0 }),
+        format!("api_name = \"{}\";", rd_config.api_name),
+        format!("width = {};", rd_config.width),
+        format!("height = {};", rd_config.height),
+        format!("depth = {};", rd_config.depth),
+        format!("card_id = {};", rd_config.card_id),
+        format!("fullscreen = {};", if rd_config.fullscreen { 1 } else { 0 }),
     ];
 
     configs
