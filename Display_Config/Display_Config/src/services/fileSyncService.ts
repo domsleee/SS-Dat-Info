@@ -2,7 +2,7 @@ import { useRenderSettingsStore } from "@/stores/renderSettings";
 import { invoke } from "@tauri-apps/api/core";
 import { tryParseInt } from "./stringUtil";
 import type { VForm } from "vuetify/components";
-import { render, type Ref } from "vue";
+import { type Ref } from "vue";
 import { writeDetailConfig } from "./handlePlay";
 
 

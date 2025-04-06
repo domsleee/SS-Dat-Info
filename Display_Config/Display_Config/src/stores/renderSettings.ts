@@ -22,6 +22,7 @@ function getDefaultRenderSettings(): { renderSettings: Ref<RenderSettings> } {
     language: "English",
     renderDistance: 450,
     groundDetail: 3,
+    ghostPlayer: "Vincent"
   });
   return { renderSettings: settings };
 }
