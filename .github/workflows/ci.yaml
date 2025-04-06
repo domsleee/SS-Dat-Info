@@ -48,7 +48,7 @@ jobs:
       - run: cd Display_Config/Display_Config/src-tauri && cargo fmt --all --check
       - run: cd Display_Config/Display_Config/src-tauri && cargo clippy -- -Dwarnings
   displayConfigTestRust:
-    name: displayConfig:lintRust
+    name: displayConfig:testRust
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
