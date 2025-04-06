@@ -14,6 +14,7 @@ export interface RenderSettings {
   language: string;
   renderDistance: number;
   groundDetail: number;
+  ghostPlayer: string;
 }
 
 export interface TrainerUISettings {

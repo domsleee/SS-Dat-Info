@@ -15,10 +15,13 @@
         v-model="trainerSettings.makeGhostsOpaque"
         label="Make replay ghosts opaque"
       />
-      <v-checkbox
-        v-model="trainerSettings.matchGhostSoundsToCharacter"
-        label="Match ghost sounds to character"
-      />
+      <div class="d-flex ga-2" style="align-items: center">
+        <v-checkbox
+          v-model="trainerSettings.matchGhostSoundsToCharacter"
+          label="Match ghost sounds to character"
+        />
+        <GhostSoundsTooltip />
+      </div>
     </v-card-text>
   </v-card>
 </template>
@@ -27,6 +30,7 @@
 import { useTrainerUISettingsStore } from "@/stores/trainerSettings";
 import EnableLoggingTooltip from "./EnableLoggingTooltip.vue";
 import FovSelectorRow from "./FovSelectorRow.vue";
+import GhostSoundsTooltip from "./GhostSoundsTooltip.vue";
 const { trainerSettings } = useTrainerUISettingsStore();
 
 const { formIsLoading } = defineProps<{ formIsLoading: boolean }>();

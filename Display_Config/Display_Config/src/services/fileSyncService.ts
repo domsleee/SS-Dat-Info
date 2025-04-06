@@ -2,7 +2,7 @@ import { useRenderSettingsStore } from "@/stores/renderSettings";
 import { invoke } from "@tauri-apps/api/core";
 import { tryParseInt } from "./stringUtil";
 import type { VForm } from "vuetify/components";
-import type { Ref } from "vue";
+import { render, type Ref } from "vue";
 import { writeDetailConfig } from "./handlePlay";
 
 
@@ -18,6 +18,14 @@ export async function loadFromFiles() {
       renderSettings.groundDetail = parseInt(v);
     }
   }
+
+  try {
+    const playerType = await invoke<string>('get_first_player_type');
+    renderSettings.ghostPlayer = playerType.charAt(0).toUpperCase() + playerType.slice(1);;
+
+  } catch (e) {
+    console.log(e);
+  }
 }
 
 export async function setupFileSync(form: Ref<VForm | undefined>) {
@@ -27,5 +35,6 @@ export async function setupFileSync(form: Ref<VForm | undefined>) {
     if (!valid) return;
 
     await writeDetailConfig();
+    await invoke('set_first_player_type', { character: renderSettingsStore.renderSettings.ghostPlayer });
   });
 }

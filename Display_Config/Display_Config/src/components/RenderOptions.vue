@@ -33,7 +33,10 @@
             :items="colorDepths"
           />
         </div>
-        <LanguageSelect />
+        <div class="d-flex ga-2">
+          <LanguageSelect style="flex-basis: 60%; flex-shrink: 0; flex-grow: 0;" />
+          <v-checkbox v-model="renderSettings.fullscreen" label="Full screen"></v-checkbox>
+        </div>
         <RenderDistanceRow :formIsLoading="formIsLoading" />
         <div class="d-flex ga-2">
           <v-select
@@ -44,7 +47,11 @@
             style="flex-basis: 60%; flex-shrink: 0; flex-grow: 0;"
             v-model="renderSettings.groundDetail"
           />
-          <v-checkbox v-model="renderSettings.fullscreen" label="Full screen"></v-checkbox>
+          <v-select
+            v-model="renderSettings.ghostPlayer"
+            label="Ghost Player"
+            :items="ghostPlayers"
+          />
         </div>
       </div>
     </v-card-text>
@@ -62,6 +69,7 @@ import {
 const { formIsLoading } = defineProps<{ formIsLoading: boolean }>();
 const { renderSettings } = useRenderSettingsStore();
 
+const ghostPlayers = ["Vincent", "Keith", "Ulrika", "Akiko", "Guide", "Mike"];
 const renderDevices = ["DirectX6", "DirectX7", "OpenGL", "Software2"];
 const colorDepths = ["16bit", "32bit"];
 
