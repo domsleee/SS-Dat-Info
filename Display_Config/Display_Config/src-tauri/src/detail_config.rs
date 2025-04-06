@@ -23,10 +23,10 @@ pub fn write_detail_config(detail_config: DetailConfig) -> Result<(), String> {
     let mut found = vec![false; configs.len()];
 
     // Update existing settings
-    for line_idx in 0..lines.len() {
+    for line in &mut lines {
         for (config_idx, (key, value)) in configs.iter().enumerate() {
-            if lines[line_idx].starts_with(key) {
-                lines[line_idx] = format!("{}\t= {};", key, value);
+            if line.starts_with(key) {
+                *line = format!("{}\t= {};", key, value);
                 found[config_idx] = true;
                 break;
             }
