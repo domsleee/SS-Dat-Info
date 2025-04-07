@@ -69,7 +69,7 @@ import {
 const { formIsLoading } = defineProps<{ formIsLoading: boolean }>();
 const { renderSettings } = useRenderSettingsStore();
 
-const ghostPlayers = ["Vincent", "Keith", "Ulrika", "Akiko", "Guide", "Mike"];
+const ghostPlayers = ["Vincent", "Keith", "Ulrika", "Akiko", "Mike", "Karl", "Guide"];
 const renderDevices = ["DirectX6", "DirectX7", "OpenGL", "Software2"];
 const colorDepths = ["16bit", "32bit"];
 
