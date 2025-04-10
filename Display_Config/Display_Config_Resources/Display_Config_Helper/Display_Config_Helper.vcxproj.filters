@@ -42,7 +42,10 @@
     <ClInclude Include="src\PathUtil.hpp">
       <Filter>Source Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\fixGhostSounds.hpp">
+    <ClInclude Include="src\matchGhostSoundsToCharacter.hpp">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\saveReplayTimestamp.hpp">
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="src\disableDirectInput.hpp">

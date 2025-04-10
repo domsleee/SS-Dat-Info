@@ -1,6 +1,7 @@
 #include <windows.h>
 #include "log.hpp"
 #include "fixes.hpp"
+#include "saveReplayTimestamp.hpp"
 #include "matchGhostSoundsToCharacter.hpp"
 #include "external/json.hpp"
 #include "PathUtil.hpp"
@@ -51,6 +52,8 @@ void run() {
         Log("Disable direct input (fixes some start-up crashes, but joysticks will no longer work)");
         DoDisableDirectInput();
     }
+
+    DoSaveReplayToTimestamp();
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
