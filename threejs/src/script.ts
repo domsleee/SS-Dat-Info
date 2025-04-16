@@ -11,7 +11,7 @@ import { parseLittleEndianFloat32 } from "dat-analyze/src/analyzeReplay";
 import { setupConfig, updateConfigDOM } from "./config";
 import { Config, MainLoopContainer, TextFields } from "./types";
 import { createPresets } from "./presets";
-import { PlaneCollisionInfo } from "dat-analyze/src/PlaneUtil/types";
+import { LevelScore, PlaneCollisionInfo } from "dat-analyze/src/PlaneUtil/types";
 import { minBy } from "lodash-es";
 import { getScoreBreakdown, MAX_SCORE, PLANE_RADIUS, NEAREST_START_POINT_DIST } from "dat-analyze/src/PlaneUtil/scoreTrack";
 import { createIcons, Info, Pause, Play, SkipBack, SkipForward } from 'lucide';
@@ -572,8 +572,9 @@ function getScoreHtml(analyzeResult: AnalyzeResult) {
   </table>`;
 
   const table2 = getScoreBreakdownTable(analyzeResult);
+  const table3 = getAllCollisionsTable(analyzeResult, levelScores![0]);
   const highTimes = getHighTimes(analyzeResult);
-  return table1 + table2 + highTimes;
+  return table1 + table2 + highTimes + table3;
 }
 
 function getHighTimes(analyzeResult: AnalyzeResult) {
@@ -617,6 +618,31 @@ function getScoreBreakdownTable(analyzeResult: AnalyzeResult) {
     </tbody>
   </table>
   <div style='font-size:10px'>Explanation of the track logic is in <a target='_blank' href='https://github.com/domsleee/SS-Dat-Info/wiki/Dat%E2%80%90Info-design-notes#determining-trackname-of-a-dat-file'>the wiki</a>.</div>`;
+  return table;
+}
+
+function getAllCollisionsTable(analyzeResult: AnalyzeResult, levelScore: LevelScore) {
+  if (!levelScore) return "";
+
+  const allLevelCollisions = analyzeResult.trackScoreData!.allCollisions.find(t => t.name === levelScore.name)!.collisions!;
+  const collisionCols = allLevelCollisions.map(t => {
+    return [
+      `${t.objectName} (${t.plane.position.x.toFixed(2)},${t.plane.position.y.toFixed(2)},${t.plane.position.z.toFixed(2)})`,
+      t.frame2,
+      t.distance.toFixed(2) ];
+  });
+
+  const table = `
+  <table>
+    <thead>
+      <th>Plane</th>
+      <th>Frame</th>
+      <th>Distance</th>
+    </thead>
+    <tbody>
+      ${collisionCols.map(row => `<tr>${row.map(r => `<td>${r}</td>`)}</tr>`).join("\n")}
+    </tbody>
+  </table`;
   return table;
 }
 
