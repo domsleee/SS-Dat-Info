@@ -8,6 +8,9 @@
     },
     {
       "path": "Display_Config/Display_Config"
+    },
+    {
+      "path": "Display_Config/Display_Config_Resources"
     }
   ],
   "settings": {

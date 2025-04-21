@@ -4,6 +4,7 @@
 #include "matchGhostSoundsToCharacter.hpp"
 #include "external/json.hpp"
 #include "PathUtil.hpp"
+#include "disableDirectInput.hpp"
 #include <fstream>
 using json = nlohmann::json;
 
@@ -44,7 +45,12 @@ void run() {
     if (data.value("matchGhostSoundsToCharacter", false)) {
         Log("Match ghost sounds to character");
         DoMatchGhostSoundsToCharacter();
-	}
+    }
+
+    if (data.value("disableDirectInput", false)) {
+        Log("Disable direct input (fixes some start-up crashes, but joysticks will no longer work)");
+        DoDisableDirectInput();
+    }
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
@@ -57,10 +63,10 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
     try {
         run();
     }
-	catch (const std::exception& e) {
-		Log(std::format("Error: {}", e.what()));
+    catch (const std::exception& e) {
+        Log(std::format("Error: {}", e.what()));
         return TRUE;
-	}
+    }
     Log("Finished.");
     return TRUE;
 }

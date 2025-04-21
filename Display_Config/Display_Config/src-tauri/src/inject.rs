@@ -14,6 +14,7 @@ pub struct TrainerSettings {
     pub enable_logging: bool,
     pub make_ghosts_opaque: bool,
     pub match_ghost_sounds_to_character: bool,
+    pub disable_direct_input: bool,
 }
 
 #[tauri::command]
