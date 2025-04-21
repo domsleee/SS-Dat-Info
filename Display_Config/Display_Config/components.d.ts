@@ -8,6 +8,7 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     Autostart: typeof import('./src/components/Autostart.vue')['default']
+    DisableDirectInputTooltip: typeof import('./src/components/DisableDirectInputTooltip.vue')['default']
     EnableLoggingTooltip: typeof import('./src/components/EnableLoggingTooltip.vue')['default']
     ErrorDialog: typeof import('./src/components/ErrorDialog.vue')['default']
     FovSelectorRow: typeof import('./src/components/FovSelectorRow.vue')['default']

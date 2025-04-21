@@ -62,6 +62,7 @@ function getTrainerSettings(): TrainerSettings {
     enableLogging: trainerSettings.enableLogging,
     makeGhostsOpaque: trainerSettings.makeGhostsOpaque,
     matchGhostSoundsToCharacter: trainerSettings.matchGhostSoundsToCharacter,
+    disableDirectInput: trainerSettings.disableDirectInput,
   };
 }
 
@@ -86,4 +87,5 @@ interface TrainerSettings {
   enableLogging: boolean;
   makeGhostsOpaque: boolean;
   matchGhostSoundsToCharacter: boolean;
+  disableDirectInput: boolean;
 }

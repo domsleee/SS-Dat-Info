@@ -25,4 +25,5 @@ export interface TrainerUISettings {
   enableLogging: boolean;
   makeGhostsOpaque: boolean;
   matchGhostSoundsToCharacter: boolean;
+  disableDirectInput: boolean;
 }

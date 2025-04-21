@@ -18,6 +18,7 @@ function getDefaultTrainerUISettings(): { trainerSettings: Ref<TrainerUISettings
     enableLogging: false,
     makeGhostsOpaque: false,
     matchGhostSoundsToCharacter: false,
+    disableDirectInput: false,
   });
   return { trainerSettings: settings };
 }
