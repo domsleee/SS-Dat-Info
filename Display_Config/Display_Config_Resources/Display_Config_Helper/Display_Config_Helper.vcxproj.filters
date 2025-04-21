@@ -51,6 +51,9 @@
     <ClInclude Include="src\disableDirectInput.hpp">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\customInput.hpp">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cc">

@@ -48,3 +48,5 @@ void DoSaveReplayToTimestamp() {
     });
     Log("DoSaveReplayToTimestamp: Fix applied");
 }
+
+// Supreme_Game.dll+1d5450

@@ -3,6 +3,7 @@
 #include "fixes.hpp"
 #include "saveReplayTimestamp.hpp"
 #include "matchGhostSoundsToCharacter.hpp"
+#include "customInput.hpp"
 #include "external/json.hpp"
 #include "PathUtil.hpp"
 #include "disableDirectInput.hpp"
@@ -54,6 +55,7 @@ void run() {
     }
 
     DoSaveReplayToTimestamp();
+    DoCustomInput();
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
