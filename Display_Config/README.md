@@ -10,7 +10,8 @@ Example `Display_Config_Helper.json`:
   "fovHeight": 1080,
   "enableLogging": true,
   "makeGhostsOpaque": true,
-  "matchGhostSoundsToCharacter": true
+  "matchGhostSoundsToCharacter": true,
+  "disableDirectInput": true
 }
 ```
 
