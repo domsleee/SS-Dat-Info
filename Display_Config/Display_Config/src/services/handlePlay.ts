@@ -47,7 +47,7 @@ export async function writeDetailConfig() {
 }
 
 function requiresInject(trainerSettings: TrainerSettings): boolean {
-  return trainerSettings.changeFov || trainerSettings.use4xFonts || trainerSettings.enableLogging || trainerSettings.makeGhostsOpaque || trainerSettings.matchGhostSoundsToCharacter;
+  return trainerSettings.changeFov || trainerSettings.use4xFonts || trainerSettings.enableLogging || trainerSettings.makeGhostsOpaque || trainerSettings.matchGhostSoundsToCharacter || trainerSettings.disableDirectInput;
 }
 
 function getTrainerSettings(): TrainerSettings {
