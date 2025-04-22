@@ -12,9 +12,13 @@
   "app": {
     "windows": [
       {
-        "title": "Supreme Snowboarding Config {{version}}",
+        "title": "Supreme Snowboarding Config {{current_version}}",
         "label": "main",
-        "visible": false,
+        "visible": true,
+        "backgroundColor": "#121212",
+        "windowEffects": {
+          "effects": ["micaLight"]
+        },
         "width": 400,
         "height": 660
       }
