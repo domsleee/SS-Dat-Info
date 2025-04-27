@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: cd analyze && bun install
-      - run: cd analyze && bun test
+      - run: cd analyze && bun run test
   threejsLint:
     name: threejs:lint
     runs-on: ubuntu-latest
@@ -63,3 +63,11 @@ jobs:
       - run: cd Display_Config/Display_Config && bun install
       - run: cd Display_Config/Display_Config && bun run lint
       - run: cd Display_Config/Display_Config && bun run typecheck
+  displayConfigTest:
+    name: displayConfig:test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: cd Display_Config/Display_Config && bun install
+      - run: cd Display_Config/Display_Config && bun run test

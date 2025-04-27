@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "lint": "eslint .",
+    "test": "bun test",
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
@@ -27,6 +28,7 @@
     "@tauri-apps/cli": "^2",
     "@types/node": "^22.10.10",
     "@vitejs/plugin-vue": "^5.2.1",
+    "bun-types": "^1.2.10",
     "eslint": "^9.23.0",
     "pinia": "^2.3.1",
     "typescript": "^5.8.2",

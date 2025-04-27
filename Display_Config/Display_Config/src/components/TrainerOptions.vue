@@ -16,6 +16,10 @@
           label="Enable Logging"
         />
         <EnableLoggingTooltip />
+        <v-checkbox
+          v-model="trainerSettings.enableCustomControls"
+          label="Custom Controls"
+        />
       </div>
       <v-checkbox
         v-model="trainerSettings.makeGhostsOpaque"

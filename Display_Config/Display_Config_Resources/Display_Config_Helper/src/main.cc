@@ -6,9 +6,32 @@
 #include "customInput.hpp"
 #include "external/json.hpp"
 #include "PathUtil.hpp"
+#include "globalState.hpp"
 #include "disableDirectInput.hpp"
 #include <fstream>
 using json = nlohmann::json;
+
+class DisplayConfig {
+public:
+    // FOV settings
+    bool changeFov = false;
+    int fovWidth = 0;
+    int fovHeight = 0;
+
+    // Feature flags
+    bool use4xFonts = false;
+    bool enableLogging = false;
+    bool makeGhostsOpaque = false;
+    bool matchGhostSoundsToCharacter = false;
+    bool disableDirectInput = false;
+    bool enableCustomControls = false;
+};
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DisplayConfig,
+    changeFov, fovWidth, fovHeight,
+    use4xFonts, enableLogging, makeGhostsOpaque,
+    matchGhostSoundsToCharacter, disableDirectInput, enableCustomControls)
+
 
 void run() {
     Log("Processing");
@@ -20,42 +43,43 @@ void run() {
     }
 
     std::ifstream jsonFile(jsonPath);
-    auto data = json::parse(jsonFile);
+    DisplayConfig config = json::parse(jsonFile).get<DisplayConfig>();
 
-    if (data.value("changeFov", false)) {
-        int fovWidth = data["fovWidth"];
-        int fovHeight = data["fovHeight"];
-        Log(std::format("Changing FOV to {}x{}", fovWidth, fovHeight));
-        DoFovFix(fovWidth, fovHeight);
+    if (config.changeFov) {
+        Log(std::format("Changing FOV to {}x{}", config.fovWidth, config.fovHeight));
+        DoFovFix(config.fovWidth, config.fovHeight);
     }
 
-    if (data.value("use4xFonts", false)) {
+    if (config.use4xFonts) {
         Log("Applying 4x font fix");
         Do4xFont();
     }
 
-    if (data.value("enableLogging", false)) {
+    if (config.enableLogging) {
         Log("Enable logging");
         EnableLogging();
     }
 
-    if (data.value("makeGhostsOpaque", false)) {
+    if (config.makeGhostsOpaque || config.enableCustomControls) {
         Log("Make ghosts opaque");
         DoMakeGhostsOpaque();
+        GlobalState::ghostsOpaque = config.makeGhostsOpaque;
     }
 
-    if (data.value("matchGhostSoundsToCharacter", false)) {
+    if (config.matchGhostSoundsToCharacter) {
         Log("Match ghost sounds to character");
         DoMatchGhostSoundsToCharacter();
     }
 
-    if (data.value("disableDirectInput", false)) {
+    if (config.disableDirectInput) {
         Log("Disable direct input (fixes some start-up crashes, but joysticks will no longer work)");
         DoDisableDirectInput();
     }
 
-    DoSaveReplayToTimestamp();
-    DoCustomInput();
+    if (config.enableCustomControls) {
+        DoSaveReplayToTimestamp();
+        DoCustomInput();
+    }
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
