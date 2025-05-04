@@ -10,6 +10,9 @@
       "path": "Display_Config/Display_Config"
     },
     {
+      "path": "Display_Config/Display_Config/src-tauri"
+    },
+    {
       "path": "Display_Config/Display_Config_Resources"
     }
   ],

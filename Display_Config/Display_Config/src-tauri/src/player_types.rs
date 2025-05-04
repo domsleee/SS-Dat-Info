@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::{
-    config_parser::{parse_config, ConfigEntry},
+    config_parser::{ConfigEntry, parse_config},
     config_writer::write_config_to_file,
     path_util::get_supreme_folder,
 };

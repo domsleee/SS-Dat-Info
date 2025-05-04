@@ -1,7 +1,7 @@
 {
   "name": "display-config",
   "private": true,
-  "version": "0.3.5",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,28 +14,29 @@
   },
   "dependencies": {
     "@mdi/font": "^7.4.47",
-    "@tauri-apps/api": "^2",
+    "@tauri-apps/api": "^2.5.0",
     "@tauri-apps/plugin-opener": "^2",
-    "@tauri-apps/plugin-process": "^2.2.0",
+    "@tauri-apps/plugin-process": "^2.2.1",
+    "@tauri-apps/plugin-upload": "^2.2.1",
     "@vue/tsconfig": "^0.7.0",
     "pinia-plugin-persistedstate": "^4.2.0",
     "vue": "^3.5.13",
-    "vuetify": "^3.7.7"
+    "vuetify": "^3.8.3"
   },
   "devDependencies": {
-    "@eslint/js": "^9.23.0",
+    "@eslint/js": "^9.26.0",
     "@stylistic/eslint-plugin": "^4.2.0",
-    "@tauri-apps/cli": "^2",
-    "@types/node": "^22.10.10",
-    "@vitejs/plugin-vue": "^5.2.1",
-    "bun-types": "^1.2.10",
-    "eslint": "^9.23.0",
-    "pinia": "^2.3.1",
-    "typescript": "^5.8.2",
-    "typescript-eslint": "^8.28.0",
-    "unplugin-vue-components": "^28.0.0",
-    "vite": "^6.0.3",
-    "vite-plugin-vuetify": "^2.0.4",
-    "vue-tsc": "^2.1.10"
+    "@tauri-apps/cli": "2.5.0",
+    "@types/node": "^22.15.3",
+    "@vitejs/plugin-vue": "^5.2.3",
+    "bun-types": "^1.2.12",
+    "eslint": "^9.26.0",
+    "pinia": "^3.0.2",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.31.1",
+    "unplugin-vue-components": "^28.5.0",
+    "vite": "^6.3.4",
+    "vite-plugin-vuetify": "^2.1.1",
+    "vue-tsc": "^2.2.10"
   }
 }
