@@ -24,7 +24,7 @@ tauri-plugin-process = "2.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 opener = "0.7.2"
-sysinfo = "0.34.2"
+sysinfo = "0.35.0"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 log = "0.4.27"
 futures-util = "0.3.31"
