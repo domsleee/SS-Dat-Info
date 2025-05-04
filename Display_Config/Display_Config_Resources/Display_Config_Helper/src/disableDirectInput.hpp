@@ -27,29 +27,21 @@ void DoDisableDirectInput() {
         return;
     }
 
+    /*
     const auto cetsupDIModule = GetModuleHandleA("HMG_Cetsup_DI.dll");
     if (!cetsupDIModule) {
         Log("DoDisableJoystick: Failed to find cetsupDIModule");
         return;
     }
-    /*
     std::uint8_t* DI_DriverAddress = (std::uint8_t*)cetsupDIModule + 0x2fa4;
     static SafetyHookMid disableJoystickHook = safetyhook::create_mid(DI_DriverAddress, [](safetyhook::Context& ctx) {
         Log(std::format("DoDisableJoystick: ZERO IS SUCCESS: {}", ctx.eax));
-    });
-    */
-    static SafetyHookMid hey = safetyhook::create_mid(
-		(char*)cetsupDIModule + 0x2fa4,
-		[](safetyhook::Context& ctx) {
-            ctx.eax = 1;
-		}
-	);
+    });*/
 
-    /*
     Original_DirectInputCreateA = (DirectInputCreateA_t)GetProcAddress(hDinput, "DirectInputCreateA");
     static SafetyHookInline dinputHook = safetyhook::create_inline(
         (BYTE*)Original_DirectInputCreateA,
         HookedDirectInputCreateA
-    );*/
+    );
     Log("DoDisableDirectInput: Fix applied");
 }
