@@ -1,4 +1,3 @@
-
 use crate::version_info::get_version;
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +23,7 @@ pub async fn check_for_updates() -> Result<UpdateInfo, String> {
 }
 
 async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error>> {
-    let client = tauri_plugin_http::reqwest::Client::new();
+    let client = reqwest::Client::new();
     let response = serde_json::from_str::<serde_json::Value>(
         &client
             .get("https://api.github.com/repos/domsleee/SS-Dat-Info/releases/latest")

@@ -125,7 +125,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { checkForUpdates } from '@/services/updaterService';
-import { download } from '@tauri-apps/plugin-upload';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { runWithErrorHandler } from '@/stores/errorStore';
 
@@ -170,19 +169,15 @@ async function doDownload() {
     }
     const url = `https://github.com/domsleee/SS-Dat-Info/releases/download/${state.value.latestVersion}/Display_Config_${state.value.latestVersion}.zip`;
 
-    try {
-      await invoke('download_and_extract', {
-        url,
-        onEvent: new Channel<DownloadEvent>((message) => {
-          if (download.name === 'downloadProgress' && state.value.key === StateKey.Downloading) {
-            const { progressTotal, total } = message.data;
-            state.value.progress = parseFloat(((progressTotal / total) * 100).toFixed(0));
-          }
-        })
-      });
-    } catch (e) {
-      throw e;
-    }
+    await invoke('download_and_extract', {
+      url,
+      onEvent: new Channel<DownloadEvent>((message) => {
+        if (message.event === 'downloadProgress' && state.value.key === StateKey.Downloading) {
+          const { progressTotal, total } = message.data;
+          state.value.progress = parseFloat(((progressTotal / total) * 100).toFixed(0));
+        }
+      })
+    });
 
     state.value = {
       key: StateKey.Finished,
@@ -236,7 +231,3 @@ function closeDialog() {
 
 defineExpose({ openDialog });
 </script>
-
-
-<style>
-</style>

@@ -1,9 +1,11 @@
 use tauri::Manager;
 
+mod channel_test;
 mod close_others;
 mod config_parser;
 mod config_writer;
 mod detail_config;
+mod download_and_extract;
 mod file_commands;
 mod get_log_data;
 mod inject;
@@ -11,11 +13,9 @@ mod language;
 mod path_util;
 mod player_types;
 mod rd_config;
+mod transfer_stats;
 mod updater;
 mod version_info;
-mod channel_test;
-mod transfer_stats;
-mod download_and_extract;
 
 // fixme: is this really needed?
 #[tauri::command]
@@ -32,13 +32,18 @@ fn show_window(app: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_upload::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_log::Builder::new()
-            .target(tauri_plugin_log::Target::new( tauri_plugin_log::TargetKind::Webview))
-            .target(tauri_plugin_log::Target::new( tauri_plugin_log::TargetKind::Stdout))
-            .build())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Webview,
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             show_window,
             inject::run_inject,
