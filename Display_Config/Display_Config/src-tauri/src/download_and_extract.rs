@@ -1,9 +1,9 @@
+use crate::{path_util::get_supreme_folder, transfer_stats::TransferStats};
 use anyhow::Context;
 use futures_util::TryStreamExt;
 use log::{error, info};
 use serde::Serialize;
 use tauri::ipc::Channel;
-use crate::{path_util::get_supreme_folder, transfer_stats::TransferStats};
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "event", content = "data")]
 pub enum DownloadEvent {
