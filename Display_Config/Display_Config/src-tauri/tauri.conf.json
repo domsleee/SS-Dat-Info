@@ -16,7 +16,8 @@
         "label": "main",
         "visible": false,
         "width": 400,
-        "height": 660
+        "height": 660,
+        "backgroundColor": "#121212"
       }
     ],
     "security": {
