@@ -185,6 +185,7 @@ async function doDownload() {
       key: StateKey.Finished,
       latestVersion: state.value.latestVersion,
     };
+    invoke('relaunch');
   });
 }
 

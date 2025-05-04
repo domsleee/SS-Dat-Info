@@ -929,6 +929,7 @@ dependencies = [
  "tauri-plugin-log",
  "tauri-plugin-opener",
  "tauri-plugin-process",
+ "tauri-plugin-shell",
  "uuid",
  "zip",
 ]
@@ -2808,6 +2809,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "os_pipe"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ffd2b0a5634335b135d5728d84c5e0fd726954b87111f7506a61c502280d982"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "pango"
 version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3825,6 +3836,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shared_child"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e297bd52991bbe0686c086957bee142f13df85d1e79b0b21630a99d374ae9dc"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4310,6 +4331,27 @@ checksum = "57da5888533e802b6206b9685091f8714aa1f5266dc80051a82388449558b773"
 dependencies = [
  "tauri",
  "tauri-plugin",
+]
+
+[[package]]
+name = "tauri-plugin-shell"
+version = "2.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69d5eb3368b959937ad2aeaf6ef9a8f5d11e01ffe03629d3530707bbcb27ff5d"
+dependencies = [
+ "encoding_rs",
+ "log",
+ "open",
+ "os_pipe",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "shared_child",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.12",
+ "tokio",
 ]
 
 [[package]]

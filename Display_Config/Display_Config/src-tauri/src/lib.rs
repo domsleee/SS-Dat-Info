@@ -13,6 +13,7 @@ mod language;
 mod path_util;
 mod player_types;
 mod rd_config;
+mod relaunch;
 mod transfer_stats;
 mod updater;
 mod version_info;
@@ -32,6 +33,7 @@ fn show_window(app: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(
@@ -62,6 +64,7 @@ pub fn run() {
             download_and_extract::download_and_extract,
             channel_test::channel_test,
             version_info::get_version,
+            relaunch::relaunch,
             kill_exit_1
         ])
         .setup(|app| {
