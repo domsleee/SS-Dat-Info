@@ -1,5 +1,6 @@
 use crate::{path_util::get_supreme_folder, transfer_stats::TransferStats};
 use anyhow::Context;
+use anyhow::Result;
 use futures_util::TryStreamExt;
 use log::{error, info};
 use serde::Serialize;
@@ -61,7 +62,11 @@ async fn do_download_and_extract(
 
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(buffer))?;
 
-    info!("Extracting files to {}...", get_supreme_folder().display());
+    let temp_dir = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+    info!(
+        "Extracting files to {}, temp_folder {temp_dir:?}...",
+        get_supreme_folder().display()
+    );
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
         let outpath = get_supreme_folder().join(file.name());
@@ -78,7 +83,7 @@ async fn do_download_and_extract(
             }
 
             if outpath.exists() {
-                let temp_path: std::path::PathBuf = std::env::temp_dir().join(file.name());
+                let temp_path = temp_dir.join(file.name());
                 if let Some(parent) = temp_path.parent() {
                     if !parent.exists() {
                         std::fs::create_dir_all(parent).context("Failed to create_dir_all")?;

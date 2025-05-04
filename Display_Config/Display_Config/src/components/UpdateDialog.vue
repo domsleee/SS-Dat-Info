@@ -113,7 +113,7 @@
 
         <template v-slot:actions>
           <v-btn
-            text="Cancel"
+            text="Close"
             @click="closeDialog()"
           ></v-btn>
         </template>
@@ -140,23 +140,25 @@ const dialog = ref(false);
 const state = ref<State>({ key: StateKey.Checking });
 
 async function openDialog() {
-  dialog.value = true;
-  state.value = { key: StateKey.Checking };
-  const checkForUpdatesResult = await checkForUpdates();
-  if (checkForUpdatesResult.currentVersion === checkForUpdatesResult.latestVersion) {
+  await runWithErrorHandler(async () => {
+    dialog.value = true;
+    state.value = { key: StateKey.Checking };
+    const checkForUpdatesResult = await checkForUpdates();
+    if (checkForUpdatesResult.currentVersion === checkForUpdatesResult.latestVersion) {
+      state.value = {
+        key: StateKey.NoUpdateAvailable,
+        currentVersion: checkForUpdatesResult.currentVersion,
+        latestVersion: checkForUpdatesResult.latestVersion,
+      };
+      return;
+    }
+    
     state.value = {
-      key: StateKey.NoUpdateAvailable,
+      key: StateKey.UpdateAvailable,
       currentVersion: checkForUpdatesResult.currentVersion,
       latestVersion: checkForUpdatesResult.latestVersion,
     };
-    return;
-  }
-
-  state.value = {
-    key: StateKey.UpdateAvailable,
-    currentVersion: checkForUpdatesResult.currentVersion,
-    latestVersion: checkForUpdatesResult.latestVersion,
-  };
+  });
 }
 
 async function doDownload() {

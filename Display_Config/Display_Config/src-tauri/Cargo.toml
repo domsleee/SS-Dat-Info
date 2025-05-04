@@ -30,4 +30,15 @@ log = "0.4.27"
 futures-util = "0.3.31"
 anyhow = "1.0.98"
 tauri-plugin-log = "2.4.0"
-reqwest = { version = "0.12", features = ["stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "default-tls", "stream"] }
+uuid = { version = "1.16.0", features = ["v4"] }
+
+[profile.dev]
+incremental = true # Compile your binary in smaller steps.
+
+[profile.release]
+codegen-units = 1 # Allows LLVM to perform better optimization.
+lto = true # Enables link-time-optimizations.
+opt-level = "s" # Prioritizes small binary size. Use `3` if you prefer speed.
+panic = "abort" # Higher performance by disabling panic handlers.
+strip = true # Ensures debug symbols are removed.
