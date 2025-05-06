@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: cd Display_Config/Display_Config && bun install
-      - run: cd Display_Config/Display_Config && bun tauri build
+      - run: cd Display_Config/Display_Config && bun tauri build --debug
   displayConfigLintRust:
     name: displayConfig:lintRust
     runs-on: windows-latest
