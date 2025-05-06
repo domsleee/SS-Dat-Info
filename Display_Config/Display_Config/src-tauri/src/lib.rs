@@ -2,7 +2,6 @@ use cancellation_registry::CancellationRegistry;
 use tauri::Manager;
 
 mod cancellation_registry;
-mod channel_test;
 mod close_others;
 mod config_parser;
 mod config_writer;
@@ -64,7 +63,6 @@ pub fn run() {
             updater::check_for_updates,
             download_and_extract::download_and_extract,
             download_and_extract::cancel_download,
-            channel_test::channel_test,
             version_info::get_version,
             relaunch::relaunch,
             kill_exit_1
