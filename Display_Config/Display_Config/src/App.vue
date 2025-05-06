@@ -19,5 +19,13 @@ window.addEventListener("DOMContentLoaded", () => {
 </template>
 
 <style>
+a {
+  color: #6d8bef;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
 
 </style>

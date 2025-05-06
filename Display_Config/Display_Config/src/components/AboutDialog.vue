@@ -43,15 +43,3 @@ const openDialog = async () => {
 };
 defineExpose({ openDialog });
 </script>
-
-<style scoped>
-a {
-  color: #6d8bef;
-  text-decoration: none;
-}
-
-a:hover {
-  text-decoration: underline;
-}
-
-</style>
