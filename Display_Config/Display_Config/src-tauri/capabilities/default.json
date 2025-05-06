@@ -9,6 +9,7 @@
     "core:default",
     "process:default",
     "core:window:allow-set-focus",
-    "shell:default"
+    "shell:default",
+    "log:default"
   ]
 }

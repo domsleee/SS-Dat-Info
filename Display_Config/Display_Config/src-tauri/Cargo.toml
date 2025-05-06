@@ -27,7 +27,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 log = "0.4.27"
 futures-util = "0.3.31"
 anyhow = "1.0.98"
-tauri-plugin-log = "2.4.0"
+tauri-plugin-log = "2"
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "default-tls", "stream"] }
 uuid = { version = "1.16.0", features = ["v4"] }
 tauri-plugin-shell = "2"
