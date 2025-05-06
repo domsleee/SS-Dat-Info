@@ -1,5 +1,7 @@
+use cancellation_registry::CancellationRegistry;
 use tauri::Manager;
 
+mod cancellation_registry;
 mod channel_test;
 mod close_others;
 mod config_parser;
@@ -33,9 +35,8 @@ fn show_window(app: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_shell::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .target(tauri_plugin_log::Target::new(
@@ -62,12 +63,14 @@ pub fn run() {
             player_types::get_first_player_type,
             updater::check_for_updates,
             download_and_extract::download_and_extract,
+            download_and_extract::cancel_download,
             channel_test::channel_test,
             version_info::get_version,
             relaunch::relaunch,
             kill_exit_1
         ])
         .setup(|app| {
+            app.manage(CancellationRegistry::default());
             let window = app.get_webview_window("main").unwrap();
             let package_info = app.package_info();
             window.set_title(&format!(

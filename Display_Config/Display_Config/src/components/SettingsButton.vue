@@ -14,11 +14,11 @@
           icon="mdi-cog"
           size="large"
           class="settings-button"
-        ></v-btn>
+        />
       </template>
       
       <v-card elevation="16" rounded="lg" class="menu-card">
-        <v-divider></v-divider>
+        <v-divider />
         
         <v-list density="compact" bg-color="background">
           <v-list-item
@@ -30,8 +30,7 @@
             link
             class="menu-item my-1"
             @click="handleAction(item.action)"
-          >
-          </v-list-item>
+          />
         </v-list>
       </v-card>
     </v-menu>
@@ -63,10 +62,6 @@ const handleAction = (action) => {
 </script>
 
 <style scoped>
-.menu-item {
-  transition: background-color 0.2s ease;
-}
-
 .settings-button {
   transition: transform 0.2s ease;
 }

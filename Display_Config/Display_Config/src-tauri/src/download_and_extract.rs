@@ -1,3 +1,7 @@
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
+use crate::cancellation_registry::{CancellationRegistry, is_task_cancelled};
 use crate::{path_util::get_supreme_folder, transfer_stats::TransferStats};
 use anyhow::Context;
 use anyhow::Result;
@@ -15,25 +19,48 @@ pub enum DownloadEvent {
         total: u64,
         transfer_speed: u64,
     },
-}
 
+    #[serde(rename_all = "camelCase")]
+    Token { token: String },
+
+    #[serde(rename_all = "camelCase")]
+    DownloadCancelled,
+}
 #[tauri::command]
 pub async fn download_and_extract(
     url: String,
     on_event: Channel<DownloadEvent>,
-) -> Result<(), String> {
-    if let Err(e) = do_download_and_extract(url, on_event).await {
-        error!("Error: {:?}", e);
-        return Err(format!("download_and_extract error: {:?}", e));
+) -> Result<DownloadResult, String> {
+    let cancellation_registry = CancellationRegistry::instance();
+    let (id, token) = cancellation_registry.create_and_register_task();
+    on_event
+        .send(DownloadEvent::Token {
+            token: id.to_string(),
+        })
+        .expect("Can send token");
+    match do_download_and_extract(url, on_event, token).await {
+        Ok(result) => {
+            cancellation_registry.remove_task(&id);
+            Ok(result)
+        }
+        Err(e) => {
+            error!("Error: {:?}", e);
+            cancellation_registry.remove_task(&id);
+            Err(format!("download_and_extract error: {:?}", e))
+        }
     }
+}
 
-    Ok(())
+#[derive(Serialize)]
+pub struct DownloadResult {
+    installed: bool,
 }
 
 async fn do_download_and_extract(
     url: String,
     on_event: Channel<DownloadEvent>,
-) -> Result<(), Box<dyn std::error::Error>> {
+    token: Arc<AtomicBool>,
+) -> Result<DownloadResult, Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
     let response = client
         .get(url)
@@ -50,6 +77,10 @@ async fn do_download_and_extract(
     let mut stream = response.bytes_stream();
     let mut stats = TransferStats::default();
     while let Some(chunk) = stream.try_next().await.context("failed to try_next")? {
+        if is_task_cancelled(&token) {
+            on_event.send(DownloadEvent::DownloadCancelled)?;
+            return Ok(DownloadResult { installed: false });
+        }
         stats.record_chunk_transfer(chunk.len());
         buffer.extend_from_slice(&chunk);
         on_event.send(DownloadEvent::DownloadProgress {
@@ -70,6 +101,10 @@ async fn do_download_and_extract(
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
         let outpath = get_supreme_folder().join(file.name());
+        if is_task_cancelled(&token) {
+            on_event.send(DownloadEvent::DownloadCancelled)?;
+            return Ok(DownloadResult { installed: false });
+        }
 
         if file.name().ends_with('/') {
             if !outpath.exists() {
@@ -96,5 +131,15 @@ async fn do_download_and_extract(
         }
     }
     info!("Extraction complete.");
-    Ok(())
+    Ok(DownloadResult { installed: true })
+}
+
+#[tauri::command]
+pub fn cancel_download(id: String) -> bool {
+    let uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => return false,
+    };
+    let cancellation_registry = CancellationRegistry::instance();
+    cancellation_registry.cancel_task(&uuid)
 }
