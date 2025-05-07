@@ -9,14 +9,14 @@
   >
     <template v-slot:selection="{ item }">
       <div class="d-flex align-center">
-        <i :class="['mr-2', 'em', `em-flag-${item.raw.flag}`]"></i>
+        <span class="em mr-2">{{ getFlagEmoji(item.raw.flag) }}</span>
         {{ item.raw.name }}
       </div>
     </template>
     <template v-slot:item="{ item, props }">
       <v-list-item v-bind="props">
         <template v-slot:prepend>
-          <i :class="['mr-2', 'em', `em-flag-${item.raw.flag}`]"></i>
+          <span class="em mr-2">{{ getFlagEmoji(item.raw.flag) }}</span>
         </template>
         <template v-slot:title>
           {{ item.raw.name }}
@@ -26,8 +26,8 @@
   </v-select>
 </template>
 
-<script setup>
-import { ref, computed } from "vue";
+<script setup lang="ts">
+import { computed } from "vue";
 import { useRenderSettingsStore } from "@/stores/renderSettings";
 
 const { renderSettings } = useRenderSettingsStore();
@@ -49,11 +49,17 @@ const country = computed({
   }
 });
 
+function getFlagEmoji(countryCode: string): string {
+  return String.fromCodePoint(...[...countryCode.toUpperCase()].map(
+    char => 127397 + char.charCodeAt(0)
+  ));
+}
+
 </script>
 
 <style>
 .em {
-  width: 1.2em;
-  height: 1.2em;
+  font-size: 1.2em;
+  line-height: 1em;
 }
 </style>
