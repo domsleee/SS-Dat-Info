@@ -46,12 +46,22 @@ export async function writeDetailConfig() {
   return await invoke('write_detail_config', { detailConfig: getAsDetailConfig() })
 }
 
-function requiresInject(trainerSettings: TrainerSettings): boolean {
-  return trainerSettings.changeFov || trainerSettings.use4xFonts || trainerSettings.enableLogging || trainerSettings.makeGhostsOpaque || trainerSettings.matchGhostSoundsToCharacter || trainerSettings.disableDirectInput;
+export function requiresInject(trainerSettings: TrainerSettings): boolean {
+  return trainerSettings.changeFov
+    || trainerSettings.use4xFonts
+    || trainerSettings.enableLogging
+    || trainerSettings.makeGhostsOpaque
+    || trainerSettings.matchGhostSoundsToCharacter
+    || trainerSettings.disableDirectInput
+    || trainerSettings.enableCustomControls;
 }
 
 function getTrainerSettings(): TrainerSettings {
   const { trainerSettings } = useTrainerUISettingsStore();
+  return getTrainerSettingsFromUI(trainerSettings);
+}
+
+export function getTrainerSettingsFromUI(trainerSettings: TrainerUISettings): TrainerSettings {
   const changeFov = shouldChangeFov(trainerSettings);
 
   return {
@@ -63,6 +73,7 @@ function getTrainerSettings(): TrainerSettings {
     makeGhostsOpaque: trainerSettings.makeGhostsOpaque,
     matchGhostSoundsToCharacter: trainerSettings.matchGhostSoundsToCharacter,
     disableDirectInput: trainerSettings.disableDirectInput,
+    enableCustomControls: trainerSettings.enableCustomControls,
   };
 }
 
@@ -79,7 +90,7 @@ function shouldChangeFov(trainerSettings: TrainerUISettings): boolean {
 }
 
 
-interface TrainerSettings {
+export interface TrainerSettings {
   use4xFonts: boolean;
   changeFov: boolean;
   fovWidth?: number;
@@ -88,4 +99,5 @@ interface TrainerSettings {
   makeGhostsOpaque: boolean;
   matchGhostSoundsToCharacter: boolean;
   disableDirectInput: boolean;
+  enableCustomControls: boolean;
 }

@@ -26,4 +26,5 @@ export interface TrainerUISettings {
   makeGhostsOpaque: boolean;
   matchGhostSoundsToCharacter: boolean;
   disableDirectInput: boolean;
+  enableCustomControls: boolean;
 }

@@ -9,7 +9,7 @@ export const useTrainerUISettingsStore = defineStore(
   getPersistentSettings(getDefaultTrainerUISettings)
 );
 
-function getDefaultTrainerUISettings(): { trainerSettings: Ref<TrainerUISettings> } {
+export function getDefaultTrainerUISettings(): { trainerSettings: Ref<TrainerUISettings> } {
   const settings = ref<TrainerUISettings>({
     fovType: "MatchRes",
     use4xFonts: false,
@@ -19,6 +19,7 @@ function getDefaultTrainerUISettings(): { trainerSettings: Ref<TrainerUISettings
     makeGhostsOpaque: false,
     matchGhostSoundsToCharacter: false,
     disableDirectInput: false,
+    enableCustomControls: false,
   });
   return { trainerSettings: settings };
 }

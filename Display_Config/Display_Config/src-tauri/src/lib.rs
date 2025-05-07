@@ -1,9 +1,12 @@
+use cancellation_registry::CancellationRegistry;
 use tauri::Manager;
 
+mod cancellation_registry;
 mod close_others;
 mod config_parser;
 mod config_writer;
 mod detail_config;
+mod download_and_extract;
 mod file_commands;
 mod get_log_data;
 mod inject;
@@ -11,6 +14,10 @@ mod language;
 mod path_util;
 mod player_types;
 mod rd_config;
+mod relaunch;
+mod transfer_stats;
+mod updater;
+mod version_info;
 
 // fixme: is this really needed?
 #[tauri::command]
@@ -27,8 +34,19 @@ fn show_window(app: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Webview,
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             show_window,
             inject::run_inject,
@@ -43,9 +61,15 @@ pub fn run() {
             detail_config::read_detail_config,
             player_types::set_first_player_type,
             player_types::get_first_player_type,
+            updater::check_for_updates,
+            download_and_extract::download_and_extract,
+            download_and_extract::cancel_download,
+            version_info::get_version,
+            relaunch::relaunch,
             kill_exit_1
         ])
         .setup(|app| {
+            app.manage(CancellationRegistry::default());
             let window = app.get_webview_window("main").unwrap();
             let package_info = app.package_info();
             window.set_title(&format!(

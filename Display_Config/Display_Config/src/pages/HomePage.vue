@@ -5,6 +5,8 @@
       <TrainerOptions :formIsLoading="playLoading" class="mt-2" />
       <Autostart @auto-play="handleAutoplay()" />
       <div class="mt-2 ga-2 d-flex justify-end">
+        <DownloadLatestButton />
+        <SettingsButton />
         <v-btn size="x-large" color="indigo-darken-3" :loading="playLoading" @click="handlePlay">Play</v-btn>
         <v-btn size="x-large" color="" @click="handleExit">Exit</v-btn>
       </div>

@@ -5,7 +5,7 @@ all:
     task build
 
 display_config:
-    cd Display_Config && bun tauri build
+    cd Display_Config && bun tauri build;
     if (!(Test-Path ./output)) { mkdir output > $null }; \
     cp Display_Config\src-tauri\target\release\display-config.exe ./output/Display_Config.exe
 

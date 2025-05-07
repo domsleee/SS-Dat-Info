@@ -19,6 +19,19 @@ export const useErrorStore = defineStore("errorStore", {
   },
 });
 
+export async function runWithErrorHandler<T>(asyncFn: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await asyncFn();
+  } catch (e) {
+    const errorStore = useErrorStore();
+    if (e instanceof Error || typeof e === 'string') {
+      errorStore.setError(e);
+    } else {
+      errorStore.setError('Unknown error');
+    }
+  }
+}
+
 interface Options {
   logData: string[];
 }
