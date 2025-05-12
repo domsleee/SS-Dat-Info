@@ -20,7 +20,6 @@
     "@tauri-apps/plugin-process": "~2",
     "@tauri-apps/plugin-shell": "~2",
     "@vue/tsconfig": "^0.7.0",
-    "country-flag-emoji-polyfill": "^0.1.8",
     "pinia-plugin-persistedstate": "^4.2.0",
     "vue": "^3.5.13",
     "vuetify": "^3.8.3"
