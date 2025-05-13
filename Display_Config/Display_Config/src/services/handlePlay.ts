@@ -8,19 +8,20 @@ import type { Ref } from 'vue';
 import { useErrorStore } from '@/stores/errorStore';
 import type { TrainerUISettings } from './types';
 import { tryParseInt } from '../services/stringUtil';
+import { commands } from '@/bindings';
 
 export async function handlePlayAsync(playLoading: Ref<boolean>) {
   const errorStore = useErrorStore();
   console.log(useRenderSettingsStore().renderSettings);
   playLoading.value = true;
   try {
-    console.log(await invoke('read_rd_config'));
+    console.log(await commands.readRdConfig());
     console.log(await writeDetailConfig());
-    console.log(await invoke('write_rd_config', { rdConfig: getAsRdConfig() }));
-    console.log(await invoke('write_language', { language: useRenderSettingsStore().renderSettings.language }));
+    console.log(await commands.writeRdConfig(getAsRdConfig()));
+    console.log(await commands.writeLanguage(useRenderSettingsStore().renderSettings.language));
     const trainerSettings = getTrainerSettings();
     if (requiresInject(trainerSettings)) {
-      const r2 = await invoke('run_inject', { trainerSettings });
+      const r2 = commands.runInject(trainerSettings);
       console.log(r2);
     }
     await getCurrentWindow().setFocus();
@@ -43,7 +44,7 @@ export async function handlePlayAsync(playLoading: Ref<boolean>) {
 }
 
 export async function writeDetailConfig() {
-  return await invoke('write_detail_config', { detailConfig: getAsDetailConfig() })
+  return await commands.writeDetailConfig(getAsDetailConfig());
 }
 
 export function requiresInject(trainerSettings: TrainerSettings): boolean {
@@ -93,8 +94,8 @@ function shouldChangeFov(trainerSettings: TrainerUISettings): boolean {
 export interface TrainerSettings {
   use4xFonts: boolean;
   changeFov: boolean;
-  fovWidth?: number;
-  fovHeight?: number;
+  fovWidth: number | null;
+  fovHeight: number | null;
   enableLogging: boolean;
   makeGhostsOpaque: boolean;
   matchGhostSoundsToCharacter: boolean;

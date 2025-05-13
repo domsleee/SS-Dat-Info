@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::path_util::get_supreme_folder;
 
 #[tauri::command]
+#[specta::specta]
 pub fn write_detail_config(detail_config: DetailConfig) -> Result<(), String> {
     let detail_config_path = get_detail_config_path();
 
@@ -12,13 +13,15 @@ pub fn write_detail_config(detail_config: DetailConfig) -> Result<(), String> {
         .map_err(|e| format!("Failed to read {detail_config_path:?}: {}", e))?;
 
     let mut lines: Vec<String> = content.lines().map(String::from).collect();
-    let configs = [
-        (
-            "visibility_cube_width",
-            detail_config.render_distance.to_string(),
-        ),
-        ("ground_detail", detail_config.ground_detail.to_string()),
-    ];
+    let configs: Vec<(String, String)> = [
+        ("visibility_cube_width", detail_config.render_distance.map(|n| n.to_string())),
+        ("ground_detail", detail_config.ground_detail.map(|n| n.to_string())),
+    ]
+    .into_iter()
+    .filter_map(|(key, opt_value)| {
+        opt_value.map(|value| (key.to_string(), value))
+    })
+    .collect();
 
     let mut found = vec![false; configs.len()];
 
@@ -51,6 +54,7 @@ fn get_detail_config_path() -> std::path::PathBuf {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn read_detail_config() -> Result<Vec<(String, String)>, String> {
     let detail_config_path = get_detail_config_path();
     let mut res = Vec::new();
@@ -71,9 +75,9 @@ pub fn read_detail_config() -> Result<Vec<(String, String)>, String> {
     Ok(res)
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DetailConfig {
-    pub render_distance: i32,
-    pub ground_detail: i32,
+    pub render_distance: Option<i32>,
+    pub ground_detail: Option<i32>,
 }

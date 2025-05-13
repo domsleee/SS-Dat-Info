@@ -4,6 +4,7 @@ use std::io::Write;
 use crate::path_util::get_supreme_folder;
 
 #[tauri::command]
+#[specta::specta]
 pub fn write_language(language: String) -> Result<(), String> {
     let language_file = get_supreme_folder().join("Saved_Data").join("language.txt");
 
