@@ -1,9 +1,14 @@
+import { commands, type DownloadEvent } from "@/bindings";
 import { runWithErrorHandler } from "@/stores/errorStore";
 import { useUpdateDialogStore } from "@/stores/updateDialogStore";
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel } from "@tauri-apps/api/core";
 
 export async function checkForUpdates(): Promise<{ currentVersion: string; latestVersion: string; }> {
-  return await invoke('check_for_updates');
+  const x = (await commands.checkForUpdates());
+  if (x.status === 'ok') {
+    return x.data;
+  }
+  throw x.error;
 }
 
 export async function update(latestVersion: string): Promise<void> {
@@ -26,34 +31,15 @@ export async function update(latestVersion: string): Promise<void> {
         state.state.progress = parseFloat(((progressTotal / total) * 100).toFixed(0));
       }
     });
-    const { installed } = await invoke<{installed: boolean}>('download_and_extract', {
-      url,
-      onEvent
-    });
-
+    const res = await commands.downloadAndExtract(url, onEvent);
+    if (res.status === 'error') throw res.error;
+    const { installed } = res.data;
     if (!installed) return;
 
     state.state = {
       key: 'finished',
       latestVersion,
     };
-    invoke('relaunch');
+    commands.relaunch();
   });
 }
-
-type DownloadEvent =
-  {
-    event: 'downloadProgress';
-    data: {
-      progress: number;
-      progressTotal: number;
-      total: number;
-      transfer_speed: number;
-    };
-  }
-  | {
-    event: 'token';
-    data: {
-      token: string;
-    }
-  }

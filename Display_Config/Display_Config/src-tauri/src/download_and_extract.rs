@@ -9,7 +9,7 @@ use futures_util::TryStreamExt;
 use log::{error, info};
 use serde::Serialize;
 use tauri::ipc::Channel;
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase", tag = "event", content = "data")]
 pub enum DownloadEvent {
     #[serde(rename_all = "camelCase")]
@@ -27,6 +27,7 @@ pub enum DownloadEvent {
     DownloadCancelled,
 }
 #[tauri::command]
+#[specta::specta]
 pub async fn download_and_extract(
     url: String,
     on_event: Channel<DownloadEvent>,
@@ -51,7 +52,7 @@ pub async fn download_and_extract(
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, specta::Type)]
 pub struct DownloadResult {
     installed: bool,
 }
@@ -135,6 +136,7 @@ async fn do_download_and_extract(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn cancel_download(id: String) -> bool {
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(id) => id,

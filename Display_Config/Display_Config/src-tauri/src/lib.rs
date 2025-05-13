@@ -21,18 +21,53 @@ mod version_info;
 
 // fixme: is this really needed?
 #[tauri::command]
+#[specta::specta]
 fn kill_exit_1() -> String {
     std::process::exit(1);
 }
 
 // crazy hack: https://github.com/tauri-apps/tauri/issues/1564
 #[tauri::command]
+#[specta::specta]
 fn show_window(app: tauri::AppHandle) {
     app.get_webview_window("main").unwrap().show().unwrap();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let builder = tauri_specta::Builder::new().commands(tauri_specta::collect_commands![
+        show_window,
+        inject::run_inject,
+        rd_config::read_rd_config,
+        rd_config::write_rd_config,
+        file_commands::open_log_file,
+        file_commands::open_player_types,
+        close_others::close_others,
+        get_log_data::get_log_data,
+        language::write_language,
+        detail_config::write_detail_config,
+        detail_config::read_detail_config,
+        player_types::set_first_player_type,
+        player_types::get_first_player_type,
+        updater::check_for_updates,
+        download_and_extract::download_and_extract,
+        download_and_extract::cancel_download,
+        version_info::get_version,
+        relaunch::relaunch,
+        kill_exit_1
+    ]);
+
+    #[cfg(debug_assertions)]
+    builder
+        .export(
+            specta_typescript::Typescript::default()
+                .header("// eslint-disable\n// @ts-nocheck")
+                .bigint(specta_typescript::BigIntExportBehavior::Number)
+                .formatter(specta_typescript::formatter::eslint),
+            "../src/bindings.ts",
+        )
+        .expect("Failed to export typescript bindings");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -42,32 +77,9 @@ pub fn run() {
                 .target(tauri_plugin_log::Target::new(
                     tauri_plugin_log::TargetKind::Webview,
                 ))
-                .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::Stdout,
-                ))
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![
-            show_window,
-            inject::run_inject,
-            rd_config::read_rd_config,
-            rd_config::write_rd_config,
-            file_commands::open_log_file,
-            file_commands::open_player_types,
-            close_others::close_others,
-            get_log_data::get_log_data,
-            language::write_language,
-            detail_config::write_detail_config,
-            detail_config::read_detail_config,
-            player_types::set_first_player_type,
-            player_types::get_first_player_type,
-            updater::check_for_updates,
-            download_and_extract::download_and_extract,
-            download_and_extract::cancel_download,
-            version_info::get_version,
-            relaunch::relaunch,
-            kill_exit_1
-        ])
+        .invoke_handler(builder.invoke_handler())
         .setup(|app| {
             app.manage(CancellationRegistry::default());
             let window = app.get_webview_window("main").unwrap();

@@ -1,6 +1,6 @@
 
-export function tryParseInt(value: string | number | undefined): number | undefined {
-  if (value === undefined) return undefined;
+export function tryParseInt(value: string | number | undefined): number | null {
+  if (value === undefined) return null;
   const parsedValue = parseInt((value as unknown as string) ?? '');
-  return isNaN(parsedValue) ? undefined : parsedValue;
+  return isNaN(parsedValue) ? null : parsedValue;
 }

@@ -8,6 +8,6 @@ export interface RdConfig {
 }
 
 export interface DetailConfig {
-  renderDistance: number | undefined;
-  groundDetail: number | undefined;
+  renderDistance: number | null;
+  groundDetail: number | null;
 }

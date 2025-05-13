@@ -29,7 +29,7 @@
 </template>
 
 <script setup>
-import { invoke } from '@tauri-apps/api/core';
+import { commands } from "@/bindings";
 import { ref } from 'vue';
 
 const dialog = ref(false);
@@ -37,9 +37,7 @@ const version = ref('');
 
 const openDialog = async () => {
   dialog.value = true;
-  invoke('get_version').then((versionValue) => {
-    version.value = versionValue;
-  });
+  version.value = await commands.relaunch();
 };
 defineExpose({ openDialog });
 </script>

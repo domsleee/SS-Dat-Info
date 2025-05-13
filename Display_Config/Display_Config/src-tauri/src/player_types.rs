@@ -7,6 +7,7 @@ use crate::{
 };
 
 #[tauri::command]
+#[specta::specta]
 pub fn set_first_player_type(character: String) -> Result<(), String> {
     let character = character.trim().to_lowercase();
     if get_first_player_type()? == character {
@@ -32,6 +33,7 @@ pub fn set_first_player_type(character: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn get_first_player_type() -> Result<String, String> {
     // return Ok("HEY!".to_string());
     let config: Vec<ConfigEntry> =

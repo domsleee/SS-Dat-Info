@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::path_util::get_supreme_folder;
 
 #[tauri::command]
+#[specta::specta]
 pub fn read_rd_config() -> String {
     let supreme_folder = get_supreme_folder();
     let rd_config = supreme_folder.join("rd_config.txt");
@@ -64,6 +65,7 @@ pub fn read_rd_config() -> String {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn write_rd_config(rd_config: RdConfig) -> Result<(), String> {
     let rd_config_path = get_supreme_folder().join("rd_config.txt");
     let mut file = File::create(&rd_config_path)
@@ -84,7 +86,7 @@ pub fn write_rd_config(rd_config: RdConfig) -> Result<(), String> {
         .map_err(|e| format!("Failed to write config: {}", e))
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RdConfig {
     pub api_name: String,

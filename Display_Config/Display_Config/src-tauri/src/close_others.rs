@@ -1,6 +1,7 @@
 use sysinfo::{Pid, System};
 
 #[tauri::command]
+#[specta::specta]
 pub fn close_others() -> Result<(), String> {
     let mut system = System::new_all();
     system.refresh_all();

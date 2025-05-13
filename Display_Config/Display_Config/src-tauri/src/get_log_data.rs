@@ -1,4 +1,5 @@
 #[tauri::command]
+#[specta::specta]
 pub fn get_log_data() -> Vec<String> {
     let log_path = crate::inject::get_log_path();
 

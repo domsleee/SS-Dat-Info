@@ -128,7 +128,7 @@ import { checkForUpdates } from '@/services/updaterService';
 import { update } from '@/services/updaterService';
 import { runWithErrorHandler } from '@/stores/errorStore';
 import { useUpdateDialogStore } from '@/stores/updateDialogStore';
-import { invoke } from '@tauri-apps/api/core';
+import { commands } from '@/bindings';
 
 const state = useUpdateDialogStore();
 const isOpen = computed(() => state.state.key !== 'closed')
@@ -161,7 +161,7 @@ function getReleaseLink(version: string) {
 
 function closeDialog() {
   if (state.state.key === 'downloading' && state.state.token) {
-    invoke('cancel_download', { id: state.state.token });
+    commands.cancelDownload(state.state.token);
   }
   state.state.key = 'closed';
 }
