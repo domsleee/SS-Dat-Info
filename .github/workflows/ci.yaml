@@ -34,13 +34,21 @@ jobs:
   displayConfigBuild:
     name: displayConfig:build
     runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: cd Display_Config/Display_Config && bun install
+      - run: cd Display_Config/Display_Config && bun tauri build --debug
+  displayConfigBindings:
+    name: displayConfig:bindings
+    runs-on: windows-latest
     env:
       BINDINGS_PATH: "Display_Config/Display_Config/src/bindings.ts"
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: cd Display_Config/Display_Config && bun install
-      - run: cd Display_Config/Display_Config && bun tauri build --debug
+      - run: cd Display_Config/Display_Config && cargo run --bin codegen
       - name: Check if bindings.ts exists
         run: |
           if [ ! -f "${{ env.BINDINGS_PATH }}" ]; then
@@ -50,7 +58,7 @@ jobs:
         shell: bash
       - name: Check if bindings.ts is unchanged
         run: |
-          git diff --quiet HEAD -- "${{ env.BINDINGS_PATH }}" || (echo "bindings.ts has been modified" && exit 1)
+          git diff HEAD -- "${{ env.BINDINGS_PATH }}" || (echo "bindings.ts has been modified" && exit 1)
         shell: bash
   displayConfigLintRust:
     name: displayConfig:lintRust

@@ -35,6 +35,41 @@ fn show_window(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let builder = get_tauri_specta_builder();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_log::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Webview,
+                ))
+                .build(),
+        )
+        .invoke_handler(builder.invoke_handler())
+        .setup(|app| {
+            app.manage(CancellationRegistry::default());
+            let window = app.get_webview_window("main").unwrap();
+            let package_info = app.package_info();
+            window.set_title(&format!(
+                "Supreme Snowboarding Config {}",
+                package_info.version
+            ))?;
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    std::process::exit(1);
+                }
+            });
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+pub fn get_tauri_specta_builder() -> tauri_specta::Builder {
     let builder = tauri_specta::Builder::new().commands(tauri_specta::collect_commands![
         show_window,
         inject::run_inject,
@@ -68,34 +103,5 @@ pub fn run() {
         )
         .expect("Failed to export typescript bindings");
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_shell::init())
-        .plugin(
-            tauri_plugin_log::Builder::new()
-                .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::Webview,
-                ))
-                .build(),
-        )
-        .invoke_handler(builder.invoke_handler())
-        .setup(|app| {
-            app.manage(CancellationRegistry::default());
-            let window = app.get_webview_window("main").unwrap();
-            let package_info = app.package_info();
-            window.set_title(&format!(
-                "Supreme Snowboarding Config {}",
-                package_info.version
-            ))?;
-            window.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    std::process::exit(1);
-                }
-            });
-            Ok(())
-        })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    builder
 }
