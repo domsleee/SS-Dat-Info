@@ -14,13 +14,17 @@ pub fn write_detail_config(detail_config: DetailConfig) -> Result<(), String> {
 
     let mut lines: Vec<String> = content.lines().map(String::from).collect();
     let configs: Vec<(String, String)> = [
-        ("visibility_cube_width", detail_config.render_distance.map(|n| n.to_string())),
-        ("ground_detail", detail_config.ground_detail.map(|n| n.to_string())),
+        (
+            "visibility_cube_width",
+            detail_config.render_distance.map(|n| n.to_string()),
+        ),
+        (
+            "ground_detail",
+            detail_config.ground_detail.map(|n| n.to_string()),
+        ),
     ]
     .into_iter()
-    .filter_map(|(key, opt_value)| {
-        opt_value.map(|value| (key.to_string(), value))
-    })
+    .filter_map(|(key, opt_value)| opt_value.map(|value| (key.to_string(), value)))
     .collect();
 
     let mut found = vec![false; configs.len()];
