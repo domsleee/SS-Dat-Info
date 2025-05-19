@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: cd Display_Config/Display_Config && bun install
-      - run: cd Display_Config/Display_Config && cargo run --bin codegen
+      - run: cd Display_Config/Display_Config/src-tauri && cargo run --bin codegen
       - name: Check if bindings.ts exists
         run: |
           if [ ! -f "${{ env.BINDINGS_PATH }}" ]; then
