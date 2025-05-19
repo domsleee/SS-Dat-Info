@@ -58,7 +58,11 @@ jobs:
         shell: bash
       - name: Check if bindings.ts is unchanged
         run: |
-          git diff HEAD -- "${{ env.BINDINGS_PATH }}" || (echo "bindings.ts has been modified" && exit 1)
+          git diff --color HEAD -- "${{ env.BINDINGS_PATH }}"
+          if [ $? -ne 0 ] || [ -n "$(git diff HEAD -- "${{ env.BINDINGS_PATH }}")" ]; then
+            echo "bindings.ts has been modified"
+            exit 1
+          fi
         shell: bash
   displayConfigLintRust:
     name: displayConfig:lintRust
