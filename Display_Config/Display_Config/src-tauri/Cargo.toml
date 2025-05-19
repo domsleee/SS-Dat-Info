@@ -4,6 +4,7 @@ version = "0.4.0"
 description = "A launcher for Supreme Snowboarding."
 authors = ["domslee"]
 edition = "2024"
+default-run = "display-config"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -36,6 +37,7 @@ tauri-plugin-process = "2"
 specta = "=2.0.0-rc.22"
 specta-typescript = "0.0.9"
 tauri-specta = { version = "=2.0.0-rc.21", features = ["typescript"] }
+
 
 # From https://v2.tauri.app/concept/size/
 [profile.dev]
