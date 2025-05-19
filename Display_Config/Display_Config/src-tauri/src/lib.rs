@@ -96,7 +96,7 @@ pub fn get_tauri_specta_builder() -> tauri_specta::Builder {
     builder
         .export(
             specta_typescript::Typescript::default()
-                .header("/* eslint-disable */\n// @ts-nocheck")
+                .header("/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */\n// @ts-nocheck")
                 .bigint(specta_typescript::BigIntExportBehavior::Number)
                 .formatter(specta_typescript::formatter::eslint),
             "../src/bindings.ts",
