@@ -21,7 +21,7 @@ export async function handlePlayAsync(playLoading: Ref<boolean>) {
     console.log(await commands.writeLanguage(useRenderSettingsStore().renderSettings.language));
     const trainerSettings = getTrainerSettings();
     if (requiresInject(trainerSettings)) {
-      const r2 = commands.runInject(trainerSettings);
+      const r2 = await commands.runInject(trainerSettings);
       console.log(r2);
     }
     await getCurrentWindow().setFocus();
