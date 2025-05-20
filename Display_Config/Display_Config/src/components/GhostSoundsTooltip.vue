@@ -6,7 +6,7 @@
     <template v-slot:activator="{ props }">
       <v-icon
         @click="openPlayerTypes"
-        icon="mdi-information"
+        :icon="mdiInformation"
         class="text-medium-emphasis"
         v-bind="props"
       ></v-icon>
@@ -16,6 +16,7 @@
 
 <script lang="ts" setup>
 import { commands } from '@/bindings';
+import { mdiInformation } from '@mdi/js';
 
 function openPlayerTypes() {
   commands.openPlayerTypes();

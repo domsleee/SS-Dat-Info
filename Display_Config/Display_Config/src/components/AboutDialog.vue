@@ -1,7 +1,7 @@
 <template>
   <div>
     <v-dialog v-model="dialog" max-width="600px">
-      <v-card prepend-icon="mdi-information-outline" title="About">
+      <v-card :prepend-icon="mdiInformationOutline" title="About">
         <v-card-text>
           <h3 class="mb-3">Version {{ version }}</h3>
 
@@ -31,6 +31,7 @@
 <script setup>
 import { commands } from "@/bindings";
 import { ref } from 'vue';
+import { mdiInformationOutline } from "@mdi/js";
 
 const dialog = ref(false);
 const version = ref('');

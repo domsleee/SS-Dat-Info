@@ -4,7 +4,7 @@
       <template v-slot:activator="{ props }">
         <v-btn 
           v-bind="props"
-          icon="mdi-download" 
+          :icon="mdiDownload" 
           variant="text" 
           color="green-darken-1" 
           size="large"
@@ -18,6 +18,7 @@
 <script lang="ts" setup>
 import { checkForUpdates, update } from '@/services/updaterService';
 import { ref } from 'vue';
+import { mdiDownload } from '@mdi/js';
 
 const hasUpdate = ref(false);
 let updateStatus = {

@@ -5,10 +5,14 @@
   >
     <template v-slot:activator="{ props }">
       <v-icon
-        icon="mdi-information"
+        :icon="mdiInformation"
         class="text-medium-emphasis"
         v-bind="props"
       ></v-icon>
     </template>
   </v-tooltip>
 </template>
+
+<script lang="ts" setup>
+import { mdiInformation } from '@mdi/js';
+</script>
