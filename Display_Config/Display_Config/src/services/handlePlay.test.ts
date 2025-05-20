@@ -9,7 +9,8 @@ describe('handlePlay', () => {
     trainerSettings.changeFov = false;
     expect(requiresInject(trainerSettings)).toBe(false);
 
-    const boolKeys = Object.keys(trainerSettings).filter(key => trainerSettings[key] === false || trainerSettings[key] === true);
+    const boolKeys = (Object.keys(trainerSettings) as (keyof typeof trainerSettings)[])
+      .filter(key => trainerSettings[key] === false || trainerSettings[key] === true);
     const original = Object.freeze(trainerSettings);
     for (const key of boolKeys) {
       const newSettings = { ...original, [key]: true };
