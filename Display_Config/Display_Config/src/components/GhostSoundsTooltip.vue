@@ -15,10 +15,9 @@
 </template>
 
 <script lang="ts" setup>
-import { invoke } from '@tauri-apps/api/core';
-
+import { commands } from '@/bindings';
 
 function openPlayerTypes() {
-  invoke('open_player_types');
+  commands.openPlayerTypes();
 }
 </script>

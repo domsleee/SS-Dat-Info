@@ -1,7 +1,7 @@
 use crate::version_info::get_version;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
     current_version: String,
@@ -9,6 +9,7 @@ pub struct UpdateInfo {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn check_for_updates() -> Result<UpdateInfo, String> {
     let current_version = get_version();
     let latest_version = match fetch_latest_version().await {

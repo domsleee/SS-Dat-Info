@@ -8,7 +8,7 @@
 <script lang="ts" setup>
 import { ref, watch } from "vue";
 import { useAutostartStore } from '../stores/autostartStore';
-import { invoke } from "@tauri-apps/api/core";
+import { commands } from "@/bindings";
 
 const emit = defineEmits(["auto-play"]);
 const { settings } = useAutostartStore();
@@ -29,7 +29,7 @@ if (settings.autostart) {
 }
 
 if (settings.autoCloseOthers) {
-  invoke("close_others");
+  commands.closeOthers();
 }
 
 watch(() => settings.autostart, (newValue) => {

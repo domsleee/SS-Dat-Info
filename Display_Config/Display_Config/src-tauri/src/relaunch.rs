@@ -3,6 +3,7 @@ use tauri::Manager;
 use tauri_plugin_shell::ShellExt;
 
 #[tauri::command]
+#[specta::specta]
 pub async fn relaunch(app: tauri::AppHandle) {
     app.get_webview_window("main").unwrap().hide().unwrap();
 

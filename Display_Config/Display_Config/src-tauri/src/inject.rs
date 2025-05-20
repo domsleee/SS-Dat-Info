@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::path_util::get_supreme_folder;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TrainerSettings {
+    #[specta(rename = "use4xFonts")]
     pub use4x_fonts: bool,
     pub change_fov: bool,
     pub fov_width: Option<i32>,
@@ -19,6 +20,7 @@ pub struct TrainerSettings {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn run_inject(trainer_settings: TrainerSettings) -> Result<String, String> {
     let supreme_folder = get_supreme_folder();
     let display_config_resources = supreme_folder.join("Display_Config_Resources");

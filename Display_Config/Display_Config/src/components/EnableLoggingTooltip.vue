@@ -15,9 +15,9 @@
 </template>
 
 <script lang="ts" setup>
-import { invoke } from '@tauri-apps/api/core';
+import { commands } from '@/bindings';
 
 function openLogFile() {
-  invoke('open_log_file');
+  commands.openLogFile();
 }
 </script>
