@@ -38,7 +38,7 @@ const version = ref('');
 
 const openDialog = async () => {
   dialog.value = true;
-  version.value = await commands.relaunch();
+  version.value = await commands.getVersion();
 };
 defineExpose({ openDialog });
 </script>

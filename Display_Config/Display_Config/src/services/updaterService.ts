@@ -34,6 +34,6 @@ export async function update(latestVersion: string): Promise<void> {
       key: 'finished',
       latestVersion,
     };
-    commands.relaunch();
+    await commands.relaunch();
   });
 }
