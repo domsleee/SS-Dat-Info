@@ -16,7 +16,6 @@
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "@mdi/font": "^7.4.47",
     "@mdi/js": "^7.4.47",
     "@tauri-apps/api": "^2.5.0",
     "@tauri-apps/plugin-log": "~2",
