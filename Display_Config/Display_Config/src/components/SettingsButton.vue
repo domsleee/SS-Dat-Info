@@ -11,7 +11,7 @@
       <template v-slot:activator="{ props }">
         <v-btn
           v-bind="props"
-          icon="mdi-cog"
+          :icon="mdiCog"
           size="large"
           class="settings-button"
         />
@@ -41,14 +41,15 @@
 </template>
 
 <script setup>
+import { mdiCog, mdiInformationOutline, mdiUpdate } from '@mdi/js';
 import { ref } from 'vue';
 const aboutDialog = ref(null);
 const updateDialog = ref(null);
 
 const menu = ref(false);
 const items = ref([
-  { title: 'Check for updates', icon: 'mdi-update', action: 'checkUpdates' },
-  { title: 'About', icon: 'mdi-information-outline', action: 'about' },
+  { title: 'Check for updates', icon: mdiUpdate, action: 'checkUpdates' },
+  { title: 'About', icon: mdiInformationOutline, action: 'about' },
 ]);
 
 const handleAction = (action) => {

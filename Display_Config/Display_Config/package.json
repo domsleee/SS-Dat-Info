@@ -12,17 +12,18 @@
     "test": "bun test",
     "check:rust-clippy": "cd src-tauri && cargo clippy -- -D warnings",
     "check:rust-fmt": "cd src-tauri && cargo fmt --all -- --check",
-    "check:all": "bun lint && bun test && bun check:rust-clippy && bun check:rust-fmt",
+    "check:all": "bun lint && bun test && bun typecheck && bun check:rust-clippy && bun check:rust-fmt",
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "@mdi/font": "^7.4.47",
+    "@mdi/js": "^7.4.47",
     "@tauri-apps/api": "^2.5.0",
     "@tauri-apps/plugin-log": "~2",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "~2",
     "@tauri-apps/plugin-shell": "~2",
     "@vue/tsconfig": "^0.7.0",
+    "destr": "^2.0.5",
     "pinia-plugin-persistedstate": "^4.2.0",
     "vue": "^3.5.13",
     "vuetify": "^3.8.3"

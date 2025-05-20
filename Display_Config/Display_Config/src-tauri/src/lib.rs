@@ -1,5 +1,6 @@
 use cancellation_registry::CancellationRegistry;
 use tauri::Manager;
+use tauri_specta::ErrorHandlingMode;
 
 mod cancellation_registry;
 mod close_others;
@@ -70,27 +71,29 @@ pub fn run() {
 }
 
 pub fn get_tauri_specta_builder() -> tauri_specta::Builder {
-    let builder = tauri_specta::Builder::new().commands(tauri_specta::collect_commands![
-        show_window,
-        inject::run_inject,
-        rd_config::read_rd_config,
-        rd_config::write_rd_config,
-        file_commands::open_log_file,
-        file_commands::open_player_types,
-        close_others::close_others,
-        get_log_data::get_log_data,
-        language::write_language,
-        detail_config::write_detail_config,
-        detail_config::read_detail_config,
-        player_types::set_first_player_type,
-        player_types::get_first_player_type,
-        updater::check_for_updates,
-        download_and_extract::download_and_extract,
-        download_and_extract::cancel_download,
-        version_info::get_version,
-        relaunch::relaunch,
-        kill_exit_1
-    ]);
+    let builder = tauri_specta::Builder::new()
+        .commands(tauri_specta::collect_commands![
+            show_window,
+            inject::run_inject,
+            rd_config::read_rd_config,
+            rd_config::write_rd_config,
+            file_commands::open_log_file,
+            file_commands::open_player_types,
+            close_others::close_others,
+            get_log_data::get_log_data,
+            language::write_language,
+            detail_config::write_detail_config,
+            detail_config::read_detail_config,
+            player_types::set_first_player_type,
+            player_types::get_first_player_type,
+            updater::check_for_updates,
+            download_and_extract::download_and_extract,
+            download_and_extract::cancel_download,
+            version_info::get_version,
+            relaunch::relaunch,
+            kill_exit_1
+        ])
+        .error_handling(ErrorHandlingMode::Throw);
 
     #[cfg(debug_assertions)]
     builder

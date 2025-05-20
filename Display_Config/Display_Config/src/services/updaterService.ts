@@ -4,11 +4,7 @@ import { useUpdateDialogStore } from "@/stores/updateDialogStore";
 import { Channel } from "@tauri-apps/api/core";
 
 export async function checkForUpdates(): Promise<{ currentVersion: string; latestVersion: string; }> {
-  const x = (await commands.checkForUpdates());
-  if (x.status === 'ok') {
-    return x.data;
-  }
-  throw x.error;
+  return (await commands.checkForUpdates());
 }
 
 export async function update(latestVersion: string): Promise<void> {
@@ -31,15 +27,13 @@ export async function update(latestVersion: string): Promise<void> {
         state.state.progress = parseFloat(((progressTotal / total) * 100).toFixed(0));
       }
     });
-    const res = await commands.downloadAndExtract(url, onEvent);
-    if (res.status === 'error') throw res.error;
-    const { installed } = res.data;
+    const { installed } = await commands.downloadAndExtract(url, onEvent);
     if (!installed) return;
 
     state.state = {
       key: 'finished',
       latestVersion,
     };
-    commands.relaunch();
+    await commands.relaunch();
   });
 }

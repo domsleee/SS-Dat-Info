@@ -11,7 +11,7 @@
             :items="renderDevices"
           />
           <v-select
-            v-model="renderSettings.cardId"
+            v-model="renderSettings.cardId as unknown as string"
             label="Card ID"
             :disabled="formIsLoading || getCardIds(renderSettings.renderer).isLoading"
             :items="getCardIds(renderSettings.renderer).value"

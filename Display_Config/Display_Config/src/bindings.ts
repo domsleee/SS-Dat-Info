@@ -9,107 +9,47 @@ export const commands = {
   async showWindow() : Promise<void> {
     await TAURI_INVOKE("show_window");
   },
-  async runInject(trainerSettings: TrainerSettings) : Promise<Result<string, string>> {
-    try {
-      return { status: "ok", data: await TAURI_INVOKE("run_inject", { trainerSettings }) };
-    } catch (e) {
-      if(e instanceof Error) throw e;
-      else return { status: "error", error: e  as any };
-    }
+  async runInject(trainerSettings: TrainerSettings) : Promise<string> {
+    return await TAURI_INVOKE("run_inject", { trainerSettings });
   },
   async readRdConfig() : Promise<string> {
     return await TAURI_INVOKE("read_rd_config");
   },
-  async writeRdConfig(rdConfig: RdConfig) : Promise<Result<null, string>> {
-    try {
-      return { status: "ok", data: await TAURI_INVOKE("write_rd_config", { rdConfig }) };
-    } catch (e) {
-      if(e instanceof Error) throw e;
-      else return { status: "error", error: e  as any };
-    }
+  async writeRdConfig(rdConfig: RdConfig) : Promise<null> {
+    return await TAURI_INVOKE("write_rd_config", { rdConfig });
   },
-  async openLogFile() : Promise<Result<null, string>> {
-    try {
-      return { status: "ok", data: await TAURI_INVOKE("open_log_file") };
-    } catch (e) {
-      if(e instanceof Error) throw e;
-      else return { status: "error", error: e  as any };
-    }
+  async openLogFile() : Promise<null> {
+    return await TAURI_INVOKE("open_log_file");
   },
-  async openPlayerTypes() : Promise<Result<null, string>> {
-    try {
-      return { status: "ok", data: await TAURI_INVOKE("open_player_types") };
-    } catch (e) {
-      if(e instanceof Error) throw e;
-      else return { status: "error", error: e  as any };
-    }
+  async openPlayerTypes() : Promise<null> {
+    return await TAURI_INVOKE("open_player_types");
   },
-  async closeOthers() : Promise<Result<null, string>> {
-    try {
-      return { status: "ok", data: await TAURI_INVOKE("close_others") };
-    } catch (e) {
-      if(e instanceof Error) throw e;
-      else return { status: "error", error: e  as any };
-    }
+  async closeOthers() : Promise<null> {
+    return await TAURI_INVOKE("close_others");
   },
   async getLogData() : Promise<string[]> {
     return await TAURI_INVOKE("get_log_data");
   },
-  async writeLanguage(language: string) : Promise<Result<null, string>> {
-    try {
-      return { status: "ok", data: await TAURI_INVOKE("write_language", { language }) };
-    } catch (e) {
-      if(e instanceof Error) throw e;
-      else return { status: "error", error: e  as any };
-    }
+  async writeLanguage(language: string) : Promise<null> {
+    return await TAURI_INVOKE("write_language", { language });
   },
-  async writeDetailConfig(detailConfig: DetailConfig) : Promise<Result<null, string>> {
-    try {
-      return { status: "ok", data: await TAURI_INVOKE("write_detail_config", { detailConfig }) };
-    } catch (e) {
-      if(e instanceof Error) throw e;
-      else return { status: "error", error: e  as any };
-    }
+  async writeDetailConfig(detailConfig: DetailConfig) : Promise<null> {
+    return await TAURI_INVOKE("write_detail_config", { detailConfig });
   },
-  async readDetailConfig() : Promise<Result<([string, string])[], string>> {
-    try {
-      return { status: "ok", data: await TAURI_INVOKE("read_detail_config") };
-    } catch (e) {
-      if(e instanceof Error) throw e;
-      else return { status: "error", error: e  as any };
-    }
+  async readDetailConfig() : Promise<([string, string])[]> {
+    return await TAURI_INVOKE("read_detail_config");
   },
-  async setFirstPlayerType(character: string) : Promise<Result<null, string>> {
-    try {
-      return { status: "ok", data: await TAURI_INVOKE("set_first_player_type", { character }) };
-    } catch (e) {
-      if(e instanceof Error) throw e;
-      else return { status: "error", error: e  as any };
-    }
+  async setFirstPlayerType(character: string) : Promise<null> {
+    return await TAURI_INVOKE("set_first_player_type", { character });
   },
-  async getFirstPlayerType() : Promise<Result<string, string>> {
-    try {
-      return { status: "ok", data: await TAURI_INVOKE("get_first_player_type") };
-    } catch (e) {
-      if(e instanceof Error) throw e;
-      else return { status: "error", error: e  as any };
-    }
+  async getFirstPlayerType() : Promise<string> {
+    return await TAURI_INVOKE("get_first_player_type");
   },
-  async checkForUpdates() : Promise<Result<UpdateInfo, string>> {
-    try {
-      return { status: "ok", data: await TAURI_INVOKE("check_for_updates") };
-    } catch (e) {
-      if(e instanceof Error) throw e;
-      else return { status: "error", error: e  as any };
-    }
+  async checkForUpdates() : Promise<UpdateInfo> {
+    return await TAURI_INVOKE("check_for_updates");
   },
-  async downloadAndExtract(url: string, onEvent: TAURI_CHANNEL<DownloadEvent>) : Promise<Result<DownloadResult, string>> {
-    try {
-      return { status: "ok", data: await TAURI_INVOKE("download_and_extract", { url, onEvent }) };
-    } catch (e) {
-      if(e instanceof Error) throw e;
-      else return { status: "error", error: e  as any };
-    }
+  async downloadAndExtract(url: string, onEvent: TAURI_CHANNEL<DownloadEvent>) : Promise<DownloadResult> {
+    return await TAURI_INVOKE("download_and_extract", { url, onEvent });
   },
   async cancelDownload(id: string) : Promise<boolean> {
     return await TAURI_INVOKE("cancel_download", { id });
