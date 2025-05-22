@@ -1,5 +1,6 @@
 import { getEveryLevelScored } from "./PlaneUtil/scoreTrack";
 import { AnalyzeReplayOptions, AnalyzeResult, CoordinateData, TimingDataFromHeader, UNKNOWN_TRACK } from "./types";
+import "./polyfills.ts";
 
 export function analyzeReplayHex(hexData: string, options?: AnalyzeReplayOptions): AnalyzeResult {
   const { playerName, endNameAddr } = readName(hexData);
