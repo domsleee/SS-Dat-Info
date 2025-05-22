@@ -8,19 +8,20 @@ import type { Ref } from 'vue';
 import { useErrorStore } from '@/stores/errorStore';
 import type { TrainerUISettings } from './types';
 import { tryParseInt } from '../services/stringUtil';
+import { commands } from '@/bindings';
 
 export async function handlePlayAsync(playLoading: Ref<boolean>) {
   const errorStore = useErrorStore();
   console.log(useRenderSettingsStore().renderSettings);
   playLoading.value = true;
   try {
-    console.log(await invoke('read_rd_config'));
+    console.log(await commands.readRdConfig());
     console.log(await writeDetailConfig());
-    console.log(await invoke('write_rd_config', { rdConfig: getAsRdConfig() }));
-    console.log(await invoke('write_language', { language: useRenderSettingsStore().renderSettings.language }));
+    console.log(await commands.writeRdConfig(getAsRdConfig()));
+    console.log(await commands.writeLanguage(useRenderSettingsStore().renderSettings.language));
     const trainerSettings = getTrainerSettings();
     if (requiresInject(trainerSettings)) {
-      const r2 = await invoke('run_inject', { trainerSettings });
+      const r2 = await commands.runInject(trainerSettings);
       console.log(r2);
     }
     await getCurrentWindow().setFocus();
@@ -43,15 +44,25 @@ export async function handlePlayAsync(playLoading: Ref<boolean>) {
 }
 
 export async function writeDetailConfig() {
-  return await invoke('write_detail_config', { detailConfig: getAsDetailConfig() })
+  return await commands.writeDetailConfig(getAsDetailConfig());
 }
 
-function requiresInject(trainerSettings: TrainerSettings): boolean {
-  return trainerSettings.changeFov || trainerSettings.use4xFonts || trainerSettings.enableLogging || trainerSettings.makeGhostsOpaque || trainerSettings.matchGhostSoundsToCharacter;
+export function requiresInject(trainerSettings: TrainerSettings): boolean {
+  return trainerSettings.changeFov
+    || trainerSettings.use4xFonts
+    || trainerSettings.enableLogging
+    || trainerSettings.makeGhostsOpaque
+    || trainerSettings.matchGhostSoundsToCharacter
+    || trainerSettings.disableDirectInput
+    || trainerSettings.enableCustomControls;
 }
 
 function getTrainerSettings(): TrainerSettings {
   const { trainerSettings } = useTrainerUISettingsStore();
+  return getTrainerSettingsFromUI(trainerSettings);
+}
+
+export function getTrainerSettingsFromUI(trainerSettings: TrainerUISettings): TrainerSettings {
   const changeFov = shouldChangeFov(trainerSettings);
 
   return {
@@ -62,6 +73,8 @@ function getTrainerSettings(): TrainerSettings {
     enableLogging: trainerSettings.enableLogging,
     makeGhostsOpaque: trainerSettings.makeGhostsOpaque,
     matchGhostSoundsToCharacter: trainerSettings.matchGhostSoundsToCharacter,
+    disableDirectInput: trainerSettings.disableDirectInput,
+    enableCustomControls: trainerSettings.enableCustomControls,
   };
 }
 
@@ -78,12 +91,14 @@ function shouldChangeFov(trainerSettings: TrainerUISettings): boolean {
 }
 
 
-interface TrainerSettings {
+export interface TrainerSettings {
   use4xFonts: boolean;
   changeFov: boolean;
-  fovWidth?: number;
-  fovHeight?: number;
+  fovWidth: number | null;
+  fovHeight: number | null;
   enableLogging: boolean;
   makeGhostsOpaque: boolean;
   matchGhostSoundsToCharacter: boolean;
+  disableDirectInput: boolean;
+  enableCustomControls: boolean;
 }

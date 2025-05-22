@@ -1,11 +1,12 @@
 use sysinfo::{Pid, System};
 
 #[tauri::command]
+#[specta::specta]
 pub fn close_others() -> Result<(), String> {
     let mut system = System::new_all();
     system.refresh_all();
     let pids = get_pids(&system);
-    println!("PIDs: {:?}", pids);
+    println!("close_others pids: {:?}", pids);
     for (_, pid) in pids {
         kill_recursive(&system, pid);
     }

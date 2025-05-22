@@ -11,6 +11,8 @@ export function getSyncPromise<T>(getValue: Promise<T>): SyncPromise<T> {
   getValue.then((v) => {
     value.value = v;
     isLoading = false;
+  }).catch((e) => {
+    console.error(e);
   });
 
   return {

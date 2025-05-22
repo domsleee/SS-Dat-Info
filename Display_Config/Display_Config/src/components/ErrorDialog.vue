@@ -2,7 +2,7 @@
   <v-dialog v-model="store.show" max-width="340" persistent>
     <v-card>
       <v-card-title class="text-h6 bg-error text-white">
-        <v-icon start icon="mdi-alert-circle" class="mr-2"></v-icon>
+        <v-icon start :icon="mdiAlertCircle" class="mr-2"></v-icon>
         Error
       </v-card-title>
 
@@ -21,6 +21,7 @@
 
 <script setup lang="ts">
 import { useErrorStore } from "@/stores/errorStore";
+import { mdiAlertCircle } from "@mdi/js";
 
 const store = useErrorStore();
 

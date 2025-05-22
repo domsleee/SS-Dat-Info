@@ -2,6 +2,7 @@
 #include "external/safetyhook.hpp"
 #include "helper.hpp"
 #include "Log.hpp"
+#include "globalState.hpp"
 
 #pragma once
 float fNewCameraHFOV;
@@ -70,19 +71,20 @@ void DoMakeGhostsOpaque() {
 
     std::uint8_t* createGhostMemoryScanResult = Memory::PatternScan(module, "8B 46 04 85 C0 57 74 0C 8B 4E 08 2B C8 C1 F9 02");
     if (createGhostMemoryScanResult) {
-		Log(std::format("DoGhostOpaqueFix: Address is Supreme_Game.dll+{:x}", createGhostMemoryScanResult - (std::uint8_t*)module));
+        Log(std::format("DoGhostOpaqueFix: Address is Supreme_Game.dll+{:x}", createGhostMemoryScanResult - (std::uint8_t*)module));
 
-		static SafetyHookMid createGhostMemoryMidHook{};
-		Log("DoGhostOpaqueFix: Applying ghost opaque fix");
-		createGhostMemoryMidHook = safetyhook::create_mid(createGhostMemoryScanResult, [](SafetyHookContext& ctx)
-		{
-			*(float *)(ctx.esp + 0x28) = 1.0;
-		});
-		Log("DoGhostOpaqueFix: Ghost opaque fix applied");
-	}
-	else {
-		Log("DoGhostOpaqueFix: Couldn't find create ghost memory");
-	}
+        Log("DoGhostOpaqueFix: Applying ghost opaque fix");
+        static SafetyHookMid createGhostMemoryMidHook = safetyhook::create_mid(createGhostMemoryScanResult, [](SafetyHookContext& ctx)
+        {
+            if (GlobalState::ghostsOpaque) {
+                *(float *)(ctx.esp + 0x28) = 1.0;
+            }
+        });
+        Log("DoGhostOpaqueFix: Ghost opaque fix applied");
+    }
+    else {
+        Log("DoGhostOpaqueFix: Couldn't find create ghost memory");
+    }
 }
 
 void EnableLogging() {

@@ -4,6 +4,7 @@ import { tryParseInt } from "./stringUtil";
 import type { VForm } from "vuetify/components";
 import { type Ref } from "vue";
 import { writeDetailConfig } from "./handlePlay";
+import { commands } from "@/bindings";
 
 
 export async function loadFromFiles() {
@@ -35,6 +36,6 @@ export async function setupFileSync(form: Ref<VForm | undefined>) {
     if (!valid) return;
 
     await writeDetailConfig();
-    await invoke('set_first_player_type', { character: renderSettingsStore.renderSettings.ghostPlayer });
+    await commands.setFirstPlayerType(renderSettingsStore.renderSettings.ghostPlayer);
   });
 }

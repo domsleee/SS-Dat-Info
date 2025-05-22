@@ -8,6 +8,9 @@
     },
     {
       "path": "Display_Config/Display_Config"
+    },
+    {
+      "path": "Display_Config/Display_Config_Resources"
     }
   ],
   "settings": {
@@ -22,7 +25,7 @@
     "[vue]": {
       "editor.defaultFormatter": "Vue.volar"
     },
-    "eslint.format.enable": true,
+    "eslint.format.enable": true
   },
   "extensions": {
     "recommendations": [

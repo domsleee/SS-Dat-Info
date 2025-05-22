@@ -6,7 +6,7 @@
     <template v-slot:activator="{ props }">
       <v-icon
         @click="openPlayerTypes"
-        icon="mdi-information"
+        :icon="mdiInformation"
         class="text-medium-emphasis"
         v-bind="props"
       ></v-icon>
@@ -15,10 +15,10 @@
 </template>
 
 <script lang="ts" setup>
-import { invoke } from '@tauri-apps/api/core';
-
+import { commands } from '@/bindings';
+import { mdiInformation } from '@mdi/js';
 
 function openPlayerTypes() {
-  invoke('open_player_types');
+  commands.openPlayerTypes();
 }
 </script>
