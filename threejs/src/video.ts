@@ -27,17 +27,18 @@ export function setupVideo(videoId: string, dimensions: {width: number, height: 
       ...dimensions,
       videoId: videoId,
       playerVars: {
-        'playsinline': 1,
-        'autoplay': 1,       // Auto-play the video on load
-        'rel': 0,            // Disable related videos
-        'modestbranding': 1, // Minimal YouTube branding
-        'controls': 1,       // Show video controls
-        'showinfo': 0,       // Hide video title and uploader
-        'fs': 1,            // Allow fullscreen
-        'cc_load_policy': 0, // Don't show closed captions by default
-        'iv_load_policy': 3, // Hide video annotations
-        'autohide': 1,       // Hide video controls when playing
-        'enablejsapi': 1,     // Enable JavaScript API
+        playsinline: 1, //YT.PlaysInline.Inline,
+        autoplay: 1, //YT.AutoPlay.AutoPlay,
+        rel: 0, //YT.RelatedVideos.Hide,
+        modestbranding: 1, //YT.ModestBranding.Modest,
+        mute: 1, //YT.Mute.Muted,
+        controls: 1, //YT.Controls.ShowLoadPlayer,
+        showinfo: 0, //YT.ShowInfo.Hide,
+        fs: 1, //YT.FullscreenButton.Show,
+        cc_load_policy: 0, //YT.ClosedCaptionsLoadPolicy.UserDefault,
+        iv_load_policy: 3, //YT.IvLoadPolicy.Hide,
+        autohide: 1, //YT.AutoHide.HideAllControls,
+        enablejsapi: 1, //YT.JsApi.Enable,
         // 'endscreen-client_20': 0  // Hide endscreen/more videos
       },
       events: {
@@ -57,4 +58,3 @@ export function setupVideo(videoId: string, dimensions: {width: number, height: 
 
   return result;
 }
-  

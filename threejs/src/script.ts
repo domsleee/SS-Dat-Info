@@ -627,20 +627,24 @@ function getAllCollisionsTable(analyzeResult: AnalyzeResult, levelScore: LevelSc
   const allLevelCollisions = analyzeResult.trackScoreData!.allCollisions.find(t => t.name === levelScore.name)!.collisions!;
   const collisionCols = allLevelCollisions.map(t => {
     return [
-      `${t.objectName} (${t.plane.position.x.toFixed(2)},${t.plane.position.y.toFixed(2)},${t.plane.position.z.toFixed(2)})`,
+      `${t.objectName}<br /><span style='font-size:8px'>(${t.plane.position.x.toFixed(2)},${t.plane.position.y.toFixed(2)},${t.plane.position.z.toFixed(2)})</span>`,
+      t.frame1,
       t.frame2,
-      t.distance.toFixed(2) ];
+      t.distance.toFixed(2)
+    ];
   });
 
   const table = `
+  <div style='margin-top:15px'>Collisions for ${levelScore.name}</div>
   <table>
     <thead>
       <th>Plane</th>
-      <th>Frame</th>
+      <th>Frame1</th>
+      <th>Frame2</th>
       <th>Distance</th>
     </thead>
     <tbody>
-      ${collisionCols.map(row => `<tr>${row.map(r => `<td>${r}</td>`)}</tr>`).join("\n")}
+      ${collisionCols.map(row => `<tr>${row.map(r => `<td>${r}</td>`).join("")}</tr>`).join("\n")}
     </tbody>
   </table`;
   return table;

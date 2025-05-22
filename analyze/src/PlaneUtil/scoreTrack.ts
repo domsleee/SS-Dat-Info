@@ -5,7 +5,7 @@ import { calculateDistance } from "./distanceUtil";
 import { getPlaneCollisions } from "./getPlaneCollisions";
 import { LevelPlaneCollision as LevelPlaneCollisionGroup, LevelScore, PlaneCollisionInfo, ScoreData, EveryLevelScoredData } from "./types";
 
-export const PLANE_RADIUS = 90;
+export const PLANE_RADIUS = 90.5;
 export const NEAREST_START_POINT_DIST = 2;
 export const MAX_SCORE = 5;
 
