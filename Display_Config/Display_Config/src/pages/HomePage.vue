@@ -38,7 +38,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { ref } from 'vue';
 import { handlePlayAsync } from '../services/handlePlay';
-import Autostart from '@/components/Autostart.vue';
 import { VForm } from 'vuetify/components';
 import { loadFromFiles, setupFileSync } from '../services/fileSyncService';
 
