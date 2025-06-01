@@ -8,7 +8,7 @@
       offset="5"
       :z-index="100"
     >
-      <template v-slot:activator="{ props }">
+      <template #activator="{ props }">
         <v-btn
           v-bind="props"
           :icon="mdiCog"
@@ -17,10 +17,17 @@
         />
       </template>
       
-      <v-card elevation="16" rounded="lg" class="menu-card">
+      <v-card
+        elevation="16"
+        rounded="lg"
+        class="menu-card"
+      >
         <v-divider />
         
-        <v-list density="compact" bg-color="background">
+        <v-list
+          density="compact"
+          bg-color="background"
+        >
           <v-list-item
             v-for="(item, i) in items"
             :key="i"

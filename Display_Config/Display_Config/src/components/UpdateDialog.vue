@@ -1,7 +1,17 @@
 <template>
   <div>
-    <v-dialog persistent v-model="isOpen" max-width="600px" min-height="240px" class="UpdateDialog">
-      <v-card v-if="state.state.key === 'checking'" :prepend-icon="mdiUpdate" title="Updater">
+    <v-dialog
+      v-model="isOpen"
+      persistent
+      max-width="600px"
+      min-height="240px"
+      class="UpdateDialog"
+    >
+      <v-card
+        v-if="state.state.key === 'checking'"
+        :prepend-icon="mdiUpdate"
+        title="Updater"
+      >
         <v-card-text>
           <div class="d-flex align-center mb-3">
             <v-progress-circular
@@ -9,47 +19,71 @@
               color="primary"
               size="36"
               class="mr-4"
-            ></v-progress-circular>
+            />
             <div>
-              <div class="text-h6 font-weight-medium">Checking for updates...</div>
-              <div class="text-body-2 text-medium-emphasis">Please wait while we check for the latest version.</div>
+              <div class="text-h6 font-weight-medium">
+                Checking for updates...
+              </div>
+              <div class="text-body-2 text-medium-emphasis">
+                Please wait while we check for the latest version.
+              </div>
             </div>
           </div>
         </v-card-text>
 
-        <template v-slot:actions>
+        <template #actions>
           <v-btn
             class="ms-auto"
             text="Cancel"
             @click="closeDialog()"
-          ></v-btn>
+          />
         </template>
       </v-card>
 
-      <v-card v-if="state.state.key === 'updateAvailable'" :prepend-icon="mdiUpdate" title="Updater" style="height: 500px">
+      <v-card
+        v-if="state.state.key === 'updateAvailable'"
+        :prepend-icon="mdiUpdate"
+        title="Updater"
+        style="height: 500px"
+      >
         <v-card-text>
           <div class="d-flex align-center mb-3">
-            <v-icon :icon="mdiDownload" size="36" class="mr-4" />
+            <v-icon
+              :icon="mdiDownload"
+              size="36"
+              class="mr-4"
+            />
             <div>
-              <div class="text-h6 font-weight-medium">Update Available!</div>
-              <div class="text-body-2 text-medium-emphasis">Update from {{ state.state.currentVersion }} --> <a target="_blank" :href="getReleaseLink(state.state.latestVersion)">{{ state.state.latestVersion }}</a>?</div>
+              <div class="text-h6 font-weight-medium">
+                Update Available!
+              </div>
+              <div class="text-body-2 text-medium-emphasis">
+                Update from {{ state.state.currentVersion }} --> <a
+                  target="_blank"
+                  :href="getReleaseLink(state.state.latestVersion)"
+                >{{ state.state.latestVersion }}</a>?
+              </div>
             </div>
           </div>
         </v-card-text>
 
-        <template v-slot:actions>
+        <template #actions>
           <v-btn
             text="Install"
             @click="update(state.state.latestVersion)"
-          ></v-btn>
+          />
           <v-btn
             text="Cancel"
             @click="closeDialog()"
-          ></v-btn>
+          />
         </template>
       </v-card>
 
-      <v-card v-if="state.state.key === 'downloading'" :prepend-icon="mdiUpdate" title="Updater">
+      <v-card
+        v-if="state.state.key === 'downloading'"
+        :prepend-icon="mdiUpdate"
+        title="Updater"
+      >
         <v-card-text>
           <div class="d-flex align-center mb-3">
             <v-progress-circular
@@ -59,8 +93,15 @@
               class="mr-4"
             />
             <div class="flex-grow-1">
-              <div class="text-h6 font-weight-medium">Installing</div>
-              <div class="text-body-2 text-medium-emphasis">Downloading {{ state.state.latestVersion }} from <a href="https://github.com/domsleee/SS-Dat-Info/releases/latest" target="_blank">github</a></div>
+              <div class="text-h6 font-weight-medium">
+                Installing
+              </div>
+              <div class="text-body-2 text-medium-emphasis">
+                Downloading {{ state.state.latestVersion }} from <a
+                  href="https://github.com/domsleee/SS-Dat-Info/releases/latest"
+                  target="_blank"
+                >github</a>
+              </div>
               <v-progress-linear
                 v-model="state.state.progress"
                 height="25"
@@ -73,49 +114,73 @@
           </div>
         </v-card-text>
 
-        <template v-slot:actions>
+        <template #actions>
           <v-btn
             text="Cancel"
             @click="closeDialog()"
-          ></v-btn>
+          />
         </template>
       </v-card>
 
-      <v-card v-if="state.state.key === 'noUpdateAvailable'" :prepend-icon="mdiUpdate" title="Updater">
+      <v-card
+        v-if="state.state.key === 'noUpdateAvailable'"
+        :prepend-icon="mdiUpdate"
+        title="Updater"
+      >
         <v-card-text>
           <div class="d-flex align-center mb-3">
-            <v-icon :icon="mdiCheck" size="36" class="mr-4" />
+            <v-icon
+              :icon="mdiCheck"
+              size="36"
+              class="mr-4"
+            />
             <div>
-              <div class="text-h6 font-weight-medium">Latest Version</div>
-              <div class="text-body-2 text-medium-emphasis">{{ state.state.latestVersion }} is the latest version.</div>
+              <div class="text-h6 font-weight-medium">
+                Latest Version
+              </div>
+              <div class="text-body-2 text-medium-emphasis">
+                {{ state.state.latestVersion }} is the latest version.
+              </div>
             </div>
           </div>
         </v-card-text>
 
-        <template v-slot:actions>
+        <template #actions>
           <v-btn
             text="Cancel"
             @click="closeDialog()"
-          ></v-btn>
+          />
         </template>
       </v-card>
 
-      <v-card v-if="state.state.key === 'finished'" :prepend-icon="mdiUpdate" title="Updater">
+      <v-card
+        v-if="state.state.key === 'finished'"
+        :prepend-icon="mdiUpdate"
+        title="Updater"
+      >
         <v-card-text>
           <div class="d-flex align-center mb-3">
-            <v-icon :icon="mdiCheck" size="36" class="mr-4" />
+            <v-icon
+              :icon="mdiCheck"
+              size="36"
+              class="mr-4"
+            />
             <div>
-              <div class="text-h6 font-weight-medium">Finished</div>
-              <div class="text-body-2 text-medium-emphasis">Installed {{ state.state.latestVersion }}. Restart the program to see the change.</div>
+              <div class="text-h6 font-weight-medium">
+                Finished
+              </div>
+              <div class="text-body-2 text-medium-emphasis">
+                Installed {{ state.state.latestVersion }}. Restart the program to see the change.
+              </div>
             </div>
           </div>
         </v-card-text>
 
-        <template v-slot:actions>
+        <template #actions>
           <v-btn
             text="Close"
             @click="closeDialog()"
-          ></v-btn>
+          />
         </template>
       </v-card>
     </v-dialog>
@@ -160,9 +225,9 @@ function getReleaseLink(version: string) {
 }
 
 
-function closeDialog() {
+async function closeDialog() {
   if (state.state.key === 'downloading' && state.state.token) {
-    commands.cancelDownload(state.state.token);
+    await commands.cancelDownload(state.state.token);
   }
   state.state.key = 'closed';
 }

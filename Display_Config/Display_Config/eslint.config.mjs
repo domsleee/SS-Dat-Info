@@ -1,22 +1,34 @@
 // @ts-check
 
-import eslint from "@eslint/js";
+import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import stylistic from "@stylistic/eslint-plugin";
+import pluginVue from 'eslint-plugin-vue'
 import { globalIgnores } from "eslint/config";
+import globals from 'globals'
 
 export default tseslint.config(
-  eslint.configs.recommended,
-  tseslint.configs.recommended,
+  js.configs.recommended,
+  ...tseslint.configs.recommended,
+  ...pluginVue.configs['flat/recommended'],
   {
+    files: ['*.vue', '**/*.vue'],
     languageOptions: {
       parserOptions: {
-        projectService: true,
-        tsconfigRootDir: import.meta.dirname,
-      },
-    },
+        parser: '@typescript-eslint/parser'
+      }
+    }
+  },
+  {
     plugins: {
       "@stylistic": stylistic,
+    },
+    languageOptions: {
+      sourceType: 'module',
+      parserOptions: { projectService: true, extraFileExtensions: ['.vue'] },
+      globals: {
+        ...globals.browser
+      }
     },
     rules: {
       "@stylistic/indent": ["error", 2],

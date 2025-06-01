@@ -9,7 +9,7 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AboutDialog: typeof import('./src/components/AboutDialog.vue')['default']
-    Autostart: typeof import('./src/components/Autostart.vue')['default']
+    AutoStart: typeof import('./src/components/AutoStart.vue')['default']
     DisableDirectInputTooltip: typeof import('./src/components/DisableDirectInputTooltip.vue')['default']
     DownloadLatestButton: typeof import('./src/components/DownloadLatestButton.vue')['default']
     EnableLoggingTooltip: typeof import('./src/components/EnableLoggingTooltip.vue')['default']

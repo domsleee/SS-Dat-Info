@@ -2,11 +2,11 @@
 import HomePage from "./pages/HomePage.vue";
 import { attachConsole } from "@tauri-apps/plugin-log";
 import { commands } from "./bindings";
-attachConsole();
+void attachConsole();
 
 // crazy hack: https://github.com/tauri-apps/tauri/issues/1564
-window.addEventListener("DOMContentLoaded", () => {
-  commands.showWindow();
+window.addEventListener("DOMContentLoaded", async () => {
+  await commands.showWindow();
 });
 
 </script>

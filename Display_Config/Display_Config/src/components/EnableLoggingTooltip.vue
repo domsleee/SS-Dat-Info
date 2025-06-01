@@ -3,13 +3,13 @@
     text="The game will create more logs in Supreme/HMGEHLOG.TXT, same as ori cheat"
     location="bottom"
   >
-    <template v-slot:activator="{ props }">
+    <template #activator="{ props }">
       <v-icon
-        @click="openLogFile"
         :icon="mdiInformation"
         class="text-medium-emphasis"
         v-bind="props"
-      ></v-icon>
+        @click="openLogFile"
+      />
     </template>
   </v-tooltip>
 </template>
@@ -18,7 +18,7 @@
 import { commands } from '@/bindings';
 import { mdiInformation } from '@mdi/js';
 
-function openLogFile() {
-  commands.openLogFile();
+async function openLogFile() {
+  await commands.openLogFile();
 }
 </script>

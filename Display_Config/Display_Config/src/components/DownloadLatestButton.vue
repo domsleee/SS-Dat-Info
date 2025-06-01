@@ -1,7 +1,11 @@
 <template>
   <div v-if="hasUpdate">
-    <v-tooltip :text="'Install ' + updateStatus.latestVersion" location="top" :visible="hasUpdate">
-      <template v-slot:activator="{ props }">
+    <v-tooltip
+      :text="'Install ' + updateStatus.latestVersion"
+      location="top"
+      :visible="hasUpdate"
+    >
+      <template #activator="{ props }">
         <v-btn 
           v-bind="props"
           :icon="mdiDownload" 
@@ -26,13 +30,12 @@ let updateStatus = {
   currentVersion: '0.0.0',
 };
 
-checkForUpdates().then((x) => {
-  updateStatus = x;
-  hasUpdate.value = updateStatus.latestVersion !== updateStatus.currentVersion;
-});
+const x = await checkForUpdates();
+updateStatus = x;
+hasUpdate.value = updateStatus.latestVersion !== updateStatus.currentVersion;
 
-function downloadLatest() {
-  update(updateStatus.latestVersion);
+async function downloadLatest() {
+  await update(updateStatus.latestVersion);
 }
 
 

@@ -7,18 +7,18 @@
     item-value="code"
     return-object
   >
-    <template v-slot:selection="{ item }">
+    <template #selection="{ item }">
       <div class="d-flex align-center">
         <span class="em mr-2">{{ getFlagEmoji(item.raw.flag) }}</span>
         {{ item.raw.name }}
       </div>
     </template>
-    <template v-slot:item="{ item, props }">
+    <template #item="{ item, props }">
       <v-list-item v-bind="props">
-        <template v-slot:prepend>
+        <template #prepend>
           <span class="em mr-2">{{ getFlagEmoji(item.raw.flag) }}</span>
         </template>
-        <template v-slot:title>
+        <template #title>
           {{ item.raw.name }}
         </template>
       </v-list-item>

@@ -16,7 +16,6 @@
             :disabled="formIsLoading || getCardIds(renderSettings.renderer).isLoading"
             :items="getCardIds(renderSettings.renderer).value"
           />
-
         </div>
         <div class="d-flex ga-2">
           <v-combobox
@@ -35,17 +34,20 @@
         </div>
         <div class="d-flex ga-2">
           <LanguageSelect style="flex-basis: 60%; flex-shrink: 0; flex-grow: 0;" />
-          <v-checkbox v-model="renderSettings.fullscreen" label="Full screen"></v-checkbox>
+          <v-checkbox
+            v-model="renderSettings.fullscreen"
+            label="Full screen"
+          />
         </div>
-        <RenderDistanceRow :formIsLoading="formIsLoading" />
+        <RenderDistanceRow :form-is-loading="formIsLoading" />
         <div class="d-flex ga-2">
           <v-select
+            v-model="renderSettings.groundDetail"
             label="Ground Detail"
             :items="groundDetailOptions"
             item-title="text"
             item-value="value"
             style="flex-basis: 60%; flex-shrink: 0; flex-grow: 0;"
-            v-model="renderSettings.groundDetail"
           />
           <v-select
             v-model="renderSettings.ghostPlayer"

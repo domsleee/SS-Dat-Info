@@ -1,9 +1,17 @@
 <template>
   <div class="d-flex ga-2">
-    <v-select style="flex-basis: 60%; flex-shrink: 0; flex-grow: 0;" label="Render Distance (m)"
-      :items="renderDistanceOptions" v-model="renderDistanceSelection" />
-    <v-text-field type="number" :rules="[(v: number) => (v && v > 0) || 'required']"
-      label="Distance (m)" v-model="renderSettings.renderDistance" />
+    <v-select
+      v-model="renderDistanceSelection"
+      style="flex-basis: 60%; flex-shrink: 0; flex-grow: 0;"
+      label="Render Distance (m)"
+      :items="renderDistanceOptions"
+    />
+    <v-text-field
+      v-model="renderSettings.renderDistance"
+      type="number"
+      :rules="[(v: number) => (v && v > 0) || 'required']"
+      label="Distance (m)"
+    />
   </div>
 </template>
 
@@ -20,6 +28,7 @@ updateBasedOnRenderDistance();
 
 watch(() => renderDistanceSelection.value, (newValue) => {
   if (newValue === "Custom") {
+    // do nothing
   } else if (newValue === "200m (Near)") {
     renderSettings.renderDistance = 200;
   } else if (newValue === "300m (Normal)") {
