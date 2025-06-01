@@ -1,7 +1,13 @@
 <template>
   <div class="d-flex align-center ga-2">
-    <v-checkbox v-model="settings.autostart" :label="getLabel()" />
-    <v-checkbox v-model="settings.autoCloseOthers" label="Auto close others" />
+    <v-checkbox
+      v-model="settings.autostart"
+      :label="getLabel()"
+    />
+    <v-checkbox
+      v-model="settings.autoCloseOthers"
+      label="Auto close others"
+    />
   </div>
 </template>
 
@@ -14,7 +20,7 @@ const emit = defineEmits(["auto-play"]);
 const { settings } = useAutostartStore();
 const isRunning = ref(false);
 const timeLeft = ref(1500);
-let interval: NodeJS.Timeout | undefined = undefined;
+let interval = undefined as undefined | ReturnType<typeof setInterval>;
 
 if (settings.autostart) {
   isRunning.value = true;
@@ -29,7 +35,7 @@ if (settings.autostart) {
 }
 
 if (settings.autoCloseOthers) {
-  commands.closeOthers();
+  await commands.closeOthers();
 }
 
 watch(() => settings.autostart, (newValue) => {

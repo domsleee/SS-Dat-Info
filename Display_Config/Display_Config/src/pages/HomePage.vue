@@ -1,29 +1,38 @@
 <template>
   <v-container style="max-width: 400px">
-    <v-form ref="form" :disabled="playLoading">
-      <RenderOptions :formIsLoading="playLoading" />
-      <TrainerOptions :formIsLoading="playLoading" class="mt-2" />
+    <v-form
+      ref="form"
+      :disabled="playLoading"
+    >
+      <RenderOptions :form-is-loading="playLoading" />
+      <TrainerOptions
+        :form-is-loading="playLoading"
+        class="mt-2"
+      />
       <Autostart @auto-play="handleAutoplay()" />
       <div class="mt-2 ga-2 d-flex justify-end">
         <DownloadLatestButton />
         <SettingsButton />
-        <v-btn size="x-large" color="indigo-darken-3" :loading="playLoading" @click="handlePlay">Play</v-btn>
-        <v-btn size="x-large" color="" @click="handleExit">Exit</v-btn>
+        <v-btn
+          size="x-large"
+          color="indigo-darken-3"
+          :loading="playLoading"
+          @click="handlePlay"
+        >
+          Play
+        </v-btn>
+        <v-btn
+          size="x-large"
+          color=""
+          @click="handleExit"
+        >
+          Exit
+        </v-btn>
       </div>
       <ErrorDialog />
     </v-form>
   </v-container>
 </template>
-
-<style>
-.v-field {
-  --v-field-padding-start: 12px;
-  --v-field-padding-end: 12px;
-}
-.v-field.v-field--appended {
-  --v-field-padding-end: 0px;
-}
-</style>
 
 <script lang="ts" setup>
 import { invoke } from '@tauri-apps/api/core';
@@ -40,8 +49,8 @@ async function handleAutoplay() {
     await handlePlay();
   }
 }
-loadFromFiles();
-setupFileSync(form);
+void loadFromFiles();
+void setupFileSync(form);
 
 async function handlePlay() {
   const { valid } = await form.value!.validate();
@@ -50,7 +59,17 @@ async function handlePlay() {
 }
 
 async function handleExit() {
-  invoke('kill_exit_1');
+  await invoke('kill_exit_1');
 }
 
 </script>
+
+<style>
+.v-field {
+  --v-field-padding-start: 12px;
+  --v-field-padding-end: 12px;
+}
+.v-field.v-field--appended {
+  --v-field-padding-end: 0px;
+}
+</style>

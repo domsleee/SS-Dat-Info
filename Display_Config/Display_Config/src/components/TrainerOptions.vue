@@ -3,13 +3,19 @@
     <v-card-title>Trainer Options</v-card-title>
     <v-card-text class="pb-2">
       <div class="d-flex ga-2">
-        <v-checkbox v-model="trainerSettings.use4xFonts" label="Use 4x Fonts" />
+        <v-checkbox
+          v-model="trainerSettings.use4xFonts"
+          label="Use 4x Fonts"
+        />
         <div class="d-flex ga-1 align-center">
-          <v-checkbox v-model="trainerSettings.disableDirectInput" label="Disable DirectInput" />
+          <v-checkbox
+            v-model="trainerSettings.disableDirectInput"
+            label="Disable DirectInput"
+          />
           <DisableDirectInputTooltip />
         </div>
       </div>
-      <FovSelectorRow :formIsLoading="formIsLoading" />
+      <FovSelectorRow :form-is-loading="formIsLoading" />
       <div class="d-flex ga-1 align-center">
         <v-checkbox
           v-model="trainerSettings.enableLogging"

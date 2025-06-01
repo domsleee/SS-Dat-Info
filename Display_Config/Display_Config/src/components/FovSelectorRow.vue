@@ -1,22 +1,22 @@
 <template>
   <div class="d-flex align-items-center ga-1">
     <v-select
+      v-model="trainerSettings.fovType"
       label="FOV Option"
       :items="fovTypes"
       style="flex-basis: 125px; flex-shrink: 0"
-      v-model="trainerSettings.fovType"
     />
     <v-text-field
-      type="number"
       v-model="trainerSettings.fovWidth"
+      type="number"
       :disabled="formIsLoading || trainerSettings.fovType !== 'Custom'"
       :rules="[(v: number) => validateNumber(v)]"
       label="Width"
       density="compact"
     />
     <v-text-field
-      type="number"
       v-model="trainerSettings.fovHeight"
+      type="number"
       :disabled="formIsLoading || trainerSettings.fovType !== 'Custom'"
       :rules="[(v: number) => validateNumber(v)]"
       label="Height"
@@ -58,13 +58,13 @@ watch(() => trainerSettings.fovType, (newValue) => {
 watch(() => renderSettings.resolution, (newValue) => fixBasedOnResolution(newValue));
 
 function fixBasedOnResolution(resolution: string | undefined) {
-    if (trainerSettings.fovType !== "MatchRes") return;
-    if (!resolution) return;
-    const spl = resolution.split("x");
-    if (spl.length !== 2) return;
-    const [width, height] = spl.map(Number);
-    trainerSettings.fovWidth = width;
-    trainerSettings.fovHeight = height;
+  if (trainerSettings.fovType !== "MatchRes") return;
+  if (!resolution) return;
+  const spl = resolution.split("x");
+  if (spl.length !== 2) return;
+  const [width, height] = spl.map(Number);
+  trainerSettings.fovWidth = width;
+  trainerSettings.fovHeight = height;
 }
 
 function getFovFactor() {
