@@ -29,6 +29,7 @@ const int KEY_SHIFT = 36;
 static HMODULE supremeGameModule;
 static HMODULE hmgSoundModule;
 static HMODULE hmgCetsupDIModule;
+static HMODULE srUitModule;
 
 namespace Housemarque::Supreme_Snowboarding::Music_Handler {
     typedef void (*voidFunction)();
@@ -55,6 +56,16 @@ namespace Housemarque::Supreme_Snowboarding::Supreme {
     typedef bool(__fastcall* Set_AI_Learning_Mode_t)(void*);
     Set_AI_Learning_Mode_t Set_AI_Learning_Mode;
 }
+
+namespace Housemarque::SR_UIT::Sr_Plane_Text_Line {
+    typedef void (__fastcall* Hide_t)(void*);
+    Hide_t Hide;
+}
+
+namespace Housemarque::Supreme_Snowboarding::Supreme_Keyboard {
+    typedef bool(__fastcall* State_t)(void* thisPtr, int keyValue);
+}
+
 typedef void* (*FUN_1013e410_t)(void);
 FUN_1013e410_t FUN_1013e410;
 
@@ -72,6 +83,11 @@ void DoCustomInput() {
     hmgCetsupDIModule = GetModuleHandleA("HMG_Cetsup_DI.dll");
     if (!hmgCetsupDIModule) {
         Log("DoCustomInput: Failed to find HMG_Cetsup_DI.dll");
+        return;
+    }
+    srUitModule = GetModuleHandleA("SR_UIT.dll");
+    if (!srUitModule) {
+        Log("DoCustomInput: Failed to find SR_UIT.dll");
         return;
     }
 
@@ -110,6 +126,13 @@ void DoCustomInput() {
             keyStates[i] = isKeyDown;
         }
     });
+
+
+    static safetyhook::MidHook aiHeuristicHook;
+    aiHeuristicHook = safetyhook::create_mid((void*)((std::uint8_t*)supremeGameModule + 0x12536b), [](safetyhook::Context& ctx) {
+        void* textLine = *(void**)((char*)ctx.esi + 0x4);
+        Housemarque::SR_UIT::Sr_Plane_Text_Line::Hide(textLine);
+    });
     Log("DoCustomInput: Fix applied");
 }
 
@@ -129,8 +152,8 @@ void HandleM(bool isShiftDown) {
         const float newValue = current == 0.00f ? streamsOnVolume : 0.00f;
         Housemarque::Game_Construction_Kit::Sound_System::Set_Master_Volume_Streams(newValue);
         if (newValue == 0.00) {
-			Housemarque::Supreme_Snowboarding::Music_Handler::Play_Prev_Slope_Music();
-		} else {
+            Housemarque::Supreme_Snowboarding::Music_Handler::Play_Prev_Slope_Music();
+        } else {
             Housemarque::Supreme_Snowboarding::Music_Handler::Play_Slope_Music();
         }
     }
@@ -156,8 +179,7 @@ void HandleG() {
 
 bool CheckKeyState(void** keyboardPtr, int keyValue) {
     void** vtable = *(void***)keyboardPtr;
-    typedef bool(__fastcall* Supreme_Keyboard_State_t)(void* thisPtr, int keyValue);
-    Supreme_Keyboard_State_t Supreme_Keyboard_State = (Supreme_Keyboard_State_t)vtable[5]; // 5 * 4 = 20 = 0x14.
+    Housemarque::Supreme_Snowboarding::Supreme_Keyboard::State_t Supreme_Keyboard_State = (Housemarque::Supreme_Snowboarding::Supreme_Keyboard::State_t)vtable[5]; // 5 * 4 = 20 = 0x14.
     auto isKeyDown = Supreme_Keyboard_State(keyboardPtr, keyValue);
     return isKeyDown;
 }
@@ -173,6 +195,8 @@ void SetupFunctionPointers() {
 
     Housemarque::Supreme_Snowboarding::Supreme::Set_Replay_Mode = (Housemarque::Supreme_Snowboarding::Supreme::Set_Replay_Mode_t)((char*)supremeGameModule + 0x1417e0);
     Housemarque::Supreme_Snowboarding::Supreme::Set_AI_Learning_Mode = (Housemarque::Supreme_Snowboarding::Supreme::Set_AI_Learning_Mode_t)((char*)supremeGameModule + 0x142130);
+
+    Housemarque::SR_UIT::Sr_Plane_Text_Line::Hide = (Housemarque::SR_UIT::Sr_Plane_Text_Line::Hide_t)((char*)srUitModule + 0xf4f0);
 
     FUN_1013e410 = (FUN_1013e410_t)((char*)supremeGameModule + 0x13e410);
 }
