@@ -30,13 +30,15 @@ let updateStatus = {
   currentVersion: '0.0.0',
 };
 
-const x = await checkForUpdates();
-updateStatus = x;
-hasUpdate.value = updateStatus.latestVersion !== updateStatus.currentVersion;
+async function run() {
+  const x = await checkForUpdates();
+  updateStatus = x;
+  hasUpdate.value = updateStatus.latestVersion !== updateStatus.currentVersion;
+}
 
 async function downloadLatest() {
   await update(updateStatus.latestVersion);
 }
 
-
+void run();
 </script>
