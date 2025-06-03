@@ -35,7 +35,7 @@ if (settings.autostart) {
 }
 
 if (settings.autoCloseOthers) {
-  await commands.closeOthers();
+  void commands.closeOthers();
 }
 
 watch(() => settings.autostart, (newValue) => {

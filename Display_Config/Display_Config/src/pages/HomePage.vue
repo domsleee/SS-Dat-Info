@@ -9,7 +9,7 @@
         :form-is-loading="playLoading"
         class="mt-2"
       />
-      <Autostart @auto-play="handleAutoplay()" />
+      <AutoStart @auto-play="handleAutoplay()" />
       <div class="mt-2 ga-2 d-flex justify-end">
         <DownloadLatestButton />
         <SettingsButton />
