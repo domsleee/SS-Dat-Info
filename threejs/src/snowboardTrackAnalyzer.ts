@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import { BufferGeometry, CylinderGeometry, DoubleSide, Float32BufferAttribute, Group, Mesh, MeshBasicMaterial, MeshStandardMaterial, PlaneGeometry, Vector3 } from "three";
 
 interface Coordinate {
   x: number;
@@ -97,7 +97,7 @@ export class SnowboardTrackAnalyzer {
     metalness?: number;
     playerYOffset?: number;
     debug?: boolean;
-  } = {}): THREE.Group {
+  } = {}): Group {
     const {
       width = 30,
       roughness = 0.8,
@@ -106,11 +106,11 @@ export class SnowboardTrackAnalyzer {
       debug = false
     } = options;
 
-    const group = new THREE.Group();
+    const group = new Group();
     const jumps = this.detectJumps();
 
-    const getPerpendicularVector = (direction: THREE.Vector3) => {
-      return new THREE.Vector3(-direction.z, 0, direction.x).normalize().multiplyScalar(width/2);
+    const getPerpendicularVector = (direction: Vector3) => {
+      return new Vector3(-direction.z, 0, direction.x).normalize().multiplyScalar(width/2);
     };
 
     const createContinuousGeometry = (startIndex: number, endIndex: number) => {
@@ -121,7 +121,7 @@ export class SnowboardTrackAnalyzer {
         const curr = this.coordinates[i];
         const next = this.coordinates[Math.min(i + 1, endIndex)];
                 
-        const direction = new THREE.Vector3(
+        const direction = new Vector3(
           next.x - curr.x,
           next.y - curr.y,
           next.z - curr.z
@@ -156,37 +156,37 @@ export class SnowboardTrackAnalyzer {
         }
       }
 
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+      const geometry = new BufferGeometry();
+      geometry.setAttribute('position', new Float32BufferAttribute(vertices, 3));
       geometry.setIndex(indices);
       geometry.computeVertexNormals();
       return geometry;
     };
 
     const regularMaterial = debug 
-      ? new THREE.MeshBasicMaterial({
+      ? new MeshBasicMaterial({
         color: 0xFFFFFF,
         wireframe: true,
-        side: THREE.DoubleSide
+        side: DoubleSide
       })
-      : new THREE.MeshStandardMaterial({
+      : new MeshStandardMaterial({
         color: 0xF0F0F0, // Snow white
         roughness: 0.9,  // More rough for snow-like appearance
         metalness: 0.1,  // Less metallic for snow
-        side: THREE.DoubleSide
+        side: DoubleSide
       });
 
     const jumpMaterial = debug
-      ? new THREE.MeshBasicMaterial({
+      ? new MeshBasicMaterial({
         color: 0x404040,
         wireframe: true,
-        side: THREE.DoubleSide
+        side: DoubleSide
       })
-      : new THREE.MeshStandardMaterial({
+      : new MeshStandardMaterial({
         color: 0x404040, // Darker grey
         roughness,
         metalness,
-        side: THREE.DoubleSide
+        side: DoubleSide
       });
 
     let currentIndex = 0;
@@ -196,7 +196,7 @@ export class SnowboardTrackAnalyzer {
         // Add regular section before jump
         if (currentIndex < jump.index) {
           const regularGeometry = createContinuousGeometry(currentIndex, jump.index);
-          const regularMesh = new THREE.Mesh(regularGeometry, regularMaterial);
+          const regularMesh = new Mesh(regularGeometry, regularMaterial);
           regularMesh.receiveShadow = true;
           group.add(regularMesh);
         }
@@ -211,7 +211,7 @@ export class SnowboardTrackAnalyzer {
           const takeoff = this.coordinates[jump.index];
           const landing = this.coordinates[nextLanding.index];
                     
-          const direction = new THREE.Vector3(
+          const direction = new Vector3(
             landing.x - takeoff.x,
             landing.y - takeoff.y,
             landing.z - takeoff.z
@@ -247,12 +247,12 @@ export class SnowboardTrackAnalyzer {
             1, 3, 2   // Second triangle
           );
 
-          const jumpGeometry = new THREE.BufferGeometry();
-          jumpGeometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+          const jumpGeometry = new BufferGeometry();
+          jumpGeometry.setAttribute('position', new Float32BufferAttribute(vertices, 3));
           jumpGeometry.setIndex(indices);
           jumpGeometry.computeVertexNormals();
                     
-          group.add(new THREE.Mesh(jumpGeometry, jumpMaterial));
+          group.add(new Mesh(jumpGeometry, jumpMaterial));
                     
           currentIndex = nextLanding.index;
         }
@@ -262,7 +262,7 @@ export class SnowboardTrackAnalyzer {
     // Add final regular section
     if (currentIndex < this.coordinates.length - 1) {
       const finalGeometry = createContinuousGeometry(currentIndex, this.coordinates.length - 1);
-      group.add(new THREE.Mesh(finalGeometry, regularMaterial));
+      group.add(new Mesh(finalGeometry, regularMaterial));
     }
 
     return group;
@@ -272,7 +272,7 @@ export class SnowboardTrackAnalyzer {
     width?: number;
     takeoffColor?: number;
     landingColor?: number;
-  } = {}): THREE.Group[] {
+  } = {}): Group[] {
     const {
       width = 30, // Track width to properly position flags on sides
       takeoffColor = 0x00ff00,
@@ -282,16 +282,16 @@ export class SnowboardTrackAnalyzer {
     const jumps = this.detectJumps();
         
     return jumps.map(jump => {
-      const group = new THREE.Group();
+      const group = new Group();
             
       // Create appropriately sized flag for on-track placement
-      const flagGeometry = new THREE.PlaneGeometry(4, 3); // More reasonable size
-      const flagMaterial = new THREE.MeshBasicMaterial({ 
+      const flagGeometry = new PlaneGeometry(4, 3); // More reasonable size
+      const flagMaterial = new MeshBasicMaterial({ 
         color: jump.type === 'takeoff' ? takeoffColor : landingColor,
-        side: THREE.DoubleSide,
+        side: DoubleSide,
         transparent: false,
       });
-      const flag = new THREE.Mesh(flagGeometry, flagMaterial);
+      const flag = new Mesh(flagGeometry, flagMaterial);
             
       // Position flag at a reasonable height above the track
       flag.position.y = 5;
@@ -299,11 +299,11 @@ export class SnowboardTrackAnalyzer {
             
       // Create proportional pole that extends from ground to flag
       const poleHeight = 12;
-      const poleGeometry = new THREE.CylinderGeometry(0.1, 0.1, poleHeight);
-      const poleMaterial = new THREE.MeshBasicMaterial({ 
+      const poleGeometry = new CylinderGeometry(0.1, 0.1, poleHeight);
+      const poleMaterial = new MeshBasicMaterial({ 
         color: 0xCCCCCC, // Light grey
       });
-      const pole = new THREE.Mesh(poleGeometry, poleMaterial);
+      const pole = new Mesh(poleGeometry, poleMaterial);
             
       // Position pole to start at track level and extend up
       pole.position.y = -poleHeight/2 + 5; // Half below to reach ground, offset to flag height
@@ -314,14 +314,14 @@ export class SnowboardTrackAnalyzer {
       // Get direction vector
       const prevIndex = Math.max(0, jump.index - 1);
 
-      const direction = new THREE.Vector3(
+      const direction = new Vector3(
         this.coordinates[jump.index].x - this.coordinates[prevIndex].x,
         this.coordinates[jump.index].y - this.coordinates[prevIndex].y,
         this.coordinates[jump.index].z - this.coordinates[prevIndex].z
       ).normalize();
 
       // Calculate perpendicular vector (same as in createSegmentGeometry)
-      const perpVector = new THREE.Vector3(-direction.z, 0, direction.x)
+      const perpVector = new Vector3(-direction.z, 0, direction.x)
         .normalize()
         .multiplyScalar(width/2); // Track width plus small gap
 

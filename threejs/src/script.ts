@@ -1,5 +1,4 @@
 import "./polyfills";
-import * as THREE from "three";
 import { getDomVM } from "./data";
 import { setupVideo, videoIds } from "./video";
 import { calculateAcceleration, getSpeed } from "./coordUtil";
@@ -16,6 +15,7 @@ import { minBy } from "lodash-es";
 import { getScoreBreakdown, MAX_SCORE, PLANE_RADIUS, NEAREST_START_POINT_DIST } from "dat-analyze/src/PlaneUtil/scoreTrack";
 import { createIcons, Info, Pause, Play, SkipBack, SkipForward } from 'lucide';
 import { PositionXYZ } from "dat-analyze/src/generateCircle/types";
+import { DirectionalLight, Euler, Group, Matrix4, PerspectiveCamera, Scene, WebGLRenderer } from "three";
 
 const dimensions = {
   width: 480,
@@ -124,14 +124,14 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
   playerRange.min = "0";
   playerRange.max = data.length.toString();
 
-  const camera = new THREE.PerspectiveCamera(
+  const camera = new PerspectiveCamera(
     75,
     window.innerWidth / window.innerHeight,
     0.01,
     1000
   );
 
-  const scene = new THREE.Scene();
+  const scene = new Scene();
 
   const keyControls = document.getElementById("keyControls")!;
   keyControls.style.bottom = "0";
@@ -149,7 +149,7 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
   scene.add(slopeMesh);
   jumpMarkers.forEach((marker) => scene.add(marker));
 
-  const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+  const directionalLight = new DirectionalLight(0xffffff, 1);
   directionalLight.castShadow = true;
   scene.add(directionalLight);
 
@@ -159,7 +159,7 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
   setMeshPosition(characterGroup, firstRow);
   scene.add(characterGroup);
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  const renderer = new WebGLRenderer({ antialias: true });
   renderer.setSize(dimensions.width, dimensions.height);
   renderer.setAnimationLoop((time) => renderFrame(time));
   renderer.shadowMap.enabled = true;
@@ -362,11 +362,11 @@ function getRawString(raw: string) {
   );
 }
 
-function updateCharacterRotation(characterGroup: THREE.Group, row: RowData) {
+function updateCharacterRotation(characterGroup: Group, row: RowData) {
   const rotation3x3 = row.rotation3x3;
 
   // Convert the 3×3 to a full 4×4 matrix
-  const matrix = new THREE.Matrix4().set(
+  const matrix = new Matrix4().set(
     rotation3x3[0][0],
     rotation3x3[0][1],
     rotation3x3[0][2],
@@ -386,7 +386,7 @@ function updateCharacterRotation(characterGroup: THREE.Group, row: RowData) {
   );
 
   // Extract Euler angles from that matrix (assuming an XYZ rotation order)
-  const euler = new THREE.Euler().setFromRotationMatrix(matrix, "XYZ");
+  const euler = new Euler().setFromRotationMatrix(matrix, "XYZ");
 
   // --- Fix pitch (looking "up" instead of "down") ---
   euler.x = -euler.x;
@@ -394,7 +394,7 @@ function updateCharacterRotation(characterGroup: THREE.Group, row: RowData) {
   euler.y = -euler.y;
 
   // Recreate the matrix from our modified Euler
-  const fixedMatrix = new THREE.Matrix4().makeRotationFromEuler(euler);
+  const fixedMatrix = new Matrix4().makeRotationFromEuler(euler);
 
   // Set the group’s rotation from this fixed matrix
   characterGroup.setRotationFromMatrix(fixedMatrix);
