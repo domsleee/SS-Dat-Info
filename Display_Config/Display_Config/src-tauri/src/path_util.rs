@@ -6,9 +6,9 @@ pub fn get_supreme_folder() -> PathBuf {
         .map(|p| p.parent().unwrap_or(Path::new("")).to_path_buf())
         .unwrap_or_default();
 
-    if exe_dir.join("Supreme_Game.dll").exists() {
-        exe_dir
-    } else {
+    if cfg!(debug_assertions) {
         PathBuf::from(r"C:\Games\Supreme2")
+    } else {
+        exe_dir
     }
 }
