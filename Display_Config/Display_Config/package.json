@@ -26,18 +26,18 @@
     "destr": "^2.0.5",
     "pinia-plugin-persistedstate": "^4.3.0",
     "vue": "^3.5.16",
-    "vuetify": "^3.8.7"
+    "vuetify": "^3.8.8"
   },
   "devDependencies": {
     "@eslint/js": "^9.28.0",
-    "@stylistic/eslint-plugin": "^4.4.0",
+    "@stylistic/eslint-plugin": "^4.4.1",
     "@tauri-apps/cli": "2.5.0",
     "@types/node": "^22.15.29",
     "@vitejs/plugin-vue": "^5.2.4",
     "bun-types": "^1.2.15",
     "eslint": "^9.28.0",
     "eslint-plugin-vue": "^10.1.0",
-    "pinia": "^3.0.2",
+    "pinia": "^3.0.3",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.33.1",
     "unplugin-vue-components": "^28.7.0",
