@@ -96,3 +96,13 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: cd Display_Config/Display_Config && bun install
       - run: cd Display_Config/Display_Config && bun run test
+  displayConfigCppBuild:
+    name: displayConfig:cppBuild
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1.4.1
+      - uses: extractions/setup-just@v3
+      - uses: pnorton5432/setup-task@v1
+      - run: cd Display_Config/Display_Config && bun install
+      - run: cd Display_Config/Display_Config && just
