@@ -104,6 +104,6 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: ilammy/msvc-dev-cmd@v1.4.1
       - uses: extractions/setup-just@v3
-      - uses: pnorton5432/setup-task@v1
+      - uses: arduino/setup-task@v2
       - run: cd Display_Config/Display_Config && bun install
       - run: cd Display_Config/Display_Config && just
