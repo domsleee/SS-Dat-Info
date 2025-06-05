@@ -104,7 +104,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: ilammy/msvc-dev-cmd@v1.4.1
         with:
-          arch: win32
+          arch: amd64_x86
       - uses: extractions/setup-just@v3
       - uses: arduino/setup-task@v2
       - run: cd Display_Config/Display_Config && bun install
