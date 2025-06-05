@@ -1,9 +1,8 @@
-import * as THREE from "three";
-import { Mesh } from "three"; 
+import { BoxGeometry, CylinderGeometry, DoubleSide, Group, Mesh, MeshBasicMaterial, MeshNormalMaterial, SphereGeometry } from "three"; 
 
 export function createCharacterGroup(scale = 0.04) {
   // Default to half size (0.5)
-  const characterGroup = new THREE.Group();
+  const characterGroup = new Group();
   
   // Base dimensions (at scale = 1.0)
   const BASE = {
@@ -27,7 +26,7 @@ export function createCharacterGroup(scale = 0.04) {
   const headSegments = 32;
   
   // Front of head (green)
-  const frontHeadGeometry = new THREE.SphereGeometry(
+  const frontHeadGeometry = new SphereGeometry(
     headRadius,
     headSegments,
     headSegments,
@@ -36,14 +35,14 @@ export function createCharacterGroup(scale = 0.04) {
     0,
     Math.PI
   );
-  const frontHeadMaterial = new THREE.MeshBasicMaterial({
+  const frontHeadMaterial = new MeshBasicMaterial({
     color: 0x00ff00,
-    side: THREE.DoubleSide,
+    side: DoubleSide,
   });
-  const frontHeadMesh = new THREE.Mesh(frontHeadGeometry, frontHeadMaterial);
+  const frontHeadMesh = new Mesh(frontHeadGeometry, frontHeadMaterial);
   
   // Back of head (red)
-  const backHeadGeometry = new THREE.SphereGeometry(
+  const backHeadGeometry = new SphereGeometry(
     headRadius,
     headSegments,
     headSegments,
@@ -52,14 +51,14 @@ export function createCharacterGroup(scale = 0.04) {
     0,
     Math.PI
   );
-  const backHeadMaterial = new THREE.MeshBasicMaterial({
+  const backHeadMaterial = new MeshBasicMaterial({
     color: 0xff0000,
-    side: THREE.DoubleSide,
+    side: DoubleSide,
   });
-  const backHeadMesh = new THREE.Mesh(backHeadGeometry, backHeadMaterial);
+  const backHeadMesh = new Mesh(backHeadGeometry, backHeadMaterial);
   
   // Group for the complete head
-  const headGroup = new THREE.Group();
+  const headGroup = new Group();
   headGroup.add(frontHeadMesh);
   headGroup.add(backHeadMesh);
   headGroup.position.y = BASE.headY * scale;
@@ -67,33 +66,33 @@ export function createCharacterGroup(scale = 0.04) {
   backHeadMesh.castShadow = true;
   
   // Neck
-  const neckGeometry = new THREE.CylinderGeometry(
+  const neckGeometry = new CylinderGeometry(
     BASE.neckRadius * scale,
     BASE.neckRadius * scale,
     BASE.neckHeight * scale,
     32
   );
-  const neckMaterial = new THREE.MeshNormalMaterial();
+  const neckMaterial = new MeshNormalMaterial();
   const neckMesh = new Mesh(neckGeometry, neckMaterial);
   neckMesh.position.y = BASE.neckY * scale;
   
   // Body
-  const bodyGeometry = new THREE.BoxGeometry(
+  const bodyGeometry = new BoxGeometry(
     BASE.bodyWidth * scale,
     BASE.bodyHeight * scale,
     BASE.bodyDepth * scale
   );
-  const bodyMaterial = new THREE.MeshNormalMaterial();
-  const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
+  const bodyMaterial = new MeshNormalMaterial();
+  const bodyMesh = new Mesh(bodyGeometry, bodyMaterial);
   
   // Snowboard
-  const boardGeometry = new THREE.BoxGeometry(
+  const boardGeometry = new BoxGeometry(
     BASE.boardWidth * scale,
     BASE.boardHeight * scale,
     BASE.boardLength * scale
   );
-  const boardMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 });
-  const boardMesh = new THREE.Mesh(boardGeometry, boardMaterial);
+  const boardMaterial = new MeshBasicMaterial({ color: 0xffff00 });
+  const boardMesh = new Mesh(boardGeometry, boardMaterial);
   boardMesh.position.y = BASE.boardY * scale;
   
   // Add all meshes to the group

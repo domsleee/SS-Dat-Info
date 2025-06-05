@@ -13,30 +13,25 @@
         "typecheck": "bunx tsc"
     },
     "devDependencies": {
-        "@eslint/js": "^9.27.0",
-        "@stylistic/eslint-plugin": "^4.2.0",
+        "@eslint/js": "^9.28.0",
+        "@stylistic/eslint-plugin": "^4.4.1",
         "@types/lodash-es": "^4.17.12",
-        "bun-types": "^1.2.14",
-        "eslint": "^9.27.0",
-        "sass": "^1.89.0",
+        "bun-types": "^1.2.15",
+        "eslint": "^9.28.0",
+        "sass": "^1.89.1",
         "typescript": "^5.8.3",
-        "typescript-eslint": "^8.32.1",
+        "typescript-eslint": "^8.33.1",
         "vite": "^6.3.5",
-        "vite-plugin-glsl": "^1.4.1"
+        "vite-plugin-glsl": "^1.4.2"
     },
     "dependencies": {
-        "@types/three": "^0.176.0",
-        "@types/youtube": "^0.1.1",
-        "async-preloader": "^8.0.4",
+        "@types/three": "^0.177.0",
+        "@types/youtube": "^0.1.2",
         "buffer": "^6.0.3",
         "dat-analyze": "../analyze/",
         "lodash-es": "^4.17.21",
-        "lucide": "^0.511.0",
-        "serve-static": "^2.2.0",
-        "sirv": "^3.0.1",
-        "stats.js": "^0.17.0",
-        "tailwindcss": "^4.1.7",
-        "three": "^0.176.0",
-        "tweakpane": "^4.0.5"
+        "lucide": "^0.513.0",
+        "tailwindcss": "^4.1.8",
+        "three": "^0.177.0"
     }
 }

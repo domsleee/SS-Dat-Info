@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import { BufferAttribute, BufferGeometry, Camera, Group, Line, LineBasicMaterial, Scene, Vector3 } from "three";
 
 interface CameraConfig {
   distance: number;
@@ -7,9 +7,9 @@ interface CameraConfig {
 }
 
 interface CameraSetup {
-  trail: THREE.Line;
-  trailPoints: THREE.Vector3[];
-  updateCamera: (row: Position, prevRow?: Position, characterGroup?: THREE.Group, speed?: number) => void;
+  trail: Line;
+  trailPoints: Vector3[];
+  updateCamera: (row: Position, prevRow?: Position, characterGroup?: Group, speed?: number) => void;
   updateConfig: (newConfig: Partial<CameraConfig>) => void;
   getConfig: () => CameraConfig;
 }
@@ -27,8 +27,8 @@ const DEFAULT_CONFIG: CameraConfig = {
 };
 
 export function createCameraSetup(
-  camera: THREE.Camera,
-  scene: THREE.Scene,
+  camera: Camera,
+  scene: Scene,
   config: Partial<CameraConfig> = {}
 ): CameraSetup {
   const cameraConfig: CameraConfig = {
@@ -37,30 +37,30 @@ export function createCameraSetup(
   };
 
   // Store current camera target position for smoothing
-  const currentTarget = new THREE.Vector3();
-  const currentPosition = new THREE.Vector3();
+  const currentTarget = new Vector3();
+  const currentPosition = new Vector3();
   
   // Store last valid direction
-  const lastDirection = new THREE.Vector3(0, 0, 1);
+  const lastDirection = new Vector3(0, 0, 1);
 
   // Motion trail setup
-  const trailGeometry = new THREE.BufferGeometry();
-  const trailMaterial = new THREE.LineBasicMaterial({
+  const trailGeometry = new BufferGeometry();
+  const trailMaterial = new LineBasicMaterial({
     color: 0x00ff00,
     transparent: true,
     opacity: 0.5
   });
   const trailPositions = new Float32Array(300);
-  trailGeometry.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
-  const trail = new THREE.Line(trailGeometry, trailMaterial);
-  const trailPoints: THREE.Vector3[] = [];
+  trailGeometry.setAttribute('position', new BufferAttribute(trailPositions, 3));
+  const trail = new Line(trailGeometry, trailMaterial);
+  const trailPoints: Vector3[] = [];
 
   function updateCamera(
     row: Position,
     prevRow?: Position,
   ): void {
     // Calculate direction, with fallback to last valid direction
-    const newDirection = new THREE.Vector3();
+    const newDirection = new Vector3();
     if (prevRow) {
       newDirection.set(
         -row.x - -prevRow.x,
@@ -76,7 +76,7 @@ export function createCameraSetup(
     }
 
     // Update trail
-    trailPoints.unshift(new THREE.Vector3(-row.x, -row.y, row.z));
+    trailPoints.unshift(new Vector3(-row.x, -row.y, row.z));
     if (trailPoints.length > 100) trailPoints.pop();
     
     const positions = trail.geometry.attributes.position.array;
@@ -88,13 +88,13 @@ export function createCameraSetup(
     trail.geometry.attributes.position.needsUpdate = true;
 
     // Use fixed distance regardless of speed
-    const cameraOffset = new THREE.Vector3(
+    const cameraOffset = new Vector3(
       -lastDirection.x * cameraConfig.distance,
       cameraConfig.height,
       -lastDirection.z * cameraConfig.distance
     );
 
-    const targetPosition = new THREE.Vector3(
+    const targetPosition = new Vector3(
       -row.x + cameraOffset.x,
       -row.y + cameraOffset.y,
       row.z + cameraOffset.z
@@ -105,7 +105,7 @@ export function createCameraSetup(
     camera.position.copy(currentPosition);
 
     // Update look-at target with smoothing
-    const lookAtTarget = new THREE.Vector3(-row.x, -row.y, row.z);
+    const lookAtTarget = new Vector3(-row.x, -row.y, row.z);
     currentTarget.lerp(lookAtTarget, cameraConfig.smoothing);
     camera.lookAt(currentTarget);
   }
