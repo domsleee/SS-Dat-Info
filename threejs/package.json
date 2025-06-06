@@ -9,8 +9,8 @@
         "preview": "vite preview",
         "start": "bun dev",
         "deploy": "bun run build && bunx gh-pages -d dist",
-        "lint": "bunx eslint",
-        "typecheck": "bunx tsgo"
+        "lint": "eslint",
+        "typecheck": "tsgo"
     },
     "devDependencies": {
         "@eslint/js": "^9.28.0",

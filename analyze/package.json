@@ -18,8 +18,8 @@
   },
   "scripts": {
     "start": "bun src/index.ts",
-    "lint": "bunx eslint",
+    "lint": "eslint",
     "test": "bun test",
-    "typecheck": "bunx tsgo"
+    "typecheck": "tsgo"
   }
 }
