@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import path from 'path';
 import { readdir } from 'fs/promises';
+import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig(({ command }) => ({
   base: command === 'serve' ? '/' : '/SS-Dat-Info/',
@@ -26,6 +27,7 @@ export default defineConfig(({ command }) => ({
     '/replays': '../replays'
   },
   plugins: [
+    tailwindcss(),
     {
       name: 'list-public-dir',
       configureServer(server) {
