@@ -31,7 +31,6 @@
         "dat-analyze": "../analyze/",
         "lodash-es": "^4.17.21",
         "lucide": "^0.513.0",
-        "tailwindcss": "^4.1.8",
         "three": "^0.177.0"
     }
 }
