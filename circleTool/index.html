@@ -5,8 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
     <title>Checkpoint Circle Tool</title>
-    <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
-    <style type="text/tailwindcss">@layer theme, base, components, utilities;
+    <script>
+    if (localStorage.getItem("darkMode") !== "false") {
+      document.documentElement.classList.add("dark");
+    }
+    </script>
+    <style type="style/css">@layer theme, base, components, utilities;
 
 @layer theme {
   @theme default {
@@ -934,7 +938,7 @@
       }
 
     </style>
-    <script type="module" crossorigin src="/SS-Dat-Info/assets/circleTool-BQYHhzzg.js"></script>
+    <script type="module" crossorigin src="/SS-Dat-Info/assets/circleTool-CMsq5nfU.js"></script>
     <link rel="modulepreload" crossorigin href="/SS-Dat-Info/assets/modulepreload-polyfill-C-9fG3_E.js">
   </head>
   <body class="bg-gray-100 text-gray-900 dark:bg-gray-900 dark:text-gray-50">
