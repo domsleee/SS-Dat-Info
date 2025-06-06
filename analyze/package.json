@@ -17,8 +17,8 @@
   },
   "scripts": {
     "start": "bun src/index.ts",
-    "lint": "bunx eslint . --ext .ts",
+    "lint": "bunx eslint",
     "test": "bun test",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsgo"
   }
 }

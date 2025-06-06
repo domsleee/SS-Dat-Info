@@ -1,4 +1,3 @@
-import glsl from 'vite-plugin-glsl';
 import { defineConfig } from 'vite';
 import path from 'path';
 import { readdir } from 'fs/promises';
@@ -12,6 +11,9 @@ export default defineConfig(({ command }) => ({
       allow: ['..', '../replays']
     },
   },
+  experimental: {
+    enableNativePlugin: 'resolver'
+  },
   build: {
     rollupOptions: {
       input: {
@@ -23,7 +25,7 @@ export default defineConfig(({ command }) => ({
   publicDir: {
     '/replays': '../replays'
   },
-  plugins: [ glsl(),
+  plugins: [
     {
       name: 'list-public-dir',
       configureServer(server) {
