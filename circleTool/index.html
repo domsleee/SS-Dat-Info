@@ -59,6 +59,7 @@
     <div class="fixed top-4 right-4 z-50">
       <button
         id="themeToggle"
+        aria-label="Toggle Dark Mode"
         class="p-2 rounded-full bg-indigo-600 text-white shadow-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 dark:focus:ring-offset-gray-900"
       >
         <svg
@@ -167,6 +168,7 @@ melt_height	= 0;
               <div class="flex-1 min-w-[45%]">
                 <label class="block font-medium mb-1 text-sm">Circle radius</label>
                 <input
+                  aria-label="Circle radius"
                   type="number"
                   id="radiusValue"
                   min="1"
@@ -178,6 +180,7 @@ melt_height	= 0;
               <div class="flex-1 min-w-[45%]">
                 <label class="block font-medium mb-1 text-sm"># Objects per circle</label>
                 <input
+                  aria-label="Number of objects per circle"
                   type="number"
                   id="numObjectsValue"
                   min="1"
@@ -189,6 +192,7 @@ melt_height	= 0;
               <div class="flex-1 min-w-[45%]">
                 <label class="block font-medium mb-1 text-sm">Uniform_scale</label>
                 <input
+                  aria-label="Uniform scale value"
                   type="number"
                   id="uniformScaleValue"
                   min="0.01"
@@ -222,6 +226,7 @@ melt_height	= 0;
             <div class="relative">
               <textarea
                 id="outputResult"
+                aria-label="Generated output"
                 class="w-full h-60 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 bg-gray-50 dark:bg-gray-700 code-textarea text-sm"
                 readonly
               ></textarea>
