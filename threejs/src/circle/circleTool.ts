@@ -1,12 +1,6 @@
 import { GameConfigParser, circleToString, generateCircle } from "dat-analyze/src/exports";
 
 document.addEventListener("DOMContentLoaded", function (): void {
-  if (
-    localStorage.getItem("darkMode") !== "false"
-  ) {
-    document.documentElement.classList.add("dark");
-  }
-
   const generateBtn = document.getElementById("generate") as HTMLButtonElement;
   const copyBtn = document.getElementById(
     "copyToClipboard"

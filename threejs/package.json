@@ -9,20 +9,20 @@
         "preview": "vite preview",
         "start": "bun dev",
         "deploy": "bun run build && bunx gh-pages -d dist",
-        "lint": "bunx eslint .",
-        "typecheck": "bunx tsc"
+        "lint": "eslint",
+        "typecheck": "tsgo"
     },
     "devDependencies": {
         "@eslint/js": "^9.28.0",
         "@stylistic/eslint-plugin": "^4.4.1",
         "@types/lodash-es": "^4.17.12",
+        "@typescript/native-preview": "^7.0.0-dev.20250606.1",
         "bun-types": "^1.2.15",
         "eslint": "^9.28.0",
         "sass": "^1.89.1",
         "typescript": "^5.8.3",
         "typescript-eslint": "^8.33.1",
-        "vite": "^6.3.5",
-        "vite-plugin-glsl": "^1.4.2"
+        "vite": "npm:rolldown-vite@latest"
     },
     "dependencies": {
         "@types/three": "^0.177.0",
@@ -31,7 +31,6 @@
         "dat-analyze": "../analyze/",
         "lodash-es": "^4.17.21",
         "lucide": "^0.513.0",
-        "tailwindcss": "^4.1.8",
         "three": "^0.177.0"
     }
 }

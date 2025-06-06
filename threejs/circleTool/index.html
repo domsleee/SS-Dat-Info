@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
     <title>Checkpoint Circle Tool</title>
-    <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
+    <script>
+    if (localStorage.getItem("darkMode") !== "false") {
+      document.documentElement.classList.add("dark");
+    }
+    </script>
     <script type="module" src="../src/circle/circleTool.ts"></script>
-    <style type="text/tailwindcss">
-      @import 'tailwindcss';
-      
+    <style type="style/css">
+      @import "tailwindcss";
       @custom-variant dark (&:where(.dark, .dark *));
     </style>
     <style>

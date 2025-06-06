@@ -5,15 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "lint": "eslint .",
+    "lint": "eslint",
     "test": "bun test",
     "check:rust-clippy": "cd src-tauri && cargo clippy -- -D warnings",
     "check:rust-fmt": "cd src-tauri && cargo fmt --all -- --check",
     "check:all": "bun lint && bun test && bun typecheck && bun check:rust-clippy && bun check:rust-fmt",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc"
   },
   "dependencies": {
     "@mdi/js": "^7.4.47",
@@ -41,7 +41,7 @@
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.33.1",
     "unplugin-vue-components": "^28.7.0",
-    "vite": "^6.3.5",
+    "vite": "npm:rolldown-vite@latest",
     "vite-plugin-vuetify": "^2.1.1",
     "vue-tsc": "^2.2.10"
   }
