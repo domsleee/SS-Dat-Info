@@ -6,7 +6,7 @@ export function createPresets(config: Config, videoTarget: VideoTarget, processA
   const presetSelector = document.getElementById("presetSelector")! as HTMLSelectElement;
   const presets = [
     {
-      name: "Dom VM 1.09.08 with speed & inputs",
+      name: "Dom VM 1.09.08 with inputs",
       videoId: "Ja3OmVZS2jQ",
       datFile: "replays/Village/Medium/VM 1.09.08 Dom.dat",
       offsetSeconds: -1.05,
@@ -44,6 +44,7 @@ export function createPresets(config: Config, videoTarget: VideoTarget, processA
   ];
 
   // add option for each preset
+  presetSelector.innerHTML = ""; // Clear existing options
   for (const preset of presets) {
     const option = document.createElement("option");
     option.value = preset.videoId;
