@@ -12,7 +12,7 @@ export const videoIds = {
   vm109: 'Ja3OmVZS2jQ',
 }
 
-export function setupVideo(videoId: string, dimensions: {width: number, height: number}): VideoTarget {
+export function setupVideo(videoId: string, dimensions: {width: number, height: number}, onReadyCallback: () => Promise<void>): VideoTarget {
   console.log("Setup Video")
   const tag = document.createElement('script');
   const result = { videoTarget: undefined as YT.Player | undefined };
@@ -43,8 +43,8 @@ export function setupVideo(videoId: string, dimensions: {width: number, height: 
       },
       events: {
         'onReady': (event) => {
-          event.target.playVideo();
-          result.videoTarget = event.target; 
+          result.videoTarget = event.target;
+          void onReadyCallback();
         },
         'onStateChange': (event) => {
           if (event.data === YT.PlayerState.ENDED) {

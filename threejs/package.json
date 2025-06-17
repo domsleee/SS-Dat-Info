@@ -13,17 +13,17 @@
         "typecheck": "tsgo"
     },
     "devDependencies": {
-        "@eslint/js": "^9.28.0",
+        "@eslint/js": "^9.29.0",
         "@stylistic/eslint-plugin": "^4.4.1",
-        "@tailwindcss/vite": "^4.1.8",
+        "@tailwindcss/vite": "^4.1.10",
         "@types/lodash-es": "^4.17.12",
-        "@typescript/native-preview": "^7.0.0-dev.20250606.1",
-        "bun-types": "^1.2.15",
-        "eslint": "^9.28.0",
-        "sass": "^1.89.1",
-        "tailwindcss": "^4.1.8",
+        "@typescript/native-preview": "^7.0.0-dev.20250617.1",
+        "bun-types": "^1.2.16",
+        "eslint": "^9.29.0",
+        "sass": "^1.89.2",
+        "tailwindcss": "^4.1.10",
         "typescript": "^5.8.3",
-        "typescript-eslint": "^8.33.1",
+        "typescript-eslint": "^8.34.1",
         "vite": "npm:rolldown-vite@latest"
     },
     "dependencies": {
@@ -32,7 +32,7 @@
         "buffer": "^6.0.3",
         "dat-analyze": "../analyze/",
         "lodash-es": "^4.17.21",
-        "lucide": "^0.513.0",
+        "lucide": "^0.515.0",
         "three": "^0.177.0"
     }
 }

@@ -1,6 +1,7 @@
 body {
   height: 100vh;
   margin: 0;
+  overflow-y: scroll;
 }
 
 html {
@@ -86,6 +87,15 @@ button:hover {
   padding: 0 20px;
   font-family: monospace;
   position: relative;
+}
+
+#info > div {
+  flex: 1;
+  min-height: 400px;
+}
+
+#scoreInfo {
+  margin-bottom: 15px;
 }
 
 #keyControls {
@@ -178,4 +188,17 @@ table th {
 
 .dropzone-label {
   cursor: pointer;
+}
+
+#mainContainer {
+  width: 960px;
+}
+
+#container {
+  min-height: 360px;
+}
+
+.iconButton {
+  width: 42px;
+  height: 42px;
 }

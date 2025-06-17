@@ -13,7 +13,7 @@ import { createPresets } from "./presets";
 import { LevelScore, PlaneCollisionInfo } from "dat-analyze/src/PlaneUtil/types";
 import { minBy } from "lodash-es";
 import { getScoreBreakdown, MAX_SCORE, PLANE_RADIUS, NEAREST_START_POINT_DIST } from "dat-analyze/src/PlaneUtil/scoreTrack";
-import { createIcons, Info, Pause, Play, SkipBack, SkipForward } from 'lucide';
+import { createElement, Info, Pause, Play, SkipBack, SkipForward } from 'lucide';
 import { PositionXYZ } from "dat-analyze/src/generateCircle/types";
 import { DirectionalLight, Euler, Group, Matrix4, PerspectiveCamera, Scene, WebGLRenderer } from "three";
 
@@ -29,8 +29,6 @@ const config: Config = {
 };
 const SYNC_THRESHOLD = 0.02;
 
-const videoTarget = setupVideo(config.videoId, dimensions);
-
 const playerState = {
   isPlaying: true,
   resumedTime: 0,
@@ -38,7 +36,16 @@ const playerState = {
   lastFrameChecked: -5000,
 };
 
+const videoTarget = setupVideo(config.videoId, dimensions, async () => {
+  if (playerState.isPlaying) {
+    videoTarget.videoTarget?.playVideo();
+  } else {
+    videoTarget.videoTarget?.pauseVideo();
+  }
+});
+
 async function main() {
+  setupButtons();
   document.getElementById("mainContainer")!.style.width = `${
     dimensions.width * 2
   }px`;
@@ -55,6 +62,20 @@ async function main() {
   createPresets(config, videoTarget, processAnalyzeResult);
   setupConfig(config, videoTarget, processAnalyzeResult);
   processAnalyzeResult(analyzeResult);
+}
+
+function setupButtons() {
+  const playPauseButton = document.getElementById("playPauseButton")!;
+  const backButton = document.getElementById("backButton")!;
+  const forwardButton = document.getElementById("forwardButton")!;
+
+  setPlayPauseButtonIcon(playPauseButton);
+  backButton.innerHTML = createElement(SkipBack).outerHTML;
+  forwardButton.innerHTML = createElement(SkipForward).outerHTML;
+}
+
+function setPlayPauseButtonIcon(playPauseButton: HTMLElement) {
+  playPauseButton.innerHTML = createElement(playerState.isPlaying ? Pause : Play).outerHTML;
 }
 
 function mainLoop(mainLoopContainer: MainLoopContainer) {
@@ -82,8 +103,10 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
       playerState.isPlaying = false;
       if (config.syncWithVideo) {
         videoTarget.videoTarget?.pauseVideo();
-        const { expectedFrame } = resync();
-        renderFrame(0, Math.floor(expectedFrame));
+        const expectedObject = resync();
+        if (expectedObject) {
+          renderFrame(0, Math.floor(expectedObject.expectedFrame));
+        }
       }
     } else {
       playerState.resumedTime =
@@ -95,11 +118,7 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
       }
     }
 
-    playPauseButton.innerHTML = `<i data-lucide="${
-      playerState.isPlaying ? "pause" : "play"
-    }"></i>`;
-
-    refreshLucideIcons();
+    setPlayPauseButtonIcon(playPauseButton);
   };
 
   forwardButton.onclick = () => {
@@ -119,14 +138,13 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
     getHeaderHtml(analyzeResult);
   document.getElementById("scoreInfo")!.innerHTML =
     getScoreHtml(analyzeResult);
-  refreshLucideIcons();
 
   playerRange.min = "0";
   playerRange.max = data.length.toString();
 
   const camera = new PerspectiveCamera(
     75,
-    window.innerWidth / window.innerHeight,
+    dimensions.width / dimensions.height,
     0.01,
     1000
   );
@@ -421,8 +439,11 @@ function tryResync(frameToRender: number) {
   }
 }
 
-function resync(actualSeconds?: number): { expectedFrame: number } {
-  actualSeconds = actualSeconds ?? videoTarget.videoTarget!.getCurrentTime();
+function resync(actualSeconds?: number): { expectedFrame: number } | undefined {
+  if (!videoTarget.videoTarget) {
+    return undefined;
+  }
+  actualSeconds ??= videoTarget.videoTarget!.getCurrentTime();
   const expectedFrame = (actualSeconds! - config.offsetSeconds) * 100;
   playerState.resumedTime = performance.now() - 10 * expectedFrame;
   return { expectedFrame };
@@ -545,8 +566,16 @@ function getTextWithCaption(text: string, caption: string, isWarning: boolean) {
   const style = isWarning
     ? "color:darkorange"
     : "color:green";
-  const iconCaptionSpan = `<span data-tooltip='${caption}'> <i data-lucide="info" style='width:12px; height:12px; vertical-align:middle'></i></span>`;
+  const iconCaptionSpan = `<span data-tooltip='${caption}'> ${createInfoIcon().outerHTML}</span>`;
   return `<span style='${style}'>${text}</span>${iconCaptionSpan}`;
+}
+
+function createInfoIcon() {
+  const el = createElement(Info);
+  el.style.width = "12px";
+  el.style.height = "12px";
+  el.style.verticalAlign = "middle";
+  return el;
 }
 
 function getScoreHtml(analyzeResult: AnalyzeResult) {
@@ -648,14 +677,6 @@ function getAllCollisionsTable(analyzeResult: AnalyzeResult, levelScore: LevelSc
     </tbody>
   </table`;
   return table;
-}
-
-function refreshLucideIcons() {
-  try {
-    createIcons({icons: {Play, Pause, SkipBack, SkipForward, Info}});
-  } catch (e) {
-    console.error(e);
-  }
 }
 
 main();
