@@ -11,6 +11,16 @@ export function doesLineSegmentCollideWithPlane(plane: Plane, segment: LineSegme
   const normalLength = Math.sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
   if (normalLength < 1e-6) return undefined;
 
+  const d1 =
+    normal.x * (segment.p1.x - plane.position.x) +
+    normal.y * (segment.p1.y - plane.position.y) +
+    normal.z * (segment.p1.z - plane.position.z);
+  const d2 =
+    normal.x * (segment.p2.x - plane.position.x) +
+    normal.y * (segment.p2.y - plane.position.y) +
+    normal.z * (segment.p2.z - plane.position.z);
+  if (d1 * d2 > 0) return undefined;
+
   const normalizedNormal = {
     x: normal.x / normalLength,
     y: normal.y / normalLength,

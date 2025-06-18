@@ -6,7 +6,6 @@ import { AnalyzeResult, RowData, UNKNOWN_TRACK } from "dat-analyze/src/types";
 import { SnowboardTrackAnalyzer } from "./snowboardTrackAnalyzer";
 import { createCameraSetup } from "./cameraSetup";
 import { createCharacterGroup } from "./characterGroup";
-import { parseLittleEndianFloat32 } from "dat-analyze/src/analyzeReplay";
 import { setupConfig, updateConfigDOM } from "./config";
 import { Config, MainLoopContainer, TextFields } from "./types";
 import { createPresets } from "./presets";
@@ -354,7 +353,7 @@ function msToHumanReadable(ms: number) {
 function getRawString(raw: string) {
   const arr = new Array<number>();
   for (let i = 0; i < raw.length; i += 8) {
-    arr.push(parseLittleEndianFloat32(raw.slice(i, i + 8)));
+    // arr.push(parseLittleEndianFloat32(raw.slice(i, i + 8)));
   }
 
   const rowCount = 7; // Number of rows to display

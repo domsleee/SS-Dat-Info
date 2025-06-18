@@ -115,6 +115,7 @@ function getTotalNumberOfBlocks(data: Uint8Array, firstBlockOffset: number): num
 function getCoordinateData(blockData: Uint8Array, timingDataFromHeader: TimingDataFromHeader): CoordinateData {
   const footerExists = blockData.slice(blockData.length - BLOCK_SIZE, BLOCK_SIZE).every(byte => byte === 0x00);
   const coordinateData: CoordinateData = { rows: [] };
+  const dataView = new DataView(blockData.buffer, 0);
 
   const firstBlockOffset = getFirstBlockOffset(blockData);
   const totalCoordinateBlocks = getTotalNumberOfBlocks(blockData, firstBlockOffset) - 1 - (footerExists ? 1 : 0);
@@ -133,14 +134,14 @@ function getCoordinateData(blockData: Uint8Array, timingDataFromHeader: TimingDa
       const rowData: number[] = [];
       for (let col = 0; col < 3; col++) {
         const offset = matrixOffset + (row * 3 + col) * 4;
-        rowData.push(parseLittleEndianFloat32(blockData, offset));
+        rowData.push(parseLittleEndianFloat32WithView(dataView, offset));
       }
       rotation3x3.push(rowData);
     }
     const data = {
-      x: parseLittleEndianFloat32(blockData, posOffset),
-      y: parseLittleEndianFloat32(blockData, posOffset + 4),
-      z: parseLittleEndianFloat32(blockData, posOffset + 2 * 4),
+      x: parseLittleEndianFloat32WithView(dataView, posOffset),
+      y: parseLittleEndianFloat32WithView(dataView, posOffset + 4),
+      z: parseLittleEndianFloat32WithView(dataView, posOffset + 2 * 4),
       rotation3x3,
     };
     coordinateData.rows.push(data);
@@ -148,6 +149,6 @@ function getCoordinateData(blockData: Uint8Array, timingDataFromHeader: TimingDa
   return coordinateData;
 }
 
-export function parseLittleEndianFloat32(data: Uint8Array, offset: number): number {
-  return new DataView(data.buffer, data.byteOffset + offset).getFloat32(0, true);
+function parseLittleEndianFloat32WithView(dataView: DataView, offset: number): number {
+  return dataView.getFloat32(offset, true);
 }

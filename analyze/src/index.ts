@@ -1,8 +1,6 @@
 import { Command } from "commander";
-import { existsSync, writeFileSync } from "fs";
+import { existsSync } from "fs";
 import { analyzeReplayFile } from "./analyzeReplayFs";
-import { readFile } from "fs/promises";
-import { getDataBlocks } from "./analyzeReplay";
 import { debugKeypress } from "./debugKeypress";
 import { dumpObjects } from "./dumpObjects";
 import { combine } from "./LevelData/combine";
@@ -26,28 +24,28 @@ program
     // Add analysis logic here
   });
 
-program
-  .command("dump")
-  .description("Output file hex")
-  .argument("<filepath>", "path to file")
-  .option("-b, --block <index>", "output specific block by index")
-  .action(async (filepath: string, options: { block: string }) => {
-    if (!existsSync(filepath)) {
-      console.error("File not found:", filepath);
-      process.exit(1);
-    }
+// program
+//   .command("dump")
+//   .description("Output file hex")
+//   .argument("<filepath>", "path to file")
+//   .option("-b, --block <index>", "output specific block by index")
+//   .action(async (filepath: string, options: { block: string }) => {
+//     if (!existsSync(filepath)) {
+//       console.error("File not found:", filepath);
+//       process.exit(1);
+//     }
 
-    const content = await readFile(filepath);
-    const hexData = Buffer.from(content.buffer).toString("hex");
-    const blocks = getDataBlocks(hexData);
+//     const content = await readFile(filepath);
+//     const hexData = Buffer.from(content.buffer).toString("hex");
+//     const blocks = getDataBlocks(hexData);
 
-    if (options.block) {
-      console.log(blocks[parseInt(options.block)]);
-    } else {
-      console.log(blocks.join("\n")); 
-    }
-    // Add analysis logic here
-  });
+//     if (options.block) {
+//       console.log(blocks[parseInt(options.block)]);
+//     } else {
+//       console.log(blocks.join("\n")); 
+//     }
+//     // Add analysis logic here
+//   });
 
 program
   .command("debug-keypress")
