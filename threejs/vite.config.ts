@@ -16,6 +16,7 @@ export default defineConfig(({ command }) => ({
     enableNativePlugin: 'resolver'
   },
   build: {
+    sourcemap: true,
     rollupOptions: {
       input: {
         main: path.resolve(__dirname, 'index.html'),

@@ -1,4 +1,3 @@
-import "./polyfills";
 import { getDomVM } from "./data";
 import { setupVideo, videoIds } from "./video";
 import { calculateAcceleration, getSpeed } from "./coordUtil";
@@ -566,7 +565,7 @@ function getNearestStartPlaneText(analyzeResult: AnalyzeResult) {
 function getTextWithCaption(text: string, caption: string, isWarning: boolean) {
   const style = isWarning
     ? "color:darkorange"
-    : "color:green";
+    : "color:#1a5f1a"; // dark forest green
   const iconCaptionSpan = `<span data-tooltip='${caption}'> ${createInfoIcon().outerHTML}</span>`;
   return `<span style='${style}'>${text}</span>${iconCaptionSpan}`;
 }
