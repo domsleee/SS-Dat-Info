@@ -1,5 +1,5 @@
 
-import { doesLineSegmentCollideWithPlane } from "../PlaneUtil/planeUtil";
+import { doesLineSegmentCollideWithPlaneWithNormal, getPlaneNormal } from "../PlaneUtil/planeUtil";
 import { RowData } from "../types";
 import type { LevelPlaneCollision } from "./types";
 import { getLevels } from "../LevelData/levels";
@@ -13,13 +13,23 @@ export function getPlaneCollisions(rows: Array<RowData>): Array<LevelPlaneCollis
 
   for (const level of getLevels()) {
     const planeEntries = level.entries.filter(t => planeTypes.includes(t.name));
-    const planeEntryPlanes = planeEntries.map(t => ({ planeName: t.name, plane: {position: t.position, quat: t.quat}}))
+    const planeEntryPlanes = planeEntries.map(t => ({ planeName: t.name, plane: {position: t.position, quat: t.quat, normal: getPlaneNormal(t)}}))
     const levelPlaneCollision: LevelPlaneCollision = {name: level.name, collisions: []};
 
     for (let i = 0; i < rows.length - 1; i++) {
       const segment = segments[i];
       for (const { planeName, plane } of planeEntryPlanes) {
-        const intersection = doesLineSegmentCollideWithPlane(plane, segment);
+        const d1 =
+          plane.normal.x * (segment.p1.x - plane.position.x) +
+          plane.normal.y * (segment.p1.y - plane.position.y) +
+          plane.normal.z * (segment.p1.z - plane.position.z);
+        const d2 =
+          plane.normal.x * (segment.p2.x - plane.position.x) +
+          plane.normal.y * (segment.p2.y - plane.position.y) +
+          plane.normal.z * (segment.p2.z - plane.position.z);
+        if (d1 * d2 > 0) continue; // both points are on the same side of the plane, no intersection
+
+        const intersection = doesLineSegmentCollideWithPlaneWithNormal(plane, segment);
         if (intersection !== undefined) {
           levelPlaneCollision.collisions.push({
             intersection,
@@ -29,7 +39,7 @@ export function getPlaneCollisions(rows: Array<RowData>): Array<LevelPlaneCollis
             frame1: i,
             frame2: i+1,
             objectName: planeName,
-            plane: plane
+            plane
           });
         }
       }
