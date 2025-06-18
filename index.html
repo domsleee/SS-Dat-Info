@@ -3,7 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <script type="module" crossorigin src="/SS-Dat-Info/assets/main-DJufQj7G.js"></script>
+    <meta name="description" content="Gets information from *.dat replay files of Supreme Snowboarding. Includes checkpoint 1 and checkpoint 2 splits." />
+    <title>Supreme Snowboarding Replay Viewer</title>
+    <script type="module" crossorigin src="/SS-Dat-Info/assets/main-DldYhT3v.js"></script>
     <link rel="modulepreload" crossorigin href="/SS-Dat-Info/assets/modulepreload-polyfill-C-9fG3_E.js">
     <link rel="stylesheet" crossorigin href="/SS-Dat-Info/assets/main-DfOubvTs.css">
   </head>
@@ -41,15 +43,16 @@
             value="0"
             min="0"
             max="100"
+            aria-label="Frame Slider"
           />
           <div class="controls">
-            <button id="playPauseButton" class="iconButton">
+            <button id="playPauseButton" class="iconButton" aria-label="Play/Pause">
               <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="14" y="4" width="4" height="16" rx="1"></rect><rect x="6" y="4" width="4" height="16" rx="1"></rect></svg>
             </button>
-            <button id="backButton" class="iconButton">
+            <button id="backButton" class="iconButton" aria-label="Back">
               <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"></polygon><line x1="5" x2="5" y1="19" y2="5"></line></svg>
             </button>
-            <button id="forwardButton" class="iconButton">
+            <button id="forwardButton" class="iconButton" aria-label="Forward">
               <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" x2="19" y1="5" y2="19"></line></svg>
             </button>
             <p id="frameInfo" style="display: inline; margin: 0">Frame: 0 / loading</p>
@@ -80,7 +83,7 @@
           <table>
             <tr>
               <td>Preset</td>
-              <td><select id="presetSelector"><option selected>Dom VM 1.09.08 with inputs</option></select></td>
+              <td><select id="presetSelector" aria-label="Preset Selector"><option selected>Dom VM 1.09.08 with inputs</option></select></td>
             </tr>
             <tr>
               <td></td>
@@ -93,11 +96,11 @@
             </tr>
             <tr>
               <td>Offset (s)</td>
-              <td><input type="number" id="offsetSeconds" value="0" /></td>
+              <td><input type="number" id="offsetSeconds" value="0" aria-label="Offset Seconds" /></td>
             </tr>
             <tr>
               <td>Youtube ID</td>
-              <td><input type="text" id="videoId" value="0" /></td>
+              <td><input type="text" id="videoId" value="0" aria-label="Video ID" /></td>
             </tr>
           </table>
         </div>
