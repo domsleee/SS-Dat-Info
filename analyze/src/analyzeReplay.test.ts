@@ -4,6 +4,7 @@ import { readdir, stat } from "fs/promises";
 import { relative, join, basename, resolve } from "path";
 import { MAX_SCORE } from "./PlaneUtil/scoreTrack";
 import { REPLAY_FOLDER } from "./types.node";
+import "./generateCircle/toBeCloseToStructure";
 // import { sleep } from "bun";
 // import { afterAll } from "bun:test";
 
@@ -82,6 +83,18 @@ describe("analyzeReplay - other", () => {
       expect(result.recordingMs).toBe(98810);
 
       expect(result.checkpoint1Ms).toBe(23640);
+
+      expect(result.coords!.rows.length).toEqual(9881);
+      expect(result.coords!.rows[0]).toBeCloseToStructure({
+        x: 519.2340087890625,
+        y: -1555.2247314453125,
+        z: 53.577999114990234,
+        rotation3x3: [
+          [0.9999922513961792, -0.0003098223824054003, 0.003922265954315662],
+          [0, 0.9968947172164917, 0.07874537259340286],
+          [-0.0039344835095107555, -0.07874476164579391, 0.9968870282173157]
+        ]
+      });
     });
   });
 
