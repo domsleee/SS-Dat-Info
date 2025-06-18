@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { analyzeReplay } from "./analyzeReplayFs";
+import { analyzeReplayFile } from "./analyzeReplayFs";
 import { readdir, stat } from "fs/promises";
 import { relative, join, basename, resolve } from "path";
 import { MAX_SCORE } from "./PlaneUtil/scoreTrack";
@@ -39,7 +39,7 @@ describe("analyzeReplay - tracks", () => {
       matchingFiles.forEach((filepath) => {
         // if (!filepath.includes("1.15.01")) return;
         test(`identifies "${basename(filepath)}" as ${name}`, async () => {
-          const result = await analyzeReplay(filepath, {skipCoords: false});
+          const result = await analyzeReplayFile(filepath, {skipCoords: false});
           expect(result.trackName).toBe(name);
           expect(result.trackScoreData?.levelScores[0].score).toBe(MAX_SCORE);
           
@@ -58,7 +58,7 @@ describe("analyzeReplay - tracks", () => {
 describe("analyzeReplay - other", () => {
   describe("header info", () => {
     test("FM Matt 54.35", async () => {
-      const result = await analyzeReplay(resolve(REPLAY_FOLDER, "Forest/Medium/0.54.35 Matt.dat"), {skipCoords: true});
+      const result = await analyzeReplayFile(resolve(REPLAY_FOLDER, "Forest/Medium/0.54.35 Matt.dat"), {skipCoords: true});
       expect(result.playerName).toBe("Matt");
       expect(result.displayedMs).toBe(54350);
       expect(result.startMs).toBe(3400);
@@ -72,7 +72,7 @@ describe("analyzeReplay - other", () => {
     });
 
     test("FM Sesh 1.29.36", async () => {
-      const result = await analyzeReplay(resolve(REPLAY_FOLDER, "Forest/Medium/1.29.36 SESH.dat"));
+      const result = await analyzeReplayFile(resolve(REPLAY_FOLDER, "Forest/Medium/1.29.36 SESH.dat"));
       expect(result.playerName).toBe("SESH");
       expect(result.displayedMs).toBe(89360);
       expect(result.startMs).toBe(3410);

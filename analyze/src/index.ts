@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { existsSync, writeFileSync } from "fs";
-import { analyzeReplay } from "./analyzeReplayFs";
+import { analyzeReplayFile } from "./analyzeReplayFs";
 import { readFile } from "fs/promises";
 import { getDataBlocks } from "./analyzeReplay";
 import { debugKeypress } from "./debugKeypress";
@@ -21,8 +21,8 @@ program
       process.exit(1);
     }
 
-    console.log(await analyzeReplay(filepath));
-    writeFileSync("output.txt", JSON.stringify(await analyzeReplay(filepath), null, 2));
+    console.log(await analyzeReplayFile(filepath));
+    // writeFileSync("output.txt", JSON.stringify(await analyzeReplay(filepath), null, 2));
     // Add analysis logic here
   });
 

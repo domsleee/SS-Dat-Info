@@ -29,7 +29,6 @@ export interface RowData {
   y: number;
   z: number;
   rotation3x3: Array<Array<number>>;
-  raw: string;
 }
 
 export interface TimingDataFromHeader {

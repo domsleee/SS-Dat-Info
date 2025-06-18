@@ -1,7 +1,7 @@
 import { join } from 'path';
 import { REPLAY_FOLDER } from "./types.node";
 import { findDatFiles } from "./pathUtil";
-import { analyzeReplay } from "./analyzeReplayFs";
+import { analyzeReplayFile } from "./analyzeReplayFs";
 
 export async function debugKeypress() {
   const basePath = join(REPLAY_FOLDER, "tests/keypress");
@@ -25,7 +25,7 @@ export async function debugKeypress() {
     if (relevant.includes(getName(file))) {
       const track = file.split('/').at(-2);
       const name = getName(file);
-      const coords = await analyzeReplay(file, { skipCoords: false });
+      const coords = await analyzeReplayFile(file, { skipCoords: false });
       console.log(`${name} (${track})`)
       console.log(coords.coords?.rows[302].raw)
       console.log(coords.coords?.rows[402].raw);
