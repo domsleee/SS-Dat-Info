@@ -27,9 +27,9 @@ export async function debugKeypress() {
       const name = getName(file);
       const coords = await analyzeReplayFile(file, { skipCoords: false });
       console.log(`${name} (${track})`)
-      console.log(coords.coords?.rows[302].raw)
-      console.log(coords.coords?.rows[402].raw);
-      console.log(coords.coords?.rows[502].raw);
+      // console.log(coords.coords?.rows[302].raw)
+      // console.log(coords.coords?.rows[402].raw);
+      // console.log(coords.coords?.rows[502].raw);
       console.log()
     }
   }
