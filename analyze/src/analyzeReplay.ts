@@ -29,7 +29,8 @@ export function analyzeReplay(data: Uint8Array, options?: AnalyzeReplayOptions):
     recordingMs: timingDataFromHeader.totalRecordingTimeMs,
 
     checkpoint1Ms: timingDataFromHeader.checkpoint1TotalMs - timingDataFromHeader.crossStartPlusStartDelayMs,
-    timingDataFromHeader
+    timingDataFromHeader,
+    data
   };
 
   if (!options?.skipCoords) {
@@ -103,7 +104,7 @@ function blockIsSame(data: Uint8Array, block1: number, block2: number): boolean 
 
 const BLOCK_SIZE = 109;
 
-export function getFirstBlockOffset(data: Uint8Array): number {
+function getFirstBlockOffset(data: Uint8Array): number {
   const { endNameAddr } = readName(data);
   return endNameAddr + 13;
 }
@@ -134,14 +135,14 @@ function getCoordinateData(blockData: Uint8Array, timingDataFromHeader: TimingDa
       const rowData: number[] = [];
       for (let col = 0; col < 3; col++) {
         const offset = matrixOffset + (row * 3 + col) * 4;
-        rowData.push(parseLittleEndianFloat32WithView(dataView, offset));
+        rowData.push(dataView.getFloat32(offset, true));
       }
       rotation3x3.push(rowData);
     }
     const data = {
-      x: parseLittleEndianFloat32WithView(dataView, posOffset),
-      y: parseLittleEndianFloat32WithView(dataView, posOffset + 4),
-      z: parseLittleEndianFloat32WithView(dataView, posOffset + 2 * 4),
+      x: dataView.getFloat32(posOffset, true),
+      y: dataView.getFloat32(posOffset + 4, true),
+      z: dataView.getFloat32(posOffset + 2 * 4, true),
       rotation3x3,
     };
     coordinateData.rows.push(data);
@@ -149,6 +150,12 @@ function getCoordinateData(blockData: Uint8Array, timingDataFromHeader: TimingDa
   return coordinateData;
 }
 
-function parseLittleEndianFloat32WithView(dataView: DataView, offset: number): number {
-  return dataView.getFloat32(offset, true);
+export function getBlock(data: Uint8Array, blockIndex: number): Uint8Array {
+  const firstBlockOffset = getFirstBlockOffset(data);
+  const blockStart = firstBlockOffset + blockIndex * BLOCK_SIZE;
+  const blockEnd = blockStart + BLOCK_SIZE;
+  if (blockEnd > data.length) {
+    throw new Error(`Block index ${blockIndex} is out of bounds`);
+  }
+  return data.slice(blockStart, blockEnd);
 }

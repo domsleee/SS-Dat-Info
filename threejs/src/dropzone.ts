@@ -22,9 +22,7 @@ export function setupDropzone({ processCallback }: DropzoneConfig): void {
 
     try {
       const arrayBuffer = await file.arrayBuffer();
-      const hexData = Buffer.from(new Uint8Array(arrayBuffer)).toString("hex");
-
-      await processCallback(hexData);
+      await processCallback(new Uint8Array(arrayBuffer));
       updateDropzoneText(`Processed ${file.name}`);
     } catch (err) {
       console.error("Error processing file:", err);
@@ -84,5 +82,5 @@ function getElementOrThrow<T extends HTMLElement>(id: string): T {
 }
 
 interface DropzoneConfig {
-  processCallback: (hexData: string) => Promise<unknown>;
+  processCallback: (data: Uint8Array) => Promise<unknown>;
 }
