@@ -1,7 +1,7 @@
-import { analyzeReplayHex } from "dat-analyze/src/analyzeReplay";
 import { Config, VideoTarget } from "./types";
 import { AnalyzeResult } from "dat-analyze/src/types";
 import { setupDropzone } from "./dropzone";
+import { analyzeReplay } from "dat-analyze/src/analyzeReplay";
 
 export function setupConfig(
   config: Config,
@@ -25,9 +25,9 @@ export function setupConfig(
   });
   
   setupDropzone({
-    processCallback: async (hexData) => {
+    processCallback: async (data: Uint8Array) => {
       syncWithVideo.checked = false; config.syncWithVideo = false;
-      const analyzeResult = await analyzeReplayHex(hexData, { skipCoords: false });
+      const analyzeResult = await analyzeReplay(data, { skipCoords: false });
       processAnalyzeResult(analyzeResult);
     }
   });

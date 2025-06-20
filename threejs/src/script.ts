@@ -1,4 +1,3 @@
-import "./polyfills";
 import { getDomVM } from "./data";
 import { setupVideo, videoIds } from "./video";
 import { calculateAcceleration, getSpeed } from "./coordUtil";
@@ -6,7 +5,6 @@ import { AnalyzeResult, RowData, UNKNOWN_TRACK } from "dat-analyze/src/types";
 import { SnowboardTrackAnalyzer } from "./snowboardTrackAnalyzer";
 import { createCameraSetup } from "./cameraSetup";
 import { createCharacterGroup } from "./characterGroup";
-import { parseLittleEndianFloat32 } from "dat-analyze/src/analyzeReplay";
 import { setupConfig, updateConfigDOM } from "./config";
 import { Config, MainLoopContainer, TextFields } from "./types";
 import { createPresets } from "./presets";
@@ -16,6 +14,7 @@ import { getScoreBreakdown, MAX_SCORE, PLANE_RADIUS, NEAREST_START_POINT_DIST } 
 import { createElement, Info, Pause, Play, SkipBack, SkipForward } from 'lucide';
 import { PositionXYZ } from "dat-analyze/src/generateCircle/types";
 import { DirectionalLight, Euler, Group, Matrix4, PerspectiveCamera, Scene, WebGLRenderer } from "three";
+import { getBlock } from "dat-analyze/src/analyzeReplay";
 
 const dimensions = {
   width: 480,
@@ -231,7 +230,7 @@ rotation3x3:
   ${row.rotation3x3[1].map((n) => n.toFixed(3)).join(", ")}
   ${row.rotation3x3[2].map((n) => n.toFixed(3)).join(", ")}
 ]
-${getRawString(row.raw)}`;
+${getRawString(getBlock(analyzeResult.data, frameToRender))}`;
 
     setKeyInputState(keys, row);
     playerRange.value = frameToRender.toString();
@@ -351,10 +350,11 @@ function msToHumanReadable(ms: number) {
   return new Date(ms).toISOString().slice(14, 22).replace(".", ":");
 }
 
-function getRawString(raw: string) {
+function getRawString(block: Uint8Array) {
   const arr = new Array<number>();
-  for (let i = 0; i < raw.length; i += 8) {
-    arr.push(parseLittleEndianFloat32(raw.slice(i, i + 8)));
+  const dataView = new DataView(block.buffer, 0);
+  for (let i = 0; i < block.length-1; i += 4) {
+    arr.push(dataView.getFloat32(i, true));
   }
 
   const rowCount = 7; // Number of rows to display
@@ -375,7 +375,7 @@ function getRawString(raw: string) {
   }
 
   return (
-    `frame: ${raw.length / 2} bytes, ${arr.length} 4-byte floats:\n` +
+    `frame: ${block.length} bytes, ${arr.length} 4-byte floats:\n` +
     rows.join("\n")
   );
 }
@@ -565,7 +565,7 @@ function getNearestStartPlaneText(analyzeResult: AnalyzeResult) {
 function getTextWithCaption(text: string, caption: string, isWarning: boolean) {
   const style = isWarning
     ? "color:darkorange"
-    : "color:green";
+    : "color:#1a5f1a"; // dark forest green
   const iconCaptionSpan = `<span data-tooltip='${caption}'> ${createInfoIcon().outerHTML}</span>`;
   return `<span style='${style}'>${text}</span>${iconCaptionSpan}`;
 }

@@ -1,9 +1,8 @@
 import { readFile } from "fs/promises";
-import { analyzeReplayHex } from "./analyzeReplay";
+import { analyzeReplay } from "./analyzeReplay";
 import { AnalyzeReplayOptions, AnalyzeResult } from "./types";
 
-export async function analyzeReplay(filepath: string, options?: AnalyzeReplayOptions): Promise<AnalyzeResult> {
+export async function analyzeReplayFile(filepath: string, options?: AnalyzeReplayOptions): Promise<AnalyzeResult> {
   const content = await readFile(filepath);
-  const hexData = Buffer.from(content.buffer).toString("hex");
-  return analyzeReplayHex(hexData, options);
+  return analyzeReplay(new Uint8Array(content), options);
 }
