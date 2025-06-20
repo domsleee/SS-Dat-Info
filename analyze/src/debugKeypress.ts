@@ -1,7 +1,6 @@
 import { join } from 'path';
 import { REPLAY_FOLDER } from "./types.node";
 import { findDatFiles } from "./pathUtil";
-import { analyzeReplayFile } from "./analyzeReplayFs";
 
 export async function debugKeypress() {
   const basePath = join(REPLAY_FOLDER, "tests/keypress");
