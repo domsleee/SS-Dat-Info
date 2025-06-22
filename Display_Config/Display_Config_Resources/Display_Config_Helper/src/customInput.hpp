@@ -30,6 +30,7 @@ static HMODULE supremeGameModule;
 static HMODULE hmgSoundModule;
 static HMODULE hmgCetsupDIModule;
 static HMODULE srUitModule;
+static HMODULE displayConfigHelperModule;
 
 namespace Housemarque::Supreme_Snowboarding::Music_Handler {
     typedef void (*voidFunction)();
@@ -69,6 +70,53 @@ namespace Housemarque::Supreme_Snowboarding::Supreme_Keyboard {
 typedef void* (*FUN_1013e410_t)(void);
 FUN_1013e410_t FUN_1013e410;
 
+void DoNothing() {
+    Log("We did nothing, nothing happened.");
+}
+
+void TrySomething() {
+    // uint8_t* addr = (uint8_t*)((char*)supremeGameModule + 0x468ea);
+    // uint8_t* dest = (uint8_t*)(DoNothing);
+
+    // Log(std::format("DoNothing is at {:X}", reinterpret_cast<std::uintptr_t>(DoNothing)));
+    // DWORD old;
+    // VirtualProtect(addr, 5, PAGE_EXECUTE_READWRITE, &old);
+    // if (addr[0] != 0xE8) {
+    //     Log("SetupSpeed: Expected call instruction at 0x468ea, but found something else.");
+    //     VirtualProtect(addr, 5, old, &old);
+    //     return;
+    // }
+    // intptr_t rel = (intptr_t)dest - ((intptr_t)addr + 5);
+    // *(int32_t*)((uint8_t*)addr + 1) = (int32_t)rel;
+    // VirtualProtect(addr, 5, old, &old);
+}
+
+void SetupSpeed() {
+    static safetyhook::MidHook speedHook = safetyhook::create_mid((char*)supremeGameModule + 0x45cd3, [](safetyhook::Context& ctx) {
+        ctx.eip += 5;
+    });
+
+    uint8_t* addr = (uint8_t*)((char*)supremeGameModule + 0x455b2);
+    uint8_t* dest = (uint8_t*)((char*)supremeGameModule + 0x11c7a0);
+    DWORD old;
+    VirtualProtect(addr, 5, PAGE_EXECUTE_READWRITE, &old);
+    if (addr[0] != 0xE8) {
+        Log("SetupSpeed: Expected call instruction at 0x455b2, but found something else.");
+        VirtualProtect(addr, 5, old, &old);
+        return;
+    }
+    intptr_t rel = (intptr_t)dest - ((intptr_t)addr + 5);
+    *(int32_t*)((uint8_t*)addr + 1) = (int32_t)rel;
+    VirtualProtect(addr, 5, old, &old);
+
+    TrySomething();
+
+    // static auto speedHook2 = safetyhook::create_mid((char*)supremeGameModule + 0x455b2, [](safetyhook::Context& ctx) {
+    //     ctx.eip = (uintptr_t)((char*)supremeGameModule + 0x11c7b0);
+    // });
+}
+
+
 void DoCustomInput() {
     supremeGameModule = GetModuleHandleA("Supreme_Game.dll");
     if (!supremeGameModule) {
@@ -90,8 +138,14 @@ void DoCustomInput() {
         Log("DoCustomInput: Failed to find SR_UIT.dll");
         return;
     }
+    displayConfigHelperModule = GetModuleHandleA("Display_Config_Helper.dll");
+    if (!displayConfigHelperModule) {
+        Log("DoCustomInput: Failed to find Display_Config_Helper.dll");
+        return;
+    }
 
     SetupFunctionPointers();
+    SetupSpeed();
 
     std::uint8_t* FUN_10140650Address = Memory::PatternScan(supremeGameModule, "83 C4 0C C3 90 51 A0 93 53");
     if (!FUN_10140650Address) {
