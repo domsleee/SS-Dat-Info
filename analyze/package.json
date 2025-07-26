@@ -18,6 +18,7 @@
   },
   "scripts": {
     "start": "bun src/index.ts",
+    "benchmark": "bun --inspect-brk src/index.ts analyze '../threejs/public/replays/Alpine/Easy/1.19.93 Dom.dat'",
     "lint": "eslint",
     "test": "bun test",
     "typecheck": "tsgo"

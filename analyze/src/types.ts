@@ -18,6 +18,7 @@ export interface AnalyzeResult {
 
   coords?: CoordinateData;
   trackScoreData?: EveryLevelScoredData;
+  data: Uint8Array;
 }
 
 export interface CoordinateData {
@@ -29,7 +30,6 @@ export interface RowData {
   y: number;
   z: number;
   rotation3x3: Array<Array<number>>;
-  raw: string;
 }
 
 export interface TimingDataFromHeader {

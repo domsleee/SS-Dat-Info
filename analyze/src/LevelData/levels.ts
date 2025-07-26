@@ -12,6 +12,10 @@ export function getLevels(): ParsedLevels {
         name: k,
         entries: v as Array<LevelDataEntry>,
       });
+      // for performance testing, we can duplicate the levels
+      // for (let i = 0; i < 5; ++i) {
+      //   levels.push({name: k + i, entries: v as Array<LevelDataEntry>});
+      // }
     }
   }
   return levels;
