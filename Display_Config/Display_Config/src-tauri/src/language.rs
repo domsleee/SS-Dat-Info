@@ -10,6 +10,6 @@ pub fn write_language(language: String) -> Result<(), String> {
 
     // write to the language_file
     let mut file = File::create(&language_file)
-        .map_err(|e| format!("Failed to create language file: {language_file:?} {}", e))?;
-    write!(file, "{}", language).map_err(|e| format!("Failed to write language: {}", e))
+        .map_err(|e| format!("Failed to create language file: {language_file:?} {e}"))?;
+    write!(file, "{language}").map_err(|e| format!("Failed to write language: {e}"))
 }

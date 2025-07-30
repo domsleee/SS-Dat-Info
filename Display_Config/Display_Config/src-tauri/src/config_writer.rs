@@ -12,7 +12,7 @@ pub fn write_config<W: Write>(mut writer: W, entries: &[ConfigEntry]) -> io::Res
         writeln!(writer, "{}", entry.entry_type)?;
         writeln!(writer, "{{")?;
         for (key, value) in &entry.entries {
-            writeln!(writer, "\t{} \t= {};", key, value)?;
+            writeln!(writer, "\t{key} \t= {value};")?;
         }
 
         write!(writer, "}};")?;

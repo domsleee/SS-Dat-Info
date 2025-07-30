@@ -6,7 +6,7 @@ pub fn close_others() -> Result<(), String> {
     let mut system = System::new_all();
     system.refresh_all();
     let pids = get_pids(&system);
-    println!("close_others pids: {:?}", pids);
+    println!("close_others pids: {pids:?}");
     for (_, pid) in pids {
         kill_recursive(&system, pid);
     }

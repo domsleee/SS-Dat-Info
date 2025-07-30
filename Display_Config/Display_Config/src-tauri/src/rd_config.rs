@@ -69,7 +69,7 @@ pub fn read_rd_config() -> String {
 pub fn write_rd_config(rd_config: RdConfig) -> Result<(), String> {
     let rd_config_path = get_supreme_folder().join("rd_config.txt");
     let mut file = File::create(&rd_config_path)
-        .map_err(|e| format!("Failed to create config file: {rd_config_path:?} {}", e))?;
+        .map_err(|e| format!("Failed to create config file: {rd_config_path:?} {e}"))?;
 
     let configs = [
         format!("api_name = \"{}\";", rd_config.api_name),
@@ -82,8 +82,8 @@ pub fn write_rd_config(rd_config: RdConfig) -> Result<(), String> {
 
     configs
         .iter()
-        .try_for_each(|line| writeln!(file, "{}", line))
-        .map_err(|e| format!("Failed to write config: {}", e))
+        .try_for_each(|line| writeln!(file, "{line}"))
+        .map_err(|e| format!("Failed to write config: {e}"))
 }
 
 #[derive(Debug, Deserialize, Serialize, specta::Type)]
