@@ -14,7 +14,7 @@ pub async fn check_for_updates() -> Result<UpdateInfo, String> {
     let current_version = get_version();
     let latest_version = match fetch_latest_version().await {
         Ok(version) => version,
-        Err(e) => return Err(format!("Failed to fetch latest version: {}", e)),
+        Err(e) => return Err(format!("Failed to fetch latest version: {e}")),
     };
 
     Ok(UpdateInfo {

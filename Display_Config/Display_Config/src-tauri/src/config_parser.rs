@@ -169,6 +169,6 @@ player
 	player_config_file 	= "data/characters/bulk_30/plrcnf.txt";
 };"#;
         let config = parse_config_str(test_data);
-        assert!(config.is_err(), "Expected error, but got: {:?}", config);
+        assert!(config.is_err(), "Expected error, but got: {config:?}");
     }
 }

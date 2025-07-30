@@ -55,7 +55,7 @@ fn get_character_name(entry: &ConfigEntry) -> Result<String, String> {
         .replace("\"", "")
         .split("data/characters/")
         .nth(1)
-        .ok_or_else(|| format!("{} needs to start with data/characters", mesh_value).to_string())?
+        .ok_or_else(|| format!("{mesh_value} needs to start with data/characters").to_string())?
         .split('/')
         .next()
         .ok_or_else(|| "Invalid path format".to_string())

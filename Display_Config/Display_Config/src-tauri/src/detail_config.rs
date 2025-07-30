@@ -10,7 +10,7 @@ pub fn write_detail_config(detail_config: DetailConfig) -> Result<(), String> {
     let detail_config_path = get_detail_config_path();
 
     let content = fs::read_to_string(&detail_config_path)
-        .map_err(|e| format!("Failed to read {detail_config_path:?}: {}", e))?;
+        .map_err(|e| format!("Failed to read {detail_config_path:?}: {e}"))?;
 
     let mut lines: Vec<String> = content.lines().map(String::from).collect();
     let configs: Vec<(String, String)> = [
@@ -33,7 +33,7 @@ pub fn write_detail_config(detail_config: DetailConfig) -> Result<(), String> {
     for line in &mut lines {
         for (config_idx, (key, value)) in configs.iter().enumerate() {
             if line.starts_with(key) {
-                *line = format!("{}\t= {};", key, value);
+                *line = format!("{key}\t= {value};");
                 found[config_idx] = true;
                 break;
             }
@@ -43,12 +43,12 @@ pub fn write_detail_config(detail_config: DetailConfig) -> Result<(), String> {
     // Append missing settings
     for (config_idx, (key, value)) in configs.iter().enumerate() {
         if !found[config_idx] {
-            lines.push(format!("{}\t= {};", key, value));
+            lines.push(format!("{key}\t= {value};"));
         }
     }
 
     fs::write(&detail_config_path, lines.join("\n"))
-        .map_err(|e| format!("Failed to write config file: {}", e))?;
+        .map_err(|e| format!("Failed to write config file: {e}"))?;
 
     Ok(())
 }
@@ -63,7 +63,7 @@ pub fn read_detail_config() -> Result<Vec<(String, String)>, String> {
     let detail_config_path = get_detail_config_path();
     let mut res = Vec::new();
     let content = fs::read_to_string(&detail_config_path)
-        .map_err(|e| format!("Failed to read {detail_config_path:?}: {}", e))?;
+        .map_err(|e| format!("Failed to read {detail_config_path:?}: {e}"))?;
 
     let mut lines: Vec<String> = content.lines().map(String::from).collect();
     for line in lines.iter_mut() {

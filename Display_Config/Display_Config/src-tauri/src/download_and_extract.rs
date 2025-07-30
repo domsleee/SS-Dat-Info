@@ -45,9 +45,9 @@ pub async fn download_and_extract(
             Ok(result)
         }
         Err(e) => {
-            error!("Error: {:?}", e);
+            error!("Error: {e:?}");
             cancellation_registry.remove_task(&id);
-            Err(format!("download_and_extract error: {:?}", e))
+            Err(format!("download_and_extract error: {e:?}"))
         }
     }
 }
