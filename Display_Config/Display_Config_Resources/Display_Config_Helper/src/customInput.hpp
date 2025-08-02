@@ -11,7 +11,9 @@
 bool CheckKeyState(void** keyboardPtr, int keyValue);
 void HandleF7(safetyhook::Context& ctx);
 void HandleG();
+void HandleS();
 void HandleM(bool isShiftDown);
+void SetSpeedRectangleVisibility(bool showRectangle);
 void SetupFunctionPointers();
 
 constexpr int getKeyCode(char key) {
@@ -21,6 +23,7 @@ constexpr int getKeyCode(char key) {
 const int KEY_F7 = 90;
 const int KEY_M = getKeyCode('m');
 const int KEY_G = getKeyCode('g');
+const int KEY_S = getKeyCode('s');
 const int KEY_SHIFT = 36;
 
 // F1 = 84
@@ -70,52 +73,43 @@ namespace Housemarque::Supreme_Snowboarding::Supreme_Keyboard {
 typedef void* (*FUN_1013e410_t)(void);
 FUN_1013e410_t FUN_1013e410;
 
-void DoNothing() {
-    Log("We did nothing, nothing happened.");
-}
-
-void TrySomething() {
-    // uint8_t* addr = (uint8_t*)((char*)supremeGameModule + 0x468ea);
-    // uint8_t* dest = (uint8_t*)(DoNothing);
-
-    // Log(std::format("DoNothing is at {:X}", reinterpret_cast<std::uintptr_t>(DoNothing)));
-    // DWORD old;
-    // VirtualProtect(addr, 5, PAGE_EXECUTE_READWRITE, &old);
-    // if (addr[0] != 0xE8) {
-    //     Log("SetupSpeed: Expected call instruction at 0x468ea, but found something else.");
-    //     VirtualProtect(addr, 5, old, &old);
-    //     return;
-    // }
-    // intptr_t rel = (intptr_t)dest - ((intptr_t)addr + 5);
-    // *(int32_t*)((uint8_t*)addr + 1) = (int32_t)rel;
-    // VirtualProtect(addr, 5, old, &old);
-}
-
 void SetupSpeed() {
-    static safetyhook::MidHook speedHook = safetyhook::create_mid((char*)supremeGameModule + 0x45cd3, [](safetyhook::Context& ctx) {
-        ctx.eip += 5;
+    // Make the speed rectangle show (not the text)
+    SetSpeedRectangleVisibility(GlobalState::replaySpeedVisible);
+
+    // Make the text (e.g. 000km/h) show
+    static bool hasHitSpeedHook1 = false;
+    static safetyhook::MidHook speedHook1 = safetyhook::create_mid((char*)supremeGameModule + 0x45cd3, [](safetyhook::Context& ctx) {
+        if (!GlobalState::replaySpeedVisible) return;
+        ctx.eip += 5; // to skip the goto
+        hasHitSpeedHook1 = true;
     });
 
+    static const uintptr_t speedJumpOutAddress = (std::uintptr_t)((char*)supremeGameModule + 0x46912);
+    static safetyhook::MidHook speedHook2 = safetyhook::create_mid((char*)supremeGameModule + 0x45DE7, [](safetyhook::Context& ctx) {
+        if (!GlobalState::replaySpeedVisible) return;
+        if (!hasHitSpeedHook1) return;
+        ctx.eip = speedJumpOutAddress; // this is the address of the original goto (in speedHook)
+        hasHitSpeedHook1 = false;
+    });
+}
+
+void SetSpeedRectangleVisibility(bool showRectangle) {
     uint8_t* addr = (uint8_t*)((char*)supremeGameModule + 0x455b2);
-    uint8_t* dest = (uint8_t*)((char*)supremeGameModule + 0x11c7a0);
-    DWORD old;
-    VirtualProtect(addr, 5, PAGE_EXECUTE_READWRITE, &old);
+    uint8_t* dest = showRectangle
+        ? (uint8_t*)((char*)supremeGameModule + 0x11c7a0)
+        : (uint8_t*)((char*)supremeGameModule + 0x11c7b0);
+    DWORD oldProtect;
+    VirtualProtect(addr, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
     if (addr[0] != 0xE8) {
         Log("SetupSpeed: Expected call instruction at 0x455b2, but found something else.");
-        VirtualProtect(addr, 5, old, &old);
+        VirtualProtect(addr, 5, oldProtect, &oldProtect);
         return;
     }
     intptr_t rel = (intptr_t)dest - ((intptr_t)addr + 5);
     *(int32_t*)((uint8_t*)addr + 1) = (int32_t)rel;
-    VirtualProtect(addr, 5, old, &old);
-
-    TrySomething();
-
-    // static auto speedHook2 = safetyhook::create_mid((char*)supremeGameModule + 0x455b2, [](safetyhook::Context& ctx) {
-    //     ctx.eip = (uintptr_t)((char*)supremeGameModule + 0x11c7b0);
-    // });
+    VirtualProtect(addr, 5, oldProtect, &oldProtect);
 }
-
 
 void DoCustomInput() {
     supremeGameModule = GetModuleHandleA("Supreme_Game.dll");
@@ -176,6 +170,9 @@ void DoCustomInput() {
                 if (i == KEY_G) {
                     HandleG();
                 }
+                if (i == KEY_S) {
+                    HandleS();
+                }
             }
             keyStates[i] = isKeyDown;
         }
@@ -225,6 +222,11 @@ void HandleF7(safetyhook::Context& ctx) {
     if (iVar5 != 0) {
         *(int*)(iVar5 + 0x68) = (int)(*(int*)((char*)iVar5 + 0x68) == 0);
     }
+}
+
+void HandleS() {
+    GlobalState::replaySpeedVisible = !GlobalState::replaySpeedVisible;
+	SetSpeedRectangleVisibility(GlobalState::replaySpeedVisible);
 }
 
 void HandleG() {
