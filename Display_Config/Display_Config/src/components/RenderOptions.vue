@@ -11,7 +11,7 @@
             :items="renderDevices"
           />
           <v-select
-            v-model="renderSettings.cardId as unknown as string"
+            v-model="renderSettings.cardId"
             label="Card ID"
             :disabled="formIsLoading || getCardIds(renderSettings.renderer).isLoading"
             :items="getCardIds(renderSettings.renderer).value"
@@ -93,7 +93,7 @@ const groundDetailOptions = [
   { text: '4 (Maximum)', value: 4 }
 ];
 
-const cardIdData: Record<string, SyncPromise<string[]>> = {};
+const cardIdData: Record<string, SyncPromise<number[]>> = {};
 function getCardIds(renderer?: string) {
   if (!renderer) {
     return { value: [], isLoading: true };
