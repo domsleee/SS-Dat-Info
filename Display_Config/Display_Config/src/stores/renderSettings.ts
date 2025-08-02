@@ -34,7 +34,7 @@ export function getAsRdConfig(): RdConfig {
     width: parseInt(renderSettings.resolution!.split('x')[0]),
     height: parseInt(renderSettings.resolution!.split('x')[1]),
     depth: parseInt(renderSettings.colourDepth!.split('bit')[0]),
-    cardId: renderSettings.cardId!,
+    cardId: parseInt(renderSettings.cardId! as unknown as string),
     fullscreen: renderSettings.fullscreen,
   }
 }
