@@ -36,7 +36,7 @@ h1 {
   gap: 10px;
 }
 
-button {
+button.iconButton {
   appearance: none;
   border: none;
   background: none;
@@ -53,7 +53,7 @@ button.iconButton {
   padding: 8px;
 }
 
-button:hover {
+button.iconButton:hover {
   background: #f3f4f6;
 }
 
@@ -173,8 +173,17 @@ table th {
   cursor: pointer;
 }
 
-.dropzone, #headerInfo {
+.dropzone {
   margin-bottom: 15px;
+}
+
+#headerInfo {
+  margin-bottom: 5px;
+}
+
+#exportToCsv {
+  margin-bottom: 15px;
+  display: block;
 }
 
 .dropzone.dragover {
