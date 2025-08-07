@@ -43,13 +43,5 @@ export default defineConfig(({ command }) => ({
   ],
   define: {
     APP_VERSION: JSON.stringify(process.env.npm_package_version),
-  },
-  resolve: {
-    alias: {
-      buffer: 'buffer/'
-    }
-  },
-  optimizeDeps: {
-    include: ['buffer']
   }
 }));

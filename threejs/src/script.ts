@@ -15,6 +15,8 @@ import { createElement, Info, Pause, Play, SkipBack, SkipForward } from 'lucide'
 import { PositionXYZ } from "dat-analyze/src/generateCircle/types";
 import { DirectionalLight, Euler, Group, Matrix4, PerspectiveCamera, Scene, WebGLRenderer } from "three";
 import { getBlock } from "dat-analyze/src/analyzeReplay";
+import { setupExportToCsvButton } from "./exportToCsvButton";
+import { getHumanReadableTime, msToHumanReadable } from "./timeUtil";
 
 const dimensions = {
   width: 480,
@@ -81,6 +83,9 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
   const { textFields, analyzeResult } = mainLoopContainer;
   updateConfigDOM(config);
 
+  const exportToCsvButton = document.getElementById("exportToCsv")!;
+  setupExportToCsvButton(exportToCsvButton, analyzeResult);
+
   textFields.nameText.textContent = analyzeResult.playerName;
   textFields.timeText.textContent = getHumanReadableTime(analyzeResult, 0)
 
@@ -132,7 +137,7 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
   };
 
   const preText = document.getElementById("preText")!;
-  const data = analyzeResult.coords!.rows.slice(0, -1);
+  const data = analyzeResult.coords!.rows;//.slice(0, -1);
   document.getElementById("headerInfo")!.innerHTML =
     getHeaderHtml(analyzeResult);
   document.getElementById("scoreInfo")!.innerHTML =
@@ -234,7 +239,7 @@ ${getRawString(getBlock(analyzeResult.data, frameToRender))}`;
 
     setKeyInputState(keys, row);
     playerRange.value = frameToRender.toString();
-    frameInfo.innerHTML = `Frame: ${frameToRender} / ${data.length}`;
+    frameInfo.innerHTML = `Frame: ${frameToRender+1} / ${data.length}`;
     textFields.timeText.textContent = getHumanReadableTime(analyzeResult, frameToRender);
     textFields.speedText1.textContent = `${Math.floor(getSpeed(data, frameToRender))
       .toFixed(0)
@@ -335,19 +340,6 @@ function createText(text: string, style?: Partial<CSSStyleDeclaration>) {
   textDiv.textContent = text;
   document.getElementById("container")!.appendChild(textDiv);
   return textDiv;
-}
-
-function getHumanReadableTime(analyzeResult: AnalyzeResult, frame: number) {
-  let actualMs = Math.max(
-    0,
-    10 * frame - (analyzeResult.lagBeforeStartMs + analyzeResult.startMs)
-  );
-  actualMs = Math.min(actualMs, analyzeResult.displayedMs);
-  return msToHumanReadable(actualMs);
-}
-
-function msToHumanReadable(ms: number) {
-  return new Date(ms).toISOString().slice(14, 22).replace(".", ":");
 }
 
 function getRawString(block: Uint8Array) {
@@ -477,7 +469,7 @@ function transformPosition(position: PositionXYZ): PositionXYZ {
 }
 
 function getHeaderHtml(analyzeResult: AnalyzeResult) {
-  const {timingDataFromHeader } = analyzeResult;
+  const { timingDataFromHeader } = analyzeResult;
   const didFinishRun = timingDataFromHeader.totalTimeToFinishMs !== 0;
   const cp1String = timingDataFromHeader.checkpoint1TotalMs !== 0
     ? msToHumanReadable(analyzeResult.checkpoint1Ms - 10)
