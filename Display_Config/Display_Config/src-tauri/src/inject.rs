@@ -64,9 +64,10 @@ fn wait_for_finished_log(log_path: &PathBuf) -> Result<String, String> {
 
     while start_time.elapsed() < timeout_duration {
         if let Ok(log_contents) = std::fs::read_to_string(log_path)
-            && log_contents.contains("Finished.") {
-                return Ok("Finished".to_string());
-            }
+            && log_contents.contains("Finished.")
+        {
+            return Ok("Finished".to_string());
+        }
         // Ignore error case and continue waiting
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
