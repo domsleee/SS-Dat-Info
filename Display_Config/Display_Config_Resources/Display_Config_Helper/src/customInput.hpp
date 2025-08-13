@@ -11,9 +11,7 @@
 bool CheckKeyState(void** keyboardPtr, int keyValue);
 void HandleF7(safetyhook::Context& ctx);
 void HandleG();
-void HandleS();
 void HandleM(bool isShiftDown);
-void SetSpeedRectangleVisibility(bool showRectangle);
 void SetupFunctionPointers();
 
 constexpr int getKeyCode(char key) {
@@ -23,7 +21,6 @@ constexpr int getKeyCode(char key) {
 const int KEY_F7 = 90;
 const int KEY_M = getKeyCode('m');
 const int KEY_G = getKeyCode('g');
-const int KEY_S = getKeyCode('s');
 const int KEY_SHIFT = 36;
 
 // F1 = 84
@@ -33,7 +30,6 @@ static HMODULE supremeGameModule;
 static HMODULE hmgSoundModule;
 static HMODULE hmgCetsupDIModule;
 static HMODULE srUitModule;
-static HMODULE displayConfigHelperModule;
 
 namespace Housemarque::Supreme_Snowboarding::Music_Handler {
     typedef void (*voidFunction)();
@@ -94,11 +90,6 @@ void DoCustomInput() {
         Log("DoCustomInput: Failed to find SR_UIT.dll");
         return;
     }
-    displayConfigHelperModule = GetModuleHandleA("Display_Config_Helper.dll");
-    if (!displayConfigHelperModule) {
-        Log("DoCustomInput: Failed to find Display_Config_Helper.dll");
-        return;
-    }
 
     SetupFunctionPointers();
 
@@ -130,9 +121,6 @@ void DoCustomInput() {
                 }
                 if (i == KEY_G) {
                     HandleG();
-                }
-                if (i == KEY_S) {
-                    HandleS();
                 }
             }
             keyStates[i] = isKeyDown;
@@ -183,11 +171,6 @@ void HandleF7(safetyhook::Context& ctx) {
     if (iVar5 != 0) {
         *(int*)(iVar5 + 0x68) = (int)(*(int*)((char*)iVar5 + 0x68) == 0);
     }
-}
-
-void HandleS() {
-    GlobalState::replaySpeedVisible = !GlobalState::replaySpeedVisible;
-	SetSpeedRectangleVisibility(GlobalState::replaySpeedVisible);
 }
 
 void HandleG() {
