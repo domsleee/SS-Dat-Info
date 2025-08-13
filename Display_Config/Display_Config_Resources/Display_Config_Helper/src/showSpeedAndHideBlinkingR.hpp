@@ -18,7 +18,7 @@ static uintptr_t g_addr_1B8D44 = 0;
 static uintptr_t g_slot_163738 = 0;
 static uintptr_t g_speedJumpOutAddress = 0;
 
-void SetSpeedRectangleVisibility(bool showRectangle);
+void SetSpeedRectangleVisibility(void* supremeGameModule, bool showRectangle);
 void ShowSpeedAndHideBlinkingRFunction();
 void ShowSpeedOnly();
 void HideBlinkingRFunction();
@@ -27,15 +27,16 @@ static void WriteJmpRel32(void* at, void* dst);
 
 void DoShowSpeedAndHideBlinkingR(bool hideBlinkingR, bool showReplaySpeed) {
     Log(std::format("DoShowSpeedAndHideBlinkingR: Setting up with hideBlinkingR: {}, showReplaySpeed: {}", hideBlinkingR, showReplaySpeed));
-    if (showReplaySpeed) {
-        SetSpeedRectangleVisibility(true);
-    }
-
     const HMODULE supremeGameModule = GetModuleHandleA("Supreme_Game.dll");
     if (!supremeGameModule) {
         Log("DoShowSpeedAndHideBlinkingR: Failed to find Supreme_Game.dll");
         return;
     }
+
+    if (showReplaySpeed) {
+        SetSpeedRectangleVisibility(supremeGameModule, true);
+    }
+
 
     g_slot_1634C0 = (uintptr_t)((char*)supremeGameModule + 0x1634C0);
     g_slot_1634C8 = (uintptr_t)((char*)supremeGameModule + 0x1634C8);
@@ -49,10 +50,10 @@ void DoShowSpeedAndHideBlinkingR(bool hideBlinkingR, bool showReplaySpeed) {
     uint8_t* const jmpAddr = (uint8_t*)((char*)supremeGameModule + 0x45CD3);
     if (jmpAddr[0] == 0xE9) {
         // assert the jump is to g_speedJumpOutAddress
-		if (*(uintptr_t*)(jmpAddr + 1) != g_speedJumpOutAddress - (uintptr_t)(jmpAddr + 5)) {
-			Log("DoShowSpeedAndHideBlinkingR: The jump at 0x45CD3 does not point to the expected g_speedJumpOutAddress.");
-			return;
-		}
+        if (*(uintptr_t*)(jmpAddr + 1) != g_speedJumpOutAddress - (uintptr_t)(jmpAddr + 5)) {
+            Log("DoShowSpeedAndHideBlinkingR: The jump at 0x45CD3 does not point to the expected g_speedJumpOutAddress.");
+            return;
+        }
     }
     else {
         Log("DoShowSpeedAndHideBlinkingR: Expected jmp instruction at 0x45CD3, but found something else.");
@@ -68,9 +69,9 @@ void* GetFunctionAddress(bool hideBlinkingR, bool showReplaySpeed) {
     if (hideBlinkingR && showReplaySpeed) {
         return &ShowSpeedAndHideBlinkingRFunction;
     }
-	if (hideBlinkingR) return &HideBlinkingRFunction;
-	if (showReplaySpeed) return &ShowSpeedOnly;
-	Log("GetFunctionAddress: No function address found for the given parameters.");
+    if (hideBlinkingR) return &HideBlinkingRFunction;
+    if (showReplaySpeed) return &ShowSpeedOnly;
+    Log("GetFunctionAddress: No function address found for the given parameters.");
     return nullptr;
 }
 
@@ -353,7 +354,7 @@ static void WriteJmpRel32(void* at, void* dst)
     VirtualProtect(at, 5, oldProt, &oldProt);
 }
 
-void SetSpeedRectangleVisibility(bool showRectangle) {
+void SetSpeedRectangleVisibility(void* supremeGameModule, bool showRectangle) {
     uint8_t* addr = (uint8_t*)((char*)supremeGameModule + 0x455b2);
     uint8_t* dest = showRectangle
         ? (uint8_t*)((char*)supremeGameModule + 0x11c7a0)
