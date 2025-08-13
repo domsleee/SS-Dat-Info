@@ -19,12 +19,12 @@
       <div class="d-flex ga-1 align-center">
         <v-checkbox
           v-model="trainerSettings.enableLogging"
-          label="Enable Logging"
+          label="Enable logging"
         />
         <EnableLoggingTooltip />
         <v-checkbox
           v-model="trainerSettings.enableCustomControls"
-          label="Custom Controls"
+          label="Custom controls"
         />
       </div>
       <v-checkbox
