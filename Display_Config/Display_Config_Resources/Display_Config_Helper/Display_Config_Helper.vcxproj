@@ -23,6 +23,7 @@
     <ClInclude Include="src\matchGhostSoundsToCharacter.hpp" />
     <ClInclude Include="src\PathUtil.hpp" />
     <ClInclude Include="src\saveReplayTimestamp.hpp" />
+    <ClInclude Include="src\showSpeedAndHideBlinkingR.hpp" />
     <ClInclude Include="src\stdafx.h" />
   </ItemGroup>
   <ItemGroup>

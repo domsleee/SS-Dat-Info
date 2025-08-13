@@ -17,6 +17,8 @@ pub struct TrainerSettings {
     pub match_ghost_sounds_to_character: bool,
     pub disable_direct_input: bool,
     pub enable_custom_controls: bool,
+    pub hide_blinking_r: bool,
+    pub show_replay_speed: bool,
 }
 
 #[tauri::command]
@@ -61,11 +63,10 @@ fn wait_for_finished_log(log_path: &PathBuf) -> Result<String, String> {
     let timeout_duration = std::time::Duration::from_secs(5);
 
     while start_time.elapsed() < timeout_duration {
-        if let Ok(log_contents) = std::fs::read_to_string(log_path) {
-            if log_contents.contains("Finished.") {
+        if let Ok(log_contents) = std::fs::read_to_string(log_path)
+            && log_contents.contains("Finished.") {
                 return Ok("Finished".to_string());
             }
-        }
         // Ignore error case and continue waiting
         std::thread::sleep(std::time::Duration::from_millis(50));
     }

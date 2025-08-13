@@ -73,44 +73,6 @@ namespace Housemarque::Supreme_Snowboarding::Supreme_Keyboard {
 typedef void* (*FUN_1013e410_t)(void);
 FUN_1013e410_t FUN_1013e410;
 
-void SetupSpeed() {
-    // Make the speed rectangle show (not the text)
-    SetSpeedRectangleVisibility(GlobalState::replaySpeedVisible);
-
-    // Make the text (e.g. 000km/h) show
-    static bool hasHitSpeedHook1 = false;
-    static safetyhook::MidHook speedHook1 = safetyhook::create_mid((char*)supremeGameModule + 0x45cd3, [](safetyhook::Context& ctx) {
-        if (!GlobalState::replaySpeedVisible) return;
-        ctx.eip += 5; // to skip the goto
-        hasHitSpeedHook1 = true;
-    });
-
-    static const uintptr_t speedJumpOutAddress = (std::uintptr_t)((char*)supremeGameModule + 0x46912);
-    static safetyhook::MidHook speedHook2 = safetyhook::create_mid((char*)supremeGameModule + 0x45DE7, [](safetyhook::Context& ctx) {
-        if (!GlobalState::replaySpeedVisible) return;
-        if (!hasHitSpeedHook1) return;
-        ctx.eip = speedJumpOutAddress; // this is the address of the original goto (in speedHook)
-        hasHitSpeedHook1 = false;
-    });
-}
-
-void SetSpeedRectangleVisibility(bool showRectangle) {
-    uint8_t* addr = (uint8_t*)((char*)supremeGameModule + 0x455b2);
-    uint8_t* dest = showRectangle
-        ? (uint8_t*)((char*)supremeGameModule + 0x11c7a0)
-        : (uint8_t*)((char*)supremeGameModule + 0x11c7b0);
-    DWORD oldProtect;
-    VirtualProtect(addr, 5, PAGE_EXECUTE_READWRITE, &oldProtect);
-    if (addr[0] != 0xE8) {
-        Log("SetupSpeed: Expected call instruction at 0x455b2, but found something else.");
-        VirtualProtect(addr, 5, oldProtect, &oldProtect);
-        return;
-    }
-    intptr_t rel = (intptr_t)dest - ((intptr_t)addr + 5);
-    *(int32_t*)((uint8_t*)addr + 1) = (int32_t)rel;
-    VirtualProtect(addr, 5, oldProtect, &oldProtect);
-}
-
 void DoCustomInput() {
     supremeGameModule = GetModuleHandleA("Supreme_Game.dll");
     if (!supremeGameModule) {
@@ -139,7 +101,6 @@ void DoCustomInput() {
     }
 
     SetupFunctionPointers();
-    SetupSpeed();
 
     std::uint8_t* FUN_10140650Address = Memory::PatternScan(supremeGameModule, "83 C4 0C C3 90 51 A0 93 53");
     if (!FUN_10140650Address) {

@@ -20,6 +20,8 @@ export function getDefaultTrainerUISettings(): { trainerSettings: Ref<TrainerUIS
     matchGhostSoundsToCharacter: false,
     disableDirectInput: false,
     enableCustomControls: false,
+    hideBlinkingR: false,
+    showReplaySpeed: false
   });
   return { trainerSettings: settings };
 }
