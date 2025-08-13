@@ -80,7 +80,7 @@ export type DownloadEvent = { event: "downloadProgress"; data: { progress: numbe
 export type DownloadResult = { installed: boolean }
 export type RdConfig = { apiName: string; width: number; height: number; depth: number; cardId: number; fullscreen: boolean }
 export type TAURI_CHANNEL<TSend> = null
-export type TrainerSettings = { use4xFonts: boolean; changeFov: boolean; fovWidth: number | null; fovHeight: number | null; enableLogging: boolean; makeGhostsOpaque: boolean; matchGhostSoundsToCharacter: boolean; disableDirectInput: boolean; enableCustomControls: boolean }
+export type TrainerSettings = { use4xFonts: boolean; changeFov: boolean; fovWidth: number | null; fovHeight: number | null; enableLogging: boolean; makeGhostsOpaque: boolean; matchGhostSoundsToCharacter: boolean; disableDirectInput: boolean; enableCustomControls: boolean; hideBlinkingR: boolean; showReplaySpeed: boolean }
 export type UpdateInfo = { currentVersion: string; latestVersion: string }
 
 /** tauri-specta globals **/
