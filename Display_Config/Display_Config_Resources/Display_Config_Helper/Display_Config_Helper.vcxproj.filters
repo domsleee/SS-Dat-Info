@@ -57,6 +57,9 @@
     <ClInclude Include="src\globalState.hpp">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\showSpeedAndHideBlinkingR.hpp">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cc">

@@ -25,7 +25,14 @@
     "[vue]": {
       "editor.defaultFormatter": "Vue.volar"
     },
-    "eslint.format.enable": true
+    "eslint.format.enable": true,
+    "C_Cpp.default.intelliSenseMode": "msvc-x86",
+    "files.associations": {
+      "charconv": "cpp",
+      "xmemory": "cpp",
+      "format": "cpp"
+    },
+    "C_Cpp.default.cppStandard": "c++23"
   },
   "extensions": {
     "recommendations": [

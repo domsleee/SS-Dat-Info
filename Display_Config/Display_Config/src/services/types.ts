@@ -27,4 +27,6 @@ export interface TrainerUISettings {
   matchGhostSoundsToCharacter: boolean;
   disableDirectInput: boolean;
   enableCustomControls: boolean;
+  hideBlinkingR: boolean;
+  showReplaySpeed: boolean;
 }

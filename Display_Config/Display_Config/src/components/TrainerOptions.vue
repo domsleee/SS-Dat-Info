@@ -19,12 +19,12 @@
       <div class="d-flex ga-1 align-center">
         <v-checkbox
           v-model="trainerSettings.enableLogging"
-          label="Enable Logging"
+          label="Enable logging"
         />
         <EnableLoggingTooltip />
         <v-checkbox
           v-model="trainerSettings.enableCustomControls"
-          label="Custom Controls"
+          label="Custom controls"
         />
       </div>
       <v-checkbox
@@ -37,6 +37,18 @@
           label="Match ghost sounds to character"
         />
         <GhostSoundsTooltip />
+      </div>
+      <div class="d-flex ga-2">
+        <v-checkbox
+          v-model="trainerSettings.hideBlinkingR"
+          label="Hide blinking R"
+        />
+        <div class="d-flex ga-1 align-center">
+          <v-checkbox
+            v-model="trainerSettings.showReplaySpeed"
+            label="Show replay speed"
+          />
+        </div>
       </div>
     </v-card-text>
   </v-card>

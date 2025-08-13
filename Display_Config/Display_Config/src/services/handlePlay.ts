@@ -54,7 +54,9 @@ export function requiresInject(trainerSettings: TrainerSettings): boolean {
     || trainerSettings.makeGhostsOpaque
     || trainerSettings.matchGhostSoundsToCharacter
     || trainerSettings.disableDirectInput
-    || trainerSettings.enableCustomControls;
+    || trainerSettings.enableCustomControls
+    || trainerSettings.hideBlinkingR
+    || trainerSettings.showReplaySpeed;
 }
 
 function getTrainerSettings(): TrainerSettings {
@@ -75,6 +77,8 @@ export function getTrainerSettingsFromUI(trainerSettings: TrainerUISettings): Tr
     matchGhostSoundsToCharacter: trainerSettings.matchGhostSoundsToCharacter,
     disableDirectInput: trainerSettings.disableDirectInput,
     enableCustomControls: trainerSettings.enableCustomControls,
+    hideBlinkingR: trainerSettings.hideBlinkingR,
+    showReplaySpeed: trainerSettings.showReplaySpeed,
   };
 }
 
@@ -101,4 +105,6 @@ export interface TrainerSettings {
   matchGhostSoundsToCharacter: boolean;
   disableDirectInput: boolean;
   enableCustomControls: boolean;
+  hideBlinkingR: boolean;
+  showReplaySpeed: boolean;
 }

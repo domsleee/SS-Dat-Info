@@ -112,18 +112,18 @@ async fn do_download_and_extract(
                 std::fs::create_dir_all(&outpath).context("Failed to create_dir_all")?;
             }
         } else {
-            if let Some(parent) = outpath.parent() {
-                if !parent.exists() {
-                    std::fs::create_dir_all(parent).context("Failed to create_dir_all")?;
-                }
+            if let Some(parent) = outpath.parent()
+                && !parent.exists()
+            {
+                std::fs::create_dir_all(parent).context("Failed to create_dir_all")?;
             }
 
             if outpath.exists() {
                 let temp_path = temp_dir.join(file.name());
-                if let Some(parent) = temp_path.parent() {
-                    if !parent.exists() {
-                        std::fs::create_dir_all(parent).context("Failed to create_dir_all")?;
-                    }
+                if let Some(parent) = temp_path.parent()
+                    && !parent.exists()
+                {
+                    std::fs::create_dir_all(parent).context("Failed to create_dir_all")?;
                 }
                 std::fs::rename(&outpath, &temp_path).context("Failed to rename")?;
             }

@@ -8,6 +8,7 @@
 #include "PathUtil.hpp"
 #include "globalState.hpp"
 #include "disableDirectInput.hpp"
+#include "showSpeedAndHideBlinkingR.hpp"
 #include <fstream>
 using json = nlohmann::json;
 
@@ -25,12 +26,14 @@ public:
     bool matchGhostSoundsToCharacter = false;
     bool disableDirectInput = false;
     bool enableCustomControls = false;
+    bool showReplaySpeed = false;
+    bool hideBlinkingR = false;
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DisplayConfig,
     changeFov, fovWidth, fovHeight,
     use4xFonts, enableLogging, makeGhostsOpaque,
-    matchGhostSoundsToCharacter, disableDirectInput, enableCustomControls)
+    matchGhostSoundsToCharacter, disableDirectInput, enableCustomControls, showReplaySpeed, hideBlinkingR)
 
 
 void run() {
@@ -79,6 +82,10 @@ void run() {
     if (config.enableCustomControls) {
         DoSaveReplayToTimestamp();
         DoCustomInput();
+    }
+
+    if (config.hideBlinkingR || config.showReplaySpeed) {
+        DoShowSpeedAndHideBlinkingR(config.hideBlinkingR, config.showReplaySpeed);
     }
 }
 
