@@ -25,12 +25,6 @@ void HideBlinkingRFunction();
 void* GetFunctionAddress(bool hideBlinkingR, bool showReplaySpeed);
 static void WriteJmpRel32(void* at, void* dst);
 
-enum ReplayUISetting {
-    ShowSpeedAndHideBlinkingR,
-    HideBlinkingR,
-    None
-};
-
 void DoShowSpeedAndHideBlinkingR(bool hideBlinkingR, bool showReplaySpeed) {
     Log(std::format("DoShowSpeedAndHideBlinkingR: Setting up with hideBlinkingR: {}, showReplaySpeed: {}", hideBlinkingR, showReplaySpeed));
     if (showReplaySpeed) {
@@ -39,7 +33,7 @@ void DoShowSpeedAndHideBlinkingR(bool hideBlinkingR, bool showReplaySpeed) {
 
     const HMODULE supremeGameModule = GetModuleHandleA("Supreme_Game.dll");
     if (!supremeGameModule) {
-        Log("DoCustomInput: Failed to find Supreme_Game.dll");
+        Log("DoShowSpeedAndHideBlinkingR: Failed to find Supreme_Game.dll");
         return;
     }
 
@@ -77,6 +71,7 @@ void* GetFunctionAddress(bool hideBlinkingR, bool showReplaySpeed) {
 	if (hideBlinkingR) return &HideBlinkingRFunction;
 	if (showReplaySpeed) return &ShowSpeedOnly;
 	Log("GetFunctionAddress: No function address found for the given parameters.");
+    return nullptr;
 }
 
 __declspec(naked) void ShowSpeedOnly() {
