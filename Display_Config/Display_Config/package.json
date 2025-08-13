@@ -1,7 +1,7 @@
 {
   "name": "display-config",
   "private": true,
-  "version": "0.4.4",
+  "version": "0.4.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -24,25 +24,25 @@
     "@tauri-apps/plugin-shell": "~2",
     "@vue/tsconfig": "^0.7.0",
     "destr": "^2.0.5",
-    "pinia-plugin-persistedstate": "^4.4.1",
+    "pinia-plugin-persistedstate": "^4.5.0",
     "vue": "^3.5.18",
-    "vuetify": "^3.9.3"
+    "vuetify": "^3.9.5"
   },
   "devDependencies": {
-    "@eslint/js": "^9.32.0",
-    "@stylistic/eslint-plugin": "^5.2.2",
+    "@eslint/js": "^9.33.0",
+    "@stylistic/eslint-plugin": "^5.2.3",
     "@tauri-apps/cli": "2.7.1",
-    "@types/node": "^24.1.0",
+    "@types/node": "^24.2.1",
     "@vitejs/plugin-vue": "^6.0.1",
-    "bun-types": "^1.2.19",
-    "eslint": "^9.32.0",
-    "eslint-plugin-vue": "^10.3.0",
+    "bun-types": "^1.2.20",
+    "eslint": "^9.33.0",
+    "eslint-plugin-vue": "^10.4.0",
     "pinia": "^3.0.3",
-    "typescript": "^5.8.3",
-    "typescript-eslint": "^8.38.0",
-    "unplugin-vue-components": "^28.8.0",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.39.1",
+    "unplugin-vue-components": "^29.0.0",
     "vite": "npm:rolldown-vite@latest",
-    "vite-plugin-vuetify": "^2.1.1",
-    "vue-tsc": "^3.0.4"
+    "vite-plugin-vuetify": "^2.1.2",
+    "vue-tsc": "^3.0.5"
   }
 }
