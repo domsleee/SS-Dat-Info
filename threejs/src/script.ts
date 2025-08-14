@@ -137,7 +137,7 @@ function mainLoop(mainLoopContainer: MainLoopContainer) {
   };
 
   const preText = document.getElementById("preText")!;
-  const data = analyzeResult.coords!.rows;//.slice(0, -1);
+  const data = analyzeResult.coords!.rows;
   document.getElementById("headerInfo")!.innerHTML =
     getHeaderHtml(analyzeResult);
   document.getElementById("scoreInfo")!.innerHTML =
