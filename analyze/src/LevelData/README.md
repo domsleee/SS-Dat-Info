@@ -1,4 +1,3 @@
-
 # How to collect .raw.ts files
 
 1) Run the script in cheat engine
