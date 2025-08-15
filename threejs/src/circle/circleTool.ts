@@ -56,7 +56,7 @@ document.addEventListener("DOMContentLoaded", function (): void {
         totalObjects += circle.length;
       }
       outputTextarea.value = outputItems.join("\n\n");
-      outputStatus.innerText = `Generated ${totalObjects} objects.`;
+      outputStatus.innerText = `Generated ${totalObjects} objects. Copy this to Object_Data.txt.`;
     } catch (e) {
       outputStatus.innerText = `Error: ${e}`;
       throw e;

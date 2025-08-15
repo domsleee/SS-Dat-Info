@@ -1,2 +1,7 @@
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark, .dark *));
+
+ul {
+  list-style: disc; /* show solid bullets */
+  padding-left: 40px; /* add space so bullets aren’t cut off */
+}

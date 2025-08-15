@@ -5,11 +5,13 @@ A launcher for Supreme Snowboarding that adds QoL features and tweaks.
 - Download: [Latest Release][display-config-release]
 - Full guide and docs: [Display_Config wiki][display-config-docs]
 
-## Quick start
 
-1. Download the latest release and extract it next to your Supreme Snowboarding install.
-2. Launch Display Config, choose options, and start the game.
-3. The structure of `Display_Config_Resources/Display_Config_Helper.json` is as follows
+[display-config-release]: https://github.com/domsleee/SS-Dat-Info/releases/latest
+[display-config-docs]: https://github.com/domsleee/SS-Dat-Info/wiki/Display_Config
+
+## Configuration
+
+The structure of `Display_Config_Resources/Display_Config_Helper.json` is as follows:
 
 ```json
 {
@@ -26,22 +28,31 @@ A launcher for Supreme Snowboarding that adds QoL features and tweaks.
   "showReplaySpeed": true
 }
 ```
-
-Notes:
-* `use4xFonts` currently requires changing the font textures yourself. 
+This json matches to the GUI shown in the [Display_Config wiki][display-config-docs].
 
 ## Building
 
-1. Install [scoop](https://scoop.sh/)
-2. Install everything using scoop `scoop install just task rustup bun`
-3. Install [VS Community](https://visualstudio.microsoft.com/vs/community/) and tick "Desktop development with C++""
+1. Use [scoop](https://scoop.sh/) to install required tools `scoop install just task rustup bun`
+2. Install [VS Community](https://visualstudio.microsoft.com/vs/community/) and tick "Desktop development with C++"
 
 Then you can build using `just`.
 
-Development flow:
-* Using `bun tauri dev` inside `Display_Config`, to configure the UI
-* To update the injection code:
-> just display_config_helper && cp -r .\output\Display_Config_Resources\* C:\Games\Supreme\Display_Config_Resources\
+## Structure
+
+* `./Display_Config`: the launcher (`Display_Config.exe`, tauri app)
+* `./Display_Config_Resources`: c++ code that injects the mods into `Supreme.exe` at runtime (`Injector.exe`)
+
+## Development flow
+
+* Run `bun tauri dev` from `./Display_Config`, when editing the UI.
+* To update the `Display_Config.exe` + `Injector.exe`:
+```shell
+just; cp -r ./output/* C:/Games/Supreme\
+```
+* To update just `Injector.exe`:
+```shell
+just display_config_helper; cp -r ./output/Display_Config_Resources/* C:/Games/Supreme/Display_Config_Resources/
+```
 
 ## Software used for reverse engineering
 * [Cheat Engine](https://www.cheatengine.org/)
