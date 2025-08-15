@@ -47,11 +47,11 @@ Then you can build using `just`.
 * Run `bun tauri dev` from `./Display_Config`, when editing the UI.
 * To update the `Display_Config.exe` + `Injector.exe`:
 ```shell
-just; cp -r ./output/* C:\Games\Supreme\
+just; cp -r ./output/* C:/Games/Supreme\
 ```
 * To update just `Injector.exe`:
 ```shell
-just display_config_helper; cp -r .\output\Display_Config_Resources\* C:\Games\Supreme\Display_Config_Resources\
+just display_config_helper; cp -r ./output/Display_Config_Resources/* C:/Games/Supreme/Display_Config_Resources/
 ```
 
 ## Software used for reverse engineering
