@@ -40,7 +40,7 @@ Then you can build using `just`.
 ## Structure
 
 * `./Display_Config`: the launcher (`Display_Config.exe`, tauri app)
-* `./Display_Config_Resources`: c++ code that runs injects the mods into `Supreme.exe` at runtime (`Injector.exe`)
+* `./Display_Config_Resources`: c++ code that injects the mods into `Supreme.exe` at runtime (`Injector.exe`)
 
 ## Development flow
 
