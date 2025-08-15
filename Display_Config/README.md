@@ -47,7 +47,7 @@ Then you can build using `just`.
 * Run `bun tauri dev` from `./Display_Config`, when editing the UI.
 * To update the `Display_Config.exe` + `Injector.exe`:
 ```shell
-just; cp -r ./output/* C:\Games\Supreme2\
+just; cp -r ./output/* C:\Games\Supreme\
 ```
 * To update just `Injector.exe`:
 ```shell
