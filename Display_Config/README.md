@@ -34,7 +34,7 @@ Notes:
 
 1. Install [scoop](https://scoop.sh/)
 2. Install everything using scoop `scoop install just task rustup bun`
-3. Install [VS Community](https://visualstudio.microsoft.com/vs/community/) and tick "Desktop development with C++"
+3. Install [VS Community](https://visualstudio.microsoft.com/vs/community/) and tick "Desktop development with C++""
 
 Then you can build using `just`.
 
