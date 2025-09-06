@@ -3,7 +3,6 @@ import HomePage from "./pages/HomePage.vue";
 import { attachConsole } from "@tauri-apps/plugin-log";
 import { commands } from "./bindings";
 import { onMounted, nextTick } from 'vue';
-void attachConsole();
 
 // crazy hack: https://github.com/tauri-apps/tauri/issues/1564
 window.addEventListener("DOMContentLoaded", async () => {
@@ -17,6 +16,8 @@ onMounted(async () => {
   const onMounted2 = performance.now();
   console.log("onMounted(2)", onMounted2);
   await commands.logStartupTime({ onMounted1, onMounted2 });
+
+  await attachConsole();
 });
 
 </script>

@@ -12,7 +12,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, watch } from "vue";
+import { onMounted, ref, watch } from "vue";
 import { useAutostartStore } from '../stores/autostartStore';
 import { commands } from "@/bindings";
 
@@ -34,9 +34,11 @@ if (settings.autostart) {
   }, 50);
 }
 
-if (settings.autoCloseOthers) {
-  void commands.closeOthers();
-}
+onMounted(async () => {
+  if (settings.autoCloseOthers) {
+    await commands.closeOthers();
+  }
+})
 
 watch(() => settings.autostart, (newValue) => {
   if (!newValue) {

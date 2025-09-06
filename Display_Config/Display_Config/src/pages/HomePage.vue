@@ -35,7 +35,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref } from 'vue';
+import { onMounted, ref } from 'vue';
 import { handlePlayAsync } from '../services/handlePlay';
 import { VForm } from 'vuetify/components';
 import { loadFromFiles, setupFileSync } from '../services/fileSyncService';
@@ -48,8 +48,11 @@ async function handleAutoplay() {
     await handlePlay();
   }
 }
-void loadFromFiles();
-void setupFileSync(form);
+
+onMounted(async () => {
+  await loadFromFiles();
+  await setupFileSync(form);
+});
 
 async function handlePlay() {
   const { valid } = await form.value!.validate();
