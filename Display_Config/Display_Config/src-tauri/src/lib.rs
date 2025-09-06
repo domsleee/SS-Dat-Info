@@ -19,6 +19,7 @@ mod relaunch;
 mod transfer_stats;
 mod updater;
 mod version_info;
+mod performance;
 
 // fixme: is this really needed?
 #[tauri::command]
@@ -91,6 +92,7 @@ pub fn get_tauri_specta_builder() -> tauri_specta::Builder {
             download_and_extract::cancel_download,
             version_info::get_version,
             relaunch::relaunch,
+            performance::log_startup_time,
             kill_exit_1
         ])
         .error_handling(ErrorHandlingMode::Throw);
