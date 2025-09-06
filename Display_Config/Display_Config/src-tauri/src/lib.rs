@@ -13,13 +13,13 @@ mod get_log_data;
 mod inject;
 mod language;
 mod path_util;
+mod performance;
 mod player_types;
 mod rd_config;
 mod relaunch;
 mod transfer_stats;
 mod updater;
 mod version_info;
-mod performance;
 
 // fixme: is this really needed?
 #[tauri::command]

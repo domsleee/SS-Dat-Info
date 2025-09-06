@@ -35,11 +35,11 @@
 </template>
 
 <script lang="ts" setup>
-import { invoke } from '@tauri-apps/api/core';
 import { ref } from 'vue';
 import { handlePlayAsync } from '../services/handlePlay';
 import { VForm } from 'vuetify/components';
 import { loadFromFiles, setupFileSync } from '../services/fileSyncService';
+import { commands } from '@/bindings';
 
 const playLoading = ref(false);
 const form = ref<VForm | undefined>();
@@ -58,7 +58,7 @@ async function handlePlay() {
 }
 
 async function handleExit() {
-  await invoke('kill_exit_1');
+  await commands.killExit1();
 }
 
 </script>
