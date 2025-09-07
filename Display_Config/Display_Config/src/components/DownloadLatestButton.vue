@@ -21,7 +21,7 @@
 
 <script lang="ts" setup>
 import { checkForUpdates, update } from '@/services/updaterService';
-import { ref } from 'vue';
+import { onMounted, ref } from 'vue';
 import { mdiDownload } from '@mdi/js';
 
 const hasUpdate = ref(false);
@@ -40,5 +40,8 @@ async function downloadLatest() {
   await update(updateStatus.latestVersion);
 }
 
-void run();
+onMounted(async () => {
+  await run();
+});
+
 </script>

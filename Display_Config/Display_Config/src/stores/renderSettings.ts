@@ -5,7 +5,6 @@ import { getPersistentSettings } from './persistentStoreHelper';
 import type { DetailConfig, RdConfig } from './types';
 import { tryParseInt } from '@/services/stringUtil';
 
-
 export const useRenderSettingsStore = defineStore(
   'renderSettings',
   getDefaultRenderSettings,
@@ -31,10 +30,10 @@ export function getAsRdConfig(): RdConfig {
   const { renderSettings } = useRenderSettingsStore();
   return {
     apiName: renderSettings.renderer!,
-    width: parseInt(renderSettings.resolution!.split('x')[0]),
-    height: parseInt(renderSettings.resolution!.split('x')[1]),
-    depth: parseInt(renderSettings.colourDepth!.split('bit')[0]),
-    cardId: parseInt(renderSettings.cardId! as unknown as string),
+    width: parseInt(renderSettings.resolution!.split('x')[0]!),
+    height: parseInt(renderSettings.resolution!.split('x')[1]!),
+    depth: parseInt(renderSettings.colourDepth!.split('bit')[0]!),
+    cardId: parseInt(renderSettings.cardId! as unknown as string)!,
     fullscreen: renderSettings.fullscreen,
   }
 }

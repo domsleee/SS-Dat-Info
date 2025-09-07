@@ -13,6 +13,7 @@ mod get_log_data;
 mod inject;
 mod language;
 mod path_util;
+mod performance;
 mod player_types;
 mod rd_config;
 mod relaunch;
@@ -91,6 +92,7 @@ pub fn get_tauri_specta_builder() -> tauri_specta::Builder {
             download_and_extract::cancel_download,
             version_info::get_version,
             relaunch::relaunch,
+            performance::log_startup_time,
             kill_exit_1
         ])
         .error_handling(ErrorHandlingMode::Throw);

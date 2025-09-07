@@ -3,7 +3,6 @@ import { useTrainerUISettingsStore } from '../stores/trainerSettings';
 import { exit } from '@tauri-apps/plugin-process';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getAsRdConfig, getAsDetailConfig, useRenderSettingsStore } from '../stores/renderSettings';
-import { invoke } from '@tauri-apps/api/core';
 import type { Ref } from 'vue';
 import { useErrorStore } from '@/stores/errorStore';
 import type { TrainerUISettings } from './types';
@@ -31,7 +30,7 @@ export async function handlePlayAsync(playLoading: Ref<boolean>) {
     if (e instanceof Error || typeof e === 'string') {
       const errorString = e instanceof Error ? e.message : e;
       if (errorString.startsWith(`Timeout waiting for 'Finished.' in log`)) {
-        const logData = await invoke<string[]>('get_log_data');
+        const logData = await commands.getLogData();
         errorStore.setError(e, {logData});
       } else {
         errorStore.setError(e);

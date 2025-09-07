@@ -13,8 +13,8 @@
           <v-select
             v-model="renderSettings.cardId"
             label="Card ID"
-            :disabled="formIsLoading || getCardIds(renderSettings.renderer).isLoading"
-            :items="getCardIds(renderSettings.renderer).value"
+            :disabled="formIsLoading || getCardIds(renderSettings.renderer)!.isLoading"
+            :items="getCardIds(renderSettings.renderer)!.value"
           />
         </div>
         <div class="d-flex ga-2">
@@ -22,8 +22,8 @@
             v-model="renderSettings.resolution"
             style="flex-basis: 60%; flex-shrink: 0; flex-grow: 0;"
             label="Resolution"
-            :disabled="formIsLoading || getResolutions(renderSettings.renderer).isLoading"
-            :items="getResolutions(renderSettings.renderer).value"
+            :disabled="formIsLoading || getResolutions(renderSettings.renderer)!.isLoading"
+            :items="getResolutions(renderSettings.renderer)!.value"
             :rules="[(v: string) => validateResolution(v)]"
           />
           <v-select
@@ -104,7 +104,7 @@ function getCardIds(renderer?: string) {
   return cardIdData[renderer];
 }
 
-function validateResolution(resolution: string | undefined) {
+function validateResolution(resolution: string | undefined): boolean | string {
   if (!resolution) {
     return 'required';
   }
@@ -112,8 +112,8 @@ function validateResolution(resolution: string | undefined) {
   if (spl.length !== 2) {
     return 'invalid format';
   }
-  const [width, height] = resolution.split("x").map(Number);
-  return !isNaN(width) && !isNaN(height) && width > 0 && height > 0;
+  const [width, height] = spl.map(Number);
+  return width != null && height != null && !isNaN(width) && !isNaN(height) && width > 0 && height > 0;
 }
 
 </script>

@@ -29,7 +29,7 @@ pub async fn run_inject(trainer_settings: TrainerSettings) -> Result<String, Str
     let settings_path = display_config_resources.join("Display_Config_Helper.json");
     let settings_file = std::fs::File::create(settings_path).unwrap();
 
-    let log_path = get_log_path();
+    let log_path = get_display_config_helper_log_path();
     if log_path.exists() {
         std::fs::remove_file(&log_path).expect("Failed to remove log file");
     }
@@ -51,11 +51,13 @@ pub async fn run_inject(trainer_settings: TrainerSettings) -> Result<String, Str
     wait_for_finished_log(&log_path)
 }
 
-pub fn get_log_path() -> PathBuf {
-    let supreme_folder = get_supreme_folder();
-    let display_config_resources = supreme_folder.join("Display_Config_Resources");
+pub fn get_display_config_helper_log_path() -> PathBuf {
+    get_display_config_resources_path().join("Display_Config_Helper.log")
+}
 
-    display_config_resources.join("Display_Config_Helper.log")
+pub fn get_display_config_resources_path() -> PathBuf {
+    let supreme_folder = get_supreme_folder();
+    supreme_folder.join("Display_Config_Resources")
 }
 
 fn wait_for_finished_log(log_path: &PathBuf) -> Result<String, String> {
