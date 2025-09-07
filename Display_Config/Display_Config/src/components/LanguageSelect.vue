@@ -45,7 +45,7 @@ const country = computed({
     return countries.find(c => c.name === renderSettings.language) || countries[0];
   },
   set: (value) => {
-    renderSettings.language = value.name;
+    renderSettings.language = value!.name;
   }
 });
 
