@@ -38,7 +38,7 @@ async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error>> {
     // Extract the tag_name which contains version (usually in format "v1.2.3")
     let version = response["tag_name"]
         .as_str()
-        .unwrap_or("0.0.0")
+        .ok_or(format!("\"tag_name\" not found in response: {:?}", response))?
         .trim_start_matches('v')
         .to_string();
 

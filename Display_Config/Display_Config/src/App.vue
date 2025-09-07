@@ -3,19 +3,26 @@ import HomePage from "./pages/HomePage.vue";
 import { attachConsole } from "@tauri-apps/plugin-log";
 import { commands } from "./bindings";
 import { onMounted, nextTick } from 'vue';
-
-// crazy hack: https://github.com/tauri-apps/tauri/issues/1564
-window.addEventListener("DOMContentLoaded", async () => {
-  await commands.showWindow();
-});
+import { timings } from "./services/timings";
 
 onMounted(async () => {
+  // crazy hack: https://github.com/tauri-apps/tauri/issues/1564
+  void commands.showWindow();
+
   const onMounted1 = performance.now();
-  console.log("onMounted(1)", onMounted1);
   await nextTick();
   const onMounted2 = performance.now();
-  console.log("onMounted(2)", onMounted2);
-  await commands.logStartupTime({ onMounted1, onMounted2 });
+
+  const startupInfo = {
+    onMounted1,
+    onMounted2,
+    createAppTime: timings.getResult("createApp"),
+    mountAppTime: timings.getResult("mountApp"),
+    registerPluginsTime: timings.getResult("registerPlugins"),
+    totalStartupTime: timings.getResult("totalStartup")
+  };
+  console.log("Startup info:", startupInfo);
+  await commands.logStartupTime(startupInfo);
 
   await attachConsole();
 });
