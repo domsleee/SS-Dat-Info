@@ -16,7 +16,8 @@ import { PositionXYZ } from "dat-analyze/src/generateCircle/types";
 import { DirectionalLight, Euler, Group, Matrix4, PerspectiveCamera, Scene, WebGLRenderer } from "three";
 import { getBlock } from "dat-analyze/src/analyzeReplay";
 import { setupExportToCsvButton } from "./exportToCsvButton";
-import { getHumanReadableTime, msToHumanReadable } from "./timeUtil";
+import { getHumanReadableTime, msToHumanReadable, msToHumanReadableWithMs } from "./timeUtil";
+import { getInterpolatedFrame } from "./interpolation";
 
 const dimensions = {
   width: 480,
@@ -494,6 +495,15 @@ function getHeaderHtml(analyzeResult: AnalyzeResult) {
   const allCollisions = [levelScore?.scoreData.firstValidCheckPoint1Collision, cp2, levelScore?.scoreData.firstValidFinishPointCollision];
 
   const invalidRunReason = getInvalidRunReason(analyzeResult);
+  const numFramesBetweenStartAndFinish = getNumFramesBetweenStartAndFinish(levelScore);
+  const tickReadable = numFramesBetweenStartAndFinish
+    ? msToHumanReadableWithMs(numFramesBetweenStartAndFinish * 10)
+    : "N/A";
+
+  const numFramesBetweenStartAndFinish2 = getNumFramesBetweenStartAndFinish(levelScore, true);
+  const tickReadable2 = numFramesBetweenStartAndFinish2
+    ? msToHumanReadableWithMs(numFramesBetweenStartAndFinish2 * 10)
+    : "N/A";
 
   return `\
 Player: ${analyzeResult.playerName}
@@ -501,6 +511,7 @@ Track : ${analyzeResult.trackName}
 CP1   : ${cp1String}${getCollisionText(allCollisions, levelScore?.scoreData.firstValidCheckPoint1Collision, `Distance to Check_Point_1, must be ≤${PLANE_RADIUS}m`)}
 CP2   : ${cp2String}${getCollisionText(allCollisions, cp2, `Distance to Check_Point_2, must be ≤${PLANE_RADIUS}m`)}
 Time  : ${timeString}${getCollisionText(allCollisions, levelScore?.scoreData.firstValidFinishPointCollision, `Distance to Finish_Point, must be ≤${PLANE_RADIUS}m`)}
+Ticks : ${tickReadable}
 
 Legitimate Run? : ${invalidRunReason ? `<span style='color:red'>No (${invalidRunReason})</span>` : "Yes"}
 Start Time      : ${startTime}${getCollisionText([], levelScore?.scoreData.firstValidStartPointCollision, `Distance to Start_Point, must be ≤${PLANE_RADIUS}m`)}
@@ -509,6 +520,20 @@ Lag before start: ${msToHumanReadable(analyzeResult.lagBeforeStartMs)}${getNeare
 Leg after finish: ${msToHumanReadable(analyzeResult.lagAfterFinishMs)}
 Recording time  : ${msToHumanReadable(analyzeResult.recordingMs)}
 `
+}
+
+function getNumFramesBetweenStartAndFinish(levelScore?: LevelScore, ceilStartCollision?: boolean): number | undefined {
+  const startCollision = levelScore?.scoreData.firstValidStartPointCollision;
+  const endCollision = levelScore?.scoreData.firstValidFinishPointCollision;
+  if (!startCollision || !endCollision) {
+    return undefined;
+  }
+
+  let startCollisionFrame = getInterpolatedFrame(startCollision);
+  if (ceilStartCollision) {
+    startCollisionFrame = Math.ceil(startCollisionFrame);
+  }
+  return getInterpolatedFrame(endCollision) - startCollisionFrame;
 }
 
 function getInvalidRunReason(analyzer: AnalyzeResult): string | undefined {
@@ -638,7 +663,7 @@ function getScoreBreakdownTable(analyzeResult: AnalyzeResult) {
       ${breakdown.map((item) => `<tr><td>${item[0]}</td><td>${item[1].valid ? '✔️' : '❌'}</td></tr>`).join("")}
     </tbody>
   </table>
-  <div style='font-size:10px'>Explanation of the track logic is in <a target='_blank' href='https://github.com/domsleee/SS-Dat-Info/wiki/Dat%E2%80%90Info-design-notes#determining-trackname-of-a-dat-file'>the wiki</a>.</div>`;
+  <div style='font-size:10px'><a target='_blank' href='https://github.com/domsleee/SS-Dat-Info/wiki/Dat%E2%80%90Info-design-notes#determining-trackname-of-a-dat-file'>Track logic explanation in the wiki.</a></div>`;
   return table;
 }
 
@@ -649,8 +674,7 @@ function getAllCollisionsTable(analyzeResult: AnalyzeResult, levelScore: LevelSc
   const collisionCols = allLevelCollisions.map(t => {
     return [
       `${t.objectName}<br /><span style='font-size:8px'>(${t.plane.position.x.toFixed(2)},${t.plane.position.y.toFixed(2)},${t.plane.position.z.toFixed(2)})</span>`,
-      t.frame1,
-      t.frame2,
+      getInterpolatedFrame(t).toFixed(4),
       t.distance.toFixed(2)
     ];
   });
@@ -660,8 +684,7 @@ function getAllCollisionsTable(analyzeResult: AnalyzeResult, levelScore: LevelSc
   <table>
     <thead>
       <th>Plane</th>
-      <th>Frame1</th>
-      <th>Frame2</th>
+      <th>Tick</th>
       <th>Distance</th>
     </thead>
     <tbody>
