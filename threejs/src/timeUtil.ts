@@ -16,10 +16,11 @@ export function msToHumanReadable(ms: number) {
 
 export function msToHumanReadableWithMs(ms: number) {
   const DP = 4;
-  const pow10 = Math.pow(10, DP-3);
+  const MILLISECOND_DIGITS = 3;
+  const pow10 = Math.pow(10, DP - MILLISECOND_DIGITS);
   const intMs = Math.trunc(ms % 1000);
   let nDigits = intMs * pow10;
-  if (DP > 3) {
+  if (DP > MILLISECOND_DIGITS) {
     nDigits += Math.round((ms % 1) * pow10);
   }
 
