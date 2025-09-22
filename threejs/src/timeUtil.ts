@@ -20,7 +20,7 @@ export function msToHumanReadableWithMs(ms: number) {
   const intMs = Math.trunc(ms % 1000);
   let nDigits = intMs * pow10;
   if (DP > 3) {
-    nDigits += Math.trunc((ms % 1) * pow10);
+    nDigits += Math.round((ms % 1) * pow10);
   }
 
   return new Date(ms).toISOString().slice(14, 20)

@@ -496,13 +496,8 @@ function getHeaderHtml(analyzeResult: AnalyzeResult) {
 
   const invalidRunReason = getInvalidRunReason(analyzeResult);
   const numFramesBetweenStartAndFinish = getNumFramesBetweenStartAndFinish(levelScore);
-  const tickReadable = numFramesBetweenStartAndFinish
+  const ticksReadable = numFramesBetweenStartAndFinish
     ? msToHumanReadableWithMs(numFramesBetweenStartAndFinish * 10)
-    : "N/A";
-
-  const numFramesBetweenStartAndFinish2 = getNumFramesBetweenStartAndFinish(levelScore, true);
-  const tickReadable2 = numFramesBetweenStartAndFinish2
-    ? msToHumanReadableWithMs(numFramesBetweenStartAndFinish2 * 10)
     : "N/A";
 
   return `\
@@ -511,7 +506,7 @@ Track : ${analyzeResult.trackName}
 CP1   : ${cp1String}${getCollisionText(allCollisions, levelScore?.scoreData.firstValidCheckPoint1Collision, `Distance to Check_Point_1, must be ≤${PLANE_RADIUS}m`)}
 CP2   : ${cp2String}${getCollisionText(allCollisions, cp2, `Distance to Check_Point_2, must be ≤${PLANE_RADIUS}m`)}
 Time  : ${timeString}${getCollisionText(allCollisions, levelScore?.scoreData.firstValidFinishPointCollision, `Distance to Finish_Point, must be ≤${PLANE_RADIUS}m`)}
-Ticks : ${tickReadable}
+Ticks : ${ticksReadable}
 
 Legitimate Run? : ${invalidRunReason ? `<span style='color:red'>No (${invalidRunReason})</span>` : "Yes"}
 Start Time      : ${startTime}${getCollisionText([], levelScore?.scoreData.firstValidStartPointCollision, `Distance to Start_Point, must be ≤${PLANE_RADIUS}m`)}
