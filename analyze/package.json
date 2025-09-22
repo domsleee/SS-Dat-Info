@@ -3,11 +3,11 @@
   "module": "src/analyzeReplay.ts",
   "type": "module",
   "devDependencies": {
-    "@eslint/js": "^9.35.0",
-    "@stylistic/eslint-plugin": "^5.3.1",
-    "@typescript/native-preview": "^7.0.0-dev.20250918.1",
+    "@eslint/js": "^9.36.0",
+    "@stylistic/eslint-plugin": "^5.4.0",
+    "@typescript/native-preview": "^7.0.0-dev.20250922.1",
     "bun-types": "latest",
-    "eslint": "^9.35.0",
+    "eslint": "^9.36.0",
     "typescript-eslint": "^8.44.0"
   },
   "peerDependencies": {
