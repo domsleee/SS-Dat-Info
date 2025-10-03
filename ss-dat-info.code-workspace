@@ -1,17 +1,6 @@
 {
   "folders": [
-    {
-      "path": "analyze"
-    },
-    {
-      "path": "threejs"
-    },
-    {
-      "path": "Display_Config/Display_Config"
-    },
-    {
-      "path": "Display_Config/Display_Config_Resources"
-    }
+    { "path": "." },
   ],
   "settings": {
     "editor.tabSize": 2,

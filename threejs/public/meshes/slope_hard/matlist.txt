@@ -1,0 +1,13 @@
+material
+{
+	material_name		= "hard.tga";
+	material_type		= "normal";
+	texture = "data/Objects/slope_hard/hard.tga";
+};
+
+material
+{
+	material_name		= "wood.tga";
+	material_type		= "normal";
+	texture = "data/Objects/slope_hard/wood.tga";
+};

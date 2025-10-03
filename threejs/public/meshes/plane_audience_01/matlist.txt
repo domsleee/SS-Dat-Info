@@ -1,0 +1,10 @@
+material
+{
+	material_name = "plane_aud_1.tga";
+	texture = "data/objects/plane_audience_01/plane_aud_1.tga";
+	material_type		= "transparent";
+	tex_format		= "4444";
+	alpha_test		= 1;
+};
+
+

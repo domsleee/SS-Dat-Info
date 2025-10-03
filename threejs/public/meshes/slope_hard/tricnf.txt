@@ -1,0 +1,4 @@
+hx_file			= "data/objects/slope_hard/slope_hard.hx";
+hx_mesh_name_lod0	= "slope_hard_lod0";
+hx_mesh_name_space_model= "slope_hard_space_object";
+scale			= {0.01,0.01,0.01};
