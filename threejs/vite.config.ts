@@ -20,7 +20,8 @@ export default defineConfig(({ command }) => ({
     rollupOptions: {
       input: {
         main: path.resolve(__dirname, 'index.html'),
-        circleTool: path.resolve(__dirname, 'circleTool/index.html')
+        circleTool: path.resolve(__dirname, 'circleTool/index.html'),
+        meshViewer: path.resolve(__dirname, 'meshViewer/index.html')
       }
     }
   },

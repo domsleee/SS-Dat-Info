@@ -32,20 +32,20 @@ function loadMeshFromHash() {
 
   const defaults = {
     'planeAudience01': {
-      hxPath: '/meshes/plane_audience_01/plane_aud_1.hx',
-      tgaPath: '/meshes/plane_audience_01/plane_aud_1.tga',
+      hxPath: '../meshes/plane_audience_01/plane_aud_1.hx',
+      tgaPath: '../meshes/plane_audience_01/plane_aud_1.tga',
     },
     'slopeHard': {
-      hxPath: '/meshes/slope_hard/slope_hard.HX',
-      tgaPath: '/meshes/slope_hard/hard.tga',
+      hxPath: '../meshes/slope_hard/slope_hard.HX',
+      tgaPath: '../meshes/slope_hard/hard.tga',
     },
     'editorCross': {
-      hxPath: '/meshes/Editor_Cross/Editor_cross.HX',
-      tgaPath: '/meshes/Editor_Cross/checker.tga',
+      hxPath: '../meshes/Editor_Cross/Editor_cross.HX',
+      tgaPath: '../meshes/Editor_Cross/checker.tga',
     },
     'board': {
-      hxPath: '/meshes/board/board.hx',
-      tgaPath: '/meshes/board/Burton_Custom_\'10.tga',
+      hxPath: '../meshes/board/board.hx',
+      tgaPath: '../meshes/board/Burton_Custom_\'10.tga',
     },
   }
 
@@ -107,7 +107,7 @@ async function loadZeppelinGameExtracted() {
   loadMesh(positions, indices32, data.uvs);
   
   // Also try to load the texture
-  const boardTga = await fetch('/meshes/board/Burton_Custom_\'10.tga');
+  const boardTga = await fetch('../meshes/board/Burton_Custom_\'10.tga');
   if (boardTga.ok) {
     const tgaData = await boardTga.blob();
     loadTGAData(tgaData);
