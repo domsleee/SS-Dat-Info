@@ -1,0 +1,50 @@
+material
+{
+	material_name = "ilmalaiva_kori.tga";
+	material_type = "normal";
+	texture = "data/objects/zeppelin/ilmalaiva_kori.tga";
+};
+
+material
+{
+	material_name = "ilmalaiva_side.tga";
+	material_type = "normal";
+	texture = "data/objects/zeppelin/ilmalaiva_side.tga";
+};
+
+material
+{
+	material_name = "ilmalaiva_kori_nokka.tga";
+	material_type = "normal";
+	texture = "data/objects/zeppelin/ilmalaiva_kori_nokka.tga";
+};
+
+material
+{
+	material_name = "ilmalaiva_kori_pohja.tga";
+	material_type = "normal";
+	texture = "data/objects/zeppelin/ilmalaiva_kori_pohja.tga";
+};
+
+material
+{
+	material_name = "ilmalaiva_moottori.tga";
+	material_type = "normal";
+	texture = "data/objects/zeppelin/ilmalaiva_moottori.tga";
+};
+
+material
+{
+	material_type	= "transparent";
+	tex_format = "4444";
+	material_name = "ilmalaiva_potkuri.tga";
+	texture = "data/objects/zeppelin/ilmalaiva_potkuri.tga";
+	alpha_test = 1;
+};
+
+material
+{
+	material_name = "ilmalaiva_siipi.tga";
+	material_type = "normal";
+	texture = "data/objects/zeppelin/ilmalaiva_siipi.tga";
+};

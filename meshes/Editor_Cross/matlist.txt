@@ -1,0 +1,7 @@
+material
+{
+	material_name = "checker.TGA";
+	texture = "data/objects/Editor_Cross/checker.TGA";
+	material_type = "normal";
+};
+

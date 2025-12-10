@@ -1,0 +1,6 @@
+material
+{
+	material_name = "Burton_Custom.tga";
+	texture = "data/boards/board/Burton_Custom.tga";
+	envmap_texture = "testdata/ENVI_soft.TGA";
+};
