@@ -1,3 +1,0 @@
-hx_file			= "data/objects/zeppelin/zeppelin.hx";
-hx_mesh_name_lod0	= "zeppelin_lod0";
-scale			= {0.01,0.01,0.01};
