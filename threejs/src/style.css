@@ -5,8 +5,9 @@ body {
 }
 
 html {
-  background: #eee;
+  background: #1a1a2e;
   font-family: Arial, sans-serif;
+  color: #e0e0e0;
 }
 
 #preText {
@@ -24,12 +25,14 @@ table, pre {
 
 h1 {
   margin: 0;
-  margin-bottom: 5px;
+  padding: 10px 0 8px;
   text-align: center;
+  font-size: 1.4em;
+  color: #fff;
 }
 
 .controls {
-  background: white;
+  background: #2a2a3e;
   padding: 0 5px;
   border-radius: 5px;
   display: flex;
@@ -41,20 +44,17 @@ button.iconButton {
   border: none;
   background: none;
   cursor: pointer!important;
-  padding: 0 8px;
+  padding: 8px;
   border-radius: 5px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid #ccc;
-}
-
-button.iconButton {
-  padding: 8px;
+  border: 1px solid #444;
+  color: #e0e0e0;
 }
 
 button.iconButton:hover {
-  background: #f3f4f6;
+  background: #3a3a4e;
 }
 
 #container {
@@ -79,12 +79,12 @@ button.iconButton:hover {
   margin: auto;
 }
 
-/* key controls */
+/* info panels */
 
 #info {
   display: flex;
-  gap: 50px;
-  padding: 0 20px;
+  gap: 12px;
+  padding: 10px 0;
   font-family: monospace;
   position: relative;
 }
@@ -92,11 +92,28 @@ button.iconButton:hover {
 #info > div {
   flex: 1;
   min-height: 400px;
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.section-heading {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #8888aa;
+  margin: 0 0 10px 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #2a2a4a;
 }
 
 #scoreInfo {
   margin-bottom: 15px;
 }
+
+/* key controls */
 
 #keyControls {
   display: flex;
@@ -145,16 +162,16 @@ table th {
   position: absolute;
   opacity: 0;
   transition: opacity 0.15s ease;
-  background: #fff;
+  background: #1a1a2e;
   padding: 5px;
-  border: 1px solid #ccc;
-  box-shadow: 2px 2px 5px rgba(0,0,0,0.3);
+  border: 1px solid #444;
+  box-shadow: 2px 2px 5px rgba(0,0,0,0.5);
   z-index: 100;
   margin-left: 5px;
-  color: black;
-  left: 100%;        /* Position to the right of the element */
-  top: 50%;          /* Align with vertical middle */
-  transform: translateY(-50%);  /* Perfect vertical centering */
+  color: #e0e0e0;
+  left: 100%;
+  top: 50%;
+  transform: translateY(-50%);
 }
 
 [data-tooltip]:hover:after {
@@ -162,19 +179,24 @@ table th {
 }
 
 #scoreInfo table, #scoreInfo th, #scoreInfo td {
-  border: 1px solid #ccc;
+  border: 1px solid #2a2a4a;
   border-spacing: 0px;
 }
 
 /* dropzone */
 .dropzone {
   padding: 20px;
-  border: 2px dashed #ccc;
+  border: 2px dashed #444;
   cursor: pointer;
+  border-radius: 6px;
+  margin-bottom: 15px;
+  color: #aaa;
+  text-align: center;
+  transition: border-color 0.2s, background 0.2s;
 }
 
-.dropzone {
-  margin-bottom: 15px;
+.dropzone:hover {
+  border-color: #6a6a8a;
 }
 
 #headerInfo {
@@ -184,6 +206,17 @@ table th {
 #exportToCsv {
   margin-bottom: 15px;
   display: block;
+  background: #2a2a3e;
+  color: #e0e0e0;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+#exportToCsv:hover {
+  background: #3a3a4e;
 }
 
 .dropzone.dragover {
@@ -210,4 +243,65 @@ table th {
 .iconButton {
   width: 42px;
   height: 42px;
+}
+
+/* collapsible details */
+details {
+  margin-top: 10px;
+}
+
+details summary {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #8888aa;
+  cursor: pointer;
+  padding: 4px 0;
+  list-style: none;
+  user-select: none;
+}
+
+details summary::before {
+  content: '▶ ';
+  font-size: 9px;
+  display: inline-block;
+  transition: transform 0.15s;
+}
+
+details[open] summary::before {
+  transform: rotate(90deg);
+}
+
+details summary::-webkit-details-marker {
+  display: none;
+}
+
+/* form inputs */
+select, input[type="number"], input[type="text"] {
+  background: #2a2a3e;
+  color: #e0e0e0;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 3px 6px;
+}
+
+/* range slider */
+input[type="range"] {
+  accent-color: #4a90e2;
+}
+
+/* frame info */
+#frameInfo {
+  color: #ccc;
+}
+
+/* links */
+a {
+  color: #6aadff;
+}
+
+mark {
+  background: #4a4a00;
+  color: #ffff88;
 }

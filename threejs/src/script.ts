@@ -557,7 +557,7 @@ function getNearestStartPlaneText(analyzeResult: AnalyzeResult) {
 function getTextWithCaption(text: string, caption: string, isWarning: boolean) {
   const style = isWarning
     ? "color:darkorange"
-    : "color:#1a5f1a"; // dark forest green
+    : "color:#4caf7c"; // green, accessible on dark bg
   const iconCaptionSpan = `<span data-tooltip='${caption}'> ${createInfoIcon().outerHTML}</span>`;
   return `<span style='${style}'>${text}</span>${iconCaptionSpan}`;
 }
@@ -656,7 +656,7 @@ function getAllCollisionsTable(analyzeResult: AnalyzeResult, levelScore: LevelSc
   });
 
   const table = `
-  <div style='margin-top:15px'>Collisions for ${levelScore.name}</div>
+  <div style='margin-top:15px' class='section-heading'>Collisions for ${levelScore.name}</div>
   <table>
     <thead>
       <th>Plane</th>
@@ -667,7 +667,7 @@ function getAllCollisionsTable(analyzeResult: AnalyzeResult, levelScore: LevelSc
     <tbody>
       ${collisionCols.map(row => `<tr>${row.map(r => `<td>${r}</td>`).join("")}</tr>`).join("\n")}
     </tbody>
-  </table`;
+  </table>`;
   return table;
 }
 
