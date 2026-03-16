@@ -1,0 +1,10 @@
+[package]
+name = "tas_ui"
+version = "0.1.0"
+edition = "2021"
+description = "TAS UI for Supreme Snowboarding (egui/eframe)"
+
+[dependencies]
+tas_shared = { path = "../tas_shared" }
+eframe = "0.29"
+egui = "0.29"

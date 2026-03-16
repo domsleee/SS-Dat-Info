@@ -1,0 +1,8 @@
+[package]
+name = "tas_test"
+version = "0.1.0"
+edition = "2021"
+description = "TAS test runner for Supreme Snowboarding regression + acceptance"
+
+[dependencies]
+tas_shared = { path = "../tas_shared" }
