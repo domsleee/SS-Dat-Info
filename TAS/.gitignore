@@ -1,0 +1,21 @@
+# Build artifacts
+Release/
+Debug/
+*/Release/
+*/Debug/
+*.obj
+*.pdb
+*.iobj
+*.ipdb
+*.tlog/
+*.recipe
+*.lastbuildstate
+*.log
+
+# Rust
+target/
+
+# VS
+.vs/
+*.user
+*.suo

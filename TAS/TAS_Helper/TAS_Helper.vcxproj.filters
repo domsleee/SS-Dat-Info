@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Header Files\caves">
+      <UniqueIdentifier>{B1C2D3E4-F5A6-7890-BCDE-F12345678901}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\external">
+      <UniqueIdentifier>{C2D3E4F5-A6B7-8901-CDEF-123456789012}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\external\safetyhook.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\external\Zydis.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\stdafx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\log.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\helper.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\shared_state.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\game_addresses.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\caves\cave2.hpp">
+      <Filter>Header Files\caves</Filter>
+    </ClInclude>
+    <ClInclude Include="src\caves\cave1c.hpp">
+      <Filter>Header Files\caves</Filter>
+    </ClInclude>
+    <ClInclude Include="src\caves\cave1d.hpp">
+      <Filter>Header Files\caves</Filter>
+    </ClInclude>
+    <ClInclude Include="src\caves\cave5.hpp">
+      <Filter>Header Files\caves</Filter>
+    </ClInclude>
+    <ClInclude Include="src\external\safetyhook.hpp">
+      <Filter>Header Files\external</Filter>
+    </ClInclude>
+    <ClInclude Include="src\external\Zydis.h">
+      <Filter>Header Files\external</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
