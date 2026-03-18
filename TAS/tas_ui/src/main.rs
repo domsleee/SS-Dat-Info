@@ -8,7 +8,7 @@ use eframe::egui;
 use std::os::windows::process::CommandExt;
 use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 
-use panels::{analysis, config, drift, log_panel, timeline, trajectory, transport};
+use panels::{analysis, config, drift, log_panel, segments, timeline, trajectory, transport};
 use pico::PicoState;
 use recording::UndoRing;
 
@@ -29,6 +29,7 @@ struct TasApp {
     show_trajectory: bool,
     show_analysis: bool,
     show_macros: bool,
+    show_segments: bool,
     macro_state: macros::MacroState,
     segment_tracker: recording::SegmentTracker,
     last_mode: u32,
@@ -62,6 +63,7 @@ impl TasApp {
             show_trajectory: false,
             show_analysis: false,
             show_macros: false,
+            show_segments: true,
             macro_state: macros::MacroState::new(),
             segment_tracker: recording::SegmentTracker::new(),
             last_mode: 0,
@@ -322,6 +324,7 @@ impl eframe::App for TasApp {
                 });
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_pico_panel, "Pico HID Panel");
+                    ui.checkbox(&mut self.show_segments, "Segment List");
                     ui.checkbox(&mut self.show_trajectory, "Trajectory Viewer");
                     ui.checkbox(&mut self.show_analysis, "Analysis Panel");
                     ui.checkbox(&mut self.show_macros, "Macro Panel");
@@ -518,6 +521,24 @@ impl eframe::App for TasApp {
 
                 ui.separator();
 
+                // Segment list panel (collapsible)
+                let mut seg_actions = Vec::new();
+                if self.show_segments && !self.segment_tracker.segments.is_empty() {
+                    egui::CollapsingHeader::new(
+                        egui::RichText::new(format!(
+                            "Segments ({})",
+                            self.segment_tracker.segments.len()
+                        ))
+                        .strong(),
+                    )
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        seg_actions =
+                            segments::show(ui, &self.segment_tracker, state);
+                    });
+                    ui.separator();
+                }
+
                 // Two-column layout: timeline left, drift right
                 let avail = ui.available_size();
                 ui.horizontal(|ui| {
@@ -590,6 +611,61 @@ impl eframe::App for TasApp {
                         format!("Max Drift: X={:.9} Z={:.9}", dx, dz),
                     );
                 });
+
+                // Process segment actions (after state borrow is no longer needed)
+                let recorded_count = shared.state().recorded_count;
+                for action in seg_actions {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    match action {
+                        segments::SegmentAction::ScrollTo(tick) => {
+                            self.timeline_scroll = tick as f32;
+                            self.log_lines.push(format!(
+                                "[{}] Scrolled timeline to tick {}", ts, tick
+                            ));
+                        }
+                        segments::SegmentAction::DeleteFrom(idx) => {
+                            if let Some(seg) = self.segment_tracker.segments.get(idx) {
+                                let truncate_to = seg.start_tick;
+                                self.undo_ring.push(shared.state());
+                                shared.state_mut().recorded_count = truncate_to;
+                                for i in truncate_to as usize..tas_shared::TAS_MAX_TICKS {
+                                    shared.state_mut().input_log[i] = 0;
+                                }
+                                self.segment_tracker.segments.truncate(idx);
+                                self.log_lines.push(format!(
+                                    "[{}] Deleted segments from #{} onward, truncated to frame {}",
+                                    ts, idx + 1, truncate_to
+                                ));
+                            }
+                        }
+                        segments::SegmentAction::SpliceAll => {
+                            let count = self.segment_tracker.segments.len();
+                            self.segment_tracker.segments.clear();
+                            if recorded_count > 0 {
+                                self.segment_tracker.segments.push(recording::Segment {
+                                    name: "Spliced".into(),
+                                    start_tick: 0,
+                                    end_tick: recorded_count,
+                                    timestamp: chrono::Local::now().to_rfc3339(),
+                                });
+                            }
+                            self.log_lines.push(format!(
+                                "[{}] Spliced {} segments into one contiguous recording ({} frames)",
+                                ts, count, recorded_count
+                            ));
+                        }
+                        segments::SegmentAction::RedoFrom(frame) => {
+                            self.undo_ring.push(shared.state());
+                            self.continue_from_frame = frame;
+                            shared.state_mut().continue_from_frame = frame;
+                            shared.send_command(TasCommand::ArmContinue);
+                            self.segment_tracker.segments.retain(|s| s.start_tick < frame);
+                            self.log_lines.push(format!(
+                                "[{}] Redo from frame {} — armed CONT", ts, frame
+                            ));
+                        }
+                    }
+                }
             }
         });
 
