@@ -25,6 +25,7 @@ fn main() {
     match mode {
         "smoke" => run_smoke_test(),
         "f5" => run_f5_aligned_test(),
+        "segment" => run_segment_test(),
         "regression" => {
             let out = output_dir();
             let cache_dir = out.join("regression_cache");
@@ -58,6 +59,7 @@ fn main() {
             println!("Modes:");
             println!("  smoke       Basic REC/PLAY without F5 alignment");
             println!("  f5          F5-aligned straight-line zero-drift check");
+            println!("  segment     Multi-segment CONT zero-drift test (requires Pico HID)");
             println!("  regression  15-case regression suite (requires Pico HID)");
             println!("  acceptance  3-phase acceptance test (requires Pico HID)");
             println!("  mock        Regression suite with mock input (no hardware)");
@@ -77,6 +79,248 @@ fn output_dir() -> PathBuf {
                 .and_then(|p| p.parent().map(|p| p.to_path_buf()))
                 .unwrap_or_else(|| PathBuf::from("."))
         })
+}
+
+/// Multi-segment E2E zero-drift test (SSB-131).
+///
+/// Strategy: Use F5 position matching via ARM_PLAY to find a matching position,
+/// then immediately reuse that F5 for ARM_CONTINUE (no second restart needed).
+///
+/// Phase 1: REC segment 0 with LEFT steering
+/// Phase 2: F5-match via PLAY (establishes matching position), then ARM_CONTINUE
+///          for segment 1 with RIGHT steering
+/// Phase 3: PLAY full recording, verify zero drift at segment boundary
+fn run_segment_test() {
+    println!("=== Multi-Segment E2E Zero-Drift Test (SSB-131) ===\n");
+    let mut client = harness::connect();
+    harness::print_status(&client);
+
+    if !harness::check_liveness(&client) {
+        eprintln!("ERROR: Cave 2 not firing");
+        std::process::exit(1);
+    }
+
+    // ---- Phase 1: REC segment 0 with LEFT steering ----
+    println!("\n--- Phase 1: REC segment 0 (LEFT steering) ---");
+    if !harness::restart_and_stabilize(&client) {
+        eprintln!("ERROR: Game not alive for Phase 1");
+        std::process::exit(1);
+    }
+
+    harness::arm_rec(&mut client);
+    println!("  Recording with LEFT steering via Pico HID...");
+
+    // Drive LEFT for 200 ticks, then neutral for 100 ticks (total 300)
+    let seg0_steps = patterns::build_from_explicit(&[
+        ("LEFT", tas_shared::input_bits::LEFT, 200),
+        ("NEUTRAL", 0x00, 100),
+    ]);
+    drive_pico_steps(&seg0_steps);
+
+    let seg0_count = client.state().recorded_count;
+    harness::stop(&mut client);
+    println!("  Segment 0 recorded: {} ticks", seg0_count);
+
+    if seg0_count < 200 {
+        eprintln!("ERROR: Too few ticks in segment 0 (need >= 200)");
+        std::process::exit(1);
+    }
+
+    let rec_start = client.state().rec_coords[0];
+    println!(
+        "  REC start: ({:.4}, {:.4}, {:.4})",
+        rec_start[0], rec_start[1], rec_start[2]
+    );
+    println!("  Segments before CONT: {}", client.state().segment_count);
+
+    let splice_frame: u32 = 200;
+
+    // ---- Phase 2: CONT from frame 200 ----
+    // Strategy: F5-restart loop until position matches, then ARM_CONTINUE
+    // (not ARM_PLAY). This uses the same matching logic but starts CONT directly.
+    println!(
+        "\n--- Phase 2: CONT from frame {} (RIGHT steering) ---",
+        splice_frame
+    );
+
+    // Set continue_from_frame before starting CONT retries
+    let matched = harness::restart_continue_and_splice(
+        &mut client,
+        rec_start,
+        splice_frame,
+        30, // more retries
+    );
+    if !matched {
+        eprintln!("ERROR: Could not position-match for CONT after retries");
+        std::process::exit(1);
+    }
+
+    // Now we're in REC mode at the splice point — send RIGHT steering
+    println!("  Recording segment 1 with RIGHT steering via Pico HID...");
+    let seg1_steps = patterns::build_from_explicit(&[
+        ("RIGHT", tas_shared::input_bits::RIGHT, 200),
+        ("NEUTRAL", 0x00, 100),
+    ]);
+    drive_pico_steps(&seg1_steps);
+
+    let total_count = client.state().recorded_count;
+    harness::stop(&mut client);
+    println!("  Total recorded after CONT: {} ticks", total_count);
+    println!("  Segment count: {}", client.state().segment_count);
+
+    // Print segment boundaries
+    let state = client.state();
+    for i in 0..state.segment_count as usize {
+        let b = &state.segment_boundaries[i];
+        println!(
+            "  Boundary[{}]: frame={} input_log_offset={}",
+            i, b.frame, b.input_log_offset
+        );
+    }
+
+    // Verify input log has both LEFT and RIGHT
+    let mut has_left = false;
+    let mut has_right = false;
+    for i in 0..total_count as usize {
+        if state.input_log[i] & tas_shared::input_bits::LEFT != 0 {
+            has_left = true;
+        }
+        if state.input_log[i] & tas_shared::input_bits::RIGHT != 0 {
+            has_right = true;
+        }
+    }
+    println!(
+        "  Input log check: has_left={} has_right={} (both expected)",
+        has_left, has_right
+    );
+
+    if !has_left || !has_right {
+        eprintln!("ERROR: Input log missing expected LEFT or RIGHT inputs");
+        std::process::exit(1);
+    }
+
+    // ---- Phase 3: PLAY full recording ----
+    println!(
+        "\n--- Phase 3: PLAY full recording ({} ticks) ---",
+        total_count
+    );
+
+    if !harness::restart_play_and_match(&mut client, rec_start, 20) {
+        eprintln!("WARNING: Could not match position for PLAY (continuing anyway)");
+    }
+    let play_ok = harness::wait_playback(&client, total_count);
+    if !play_ok {
+        eprintln!("WARNING: Playback did not complete normally");
+    }
+
+    // ---- Results & Verification ----
+    harness::print_results(&client);
+
+    let state = client.state();
+
+    // Check drift at segment boundary specifically
+    if splice_frame < total_count {
+        let sf = splice_frame as usize;
+        let boundary_drift_x = (state.rec_coords[sf][0] as f64
+            - state.play_coords[sf][0] as f64)
+            .abs();
+        let boundary_drift_z = (state.rec_coords[sf][2] as f64
+            - state.play_coords[sf][2] as f64)
+            .abs();
+        println!(
+            "\n--- Segment Boundary (frame {}) ---",
+            splice_frame
+        );
+        println!(
+            "  REC[{}]:  ({:.6}, {:.6}, {:.6})",
+            sf, state.rec_coords[sf][0], state.rec_coords[sf][1], state.rec_coords[sf][2]
+        );
+        println!(
+            "  PLAY[{}]: ({:.6}, {:.6}, {:.6})",
+            sf, state.play_coords[sf][0], state.play_coords[sf][1], state.play_coords[sf][2]
+        );
+        println!(
+            "  Boundary drift: X={:.9} Z={:.9}",
+            boundary_drift_x, boundary_drift_z
+        );
+        if boundary_drift_x == 0.0 && boundary_drift_z == 0.0 {
+            println!("  Boundary check: PASS (zero discontinuity)");
+        } else {
+            println!("  Boundary check: FAIL (drift at segment boundary)");
+        }
+    }
+
+    // 4-gate assessment
+    let assessment = gates::run_gates(state, total_count);
+    assessment.print_summary();
+
+    // Print final verdict
+    println!("\n=== SEGMENT TEST VERDICT ===");
+    if assessment.all_pass() {
+        println!("*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***");
+        println!(
+            "  {} ticks, {} segments, splice at frame {}",
+            total_count,
+            state.segment_count,
+            splice_frame
+        );
+    } else {
+        println!("*** MULTI-SEGMENT ZERO-DRIFT TEST FAILED ***");
+    }
+
+    std::process::exit(if assessment.all_pass() { 0 } else { 1 });
+}
+
+/// Drive Pico HID through a sequence of pattern steps.
+fn drive_pico_steps(steps: &[patterns::PatternStep]) {
+    use std::io::Write;
+
+    let port = match std::fs::OpenOptions::new()
+        .write(true)
+        .open("\\\\.\\COM7")
+    {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("  ERROR: Cannot open COM7: {}. Steering will be absent.", e);
+            let total_ms = patterns::total_ticks(steps) as u64 * 10;
+            std::thread::sleep(std::time::Duration::from_millis(total_ms));
+            return;
+        }
+    };
+
+    let mut port = port;
+    let total = patterns::total_ticks(steps);
+    let ms_per_tick = 10u64;
+    let start = std::time::Instant::now();
+    let mut prev_mask = 0xFFu8;
+    let mut current_step = 0usize;
+
+    for tick in 0..total {
+        while current_step < steps.len() && tick >= steps[current_step].stop_tick {
+            current_step += 1;
+        }
+        let mask = if current_step < steps.len() {
+            steps[current_step].mask
+        } else {
+            0
+        };
+
+        if mask != prev_mask {
+            let send_byte = if mask == 0 { 0xFF } else { mask };
+            let _ = port.write_all(&[send_byte]);
+            let _ = port.flush();
+            prev_mask = mask;
+        }
+
+        let target = std::time::Duration::from_millis((tick as u64 + 1) * ms_per_tick);
+        if let Some(remaining) = target.checked_sub(start.elapsed()) {
+            std::thread::sleep(remaining);
+        }
+    }
+
+    // Release all
+    let _ = port.write_all(&[0xFF]);
+    let _ = port.flush();
 }
 
 fn run_smoke_test() {

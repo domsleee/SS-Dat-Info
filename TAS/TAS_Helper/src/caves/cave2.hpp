@@ -372,28 +372,6 @@ static void __declspec(noinline) Cave2_Logic() {
     } else if (s->mode == MODE_PLAY) {
         uint32_t pos = s->playback_pos;
 
-        // Continue Record: auto-switch to REC at splice point
-        if (s->continue_from_frame > 0 && pos >= s->continue_from_frame) {
-            s->recorded_count = pos;  // Truncate recording at splice point
-            s->prev_mask = (pos > 0) ? s->input_log[pos - 1] : 0;
-
-            // Record new segment boundary
-            uint32_t segIdx = s->segment_count;
-            if (segIdx < TAS_MAX_SEGMENTS) {
-                s->segment_boundaries[segIdx].frame = pos;
-                s->segment_boundaries[segIdx].input_log_offset = pos;
-                s->segment_count = segIdx + 1;
-                s->segment_index = segIdx;
-            }
-            s->segment_start_frame = pos;
-
-            s->mode = MODE_REC;
-            s->continue_from_frame = 0;  // Clear splice marker
-            g_cave2_logParam = pos;
-            g_cave2_pendingLog = 6;
-            return;
-        }
-
         if (pos >= s->recorded_count) {
             s->mode = MODE_OFF;
             g_cave2_logParam = pos;
@@ -418,6 +396,29 @@ static void __declspec(noinline) Cave2_Logic() {
         CapturePlayerCoords(s, pos, false);
 
         s->playback_pos = pos + 1;
+
+        // Continue Record: auto-switch to REC AFTER processing the splice frame.
+        // This ensures the splice frame gets normal PLAY processing (input injection
+        // + coordinate capture), maintaining symmetry with the final PLAY phase.
+        if (s->continue_from_frame > 0 && s->playback_pos >= s->continue_from_frame) {
+            uint32_t splice_pos = s->playback_pos;
+            s->recorded_count = splice_pos;
+
+            // Record new segment boundary
+            uint32_t segIdx = s->segment_count;
+            if (segIdx < TAS_MAX_SEGMENTS) {
+                s->segment_boundaries[segIdx].frame = splice_pos;
+                s->segment_boundaries[segIdx].input_log_offset = splice_pos;
+                s->segment_count = segIdx + 1;
+                s->segment_index = segIdx;
+            }
+            s->segment_start_frame = splice_pos;
+
+            s->mode = MODE_REC;
+            s->continue_from_frame = 0;  // Clear splice marker
+            g_cave2_logParam = splice_pos;
+            g_cave2_pendingLog = 6;
+        }
     }
 }
 
