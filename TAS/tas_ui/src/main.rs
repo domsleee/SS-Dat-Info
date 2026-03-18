@@ -1,11 +1,14 @@
+mod macros;
 mod panels;
 mod pico;
 mod recording;
 
 use eframe::egui;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 
-use panels::{config, drift, log_panel, timeline, trajectory, transport};
+use panels::{analysis, config, drift, log_panel, timeline, trajectory, transport};
 use pico::PicoState;
 use recording::UndoRing;
 
@@ -24,7 +27,17 @@ struct TasApp {
     playback_speed: f32,
     step_mode: bool,
     show_trajectory: bool,
+    show_analysis: bool,
+    show_macros: bool,
+    macro_state: macros::MacroState,
+    segment_tracker: recording::SegmentTracker,
+    last_mode: u32,
     log_read_cursor: u32,
+
+    // Crash recovery
+    last_frame_count: u32,
+    stale_frame_ticks: u32,
+    last_health_check: std::time::Instant,
 }
 
 impl TasApp {
@@ -47,7 +60,15 @@ impl TasApp {
             playback_speed: 1.0,
             step_mode: false,
             show_trajectory: false,
+            show_analysis: false,
+            show_macros: false,
+            macro_state: macros::MacroState::new(),
+            segment_tracker: recording::SegmentTracker::new(),
+            last_mode: 0,
             log_read_cursor: 0,
+            last_frame_count: 0,
+            stale_frame_ticks: 0,
+            last_health_check: std::time::Instant::now(),
         };
 
         // Auto-detect Pico on startup
@@ -79,6 +100,38 @@ impl TasApp {
         self.log_lines.push(format!("[{}] {}", ts, msg));
         if self.log_lines.len() > 500 {
             self.log_lines.drain(..100);
+        }
+    }
+
+    /// Check if the game process is still alive by monitoring frame_count advancement.
+    /// If frame_count hasn't changed for ~3 seconds, assume the game crashed.
+    fn check_game_health(&mut self) {
+        if self.last_health_check.elapsed() < std::time::Duration::from_secs(1) {
+            return;
+        }
+        self.last_health_check = std::time::Instant::now();
+
+        if let Some(ref shared) = self.shared {
+            let current_frame = shared.state().frame_count;
+            if current_frame == self.last_frame_count {
+                self.stale_frame_ticks += 1;
+                if self.stale_frame_ticks == 5 {
+                    // Check if Supreme.exe is actually running
+                    if !is_supreme_running() {
+                        self.push_log("Game process not found — disconnecting shared memory");
+                        self.shared = None;
+                        self.connect_error = Some(
+                            "Supreme.exe has exited. Inject TAS_Helper.dll after restarting the game."
+                                .into(),
+                        );
+                        self.stale_frame_ticks = 0;
+                        self.log_read_cursor = 0;
+                    }
+                }
+            } else {
+                self.last_frame_count = current_frame;
+                self.stale_frame_ticks = 0;
+            }
         }
     }
 
@@ -192,7 +245,11 @@ impl TasApp {
         }
         if save {
             if let Some(ref shared) = self.shared {
-                recording::save_dialog(shared.state(), &mut self.log_lines);
+                recording::save_dialog_with_segments(
+                    shared.state(),
+                    &self.segment_tracker.segments,
+                    &mut self.log_lines,
+                );
             }
         }
         if open {
@@ -207,6 +264,31 @@ impl TasApp {
 
 impl eframe::App for TasApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Check game health (crash detection)
+        self.check_game_health();
+
+        // Track mode transitions for segment tracking
+        if let Some(ref shared) = self.shared {
+            let current_mode = shared.state().mode;
+            if current_mode != self.last_mode {
+                let recorded = shared.state().recorded_count;
+                // REC started
+                if current_mode == 1 {
+                    let start = shared.state().continue_from_frame;
+                    if start == 0 && self.last_mode == 0 {
+                        // Fresh recording — clear old segments
+                        self.segment_tracker.clear();
+                    }
+                    self.segment_tracker.on_rec_start(start);
+                }
+                // REC stopped (mode went from REC to OFF)
+                if self.last_mode == 1 && current_mode == 0 {
+                    self.segment_tracker.on_rec_stop(recorded);
+                }
+                self.last_mode = current_mode;
+            }
+        }
+
         // Process keyboard shortcuts first
         let shortcut_actions = self.handle_shortcuts(ctx);
 
@@ -217,7 +299,11 @@ impl eframe::App for TasApp {
                     if ui.button("Save Recording...  Ctrl+S").clicked() {
                         ui.close_menu();
                         if let Some(ref shared) = self.shared {
-                            recording::save_dialog(shared.state(), &mut self.log_lines);
+                            recording::save_dialog_with_segments(
+                                shared.state(),
+                                &self.segment_tracker.segments,
+                                &mut self.log_lines,
+                            );
                         }
                     }
                     if ui.button("Load Recording...  Ctrl+O").clicked() {
@@ -237,6 +323,8 @@ impl eframe::App for TasApp {
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_pico_panel, "Pico HID Panel");
                     ui.checkbox(&mut self.show_trajectory, "Trajectory Viewer");
+                    ui.checkbox(&mut self.show_analysis, "Analysis Panel");
+                    ui.checkbox(&mut self.show_macros, "Macro Panel");
                 });
             });
         });
@@ -291,6 +379,19 @@ impl eframe::App for TasApp {
                     ui.separator();
                     if self.show_pico_panel {
                         pico::show_panel(ui, &mut self.pico, &mut self.log_lines);
+                    }
+                    if self.show_macros {
+                        ui.separator();
+                        egui::CollapsingHeader::new("Input Macros")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                macros::show_panel(
+                                    ui,
+                                    &mut self.macro_state,
+                                    shared.state_mut(),
+                                    &mut self.log_lines,
+                                );
+                            });
                     }
                 }
             });
@@ -435,9 +536,12 @@ impl eframe::App for TasApp {
 
                     ui.separator();
 
-                    // Right panel: drift monitor or trajectory viewer
+                    // Right panel: drift monitor, trajectory viewer, or analysis
                     ui.vertical(|ui| {
-                        if self.show_trajectory {
+                        if self.show_analysis {
+                            ui.label(egui::RichText::new("Input Analysis").strong());
+                            analysis::show(ui, state);
+                        } else if self.show_trajectory {
                             ui.label(egui::RichText::new("Trajectory (X-Z)").strong());
                             trajectory::show(ui, state);
                         } else {
@@ -510,6 +614,39 @@ impl eframe::App for TasApp {
         // Auto-refresh at ~30fps
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }
+}
+
+/// Check if Supreme.exe (or Supreme_v1.035.exe) is running.
+#[cfg(windows)]
+fn is_supreme_running() -> bool {
+    use std::process::Command;
+    // Use tasklist to check — lightweight and doesn't require extra crates
+    if let Ok(output) = Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq Supreme.exe", "/NH"])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("Supreme") {
+            return true;
+        }
+    }
+    if let Ok(output) = Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq Supreme_v1.035.exe", "/NH"])
+        .creation_flags(0x08000000)
+        .output()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("Supreme") {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+fn is_supreme_running() -> bool {
+    false
 }
 
 fn hook_status_dot(ui: &mut egui::Ui, name: &str, hooked: u32) {
