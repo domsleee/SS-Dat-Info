@@ -302,3 +302,109 @@ pub fn write_mock_input(client: &mut TasSharedMemoryClient, input_log: &[u8]) {
     state.input_log[..len].copy_from_slice(&input_log[..len]);
     state.recorded_count = len as u32;
 }
+
+/// Arm continue-from-frame: set splice point and send ARM_CONTINUE.
+/// DLL will PLAY 0..frame, then auto-switch to REC.
+pub fn arm_continue(client: &mut TasSharedMemoryClient, frame: u32) {
+    client.state_mut().continue_from_frame = frame;
+    client.send_command(TasCommand::ArmContinue);
+    thread::sleep(Duration::from_millis(50));
+    let mode = client.state().mode;
+    println!(
+        "  ARM_CONTINUE(frame={}) -> mode={} (expect 2=PLAY initially)",
+        frame, mode
+    );
+}
+
+/// Wait for mode to transition from PLAY to REC (ARM_CONTINUE splice).
+/// Returns true if the transition happened within timeout.
+pub fn wait_continue_splice(client: &TasSharedMemoryClient, splice_frame: u32) -> bool {
+    let start = Instant::now();
+    loop {
+        thread::sleep(Duration::from_millis(20));
+        let s = client.state();
+        if s.mode == TasMode::Rec as u32 {
+            println!(
+                "  CONT splice complete: mode=REC at pos={}, segment_count={}",
+                s.recorded_count, s.segment_count
+            );
+            return true;
+        }
+        if s.mode == TasMode::Off as u32 {
+            eprintln!("  ERROR: Mode went to OFF during CONT replay");
+            return false;
+        }
+        if start.elapsed() > Duration::from_secs(PLAYBACK_TIMEOUT_SECS) {
+            eprintln!(
+                "  CONT replay timeout: playback_pos={}/{}",
+                s.playback_pos, splice_frame
+            );
+            return false;
+        }
+    }
+}
+
+/// F5 restart + ARM_CONTINUE with position matching, then wait for splice.
+///
+/// Same as restart_play_and_match but uses ARM_CONTINUE instead of ARM_PLAY.
+/// On position match, waits for PLAY→REC splice at splice_frame.
+///
+/// Returns true if CONT successfully spliced (PLAY→REC transition at splice_frame).
+pub fn restart_continue_and_splice(
+    client: &mut TasSharedMemoryClient,
+    target: [f32; 3],
+    splice_frame: u32,
+    max_retries: u32,
+) -> bool {
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            println!(
+                "  Retry {}/{}: position match for CONT",
+                attempt, max_retries
+            );
+        }
+        if !restart_and_stabilize(client) {
+            eprintln!("  ERROR: Game not alive after F5");
+            return false;
+        }
+
+        // ARM_CONTINUE: starts as PLAY from tick 0, will auto-switch to REC at splice_frame
+        arm_continue(client, splice_frame);
+        thread::sleep(Duration::from_millis(100));
+
+        let s = client.state();
+        if s.playback_pos == 0 && s.mode == TasMode::Off as u32 {
+            eprintln!("  WARNING: CONT didn't start");
+            stop(client);
+            continue;
+        }
+
+        let pc0 = s.play_coords[0];
+        let match_x = pc0[0].to_bits() == target[0].to_bits();
+        let match_y = pc0[1].to_bits() == target[1].to_bits();
+        let match_z = pc0[2].to_bits() == target[2].to_bits();
+
+        if match_x && match_y && match_z {
+            if attempt > 0 {
+                println!("  Position matched on attempt {}", attempt + 1);
+            }
+            println!("  CONT position matched, waiting for splice...");
+            if wait_continue_splice(client, splice_frame) {
+                return true;
+            }
+            // Splice failed but position matched — retry
+            stop(client);
+            continue;
+        }
+
+        let dx = (pc0[0] as f64 - target[0] as f64).abs();
+        let dz = (pc0[2] as f64 - target[2] as f64).abs();
+        println!("  play_coords[0] offset: dx={:.9} dz={:.9}", dx, dz);
+        stop(client);
+    }
+    eprintln!(
+        "  WARNING: Could not complete CONT splice after {} retries",
+        max_retries
+    );
+    false
+}
