@@ -60,6 +60,51 @@ pub fn get_display_config_resources_path() -> PathBuf {
     supreme_folder.join("Display_Config_Resources")
 }
 
+/// Inject TAS_Helper.dll into the running Supreme.exe process.
+/// Looks for TAS_Helper/Injector.exe and TAS_Helper.dll next to Display_Config_Resources.
+#[tauri::command]
+#[specta::specta]
+pub async fn run_tas_inject() -> Result<String, String> {
+    let supreme_folder = get_supreme_folder();
+    let tas_folder = supreme_folder.join("TAS_Helper");
+    let injector_path = tas_folder.join("Injector.exe");
+    let dll_path = tas_folder.join("TAS_Helper.dll");
+
+    if !injector_path.exists() {
+        return Err(format!(
+            "TAS Injector not found at {}",
+            injector_path.display()
+        ));
+    }
+    if !dll_path.exists() {
+        return Err(format!(
+            "TAS_Helper.dll not found at {}",
+            dll_path.display()
+        ));
+    }
+
+    let status = Command::new(&injector_path)
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .current_dir(&tas_folder)
+        .status()
+        .map_err(|err| format!("Failed to spawn TAS Injector: {err}"))?;
+
+    if !status.success() {
+        return Err("TAS Injector.exe failed.\nIs Supreme.exe running?".to_string());
+    }
+
+    // Launch tas_ui.exe (SSB Inspect) as a detached process
+    let tas_ui_path = tas_folder.join("tas_ui.exe");
+    if tas_ui_path.exists() {
+        let _ = Command::new(&tas_ui_path)
+            .current_dir(&tas_folder)
+            .creation_flags(0x00000008) // DETACHED_PROCESS
+            .spawn();
+    }
+
+    Ok("TAS_Helper.dll injected".to_string())
+}
+
 fn wait_for_finished_log(log_path: &PathBuf) -> Result<String, String> {
     let start_time = std::time::Instant::now();
     let timeout_duration = std::time::Duration::from_secs(5);
