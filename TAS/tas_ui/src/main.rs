@@ -163,30 +163,30 @@ impl TasApp {
                 }
             }
 
-            // F6: Arm REC (only when OFF)
-            if input.key_pressed(egui::Key::F6) {
-                actions.push(transport::Action::AutoSave);
-                actions.push(transport::Action::Send(TasCommand::ArmRec));
-                actions.push(transport::Action::Log("Shortcut: F6 REC".into()));
-            }
-
-            // F7: Arm PLAY (only when OFF with data)
-            if input.key_pressed(egui::Key::F7) {
-                actions.push(transport::Action::Send(TasCommand::ArmPlay));
-                actions.push(transport::Action::Log("Shortcut: F7 PLAY".into()));
-            }
-
-            // F8: STOP
-            if input.key_pressed(egui::Key::F8) {
-                actions.push(transport::Action::Send(TasCommand::Stop));
-                actions.push(transport::Action::Log("Shortcut: F8 STOP".into()));
-            }
-
-            // F9: Continue record
+            // F9: Arm REC (only when OFF)
             if input.key_pressed(egui::Key::F9) {
                 actions.push(transport::Action::AutoSave);
+                actions.push(transport::Action::Send(TasCommand::ArmRec));
+                actions.push(transport::Action::Log("Shortcut: F9 REC".into()));
+            }
+
+            // F10: Arm PLAY (only when OFF with data)
+            if input.key_pressed(egui::Key::F10) {
+                actions.push(transport::Action::Send(TasCommand::ArmPlay));
+                actions.push(transport::Action::Log("Shortcut: F10 PLAY".into()));
+            }
+
+            // F11: STOP
+            if input.key_pressed(egui::Key::F11) {
+                actions.push(transport::Action::Send(TasCommand::Stop));
+                actions.push(transport::Action::Log("Shortcut: F11 STOP".into()));
+            }
+
+            // F12: Continue record
+            if input.key_pressed(egui::Key::F12) {
+                actions.push(transport::Action::AutoSave);
                 actions.push(transport::Action::Send(TasCommand::ArmContinue));
-                actions.push(transport::Action::Log("Shortcut: F9 CONT".into()));
+                actions.push(transport::Action::Log("Shortcut: F12 CONT".into()));
             }
 
             // Skip remaining shortcuts if text input has focus
