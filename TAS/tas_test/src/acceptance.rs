@@ -69,6 +69,20 @@ pub fn run(mock: bool) -> AcceptanceResult {
         std::process::exit(1);
     }
 
+    // Config preconditions: assert proven zero-drift config before running.
+    {
+        let s = client.state();
+        assert_eq!(s.force_fixed_tick, 0, "fft must be 0 (natural ticks)");
+        assert_eq!(s.inject_mode, 6, "inject_mode must be 6");
+        assert_eq!(s.force_direct, 2, "force_direct must be 2");
+        assert!(
+            s.playback_speed == 1.0 || s.playback_speed == 0.0,
+            "playback_speed must be 1.0 or 0.0 (got {})",
+            s.playback_speed
+        );
+        println!("Config OK: fft=0, inject_mode=6, force_direct=2, speed={}", s.playback_speed);
+    }
+
     println!("\n=== Three-Phase Acceptance Test ===\n");
 
     // ---- Phase 1: BASELINE (no input) ----
