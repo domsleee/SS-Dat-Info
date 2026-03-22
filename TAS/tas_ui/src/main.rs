@@ -787,7 +787,14 @@ fn main() -> eframe::Result {
         "SSB Inspect",
         options,
         Box::new(|cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            let mut visuals = egui::Visuals::dark();
+            let dark_bg = egui::Color32::from_gray(24);
+            visuals.panel_fill = dark_bg;
+            visuals.window_fill = dark_bg;
+            visuals.extreme_bg_color = egui::Color32::from_gray(10);
+            visuals.faint_bg_color = egui::Color32::from_gray(30);
+            visuals.widgets.noninteractive.bg_fill = dark_bg;
+            cc.egui_ctx.set_visuals(visuals);
             Ok(Box::new(TasApp::new()))
         }),
     )
