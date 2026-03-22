@@ -254,8 +254,8 @@ pub fn show_panel(ui: &mut egui::Ui, pico: &mut PicoState, log: &mut Vec<String>
     // Keyboard shortcut hints
     ui.separator();
     ui.label(egui::RichText::new("Shortcuts").strong().small());
-    ui.label(egui::RichText::new("F5 Restart game  F6 REC  F7 PLAY").small());
-    ui.label(egui::RichText::new("F8 STOP  F9 CONT").small());
+    ui.label(egui::RichText::new("F5 Restart game  F9 REC  F10 PLAY").small());
+    ui.label(egui::RichText::new("F11 STOP  F12 CONT").small());
     ui.label(egui::RichText::new("Space Stop  . Step  , Step back").small());
     ui.label(egui::RichText::new("Ctrl+Z Undo  Ctrl+S Save  Ctrl+O Open").small());
     ui.label(egui::RichText::new("+/- Timeline zoom").small());
