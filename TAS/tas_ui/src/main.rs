@@ -35,6 +35,9 @@ struct TasApp {
     last_mode: u32,
     log_read_cursor: u32,
 
+    // In-process restart state: command to send once restart completes
+    pending_after_restart: Option<TasCommand>,
+
     // Crash recovery
     last_frame_count: u32,
     stale_frame_ticks: u32,
@@ -68,6 +71,7 @@ impl TasApp {
             segment_tracker: recording::SegmentTracker::new(),
             last_mode: 0,
             log_read_cursor: 0,
+            pending_after_restart: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
@@ -399,6 +403,24 @@ impl eframe::App for TasApp {
                 }
             });
 
+        // Poll in-process restart state machine
+        if let (Some(pending_cmd), Some(ref mut shared)) =
+            (self.pending_after_restart, self.shared.as_mut())
+        {
+            let rs = shared.restart_state();
+            if rs == 2 {
+                // Restart complete — send the pending command
+                shared.reset_restart_state();
+                shared.send_command(pending_cmd);
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                self.log_lines
+                    .push(format!("[{}] Restart done, sent: {:?}", ts, pending_cmd));
+                self.pending_after_restart = None;
+            }
+            // Request repaint to keep polling (egui won't repaint without user input)
+            ctx.request_repaint();
+        }
+
         // Apply shortcut actions to shared state
         if let Some(ref mut shared) = self.shared {
             for cmd in shortcut_actions {
@@ -408,6 +430,13 @@ impl eframe::App for TasApp {
                         shared.send_command(c);
                         self.log_lines
                             .push(format!("[{}] Sent: {:?}", ts, c));
+                    }
+                    transport::Action::RestartThen(c) => {
+                        shared.reset_restart_state();
+                        shared.send_command(TasCommand::Restart);
+                        self.pending_after_restart = Some(c);
+                        self.log_lines
+                            .push(format!("[{}] In-process F5 restart → {:?}", ts, c));
                     }
                     transport::Action::AutoSave => {
                         self.undo_ring.push(shared.state());
@@ -458,6 +487,13 @@ impl eframe::App for TasApp {
                         transport::Action::Send(c) => {
                             shared.send_command(c);
                             self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
+                        }
+                        transport::Action::RestartThen(c) => {
+                            shared.reset_restart_state();
+                            shared.send_command(TasCommand::Restart);
+                            self.pending_after_restart = Some(c);
+                            self.log_lines
+                                .push(format!("[{}] In-process F5 restart → {:?}", ts, c));
                         }
                         transport::Action::AutoSave => {
                             self.undo_ring.push(shared.state());
@@ -597,11 +633,19 @@ impl eframe::App for TasApp {
                 });
 
                 ui.horizontal(|ui| {
-                    let dx = state.max_drift_x;
-                    let dz = state.max_drift_z;
+                    // Compute max drift live from coord arrays (shared-state fields
+                    // are only populated by the test harness, not during normal playback).
+                    let count = (state.playback_pos as usize).min(state.recorded_count as usize);
+                    let (mut dx, mut dz) = (0.0f32, 0.0f32);
+                    for i in 0..count {
+                        let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
+                        if d > dx { dx = d; }
+                        let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
+                        if d > dz { dz = d; }
+                    }
                     let drift_color = if dx == 0.0 && dz == 0.0 {
                         egui::Color32::from_rgb(80, 200, 80)
-                    } else if dx.abs() < 1.0 && dz.abs() < 1.0 {
+                    } else if dx < 1.0 && dz < 1.0 {
                         egui::Color32::YELLOW
                     } else {
                         egui::Color32::from_rgb(255, 80, 80)
