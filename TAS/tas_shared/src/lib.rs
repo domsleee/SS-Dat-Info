@@ -1,5 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 4; // Phase 4: segment fields
+pub const TAS_SHARED_VERSION: u32 = 5; // Phase 5: rotation telemetry
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
@@ -13,6 +13,7 @@ pub enum TasCommand {
     ArmPlay = 2,
     Stop = 3,
     ArmContinue = 4,
+    Restart = 5,
 }
 
 #[repr(u32)]
@@ -42,7 +43,11 @@ pub struct TasLogEntry {
 
 impl TasLogEntry {
     pub fn text_str(&self) -> &str {
-        let len = self.text.iter().position(|&b| b == 0).unwrap_or(TAS_LOG_ENTRY_SIZE);
+        let len = self
+            .text
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(TAS_LOG_ENTRY_SIZE);
         std::str::from_utf8(&self.text[..len]).unwrap_or("<invalid utf8>")
     }
 
@@ -61,8 +66,8 @@ impl TasLogEntry {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TasSegmentBoundary {
-    pub frame: u32,              // Frame number where this segment starts
-    pub input_log_offset: u32,   // Offset into input_log for this segment
+    pub frame: u32,            // Frame number where this segment starts
+    pub input_log_offset: u32, // Offset into input_log for this segment
 }
 
 /// Input mask bit definitions (matches C++ TasInputBit)
@@ -133,6 +138,11 @@ pub struct TasSharedState {
     // Variable speed playback (1.0 = normal, 0.5 = half, 2.0 = double)
     pub playback_speed: f32,
 
+    // In-process restart state machine (DLL internal)
+    // 0=idle, 1=F5 pressed (waiting frames), 2=F5 released (done)
+    pub restart_state: u32,
+    pub restart_frames_held: u32,
+
     // Telemetry (DLL writes, UI reads)
     pub prev_player_x: f32,
     pub prev_player_y: f32,
@@ -140,7 +150,7 @@ pub struct TasSharedState {
     pub velocity_x: f32,
     pub velocity_y: f32,
     pub velocity_z: f32,
-    pub speed: f32,         // Squared speed (XZ plane) — UI should sqrt for display
+    pub speed: f32, // Squared speed (XZ plane) — UI should sqrt for display
     pub tick_count: u32,
 
     // Segment fields (DLL writes, UI reads)
@@ -152,6 +162,10 @@ pub struct TasSharedState {
     pub snapshot_buffer_ptr: u32,
     pub snapshot_buffer_capacity: u32,
     pub segment_boundaries: [TasSegmentBoundary; TAS_MAX_SEGMENTS],
+
+    // Rotation telemetry (DLL writes, UI reads)
+    // 3x3 row-major rotation matrix from player+0x104..+0x124
+    pub rotation_matrix: [f32; 9],
 
     pub input_log: [u8; TAS_MAX_TICKS],
     pub rec_coords: [[f32; 3]; TAS_MAX_TICKS],
@@ -197,7 +211,11 @@ impl TasSharedState {
             let entry = &self.log_ring[idx];
             // Sequence in entry is seq+1 (0 means unused)
             if entry.sequence == seq + 1 {
-                entries.push((entry.sequence, entry.severity_enum(), entry.text_str().to_string()));
+                entries.push((
+                    entry.sequence,
+                    entry.severity_enum(),
+                    entry.text_str().to_string(),
+                ));
             }
         }
         (entries, write_seq)
@@ -212,25 +230,25 @@ mod platform {
     use std::ffi::CString;
 
     // Raw Win32 FFI — avoids windows-sys version churn
-    type HANDLE = *mut std::ffi::c_void;
+    type Handle = *mut std::ffi::c_void;
     const FILE_MAP_ALL_ACCESS: u32 = 0xF001F;
 
     extern "system" {
-        fn OpenFileMappingA(desired_access: u32, inherit_handle: i32, name: *const u8) -> HANDLE;
+        fn OpenFileMappingA(desired_access: u32, inherit_handle: i32, name: *const u8) -> Handle;
         fn MapViewOfFile(
-            file_mapping: HANDLE,
+            file_mapping: Handle,
             desired_access: u32,
             offset_high: u32,
             offset_low: u32,
             bytes_to_map: usize,
         ) -> *mut std::ffi::c_void;
         fn UnmapViewOfFile(base_address: *const std::ffi::c_void) -> i32;
-        fn CloseHandle(handle: HANDLE) -> i32;
+        fn CloseHandle(handle: Handle) -> i32;
     }
 
     /// Opens the named shared memory created by TAS_Helper.dll.
     pub struct TasSharedMemoryClient {
-        handle: HANDLE,
+        handle: Handle,
         ptr: *mut TasSharedState,
     }
 
@@ -243,9 +261,7 @@ mod platform {
             unsafe {
                 let handle = OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, name.as_ptr() as *const u8);
                 if handle.is_null() {
-                    return Err(
-                        "OpenFileMappingA failed (is TAS_Helper.dll loaded?)".into(),
-                    );
+                    return Err("OpenFileMappingA failed (is TAS_Helper.dll loaded?)".into());
                 }
 
                 let view = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0);
@@ -278,9 +294,35 @@ mod platform {
         }
 
         pub fn send_command(&mut self, cmd: TasCommand) {
+            // Enforce proven zero-drift config before arming REC/PLAY
+            if matches!(
+                cmd,
+                TasCommand::ArmRec | TasCommand::ArmPlay | TasCommand::ArmContinue
+            ) {
+                unsafe {
+                    let fft_ptr = std::ptr::addr_of_mut!((*self.ptr).force_fixed_tick);
+                    std::ptr::write_volatile(fft_ptr, 0);
+                }
+            }
             unsafe {
                 let cmd_ptr = std::ptr::addr_of_mut!((*self.ptr).command);
                 std::ptr::write_volatile(cmd_ptr, cmd as u32);
+            }
+        }
+
+        /// Read the restart state machine status (0=idle, 1=in progress, 2=done).
+        pub fn restart_state(&self) -> u32 {
+            unsafe {
+                let ptr = std::ptr::addr_of!((*self.ptr).restart_state);
+                std::ptr::read_volatile(ptr)
+            }
+        }
+
+        /// Reset restart state to idle (call after restart completes).
+        pub fn reset_restart_state(&mut self) {
+            unsafe {
+                let ptr = std::ptr::addr_of_mut!((*self.ptr).restart_state);
+                std::ptr::write_volatile(ptr, 0);
             }
         }
     }
@@ -316,6 +358,13 @@ mod platform {
             Err("Shared memory is only supported on Windows".into())
         }
 
+        /// Create a heap-backed stub client for testing (no shared memory needed).
+        pub fn new_stub() -> Self {
+            Self {
+                state: zeroed_boxed(),
+            }
+        }
+
         pub fn state(&self) -> &TasSharedState {
             &self.state
         }
@@ -325,9 +374,437 @@ mod platform {
         }
 
         pub fn send_command(&mut self, cmd: TasCommand) {
-            let _ = cmd;
+            // Mirror fft=0 policy from Windows implementation
+            if matches!(
+                cmd,
+                TasCommand::ArmRec | TasCommand::ArmPlay | TasCommand::ArmContinue
+            ) {
+                self.state.force_fixed_tick = 0;
+            }
+            self.state.command = cmd as u32;
         }
+
+        pub fn restart_state(&self) -> u32 {
+            0
+        }
+
+        pub fn reset_restart_state(&mut self) {}
     }
 }
 
 pub use platform::TasSharedMemoryClient;
+
+/// Heap-allocate a zeroed TasSharedState (avoids stack overflow for ~1.6MB struct).
+/// Intended for tests across all crates in the workspace.
+pub fn zeroed_boxed() -> Box<TasSharedState> {
+    unsafe { Box::<TasSharedState>::new_zeroed().assume_init() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem;
+
+    fn zeroed_state() -> Box<TasSharedState> {
+        zeroed_boxed()
+    }
+
+    // ========== Layout assertions ==========
+
+    #[test]
+    fn size_of_tas_shared_state_pinned() {
+        // Pin the total struct size so C++ and Rust sides stay in sync.
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_084);
+    }
+
+    #[test]
+    fn offset_of_input_log_pinned() {
+        assert_eq!(mem::offset_of!(TasSharedState, input_log), 488);
+    }
+
+    #[test]
+    fn offset_of_rec_coords() {
+        assert_eq!(
+            mem::offset_of!(TasSharedState, rec_coords),
+            488 + TAS_MAX_TICKS // 66024
+        );
+    }
+
+    #[test]
+    fn offset_of_play_coords() {
+        assert_eq!(
+            mem::offset_of!(TasSharedState, play_coords),
+            488 + TAS_MAX_TICKS + TAS_MAX_TICKS * 12 // 852456
+        );
+    }
+
+    #[test]
+    fn offset_of_log_write_seq() {
+        assert_eq!(
+            mem::offset_of!(TasSharedState, log_write_seq),
+            488 + TAS_MAX_TICKS + TAS_MAX_TICKS * 12 * 2 // 1638888
+        );
+    }
+
+    #[test]
+    fn size_of_tas_log_entry() {
+        // 4 (sequence) + 4 (severity) + 120 (text) = 128
+        assert_eq!(mem::size_of::<TasLogEntry>(), 128);
+    }
+
+    #[test]
+    fn size_of_tas_segment_boundary() {
+        assert_eq!(mem::size_of::<TasSegmentBoundary>(), 8);
+    }
+
+    // ========== TasCommand enum round-trip ==========
+
+    #[test]
+    fn tas_command_round_trip() {
+        let variants: &[(TasCommand, u32)] = &[
+            (TasCommand::Idle, 0),
+            (TasCommand::ArmRec, 1),
+            (TasCommand::ArmPlay, 2),
+            (TasCommand::Stop, 3),
+            (TasCommand::ArmContinue, 4),
+            (TasCommand::Restart, 5),
+        ];
+        for &(cmd, val) in variants {
+            assert_eq!(cmd as u32, val, "{:?} should be {}", cmd, val);
+        }
+    }
+
+    // ========== TasMode enum round-trip ==========
+
+    #[test]
+    fn tas_mode_round_trip() {
+        assert_eq!(TasMode::Off as u32, 0);
+        assert_eq!(TasMode::Rec as u32, 1);
+        assert_eq!(TasMode::Play as u32, 2);
+    }
+
+    // ========== mode_str / mode_enum edge cases ==========
+
+    #[test]
+    fn mode_enum_known_values() {
+        let mut state = zeroed_state();
+        state.mode = 0;
+        assert_eq!(state.mode_enum(), TasMode::Off);
+        state.mode = 1;
+        assert_eq!(state.mode_enum(), TasMode::Rec);
+        state.mode = 2;
+        assert_eq!(state.mode_enum(), TasMode::Play);
+    }
+
+    #[test]
+    fn mode_enum_unknown_defaults_to_off() {
+        let mut state = zeroed_state();
+        for bogus in [3, 99, u32::MAX] {
+            state.mode = bogus;
+            assert_eq!(
+                state.mode_enum(),
+                TasMode::Off,
+                "mode {} should map to Off",
+                bogus
+            );
+        }
+    }
+
+    #[test]
+    fn mode_str_known_values() {
+        let mut state = zeroed_state();
+        state.mode = 0;
+        assert_eq!(state.mode_str(), "OFF");
+        state.mode = 1;
+        assert_eq!(state.mode_str(), "REC");
+        state.mode = 2;
+        assert_eq!(state.mode_str(), "PLAY");
+    }
+
+    #[test]
+    fn mode_str_unknown_defaults_to_off() {
+        let mut state = zeroed_state();
+        state.mode = 42;
+        assert_eq!(state.mode_str(), "OFF");
+    }
+
+    // ========== TasLogSeverity ==========
+
+    #[test]
+    fn log_severity_round_trip() {
+        assert_eq!(TasLogSeverity::Debug as u32, 0);
+        assert_eq!(TasLogSeverity::Info as u32, 1);
+        assert_eq!(TasLogSeverity::Warn as u32, 2);
+        assert_eq!(TasLogSeverity::Error as u32, 3);
+    }
+
+    #[test]
+    fn log_entry_severity_unknown_defaults_to_info() {
+        let mut entry: TasLogEntry = unsafe { mem::zeroed() };
+        entry.severity = 99;
+        assert_eq!(entry.severity_enum(), TasLogSeverity::Info);
+    }
+
+    // ========== TasLogEntry::text_str ==========
+
+    #[test]
+    fn log_entry_text_str_normal() {
+        let mut entry: TasLogEntry = unsafe { mem::zeroed() };
+        let msg = b"hello world";
+        entry.text[..msg.len()].copy_from_slice(msg);
+        assert_eq!(entry.text_str(), "hello world");
+    }
+
+    #[test]
+    fn log_entry_text_str_full_buffer() {
+        let mut entry: TasLogEntry = unsafe { mem::zeroed() };
+        entry.text.fill(b'A');
+        assert_eq!(entry.text_str().len(), TAS_LOG_ENTRY_SIZE);
+    }
+
+    #[test]
+    fn log_entry_text_str_empty() {
+        let entry: TasLogEntry = unsafe { mem::zeroed() };
+        assert_eq!(entry.text_str(), "");
+    }
+
+    // ========== read_log_entries: cursor semantics ==========
+
+    fn write_log_entry(state: &mut TasSharedState, seq: u32, severity: u32, text: &str) {
+        let idx = (seq % TAS_LOG_RING_SIZE as u32) as usize;
+        state.log_ring[idx].sequence = seq + 1; // entry stores seq+1
+        state.log_ring[idx].severity = severity;
+        let bytes = text.as_bytes();
+        let len = bytes.len().min(TAS_LOG_ENTRY_SIZE);
+        state.log_ring[idx].text[..len].copy_from_slice(&bytes[..len]);
+        if len < TAS_LOG_ENTRY_SIZE {
+            state.log_ring[idx].text[len] = 0;
+        }
+    }
+
+    #[test]
+    fn read_log_entries_empty() {
+        let state = zeroed_state();
+        let (entries, cursor) = state.read_log_entries(0);
+        assert!(entries.is_empty());
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn read_log_entries_single() {
+        let mut state = zeroed_state();
+        write_log_entry(&mut state, 0, 1, "first");
+        state.log_write_seq = 1;
+
+        let (entries, cursor) = state.read_log_entries(0);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, 1); // sequence stored is seq+1
+        assert_eq!(entries[0].2, "first");
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn read_log_entries_cursor_skips_already_seen() {
+        let mut state = zeroed_state();
+        for i in 0..5u32 {
+            write_log_entry(&mut state, i, 0, &format!("msg{}", i));
+        }
+        state.log_write_seq = 5;
+
+        // Read from cursor=3 should only get entries 3,4
+        let (entries, cursor) = state.read_log_entries(3);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].2, "msg3");
+        assert_eq!(entries[1].2, "msg4");
+        assert_eq!(cursor, 5);
+    }
+
+    #[test]
+    fn read_log_entries_cursor_at_write_seq_returns_empty() {
+        let mut state = zeroed_state();
+        write_log_entry(&mut state, 0, 0, "msg0");
+        state.log_write_seq = 1;
+
+        let (entries, cursor) = state.read_log_entries(1);
+        assert!(entries.is_empty());
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn read_log_entries_wraparound() {
+        let mut state = zeroed_state();
+        // Write more than ring size entries — only last 64 should be visible
+        let total = TAS_LOG_RING_SIZE as u32 + 10;
+        for i in 0..total {
+            write_log_entry(&mut state, i, 0, &format!("w{}", i));
+        }
+        state.log_write_seq = total;
+
+        // Reading from 0 should only return last 64 (ring clamps)
+        let (entries, cursor) = state.read_log_entries(0);
+        assert_eq!(entries.len(), TAS_LOG_RING_SIZE);
+        assert_eq!(entries[0].2, "w10"); // first visible after wraparound
+        assert_eq!(cursor, total);
+    }
+
+    #[test]
+    fn read_log_entries_sequence_gap_skips_stale() {
+        let mut state = zeroed_state();
+        // Write entry at seq=0 but set log_write_seq=2 (gap at seq=1)
+        write_log_entry(&mut state, 0, 1, "zero");
+        // Don't write seq=1 — its slot has sequence=0 (stale)
+        state.log_write_seq = 2;
+
+        let (entries, _) = state.read_log_entries(0);
+        // seq=0 matches (entry.sequence == 0+1 == 1), seq=1 doesn't (slot has sequence=0, expects 2)
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].2, "zero");
+    }
+
+    // ========== TasSegmentBoundary defaults ==========
+
+    #[test]
+    fn segment_boundary_default() {
+        let seg = TasSegmentBoundary::default();
+        assert_eq!(seg.frame, 0);
+        assert_eq!(seg.input_log_offset, 0);
+    }
+
+    // ========== input_bits constants match protocol ==========
+
+    #[test]
+    fn input_bits_values() {
+        assert_eq!(input_bits::LEFT, 0x01);
+        assert_eq!(input_bits::RIGHT, 0x02);
+        assert_eq!(input_bits::UP, 0x04);
+        assert_eq!(input_bits::DOWN, 0x08);
+        assert_eq!(input_bits::JUMP, 0x10);
+        assert_eq!(input_bits::SHIFT, 0x20);
+    }
+
+    #[test]
+    fn input_bits_no_overlap() {
+        let bits = [
+            input_bits::LEFT,
+            input_bits::RIGHT,
+            input_bits::UP,
+            input_bits::DOWN,
+            input_bits::JUMP,
+            input_bits::SHIFT,
+        ];
+        for i in 0..bits.len() {
+            for j in (i + 1)..bits.len() {
+                assert_eq!(bits[i] & bits[j], 0, "bits {} and {} overlap", i, j);
+            }
+        }
+    }
+
+    #[test]
+    fn input_bits_all_table_consistent() {
+        assert_eq!(input_bits::ALL.len(), 6);
+        let expected = [
+            (input_bits::LEFT, "L", "Left"),
+            (input_bits::RIGHT, "R", "Right"),
+            (input_bits::UP, "U", "Up"),
+            (input_bits::DOWN, "D", "Down"),
+            (input_bits::JUMP, "J", "Jump"),
+            (input_bits::SHIFT, "S", "Shift"),
+        ];
+        for (i, &(bit, short, long)) in input_bits::ALL.iter().enumerate() {
+            assert_eq!(bit, expected[i].0);
+            assert_eq!(short, expected[i].1);
+            assert_eq!(long, expected[i].2);
+        }
+    }
+
+    #[test]
+    fn input_bits_each_is_single_bit() {
+        for &(bit, _, _) in input_bits::ALL {
+            assert!(bit.is_power_of_two(), "0x{:02X} is not a single bit", bit);
+        }
+    }
+
+    // ========== send_command policy: fft forced to 0 on arm ==========
+    // These tests verify the fft=0 enforcement via the platform-independent
+    // stub path (non-Windows) or live shared memory (Windows with DLL).
+
+    fn make_client_or_skip() -> Option<TasSharedMemoryClient> {
+        // On non-Windows, open() always fails so we use new_stub().
+        // On Windows without game, open() fails too.
+        #[cfg(not(windows))]
+        {
+            Some(TasSharedMemoryClient::new_stub())
+        }
+        #[cfg(windows)]
+        {
+            TasSharedMemoryClient::open().ok()
+        }
+    }
+
+    #[test]
+    fn send_command_resets_fft_on_arm_rec() {
+        let Some(mut client) = make_client_or_skip() else {
+            return;
+        };
+        client.state_mut().force_fixed_tick = 2;
+        client.send_command(TasCommand::ArmRec);
+        assert_eq!(
+            client.state().force_fixed_tick,
+            0,
+            "ArmRec must reset fft to 0"
+        );
+    }
+
+    #[test]
+    fn send_command_resets_fft_on_arm_play() {
+        let Some(mut client) = make_client_or_skip() else {
+            return;
+        };
+        client.state_mut().force_fixed_tick = 5;
+        client.send_command(TasCommand::ArmPlay);
+        assert_eq!(
+            client.state().force_fixed_tick,
+            0,
+            "ArmPlay must reset fft to 0"
+        );
+    }
+
+    #[test]
+    fn send_command_resets_fft_on_arm_continue() {
+        let Some(mut client) = make_client_or_skip() else {
+            return;
+        };
+        client.state_mut().force_fixed_tick = 3;
+        client.send_command(TasCommand::ArmContinue);
+        assert_eq!(
+            client.state().force_fixed_tick,
+            0,
+            "ArmContinue must reset fft to 0"
+        );
+    }
+
+    #[test]
+    fn send_command_preserves_fft_on_stop() {
+        let Some(mut client) = make_client_or_skip() else {
+            return;
+        };
+        client.state_mut().force_fixed_tick = 2;
+        client.send_command(TasCommand::Stop);
+        assert_eq!(
+            client.state().force_fixed_tick,
+            2,
+            "Stop must not reset fft"
+        );
+    }
+
+    #[test]
+    fn restart_state_helpers() {
+        let Some(mut client) = make_client_or_skip() else {
+            return;
+        };
+        assert_eq!(client.restart_state(), 0);
+        // On stub, reset is a no-op but should not panic
+        client.reset_restart_state();
+        assert_eq!(client.restart_state(), 0);
+    }
+}

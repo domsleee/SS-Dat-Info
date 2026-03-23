@@ -40,7 +40,7 @@ fn set_dark_title_bar(title: &str) {
     }
 }
 
-use panels::{analysis, config, drift, log_panel, segments, timeline, trajectory, transport};
+use panels::{analysis, config, drift, log_panel, rotation, segments, timeline, trajectory, transport};
 use pico::PicoState;
 use recording::UndoRing;
 
@@ -61,6 +61,7 @@ struct TasApp {
     step_mode: bool,
     show_trajectory: bool,
     show_analysis: bool,
+    show_rotation: bool,
     show_macros: bool,
     show_segments: bool,
     macro_state: macros::MacroState,
@@ -109,6 +110,7 @@ impl TasApp {
             step_mode: false,
             show_trajectory: false,
             show_analysis: false,
+            show_rotation: false,
             show_macros: false,
             show_segments: true,
             macro_state: macros::MacroState::new(),
@@ -404,6 +406,7 @@ impl eframe::App for TasApp {
                     ui.checkbox(&mut self.show_pico_panel, "Pico HID Panel");
                     ui.checkbox(&mut self.show_segments, "Segment List");
                     ui.checkbox(&mut self.show_trajectory, "Trajectory Viewer");
+                    ui.checkbox(&mut self.show_rotation, "Rotation Display");
                     ui.checkbox(&mut self.show_analysis, "Analysis Panel");
                     ui.checkbox(&mut self.show_macros, "Macro Panel");
                     ui.separator();
@@ -680,7 +683,7 @@ impl eframe::App for TasApp {
 
                     ui.separator();
 
-                    // Right panel: drift monitor, trajectory viewer, or analysis
+                    // Right panel: drift monitor, trajectory viewer, rotation, or analysis
                     ui.vertical(|ui| {
                         if self.show_analysis {
                             ui.label(egui::RichText::new("Input Analysis").strong());
@@ -688,6 +691,9 @@ impl eframe::App for TasApp {
                         } else if self.show_trajectory {
                             ui.label(egui::RichText::new("Trajectory (X-Z)").strong());
                             trajectory::show(ui, state);
+                        } else if self.show_rotation {
+                            ui.label(egui::RichText::new("Rotation").strong());
+                            rotation::show(ui, state);
                         } else {
                             ui.label(egui::RichText::new("Drift Monitor").strong());
                             drift::show(ui, state);
@@ -975,6 +981,7 @@ mod tests {
             step_mode: false,
             show_trajectory: false,
             show_analysis: false,
+            show_rotation: false,
             show_macros: false,
             show_segments: true,
             macro_state: macros::MacroState::new(),
