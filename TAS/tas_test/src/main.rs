@@ -9,6 +9,7 @@
 //!   mock        — Regression suite with mock input (no Pico hardware)
 //!   speed       — Playback speed verification (0.25x, 1x, 2x)
 //!   speed-reset — Speed reset verification (2x stop restores normal)
+//!   drift-speed — Drift-at-speed verification (2x same-speed, 1x/2x cross-speed)
 
 mod acceptance;
 mod cache;
@@ -18,6 +19,7 @@ mod gates;
 mod harness;
 mod patterns;
 mod regression;
+mod drift_speed;
 mod speed;
 mod speed_reset;
 
@@ -56,6 +58,10 @@ fn main() {
             let result = speed_reset::run();
             std::process::exit(if result.all_pass() { 0 } else { 1 });
         }
+        "drift-speed" => {
+            let result = drift_speed::run();
+            std::process::exit(if result.all_pass() { 0 } else { 1 });
+        }
         "mock" => {
             let out = output_dir();
             let cache_dir = out.join("mock_cache");
@@ -78,6 +84,7 @@ fn main() {
             println!("  mock        Regression suite with mock input (no hardware)");
             println!("  speed       Playback speed verification (0.25x, 1x, 2x)");
             println!("  speed-reset Speed reset verification (2x stop restores normal)");
+            println!("  drift-speed Drift-at-speed verification (2x same, 1x/2x cross)");
             println!();
             println!("Exit code: 0 = all pass, 1 = some failed");
         }
