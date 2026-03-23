@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! TAS test runner CLI for Supreme Snowboarding.
 //!
 //! Modes:
@@ -6,6 +7,8 @@
 //!   regression  — 15-case regression suite with CSV output
 //!   acceptance  — 3-phase acceptance test (baseline, steered REC, PLAY)
 //!   mock        — Regression suite with mock input (no Pico hardware)
+//!   speed       — Playback speed verification (0.25x, 1x, 2x)
+//!   speed-reset — Speed reset verification (2x stop restores normal)
 
 mod acceptance;
 mod cache;
@@ -15,6 +18,8 @@ mod gates;
 mod harness;
 mod patterns;
 mod regression;
+mod speed;
+mod speed_reset;
 
 use std::path::PathBuf;
 
@@ -43,6 +48,14 @@ fn main() {
             certificate::write_acceptance_certificate(&result, &cert_path);
             std::process::exit(if result.all_pass() { 0 } else { 1 });
         }
+        "speed" => {
+            let result = speed::run();
+            std::process::exit(if result.all_pass() { 0 } else { 1 });
+        }
+        "speed-reset" => {
+            let result = speed_reset::run();
+            std::process::exit(if result.all_pass() { 0 } else { 1 });
+        }
         "mock" => {
             let out = output_dir();
             let cache_dir = out.join("mock_cache");
@@ -63,6 +76,8 @@ fn main() {
             println!("  regression  15-case regression suite (requires Pico HID)");
             println!("  acceptance  3-phase acceptance test (requires Pico HID)");
             println!("  mock        Regression suite with mock input (no hardware)");
+            println!("  speed       Playback speed verification (0.25x, 1x, 2x)");
+            println!("  speed-reset Speed reset verification (2x stop restores normal)");
             println!();
             println!("Exit code: 0 = all pass, 1 = some failed");
         }
@@ -221,16 +236,11 @@ fn run_segment_test() {
     // Check drift at segment boundary specifically
     if splice_frame < total_count {
         let sf = splice_frame as usize;
-        let boundary_drift_x = (state.rec_coords[sf][0] as f64
-            - state.play_coords[sf][0] as f64)
-            .abs();
-        let boundary_drift_z = (state.rec_coords[sf][2] as f64
-            - state.play_coords[sf][2] as f64)
-            .abs();
-        println!(
-            "\n--- Segment Boundary (frame {}) ---",
-            splice_frame
-        );
+        let boundary_drift_x =
+            (state.rec_coords[sf][0] as f64 - state.play_coords[sf][0] as f64).abs();
+        let boundary_drift_z =
+            (state.rec_coords[sf][2] as f64 - state.play_coords[sf][2] as f64).abs();
+        println!("\n--- Segment Boundary (frame {}) ---", splice_frame);
         println!(
             "  REC[{}]:  ({:.6}, {:.6}, {:.6})",
             sf, state.rec_coords[sf][0], state.rec_coords[sf][1], state.rec_coords[sf][2]
@@ -260,9 +270,7 @@ fn run_segment_test() {
         println!("*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***");
         println!(
             "  {} ticks, {} segments, splice at frame {}",
-            total_count,
-            state.segment_count,
-            splice_frame
+            total_count, state.segment_count, splice_frame
         );
     } else {
         println!("*** MULTI-SEGMENT ZERO-DRIFT TEST FAILED ***");
@@ -271,56 +279,9 @@ fn run_segment_test() {
     std::process::exit(if assessment.all_pass() { 0 } else { 1 });
 }
 
-/// Drive Pico HID through a sequence of pattern steps.
+/// Drive Pico HID through a sequence of pattern steps (delegates to harness).
 fn drive_pico_steps(steps: &[patterns::PatternStep]) {
-    use std::io::Write;
-
-    let port = match std::fs::OpenOptions::new()
-        .write(true)
-        .open("\\\\.\\COM7")
-    {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("  ERROR: Cannot open COM7: {}. Steering will be absent.", e);
-            let total_ms = patterns::total_ticks(steps) as u64 * 10;
-            std::thread::sleep(std::time::Duration::from_millis(total_ms));
-            return;
-        }
-    };
-
-    let mut port = port;
-    let total = patterns::total_ticks(steps);
-    let ms_per_tick = 10u64;
-    let start = std::time::Instant::now();
-    let mut prev_mask = 0xFFu8;
-    let mut current_step = 0usize;
-
-    for tick in 0..total {
-        while current_step < steps.len() && tick >= steps[current_step].stop_tick {
-            current_step += 1;
-        }
-        let mask = if current_step < steps.len() {
-            steps[current_step].mask
-        } else {
-            0
-        };
-
-        if mask != prev_mask {
-            let send_byte = if mask == 0 { 0xFF } else { mask };
-            let _ = port.write_all(&[send_byte]);
-            let _ = port.flush();
-            prev_mask = mask;
-        }
-
-        let target = std::time::Duration::from_millis((tick as u64 + 1) * ms_per_tick);
-        if let Some(remaining) = target.checked_sub(start.elapsed()) {
-            std::thread::sleep(remaining);
-        }
-    }
-
-    // Release all
-    let _ = port.write_all(&[0xFF]);
-    let _ = port.flush();
+    harness::drive_pico_steps(steps, None);
 }
 
 fn run_smoke_test() {
@@ -404,12 +365,20 @@ fn run_f5_aligned_test() {
     let s = client.state();
     let n = rec_count as usize;
     println!("\n--- Starting position comparison ---");
-    println!("  REC[0]: ({:.6}, {:.6}, {:.6})", s.rec_coords[0][0], s.rec_coords[0][1], s.rec_coords[0][2]);
-    println!("  PLAY[0]: ({:.6}, {:.6}, {:.6})", s.play_coords[0][0], s.play_coords[0][1], s.play_coords[0][2]);
-    println!("  Initial offset: dx={:.9} dy={:.9} dz={:.9}",
+    println!(
+        "  REC[0]: ({:.6}, {:.6}, {:.6})",
+        s.rec_coords[0][0], s.rec_coords[0][1], s.rec_coords[0][2]
+    );
+    println!(
+        "  PLAY[0]: ({:.6}, {:.6}, {:.6})",
+        s.play_coords[0][0], s.play_coords[0][1], s.play_coords[0][2]
+    );
+    println!(
+        "  Initial offset: dx={:.9} dy={:.9} dz={:.9}",
         (s.rec_coords[0][0] as f64 - s.play_coords[0][0] as f64).abs(),
         (s.rec_coords[0][1] as f64 - s.play_coords[0][1] as f64).abs(),
-        (s.rec_coords[0][2] as f64 - s.play_coords[0][2] as f64).abs());
+        (s.rec_coords[0][2] as f64 - s.play_coords[0][2] as f64).abs()
+    );
 
     // Drift progression at sample frames
     println!("\n--- Drift progression ---");
