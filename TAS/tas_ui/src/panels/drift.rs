@@ -2,7 +2,47 @@ use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
 use tas_shared::TasSharedState;
 
-pub fn show(ui: &mut egui::Ui, state: &TasSharedState) {
+/// Cached drift plot data, invalidated when recorded_count or playback_pos changes.
+#[derive(Default)]
+pub struct DriftCache {
+    drift_x: Vec<[f64; 2]>,
+    drift_z: Vec<[f64; 2]>,
+    last_recorded: u32,
+    last_played: u32,
+}
+
+impl DriftCache {
+    /// Update the cache if the underlying data has changed. Returns true if refreshed.
+    pub fn refresh(&mut self, state: &TasSharedState) -> bool {
+        let recorded = state.recorded_count;
+        let played = state.playback_pos;
+        if recorded == self.last_recorded && played == self.last_played {
+            return false;
+        }
+        self.last_recorded = recorded;
+        self.last_played = played;
+
+        let count = (played as usize).min(recorded as usize);
+        if count == 0 {
+            self.drift_x.clear();
+            self.drift_z.clear();
+            return true;
+        }
+
+        let step = (count / 1000).max(1);
+        self.drift_x.clear();
+        self.drift_z.clear();
+        for i in (0..count).step_by(step) {
+            let dx = (state.play_coords[i][0] - state.rec_coords[i][0]) as f64;
+            self.drift_x.push([i as f64, dx]);
+            let dz = (state.play_coords[i][2] - state.rec_coords[i][2]) as f64;
+            self.drift_z.push([i as f64, dz]);
+        }
+        true
+    }
+}
+
+pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut DriftCache) {
     let recorded = state.recorded_count as usize;
     let played = state.playback_pos as usize;
 
@@ -11,33 +51,15 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState) {
         return;
     }
 
-    // Compute per-tick drift (only meaningful if we have both rec and play coords)
     let count = played.min(recorded);
     if count == 0 {
         ui.label("Max drift: X=0.000000000 Z=0.000000000 (no playback data)");
         return;
     }
 
-    // Sample at most 1000 points for performance
-    let step = (count / 1000).max(1);
+    cache.refresh(state);
 
-    let drift_x: Vec<[f64; 2]> = (0..count)
-        .step_by(step)
-        .map(|i| {
-            let dx = (state.play_coords[i][0] - state.rec_coords[i][0]) as f64;
-            [i as f64, dx]
-        })
-        .collect();
-
-    let drift_z: Vec<[f64; 2]> = (0..count)
-        .step_by(step)
-        .map(|i| {
-            let dz = (state.play_coords[i][2] - state.rec_coords[i][2]) as f64;
-            [i as f64, dz]
-        })
-        .collect();
-
-    let avail_height = ui.available_height().max(120.0).min(300.0);
+    let avail_height = ui.available_height().clamp(120.0, 300.0);
 
     Plot::new("drift_plot")
         .height(avail_height)
@@ -47,12 +69,12 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState) {
         .legend(egui_plot::Legend::default())
         .show(ui, |plot_ui| {
             plot_ui.line(
-                Line::new(PlotPoints::new(drift_x))
+                Line::new(PlotPoints::new(cache.drift_x.clone()))
                     .name("Drift X")
                     .color(egui::Color32::from_rgb(100, 149, 237)),
             );
             plot_ui.line(
-                Line::new(PlotPoints::new(drift_z))
+                Line::new(PlotPoints::new(cache.drift_z.clone()))
                     .name("Drift Z")
                     .color(egui::Color32::from_rgb(255, 165, 0)),
             );

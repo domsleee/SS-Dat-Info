@@ -76,6 +76,11 @@ struct TasApp {
     last_drift_scan_count: usize,
     last_logged_drift_level: u8, // 0=none, 1=any, 2=>=1.0, 3=>=5.0
 
+    // Cached plot data (avoid per-frame Vec allocation)
+    drift_cache: drift::DriftCache,
+    trajectory_cache: trajectory::TrajectoryCache,
+    analysis_cache: analysis::AnalysisCache,
+
     // In-process restart state: command to send once restart completes
     pending_after_restart: Option<TasCommand>,
 
@@ -123,6 +128,9 @@ impl TasApp {
             cached_max_drift_z: 0.0,
             last_drift_scan_count: 0,
             last_logged_drift_level: 0,
+            drift_cache: drift::DriftCache::default(),
+            trajectory_cache: trajectory::TrajectoryCache::default(),
+            analysis_cache: analysis::AnalysisCache::default(),
             pending_after_restart: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
@@ -703,16 +711,16 @@ impl eframe::App for TasApp {
                     ui.vertical(|ui| {
                         if self.show_analysis {
                             ui.label(egui::RichText::new("Input Analysis").strong());
-                            analysis::show(ui, state);
+                            analysis::show(ui, state, &mut self.analysis_cache);
                         } else if self.show_trajectory {
                             ui.label(egui::RichText::new("Trajectory (X-Z)").strong());
-                            trajectory::show(ui, state);
+                            trajectory::show(ui, state, &mut self.trajectory_cache);
                         } else if self.show_rotation {
                             ui.label(egui::RichText::new("Rotation").strong());
                             rotation::show(ui, state);
                         } else {
                             ui.label(egui::RichText::new("Drift Monitor").strong());
-                            drift::show(ui, state);
+                            drift::show(ui, state, &mut self.drift_cache);
                         }
                     });
                 });
@@ -1008,6 +1016,9 @@ mod tests {
             cached_max_drift_z: 0.0,
             last_drift_scan_count: 0,
             last_logged_drift_level: 0,
+            drift_cache: drift::DriftCache::default(),
+            trajectory_cache: trajectory::TrajectoryCache::default(),
+            analysis_cache: analysis::AnalysisCache::default(),
             pending_after_restart: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
