@@ -144,63 +144,86 @@ impl RecordingFile {
     }
 }
 
-/// Snapshot of input log + coords for undo
+/// Snapshot of input log + coords for undo.
+/// Pre-allocates max-size buffers to avoid per-push heap allocation.
 pub struct RecordingSnapshot {
     pub recorded_count: u32,
-    pub input_log: Vec<u8>,
-    pub rec_coords: Vec<[f32; 3]>,
+    pub(crate) input_log: Box<[u8; TAS_MAX_TICKS]>,
+    pub(crate) rec_coords: Box<[[f32; 3]; TAS_MAX_TICKS]>,
 }
 
 impl RecordingSnapshot {
-    pub fn from_state(state: &TasSharedState) -> Self {
-        let count = state.recorded_count as usize;
+    /// Create an empty pre-allocated snapshot.
+    fn new_empty() -> Self {
         Self {
-            recorded_count: state.recorded_count,
-            input_log: state.input_log[..count].to_vec(),
-            rec_coords: state.rec_coords[..count].to_vec(),
+            recorded_count: 0,
+            input_log: vec![0u8; TAS_MAX_TICKS].into_boxed_slice().try_into().unwrap(),
+            rec_coords: vec![[0.0f32; 3]; TAS_MAX_TICKS]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
         }
+    }
+
+    /// Capture state into this (already-allocated) snapshot. No new allocations.
+    fn capture_from(&mut self, state: &TasSharedState) {
+        let count = state.recorded_count as usize;
+        self.recorded_count = state.recorded_count;
+        self.input_log[..count].copy_from_slice(&state.input_log[..count]);
+        self.rec_coords[..count].copy_from_slice(&state.rec_coords[..count]);
     }
 
     pub fn restore_to(&self, state: &mut TasSharedState) {
         let count = self.recorded_count as usize;
         state.recorded_count = self.recorded_count;
-        state.input_log[..count].copy_from_slice(&self.input_log);
+        state.input_log[..count].copy_from_slice(&self.input_log[..count]);
         for i in count..TAS_MAX_TICKS {
             state.input_log[i] = 0;
         }
-        state.rec_coords[..count].copy_from_slice(&self.rec_coords);
+        state.rec_coords[..count].copy_from_slice(&self.rec_coords[..count]);
     }
 }
 
 pub struct UndoRing {
-    snapshots: Vec<RecordingSnapshot>,
-    capacity: usize,
+    /// Pre-allocated ring of snapshots. All slots are allocated at construction.
+    slots: Vec<RecordingSnapshot>,
+    /// Number of valid snapshots (stack top = used - 1).
+    used: usize,
 }
 
 impl UndoRing {
     pub fn new(capacity: usize) -> Self {
-        Self {
-            snapshots: Vec::new(),
-            capacity,
+        let mut slots = Vec::with_capacity(capacity);
+        for _ in 0..capacity {
+            slots.push(RecordingSnapshot::new_empty());
         }
+        Self { slots, used: 0 }
     }
 
     pub fn push(&mut self, state: &TasSharedState) {
         if state.recorded_count == 0 {
             return;
         }
-        if self.snapshots.len() >= self.capacity {
-            self.snapshots.remove(0);
+        let cap = self.slots.len();
+        if self.used >= cap {
+            // Rotate oldest slot to the end, overwrite it
+            self.slots.rotate_left(1);
+            self.used = cap - 1;
         }
-        self.snapshots.push(RecordingSnapshot::from_state(state));
+        self.slots[self.used].capture_from(state);
+        self.used += 1;
     }
 
-    pub fn pop(&mut self) -> Option<RecordingSnapshot> {
-        self.snapshots.pop()
+    pub fn pop(&mut self) -> Option<&RecordingSnapshot> {
+        if self.used == 0 {
+            return None;
+        }
+        self.used -= 1;
+        Some(&self.slots[self.used])
     }
 
     pub fn len(&self) -> usize {
-        self.snapshots.len()
+        self.used
     }
 }
 
@@ -424,7 +447,6 @@ mod tests {
     fn undo_ring_new_is_empty() {
         let ring = UndoRing::new(3);
         assert_eq!(ring.len(), 0);
-        assert!(ring.snapshots.is_empty());
     }
 
     #[test]
@@ -442,7 +464,9 @@ mod tests {
 
         let snap = ring.pop().unwrap();
         assert_eq!(snap.recorded_count, 3);
-        assert_eq!(snap.input_log, vec![0x04, 0x04, 0x00]);
+        assert_eq!(snap.input_log[0], 0x04);
+        assert_eq!(snap.input_log[1], 0x04);
+        assert_eq!(snap.input_log[2], 0x00);
         assert_eq!(snap.rec_coords[0], [1.0, 2.0, 3.0]);
         assert_eq!(ring.len(), 0);
     }
@@ -524,9 +548,11 @@ mod tests {
         state.rec_coords[0] = [10.0, 20.0, 30.0];
         state.rec_coords[1] = [40.0, 50.0, 60.0];
 
-        let snap = RecordingSnapshot::from_state(&state);
+        let mut snap = RecordingSnapshot::new_empty();
+        snap.capture_from(&state);
         assert_eq!(snap.recorded_count, 2);
-        assert_eq!(snap.input_log.len(), 2);
+        assert_eq!(snap.input_log[0], 0x01);
+        assert_eq!(snap.input_log[1], 0x02);
 
         // Modify state
         state.recorded_count = 0;
@@ -548,11 +574,12 @@ mod tests {
             state.input_log[i] = 0xFF;
         }
 
-        // Snapshot with 5 entries
+        // Snapshot with 2 entries
         state.recorded_count = 2;
         state.input_log[0] = 0x01;
         state.input_log[1] = 0x02;
-        let snap = RecordingSnapshot::from_state(&state);
+        let mut snap = RecordingSnapshot::new_empty();
+        snap.capture_from(&state);
 
         // Set state to have trailing data
         state.recorded_count = 5;
