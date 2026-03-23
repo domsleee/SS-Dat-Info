@@ -2,6 +2,7 @@ mod macros;
 mod panels;
 mod pico;
 mod recording;
+mod settings;
 
 use eframe::egui;
 #[cfg(windows)]
@@ -95,24 +96,25 @@ impl TasApp {
             Err(e) => (None, Some(e)),
         };
 
+        let settings = settings::Settings::load();
         let mut app = Self {
             shared,
             connect_error,
-            show_config: false,
-            show_pico_panel: false,
+            show_config: settings.show_config,
+            show_pico_panel: settings.show_pico_panel,
             pico: PicoState::new(),
             undo_ring: UndoRing::new(5),
             log_lines: Vec::new(),
             timeline_zoom: 1.0,
             timeline_scroll: 0.0,
             continue_from_frame: 0,
-            playback_speed: 1.0,
+            playback_speed: settings.playback_speed,
             step_mode: false,
-            show_trajectory: false,
-            show_analysis: false,
-            show_rotation: false,
-            show_macros: false,
-            show_segments: true,
+            show_trajectory: settings.show_trajectory,
+            show_analysis: settings.show_analysis,
+            show_rotation: settings.show_rotation,
+            show_macros: settings.show_macros,
+            show_segments: settings.show_segments,
             macro_state: macros::MacroState::new(),
             segment_tracker: recording::SegmentTracker::new(),
             last_mode: 0,
@@ -331,6 +333,20 @@ impl TasApp {
 impl eframe::App for TasApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.094, 0.094, 0.094, 1.0] // gray(24) in 0-1 range
+    }
+
+    fn on_exit(&mut self) {
+        let s = settings::Settings {
+            show_pico_panel: self.show_pico_panel,
+            show_segments: self.show_segments,
+            show_trajectory: self.show_trajectory,
+            show_rotation: self.show_rotation,
+            show_analysis: self.show_analysis,
+            show_macros: self.show_macros,
+            show_config: self.show_config,
+            playback_speed: self.playback_speed,
+        };
+        s.save();
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
