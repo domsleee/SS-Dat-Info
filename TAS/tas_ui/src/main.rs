@@ -179,7 +179,7 @@ impl TasApp {
         self.last_health_check = std::time::Instant::now();
 
         if let Some(ref shared) = self.shared {
-            let current_frame = shared.state().frame_count;
+            let current_frame = shared.frame_count_volatile();
             if current_frame == self.last_frame_count {
                 self.stale_frame_ticks += 1;
                 if self.stale_frame_ticks == 5 {
@@ -371,9 +371,9 @@ impl eframe::App for TasApp {
 
         // Track mode transitions for segment tracking
         if let Some(ref shared) = self.shared {
-            let current_mode = shared.state().mode;
+            let current_mode = shared.mode_volatile();
             if current_mode != self.last_mode {
-                let recorded = shared.state().recorded_count;
+                let recorded = shared.recorded_count_volatile();
                 // REC started
                 if current_mode == 1 {
                     let start = shared.state().continue_from_frame;
