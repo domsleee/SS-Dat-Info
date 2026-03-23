@@ -9,6 +9,11 @@ use std::time::{Duration, Instant};
 
 use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 
+/// Pico HID COM port. Override with `TAS_PICO_PORT` env var (default: COM7).
+pub fn pico_port() -> String {
+    std::env::var("TAS_PICO_PORT").unwrap_or_else(|_| "COM7".into())
+}
+
 /// How long to wait after F5 for the game to restart loading.
 const F5_SETTLE_MS: u64 = 4000;
 /// Frames to wait for physics stabilization after restart.
@@ -32,23 +37,25 @@ pub fn focus_game() {
     thread::sleep(Duration::from_millis(200));
 }
 
-/// Send F5 via Pico HID (COM7) to restart the race.
+/// Send F5 via Pico HID to restart the race.
 pub fn send_f5_pico() {
     focus_game();
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .open("\\\\.\\COM7")
-    {
-        Ok(mut port) => {
-            let _ = port.write_all(&[0x40]); // F5 press (bit 6)
-            let _ = port.flush();
+    let port = pico_port();
+    let com_path = format!("\\\\.\\{}", port);
+    match std::fs::OpenOptions::new().write(true).open(&com_path) {
+        Ok(mut p) => {
+            let _ = p.write_all(&[0x40]); // F5 press (bit 6)
+            let _ = p.flush();
             thread::sleep(Duration::from_millis(100));
-            let _ = port.write_all(&[0xFF]); // release all
-            let _ = port.flush();
-            println!("  F5 sent via Pico (COM7)");
+            let _ = p.write_all(&[0xFF]); // release all
+            let _ = p.flush();
+            println!("  F5 sent via Pico ({})", port);
         }
         Err(e) => {
-            eprintln!("  WARNING: Failed to open COM7: {}. Using SendKeys fallback.", e);
+            eprintln!(
+                "  WARNING: Failed to open {}: {}. Using SendKeys fallback.",
+                port, e
+            );
             let _ = Command::new("powershell")
                 .args([
                     "-NoProfile",
@@ -65,9 +72,9 @@ pub fn send_f5_pico() {
 
 /// Wait for N frames to pass (based on Cave 2 frame_count).
 pub fn wait_frames(client: &TasSharedMemoryClient, count: u32) {
-    let start_fc = client.state().frame_count;
+    let start_fc = client.frame_count_volatile();
     let timeout = Instant::now();
-    while client.state().frame_count < start_fc + count {
+    while client.frame_count_volatile() < start_fc + count {
         thread::sleep(Duration::from_millis(10));
         if timeout.elapsed() > Duration::from_secs(15) {
             eprintln!("  WARNING: wait_frames timeout ({} frames)", count);
@@ -78,9 +85,9 @@ pub fn wait_frames(client: &TasSharedMemoryClient, count: u32) {
 
 /// Check that Cave 2 is firing (game is alive and hooks are active).
 pub fn check_liveness(client: &TasSharedMemoryClient) -> bool {
-    let fc1 = client.state().frame_count;
+    let fc1 = client.frame_count_volatile();
     thread::sleep(Duration::from_millis(500));
-    let fc2 = client.state().frame_count;
+    let fc2 = client.frame_count_volatile();
     let delta = fc2 - fc1;
     println!("  Liveness: {} frames/500ms", delta);
     delta > 0
@@ -92,10 +99,7 @@ pub fn restart_and_stabilize(client: &TasSharedMemoryClient) -> bool {
     send_f5_pico();
     thread::sleep(Duration::from_millis(F5_SETTLE_MS));
     wait_frames(client, STABILIZE_FRAMES);
-    println!(
-        "  Stabilized at frame {}",
-        client.state().frame_count
-    );
+    println!("  Stabilized at frame {}", client.frame_count_volatile());
     check_liveness(client)
 }
 
@@ -103,22 +107,16 @@ pub fn restart_and_stabilize(client: &TasSharedMemoryClient) -> bool {
 pub fn arm_rec(client: &mut TasSharedMemoryClient) {
     client.send_command(TasCommand::ArmRec);
     thread::sleep(Duration::from_millis(50));
-    let mode = client.state().mode;
-    println!(
-        "  ARM_REC -> mode={} (expect 1=REC)",
-        mode
-    );
+    let mode = client.mode_volatile();
+    println!("  ARM_REC -> mode={} (expect 1=REC)", mode);
 }
 
 /// Arm playback and wait for mode to switch.
 pub fn arm_play(client: &mut TasSharedMemoryClient) {
     client.send_command(TasCommand::ArmPlay);
     thread::sleep(Duration::from_millis(50));
-    let mode = client.state().mode;
-    println!(
-        "  ARM_PLAY -> mode={} (expect 2=PLAY)",
-        mode
-    );
+    let mode = client.mode_volatile();
+    println!("  ARM_PLAY -> mode={} (expect 2=PLAY)", mode);
 }
 
 /// Stop recording/playback.
@@ -132,16 +130,14 @@ pub fn wait_playback(client: &TasSharedMemoryClient, expected: u32) -> bool {
     let start = Instant::now();
     loop {
         thread::sleep(Duration::from_millis(50));
-        let s = client.state();
-        if s.mode != TasMode::Play as u32 {
-            println!(
-                "  Playback complete: {}/{}",
-                s.playback_pos, expected
-            );
+        if client.mode_volatile() != TasMode::Play as u32 {
+            let pos = client.playback_pos_volatile();
+            println!("  Playback complete: {}/{}", pos, expected);
             return true;
         }
         if start.elapsed() > Duration::from_secs(PLAYBACK_TIMEOUT_SECS) {
-            eprintln!("  Playback timeout at {}/{}", s.playback_pos, expected);
+            let pos = client.playback_pos_volatile();
+            eprintln!("  Playback timeout at {}/{}", pos, expected);
             return false;
         }
     }
@@ -196,7 +192,10 @@ pub fn restart_play_and_match(
 ) -> bool {
     for attempt in 0..=max_retries {
         if attempt > 0 {
-            println!("  Retry {}/{}: play_coords[0] mismatch, restarting...", attempt, max_retries);
+            println!(
+                "  Retry {}/{}: play_coords[0] mismatch, restarting...",
+                attempt, max_retries
+            );
         }
         if !restart_and_stabilize(client) {
             eprintln!("  ERROR: Game not alive after F5");
@@ -223,13 +222,13 @@ pub fn restart_play_and_match(
         }
         let dx = (pc0[0] as f64 - target[0] as f64).abs();
         let dz = (pc0[2] as f64 - target[2] as f64).abs();
-        println!(
-            "  play_coords[0] offset: dx={:.9} dz={:.9}",
-            dx, dz
-        );
+        println!("  play_coords[0] offset: dx={:.9} dz={:.9}", dx, dz);
         stop(client);
     }
-    eprintln!("  WARNING: Could not match position after {} retries", max_retries);
+    eprintln!(
+        "  WARNING: Could not match position after {} retries",
+        max_retries
+    );
     false
 }
 
@@ -243,7 +242,10 @@ pub fn restart_rec_and_match(
 ) -> bool {
     for attempt in 0..=max_retries {
         if attempt > 0 {
-            println!("  Retry {}/{}: rec_coords[0] mismatch, restarting...", attempt, max_retries);
+            println!(
+                "  Retry {}/{}: rec_coords[0] mismatch, restarting...",
+                attempt, max_retries
+            );
         }
         if !restart_and_stabilize(client) {
             eprintln!("  ERROR: Game not alive after F5");
@@ -270,13 +272,13 @@ pub fn restart_rec_and_match(
         }
         let dx = (rc0[0] as f64 - target[0] as f64).abs();
         let dz = (rc0[2] as f64 - target[2] as f64).abs();
-        println!(
-            "  rec_coords[0] offset: dx={:.9} dz={:.9}",
-            dx, dz
-        );
+        println!("  rec_coords[0] offset: dx={:.9} dz={:.9}", dx, dz);
         stop(client);
     }
-    eprintln!("  WARNING: Could not match position after {} retries", max_retries);
+    eprintln!(
+        "  WARNING: Could not match position after {} retries",
+        max_retries
+    );
     false
 }
 
@@ -287,8 +289,14 @@ pub fn print_results(client: &TasSharedMemoryClient) {
     println!("=== RESULTS ===");
     println!("Recorded: {} ticks", s.recorded_count);
     println!("Played: {} ticks", s.playback_pos);
-    println!("Max drift X: {:.9} (frame {})", drift.max_drift_x, drift.max_drift_frame_x);
-    println!("Max drift Z: {:.9} (frame {})", drift.max_drift_z, drift.max_drift_frame_z);
+    println!(
+        "Max drift X: {:.9} (frame {})",
+        drift.max_drift_x, drift.max_drift_frame_x
+    );
+    println!(
+        "Max drift Z: {:.9} (frame {})",
+        drift.max_drift_z, drift.max_drift_frame_z
+    );
     println!("BB3B10 calls: {}", s.bb3b10_call_count);
     println!("Handler blocks (Cave 1C): {}", s.handler_block_count);
     println!("BB3B10 blocks (Cave 1D): {}", s.bb3b10_block_count);
@@ -309,7 +317,7 @@ pub fn arm_continue(client: &mut TasSharedMemoryClient, frame: u32) {
     client.state_mut().continue_from_frame = frame;
     client.send_command(TasCommand::ArmContinue);
     thread::sleep(Duration::from_millis(50));
-    let mode = client.state().mode;
+    let mode = client.mode_volatile();
     println!(
         "  ARM_CONTINUE(frame={}) -> mode={} (expect 2=PLAY initially)",
         frame, mode
@@ -407,4 +415,59 @@ pub fn restart_continue_and_splice(
         max_retries
     );
     false
+}
+
+/// Drive Pico HID through a sequence of pattern steps.
+///
+/// `fallback_ms` is the sleep duration if the Pico port cannot be opened
+/// (allows the test to wait for the equivalent recording duration).
+pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep], fallback_ms: Option<u64>) {
+    let port_name = pico_port();
+    let com_path = format!("\\\\.\\{}", port_name);
+    let port = match std::fs::OpenOptions::new().write(true).open(&com_path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "  ERROR: Cannot open {}: {}. Steering will be absent.",
+                port_name, e
+            );
+            let ms = fallback_ms.unwrap_or_else(|| crate::patterns::total_ticks(steps) as u64 * 10);
+            thread::sleep(Duration::from_millis(ms));
+            return;
+        }
+    };
+
+    let mut port = port;
+    let total = crate::patterns::total_ticks(steps);
+    let ms_per_tick = 10u64;
+    let start = Instant::now();
+    let mut prev_mask = 0xFFu8;
+    let mut current_step = 0usize;
+
+    for tick in 0..total {
+        while current_step < steps.len() && tick >= steps[current_step].stop_tick {
+            current_step += 1;
+        }
+        let mask = if current_step < steps.len() {
+            steps[current_step].mask
+        } else {
+            0
+        };
+
+        if mask != prev_mask {
+            let send_byte = if mask == 0 { 0xFF } else { mask };
+            let _ = port.write_all(&[send_byte]);
+            let _ = port.flush();
+            prev_mask = mask;
+        }
+
+        let target = Duration::from_millis((tick as u64 + 1) * ms_per_tick);
+        if let Some(remaining) = target.checked_sub(start.elapsed()) {
+            thread::sleep(remaining);
+        }
+    }
+
+    // Release all
+    let _ = port.write_all(&[0xFF]);
+    let _ = port.flush();
 }

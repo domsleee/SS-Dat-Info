@@ -310,6 +310,38 @@ mod platform {
             }
         }
 
+        /// Volatile read of mode (poll-hot field written by DLL).
+        pub fn mode_volatile(&self) -> u32 {
+            unsafe {
+                let ptr = std::ptr::addr_of!((*self.ptr).mode);
+                std::ptr::read_volatile(ptr)
+            }
+        }
+
+        /// Volatile read of frame_count (poll-hot field written by DLL).
+        pub fn frame_count_volatile(&self) -> u32 {
+            unsafe {
+                let ptr = std::ptr::addr_of!((*self.ptr).frame_count);
+                std::ptr::read_volatile(ptr)
+            }
+        }
+
+        /// Volatile read of playback_pos (poll-hot field written by DLL).
+        pub fn playback_pos_volatile(&self) -> u32 {
+            unsafe {
+                let ptr = std::ptr::addr_of!((*self.ptr).playback_pos);
+                std::ptr::read_volatile(ptr)
+            }
+        }
+
+        /// Volatile read of recorded_count (poll-hot field written by DLL).
+        pub fn recorded_count_volatile(&self) -> u32 {
+            unsafe {
+                let ptr = std::ptr::addr_of!((*self.ptr).recorded_count);
+                std::ptr::read_volatile(ptr)
+            }
+        }
+
         /// Read the restart state machine status (0=idle, 1=in progress, 2=done).
         pub fn restart_state(&self) -> u32 {
             unsafe {

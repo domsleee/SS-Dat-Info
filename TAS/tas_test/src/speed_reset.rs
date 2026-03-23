@@ -58,12 +58,12 @@ impl SpeedResetResult {
 /// This measures the game's actual tick processing rate, which is affected
 /// by the time advance constant.
 fn measure_tick_rate(client: &tas_shared::TasSharedMemoryClient) -> u32 {
-    let start_fc = client.state().frame_count;
+    let start_fc = client.frame_count_volatile();
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(MEASURE_SECS) {
         thread::sleep(Duration::from_millis(50));
     }
-    let end_fc = client.state().frame_count;
+    let end_fc = client.frame_count_volatile();
     end_fc.saturating_sub(start_fc)
 }
 
@@ -119,7 +119,7 @@ pub fn run() -> SpeedResetResult {
     // Keep speed at 2.0 in shared state — the fix should still reset the
     // constant because mode == OFF. This is the key test: the DLL should
     // restore 0.01 based on mode, not speed value.
-    let mode_after_stop = client.state().mode;
+    let mode_after_stop = client.mode_volatile();
     println!("  Mode after stop: {} (expect 0=OFF)", mode_after_stop);
 
     // Measure tick rate in OFF mode (should be normal ~100/s, NOT 200/s)
