@@ -173,11 +173,13 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
     if (!s->player_ptr) return;
 
     uint32_t raw[3];
+    uint32_t rot_raw[9];
     __try {
         auto player = (uint8_t*)s->player_ptr;
         memcpy(&raw[0], player + GameAddresses::PLAYER_X, 4);
         memcpy(&raw[1], player + GameAddresses::PLAYER_Y, 4);
         memcpy(&raw[2], player + GameAddresses::PLAYER_Z, 4);
+        memcpy(rot_raw, player + GameAddresses::PLAYER_ROT, 36);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return;
     }
@@ -186,6 +188,8 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
     memcpy(&s->player_x, &raw[0], 4);
     memcpy(&s->player_y, &raw[1], 4);
     memcpy(&s->player_z, &raw[2], 4);
+    // Update rotation matrix (integer-width copy, no float ops)
+    memcpy(s->rotation_matrix, rot_raw, 36);
 
     if (index < TAS_MAX_TICKS) {
         if (isRec) {
@@ -197,6 +201,29 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
             memcpy(&s->play_coords[index][1], &raw[1], 4);
             memcpy(&s->play_coords[index][2], &raw[2], 4);
         }
+    }
+}
+
+// In-process F5 restart constants
+static constexpr uint32_t RESTART_F5_HOLD_FRAMES = 10;  // Hold F5 for 10 frames
+
+// Helper: press or release F5 in the DI buffer + notify BB3B10
+static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, bool pressed) {
+    uint32_t buffer = GetDIBuffer(kbobj);
+    if (buffer) {
+        __try {
+            ((uint8_t*)buffer)[GameAddresses::KEY_F5] = pressed ? 0x01 : 0x00;
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    // Notify BB3B10 of the F5 state change
+    if (kbobj) {
+        auto bb3b10 = (BB3B10Fn)(addr->bb3b10);
+        void* thisPtr = (void*)(kbobj + GameAddresses::BB3B10_THIS_OFFSET);
+        s->cave2_injecting = 1;
+        bb3b10(thisPtr, GameAddresses::BB3B10_F5, pressed ? 1 : 0,
+               0, GameAddresses::BB3B10_ARG4);
+        s->cave2_injecting = 0;
     }
 }
 
@@ -267,6 +294,13 @@ static void ProcessCommand(TasSharedState* s) {
             s->cave2_injecting = 0;
             g_cave2_pendingLog = 3;
             break;
+
+        case CMD_RESTART:
+            // Begin in-process F5 restart sequence
+            s->restart_state = 1;
+            s->restart_frames_held = 0;
+            g_cave2_pendingLog = 7;  // "restart initiated"
+            break;
     }
 
     s->command = CMD_IDLE;
@@ -285,6 +319,8 @@ static void FlushPendingLog() {
         case 4: Log(std::format("Cave 2: playback complete at frame {}", param)); break;
         case 5: Log(std::format("Cave 2: continue record (PLAY until frame {})", param)); break;
         case 6: Log(std::format("Cave 2: spliced to REC at frame {}", param)); break;
+        case 7: Log("Cave 2: in-process F5 restart initiated"); break;
+        case 8: Log("Cave 2: F5 released, restart complete"); break;
     }
 }
 
@@ -330,10 +366,31 @@ static void __declspec(noinline) Cave2_Logic() {
             s->player_x = new_x;
             s->player_y = new_y;
             s->player_z = new_z;
+
+            // Update rotation matrix
+            memcpy(s->rotation_matrix, player + GameAddresses::PLAYER_ROT, 36);
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
 
     ProcessCommand(s);
+
+    // In-process F5 restart state machine (runs regardless of mode)
+    if (s->restart_state == 1) {
+        uint32_t kbobj = GetKeyboardObject(addr);
+        if (kbobj) {
+            if (s->restart_frames_held == 0) {
+                // First frame: press F5
+                InjectF5(s, addr, kbobj, true);
+            }
+            s->restart_frames_held++;
+            if (s->restart_frames_held >= RESTART_F5_HOLD_FRAMES) {
+                // Release F5 after holding long enough
+                InjectF5(s, addr, kbobj, false);
+                s->restart_state = 2;  // Done
+                g_cave2_pendingLog = 8;
+            }
+        }
+    }
 
     if (s->mode == MODE_OFF) return;
 

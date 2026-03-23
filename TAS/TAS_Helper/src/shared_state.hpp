@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 4;  // Bumped for segment fields
+constexpr uint32_t TAS_SHARED_VERSION = 5;  // Bumped for rotation telemetry
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
@@ -19,6 +19,7 @@ enum TasCommand : uint32_t {
     CMD_ARM_PLAY     = 2,
     CMD_STOP         = 3,
     CMD_ARM_CONTINUE = 4,  // PLAY 0..continue_from_frame, then auto-switch to REC
+    CMD_RESTART      = 5,  // In-process F5 restart (no Pico/focus needed)
 };
 
 // Modes (DLL -> UI)
@@ -68,7 +69,7 @@ struct TasSharedState {
     // -- Command region (UI writes, DLL reads) --
     volatile uint32_t command;      // TasCommand
     uint32_t inject_mode;           // 6 = proven mode
-    uint32_t force_fixed_tick;      // 0=off, 2=deterministic
+    uint32_t force_fixed_tick;      // 0=natural ticks (proven zero-drift), N=force N ticks/frame
     uint32_t force_direct;          // 2=BB3B10 direct calls
     uint32_t self_capture;          // 0=false
     uint32_t use_rec_msg_args;      // 1=use recorded wrapper args
@@ -105,6 +106,11 @@ struct TasSharedState {
     // Variable speed playback (1.0 = normal, 0.5 = half, 2.0 = double)
     float    playback_speed;            // UI writes, Cave 5 reads
 
+    // In-process restart state machine (DLL internal)
+    // 0=idle, 1=F5 pressed (waiting frames), 2=F5 released (done)
+    volatile uint32_t restart_state;
+    uint32_t restart_frames_held;       // Frames F5 has been held down
+
     // -- Telemetry (DLL writes, UI reads) --
     float    prev_player_x, prev_player_y, prev_player_z;  // Previous frame position
     float    velocity_x, velocity_y, velocity_z;            // Per-frame velocity (pos - prev_pos)
@@ -120,6 +126,9 @@ struct TasSharedState {
     uint32_t snapshot_buffer_ptr;    // External snapshot allocation pointer
     uint32_t snapshot_buffer_capacity; // Total snapshot buffer size
     TasSegmentBoundary segment_boundaries[TAS_MAX_SEGMENTS]; // (frame, offset) pairs
+
+    // -- Rotation telemetry (DLL writes, UI reads) --
+    float rotation_matrix[9]; // 3x3 row-major rotation matrix from player+0x104..+0x124
 
     // -- Input log (DLL reads/writes) --
     uint8_t  input_log[TAS_MAX_TICKS];
@@ -186,8 +195,9 @@ public:
         memset(state, 0, sizeof(TasSharedState));
         state->version = TAS_SHARED_VERSION;
         state->inject_mode = 6;        // proven default
-        state->force_fixed_tick = 2;    // deterministic
+        state->force_fixed_tick = 0;    // natural ticks (proven zero-drift config)
         state->force_direct = 2;        // BB3B10 direct calls
+        state->use_rec_msg_args = 1;   // proven zero-drift config
         state->playback_speed = 1.0f;  // normal speed
         return true;
     }
