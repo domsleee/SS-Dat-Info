@@ -72,6 +72,7 @@ struct TasApp {
     cached_max_drift_x: f32,
     cached_max_drift_z: f32,
     last_drift_scan_count: usize,
+    last_logged_drift_level: u8, // 0=none, 1=any, 2=>=1.0, 3=>=5.0
 
     // In-process restart state: command to send once restart completes
     pending_after_restart: Option<TasCommand>,
@@ -117,6 +118,7 @@ impl TasApp {
             cached_max_drift_x: 0.0,
             cached_max_drift_z: 0.0,
             last_drift_scan_count: 0,
+            last_logged_drift_level: 0,
             pending_after_restart: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
@@ -390,7 +392,11 @@ impl eframe::App for TasApp {
                     if ui.button("Dump Diagnostics...").clicked() {
                         ui.close_menu();
                         if let Some(ref shared) = self.shared {
-                            recording::dump_diagnostics(shared.state(), &mut self.log_lines);
+                            recording::dump_diagnostics(
+                                shared.state(),
+                                (self.cached_max_drift_x, self.cached_max_drift_z),
+                                &mut self.log_lines,
+                            );
                         }
                     }
                 });
@@ -722,9 +728,12 @@ impl eframe::App for TasApp {
                         self.cached_max_drift_x = 0.0;
                         self.cached_max_drift_z = 0.0;
                         self.last_drift_scan_count = 0;
+                        self.last_logged_drift_level = 0;
                     }
 
                     // Only scan new coordinates
+                    let prev_dx = self.cached_max_drift_x;
+                    let prev_dz = self.cached_max_drift_z;
                     for i in self.last_drift_scan_count..count {
                         let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
                         if d > self.cached_max_drift_x { self.cached_max_drift_x = d; }
@@ -732,6 +741,22 @@ impl eframe::App for TasApp {
                         if d > self.cached_max_drift_z { self.cached_max_drift_z = d; }
                     }
                     self.last_drift_scan_count = count;
+
+                    // Log drift at key thresholds
+                    let max_d = self.cached_max_drift_x.max(self.cached_max_drift_z);
+                    let new_level = if max_d >= 5.0 { 3 }
+                        else if max_d >= 1.0 { 2 }
+                        else if max_d > 0.0 { 1 }
+                        else { 0 };
+                    if new_level > self.last_logged_drift_level {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        self.log_lines.push(format!(
+                            "[{}] DRIFT at tick {}: X={:.9} Z={:.9} (was X={:.9} Z={:.9})",
+                            ts, count, self.cached_max_drift_x, self.cached_max_drift_z,
+                            prev_dx, prev_dz
+                        ));
+                        self.last_logged_drift_level = new_level;
+                    }
 
                     let (dx, dz) = (self.cached_max_drift_x, self.cached_max_drift_z);
                     let drift_color = if dx == 0.0 && dz == 0.0 {
@@ -959,6 +984,7 @@ mod tests {
             cached_max_drift_x: 0.0,
             cached_max_drift_z: 0.0,
             last_drift_scan_count: 0,
+            last_logged_drift_level: 0,
             pending_after_restart: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
