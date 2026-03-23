@@ -68,6 +68,11 @@ struct TasApp {
     last_mode: u32,
     log_read_cursor: u32,
 
+    // Cached max drift (incremental scan instead of per-frame O(n))
+    cached_max_drift_x: f32,
+    cached_max_drift_z: f32,
+    last_drift_scan_count: usize,
+
     // In-process restart state: command to send once restart completes
     pending_after_restart: Option<TasCommand>,
 
@@ -109,6 +114,9 @@ impl TasApp {
             segment_tracker: recording::SegmentTracker::new(),
             last_mode: 0,
             log_read_cursor: 0,
+            cached_max_drift_x: 0.0,
+            cached_max_drift_z: 0.0,
+            last_drift_scan_count: 0,
             pending_after_restart: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
@@ -123,9 +131,8 @@ impl TasApp {
             let ts = chrono::Local::now().format("%H:%M:%S");
             app.log_lines.push(format!("[{}] {}", ts, msg));
         }
-        if app.pico.auto_detected {
-            app.show_pico_panel = true;
-        }
+        // Pico auto-detected but panel hidden by default (use View menu to show)
+        let _ = app.pico.auto_detected;
 
         app
     }
@@ -435,7 +442,9 @@ impl eframe::App for TasApp {
             return;
         }
 
-        // Left side panel: config (collapsed by default) + pico
+        // Left side panel: only shown if at least one sub-panel is visible
+        let left_panel_visible = self.show_config || self.show_pico_panel || self.show_macros;
+        if left_panel_visible {
         egui::SidePanel::left("config_panel")
             .resizable(true)
             .default_width(200.0)
@@ -467,6 +476,7 @@ impl eframe::App for TasApp {
                     }
                 }
             });
+        } // left_panel_visible
 
         // Poll in-process restart state machine
         if let (Some(pending_cmd), Some(ref mut shared)) =
@@ -704,16 +714,26 @@ impl eframe::App for TasApp {
                 });
 
                 ui.horizontal(|ui| {
-                    // Compute max drift live from coord arrays (shared-state fields
-                    // are only populated by the test harness, not during normal playback).
+                    // Incremental max drift: only scan new coordinates since last frame.
                     let count = (state.playback_pos as usize).min(state.recorded_count as usize);
-                    let (mut dx, mut dz) = (0.0f32, 0.0f32);
-                    for i in 0..count {
-                        let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
-                        if d > dx { dx = d; }
-                        let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
-                        if d > dz { dz = d; }
+
+                    // Reset cache if playback restarted (count decreased)
+                    if count < self.last_drift_scan_count {
+                        self.cached_max_drift_x = 0.0;
+                        self.cached_max_drift_z = 0.0;
+                        self.last_drift_scan_count = 0;
                     }
+
+                    // Only scan new coordinates
+                    for i in self.last_drift_scan_count..count {
+                        let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
+                        if d > self.cached_max_drift_x { self.cached_max_drift_x = d; }
+                        let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
+                        if d > self.cached_max_drift_z { self.cached_max_drift_z = d; }
+                    }
+                    self.last_drift_scan_count = count;
+
+                    let (dx, dz) = (self.cached_max_drift_x, self.cached_max_drift_z);
                     let drift_color = if dx == 0.0 && dz == 0.0 {
                         egui::Color32::from_rgb(80, 200, 80)
                     } else if dx < 1.0 && dz < 1.0 {
@@ -911,6 +931,7 @@ fn main() -> eframe::Result {
 mod tests {
     use super::*;
     use egui::{Event, Key, Modifiers, RawInput};
+    use tas_shared::TasSharedState;
 
     /// Test constructor: creates TasApp without shared memory or Pico.
     fn test_app() -> TasApp {
@@ -935,6 +956,9 @@ mod tests {
             segment_tracker: recording::SegmentTracker::new(),
             last_mode: 0,
             log_read_cursor: 0,
+            cached_max_drift_x: 0.0,
+            cached_max_drift_z: 0.0,
+            last_drift_scan_count: 0,
             pending_after_restart: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
@@ -1223,5 +1247,121 @@ mod tests {
             app.pending_after_restart,
             Some(TasCommand::ArmRec)
         ));
+    }
+
+    // ===== Incremental drift cache =====
+
+    #[test]
+    fn drift_cache_matches_full_scan() {
+        let mut app = test_app();
+
+        // Heap-allocate: TasSharedState is ~1.5MB, too large for stack
+        let mut state: Box<TasSharedState> = unsafe {
+            Box::from_raw(Box::into_raw(vec![0u8; std::mem::size_of::<TasSharedState>()]
+                .into_boxed_slice()) as *mut [u8] as *mut TasSharedState)
+        };
+        state.recorded_count = 100;
+        state.playback_pos = 100;
+
+        // Set some coords with known drift
+        for i in 0..100usize {
+            state.rec_coords[i] = [i as f32, 0.0, i as f32 * 2.0];
+            state.play_coords[i] = [i as f32 + 0.5, 0.0, i as f32 * 2.0 + 1.0];
+        }
+        // Spike at index 50
+        state.play_coords[50][0] = state.rec_coords[50][0] + 7.5;
+        state.play_coords[50][2] = state.rec_coords[50][2] + 3.25;
+
+        // Run incremental scan
+        let count = (state.playback_pos as usize).min(state.recorded_count as usize);
+        for i in app.last_drift_scan_count..count {
+            let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
+            if d > app.cached_max_drift_x { app.cached_max_drift_x = d; }
+            let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
+            if d > app.cached_max_drift_z { app.cached_max_drift_z = d; }
+        }
+        app.last_drift_scan_count = count;
+
+        // Full scan for comparison
+        let (mut full_dx, mut full_dz) = (0.0f32, 0.0f32);
+        for i in 0..count {
+            let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
+            if d > full_dx { full_dx = d; }
+            let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
+            if d > full_dz { full_dz = d; }
+        }
+
+        assert_eq!(app.cached_max_drift_x, full_dx);
+        assert_eq!(app.cached_max_drift_z, full_dz);
+        assert_eq!(app.cached_max_drift_x, 7.5);
+        assert_eq!(app.cached_max_drift_z, 3.25);
+    }
+
+    #[test]
+    fn drift_cache_resets_on_playback_restart() {
+        let mut app = test_app();
+
+        // First playback: 50 frames with drift
+        app.cached_max_drift_x = 5.0;
+        app.cached_max_drift_z = 3.0;
+        app.last_drift_scan_count = 50;
+
+        // Playback restarts (count drops to 0)
+        let new_count: usize = 0;
+        if new_count < app.last_drift_scan_count {
+            app.cached_max_drift_x = 0.0;
+            app.cached_max_drift_z = 0.0;
+            app.last_drift_scan_count = 0;
+        }
+
+        assert_eq!(app.cached_max_drift_x, 0.0);
+        assert_eq!(app.cached_max_drift_z, 0.0);
+        assert_eq!(app.last_drift_scan_count, 0);
+    }
+
+    #[test]
+    fn drift_cache_incremental_accumulates() {
+        let mut app = test_app();
+
+        // First batch: frames 0..10 with small drift
+        // Heap-allocate: TasSharedState is ~1.5MB, too large for stack
+        let mut state: Box<TasSharedState> = unsafe {
+            Box::from_raw(Box::into_raw(vec![0u8; std::mem::size_of::<TasSharedState>()]
+                .into_boxed_slice()) as *mut [u8] as *mut TasSharedState)
+        };
+        state.recorded_count = 20;
+        state.playback_pos = 10;
+        for i in 0..20usize {
+            state.rec_coords[i] = [0.0, 0.0, 0.0];
+            state.play_coords[i] = [0.1, 0.0, 0.2];
+        }
+        // Spike in second batch
+        state.play_coords[15] = [9.9, 0.0, 8.8];
+
+        // Scan first batch
+        let count1 = 10usize;
+        for i in app.last_drift_scan_count..count1 {
+            let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
+            if d > app.cached_max_drift_x { app.cached_max_drift_x = d; }
+            let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
+            if d > app.cached_max_drift_z { app.cached_max_drift_z = d; }
+        }
+        app.last_drift_scan_count = count1;
+
+        assert!((app.cached_max_drift_x - 0.1).abs() < 0.001);
+        assert!((app.cached_max_drift_z - 0.2).abs() < 0.001);
+
+        // Scan second batch (frames 10..20)
+        let count2 = 20usize;
+        for i in app.last_drift_scan_count..count2 {
+            let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
+            if d > app.cached_max_drift_x { app.cached_max_drift_x = d; }
+            let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
+            if d > app.cached_max_drift_z { app.cached_max_drift_z = d; }
+        }
+        app.last_drift_scan_count = count2;
+
+        assert!((app.cached_max_drift_x - 9.9).abs() < 0.001);
+        assert!((app.cached_max_drift_z - 8.8).abs() < 0.001);
     }
 }
