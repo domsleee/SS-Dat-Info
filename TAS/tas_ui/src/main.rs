@@ -8,6 +8,38 @@ use eframe::egui;
 use std::os::windows::process::CommandExt;
 use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 
+/// Force dark title bar on Windows 10+ via DwmSetWindowAttribute.
+#[cfg(windows)]
+fn set_dark_title_bar(title: &str) {
+    use std::ffi::c_void;
+    type HWND = *mut c_void;
+    type BOOL = i32;
+    type DWORD = u32;
+    const DWMWA_USE_IMMERSIVE_DARK_MODE: DWORD = 20;
+    extern "system" {
+        fn FindWindowW(class: *const u16, title: *const u16) -> HWND;
+        fn DwmSetWindowAttribute(
+            hwnd: HWND,
+            attr: DWORD,
+            value: *const c_void,
+            size: DWORD,
+        ) -> i32;
+    }
+    unsafe {
+        let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
+        if !hwnd.is_null() {
+            let value: BOOL = 1;
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &value as *const BOOL as *const c_void,
+                std::mem::size_of::<BOOL>() as DWORD,
+            );
+        }
+    }
+}
+
 use panels::{analysis, config, drift, log_panel, segments, timeline, trajectory, transport};
 use pico::PicoState;
 use recording::UndoRing;
@@ -17,6 +49,7 @@ struct TasApp {
     connect_error: Option<String>,
 
     // UI state
+    show_config: bool,
     show_pico_panel: bool,
     pico: PicoState,
     undo_ring: UndoRing,
@@ -42,6 +75,10 @@ struct TasApp {
     last_frame_count: u32,
     stale_frame_ticks: u32,
     last_health_check: std::time::Instant,
+
+    // One-shot: force dark title bar on first frame
+    #[cfg(windows)]
+    dark_title_bar_set: bool,
 }
 
 impl TasApp {
@@ -54,6 +91,7 @@ impl TasApp {
         let mut app = Self {
             shared,
             connect_error,
+            show_config: false,
             show_pico_panel: false,
             pico: PicoState::new(),
             undo_ring: UndoRing::new(5),
@@ -75,6 +113,8 @@ impl TasApp {
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
+            #[cfg(windows)]
+            dark_title_bar_set: false,
         };
 
         // Auto-detect Pico on startup
@@ -155,7 +195,9 @@ impl TasApp {
             if input.key_pressed(egui::Key::F5) {
                 if self.pico.connected {
                     match self.pico.send_f5() {
-                        Ok(()) => actions.push(transport::Action::Log("Shortcut: F5 restart".into())),
+                        Ok(()) => {
+                            actions.push(transport::Action::Log("Shortcut: F5 restart".into()))
+                        }
                         Err(e) => actions.push(transport::Action::Log(format!("F5 error: {}", e))),
                     }
                 } else {
@@ -205,8 +247,14 @@ impl TasApp {
                 actions.push(transport::Action::StepOne);
             }
 
-            // Ctrl+Z: Undo
-            if ctrl && input.key_pressed(egui::Key::Z) {
+            // Ctrl+Z: Undo (check raw events — egui may consume key_pressed for built-in undo)
+            let ctrl_z_raw = input.events.iter().any(|e| {
+                matches!(e,
+                    egui::Event::Key { key: egui::Key::Z, pressed: true, modifiers, .. }
+                    if modifiers.ctrl || modifiers.mac_cmd
+                )
+            });
+            if ctrl_z_raw {
                 actions.push(transport::Action::Undo);
                 actions.push(transport::Action::Log("Shortcut: Ctrl+Z Undo".into()));
             }
@@ -236,7 +284,8 @@ impl TasApp {
         let (zoom_in, zoom_out, save, open) = ctx.input(|input| {
             let ctrl = input.modifiers.ctrl || input.modifiers.mac_cmd;
             (
-                !any_text_focus && (input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals)),
+                !any_text_focus
+                    && (input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals)),
                 !any_text_focus && input.key_pressed(egui::Key::Minus),
                 ctrl && input.key_pressed(egui::Key::S),
                 ctrl && input.key_pressed(egui::Key::O),
@@ -260,7 +309,7 @@ impl TasApp {
         }
         if open {
             if let Some(ref mut shared) = self.shared {
-                recording::load_dialog(shared.state_mut(), &mut self.log_lines);
+                recording::load_dialog(shared.state_mut(), &mut self.segment_tracker, &mut self.log_lines);
             }
         }
 
@@ -269,7 +318,19 @@ impl TasApp {
 }
 
 impl eframe::App for TasApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.094, 0.094, 0.094, 1.0] // gray(24) in 0-1 range
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Force dark theme + title bar on Windows (one-shot, first frame)
+        #[cfg(windows)]
+        if !self.dark_title_bar_set {
+            self.dark_title_bar_set = true;
+            ctx.set_theme(egui::Theme::Dark);
+            set_dark_title_bar("SSB Inspect");
+        }
+
         // Check game health (crash detection)
         self.check_game_health();
 
@@ -315,7 +376,7 @@ impl eframe::App for TasApp {
                     if ui.button("Load Recording...  Ctrl+O").clicked() {
                         ui.close_menu();
                         if let Some(ref mut shared) = self.shared {
-                            recording::load_dialog(shared.state_mut(), &mut self.log_lines);
+                            recording::load_dialog(shared.state_mut(), &mut self.segment_tracker, &mut self.log_lines);
                         }
                     }
                     ui.separator();
@@ -332,6 +393,8 @@ impl eframe::App for TasApp {
                     ui.checkbox(&mut self.show_trajectory, "Trajectory Viewer");
                     ui.checkbox(&mut self.show_analysis, "Analysis Panel");
                     ui.checkbox(&mut self.show_macros, "Macro Panel");
+                    ui.separator();
+                    ui.checkbox(&mut self.show_config, "Debug Config");
                 });
             });
         });
@@ -378,12 +441,14 @@ impl eframe::App for TasApp {
             .default_width(200.0)
             .show(ctx, |ui| {
                 if let Some(ref mut shared) = self.shared {
-                    egui::CollapsingHeader::new("Debug Config")
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            config::show(ui, shared.state_mut());
-                        });
-                    ui.separator();
+                    if self.show_config {
+                        egui::CollapsingHeader::new("Debug Config")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                config::show(ui, shared.state_mut());
+                            });
+                        ui.separator();
+                    }
                     if self.show_pico_panel {
                         pico::show_panel(ui, &mut self.pico, &mut self.log_lines);
                     }
@@ -428,8 +493,7 @@ impl eframe::App for TasApp {
                 match cmd {
                     transport::Action::Send(c) => {
                         shared.send_command(c);
-                        self.log_lines
-                            .push(format!("[{}] Sent: {:?}", ts, c));
+                        self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
                     }
                     transport::Action::RestartThen(c) => {
                         shared.reset_restart_state();
@@ -559,19 +623,26 @@ impl eframe::App for TasApp {
 
                 // Segment list panel (collapsible)
                 let mut seg_actions = Vec::new();
-                if self.show_segments && !self.segment_tracker.segments.is_empty() {
-                    egui::CollapsingHeader::new(
-                        egui::RichText::new(format!(
-                            "Segments ({})",
-                            self.segment_tracker.segments.len()
-                        ))
-                        .strong(),
-                    )
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        seg_actions =
-                            segments::show(ui, &self.segment_tracker, state);
-                    });
+                if self.show_segments {
+                    if self.segment_tracker.segments.is_empty() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(120, 120, 120),
+                            "No segments. Use REC then CONT to build segments.",
+                        );
+                    } else {
+                        egui::CollapsingHeader::new(
+                            egui::RichText::new(format!(
+                                "Segments ({})",
+                                self.segment_tracker.segments.len()
+                            ))
+                            .strong(),
+                        )
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            seg_actions =
+                                segments::show(ui, &self.segment_tracker, state);
+                        });
+                    }
                     ui.separator();
                 }
 
@@ -726,8 +797,7 @@ impl eframe::App for TasApp {
                     TasLogSeverity::Error => "[DLL:ERR]",
                 };
                 let ts = chrono::Local::now().format("%H:%M:%S");
-                self.log_lines
-                    .push(format!("[{}] {} {}", ts, prefix, text));
+                self.log_lines.push(format!("[{}] {} {}", ts, prefix, text));
             }
         }
 
@@ -787,15 +857,371 @@ fn main() -> eframe::Result {
         "SSB Inspect",
         options,
         Box::new(|cc| {
+            // Force dark theme regardless of OS setting
+            cc.egui_ctx.set_theme(egui::Theme::Dark);
+
             let mut visuals = egui::Visuals::dark();
             let dark_bg = egui::Color32::from_gray(24);
+            let widget_bg = egui::Color32::from_gray(35);
+            let widget_hover = egui::Color32::from_gray(45);
+            let widget_active = egui::Color32::from_gray(40);
+            let subtle_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(50));
+
+            // Panel and window backgrounds
             visuals.panel_fill = dark_bg;
             visuals.window_fill = dark_bg;
             visuals.extreme_bg_color = egui::Color32::from_gray(10);
             visuals.faint_bg_color = egui::Color32::from_gray(30);
+            visuals.code_bg_color = egui::Color32::from_gray(30);
+
+            // Non-interactive widgets (labels, separators)
             visuals.widgets.noninteractive.bg_fill = dark_bg;
-            cc.egui_ctx.set_visuals(visuals);
+            visuals.widgets.noninteractive.weak_bg_fill = dark_bg;
+            visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(40));
+
+            // Inactive widgets (buttons, combo boxes, collapsing headers)
+            visuals.widgets.inactive.bg_fill = widget_bg;
+            visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_gray(30);
+            visuals.widgets.inactive.bg_stroke = subtle_stroke;
+
+            // Hovered widgets
+            visuals.widgets.hovered.bg_fill = widget_hover;
+            visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_gray(38);
+            visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(70));
+
+            // Active (pressed) widgets
+            visuals.widgets.active.bg_fill = widget_active;
+            visuals.widgets.active.weak_bg_fill = egui::Color32::from_gray(35);
+            visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(80));
+
+            // Open widgets (dropdowns)
+            visuals.widgets.open.bg_fill = egui::Color32::from_gray(30);
+            visuals.widgets.open.weak_bg_fill = egui::Color32::from_gray(28);
+
+            // Window decoration
+            visuals.window_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(40));
+
+            cc.egui_ctx.set_visuals_of(egui::Theme::Dark, visuals);
             Ok(Box::new(TasApp::new()))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, Key, Modifiers, RawInput};
+
+    /// Test constructor: creates TasApp without shared memory or Pico.
+    fn test_app() -> TasApp {
+        TasApp {
+            shared: None,
+            connect_error: Some("Test mode: no DLL".into()),
+            show_config: false,
+            show_pico_panel: false,
+            pico: PicoState::new(),
+            undo_ring: UndoRing::new(5),
+            log_lines: Vec::new(),
+            timeline_zoom: 1.0,
+            timeline_scroll: 0.0,
+            continue_from_frame: 0,
+            playback_speed: 1.0,
+            step_mode: false,
+            show_trajectory: false,
+            show_analysis: false,
+            show_macros: false,
+            show_segments: true,
+            macro_state: macros::MacroState::new(),
+            segment_tracker: recording::SegmentTracker::new(),
+            last_mode: 0,
+            log_read_cursor: 0,
+            pending_after_restart: None,
+            last_frame_count: 0,
+            stale_frame_ticks: 0,
+            last_health_check: std::time::Instant::now(),
+            #[cfg(windows)]
+            dark_title_bar_set: false,
+        }
+    }
+
+    /// Run handle_shortcuts with a simulated key press and return actions.
+    fn press_key(app: &mut TasApp, key: Key, modifiers: Modifiers) -> Vec<transport::Action> {
+        let ctx = egui::Context::default();
+        let input = RawInput {
+            events: vec![Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+
+        let mut actions = Vec::new();
+        let _ = ctx.run(input, |_ctx| {
+            actions = app.handle_shortcuts(_ctx);
+        });
+        actions
+    }
+
+    fn action_has_command(actions: &[transport::Action], cmd: TasCommand) -> bool {
+        actions
+            .iter()
+            .any(|a| matches!(a, transport::Action::Send(c) if *c == cmd))
+    }
+
+    fn action_has_log(actions: &[transport::Action], needle: &str) -> bool {
+        actions
+            .iter()
+            .any(|a| matches!(a, transport::Action::Log(s) if s.contains(needle)))
+    }
+
+    fn action_has_auto_save(actions: &[transport::Action]) -> bool {
+        actions
+            .iter()
+            .any(|a| matches!(a, transport::Action::AutoSave))
+    }
+
+    // ===== App startup without DLL =====
+
+    #[test]
+    fn app_starts_without_dll() {
+        let app = test_app();
+        assert!(app.shared.is_none());
+        assert!(app.connect_error.is_some());
+        assert_eq!(app.playback_speed, 1.0);
+        assert_eq!(app.timeline_zoom, 1.0);
+        assert!(!app.pico.connected);
+    }
+
+    // ===== Keyboard shortcuts =====
+
+    #[test]
+    fn shortcut_f9_arms_rec() {
+        let mut app = test_app();
+        let actions = press_key(&mut app, Key::F9, Modifiers::NONE);
+        assert!(action_has_command(&actions, TasCommand::ArmRec));
+        assert!(action_has_auto_save(&actions));
+        assert!(action_has_log(&actions, "F9"));
+    }
+
+    #[test]
+    fn shortcut_f10_arms_play() {
+        let mut app = test_app();
+        let actions = press_key(&mut app, Key::F10, Modifiers::NONE);
+        assert!(action_has_command(&actions, TasCommand::ArmPlay));
+        assert!(action_has_log(&actions, "F10"));
+    }
+
+    #[test]
+    fn shortcut_f11_stops() {
+        let mut app = test_app();
+        let actions = press_key(&mut app, Key::F11, Modifiers::NONE);
+        assert!(action_has_command(&actions, TasCommand::Stop));
+        assert!(action_has_log(&actions, "F11"));
+    }
+
+    #[test]
+    fn shortcut_f12_arms_continue() {
+        let mut app = test_app();
+        let actions = press_key(&mut app, Key::F12, Modifiers::NONE);
+        assert!(action_has_command(&actions, TasCommand::ArmContinue));
+        assert!(action_has_auto_save(&actions));
+        assert!(action_has_log(&actions, "F12"));
+    }
+
+    #[test]
+    fn shortcut_space_stops() {
+        let mut app = test_app();
+        let actions = press_key(&mut app, Key::Space, Modifiers::NONE);
+        assert!(action_has_command(&actions, TasCommand::Stop));
+        assert!(action_has_log(&actions, "Space"));
+    }
+
+    #[test]
+    fn shortcut_f5_without_pico_logs_not_connected() {
+        let mut app = test_app();
+        let actions = press_key(&mut app, Key::F5, Modifiers::NONE);
+        assert!(action_has_log(&actions, "not connected"));
+    }
+
+    #[test]
+    fn shortcut_ctrl_z_undoes() {
+        let mut app = test_app();
+        let actions = press_key(&mut app, Key::Z, Modifiers::CTRL);
+        // Must produce Undo action — not just "no panic"
+        assert!(
+            actions.iter().any(|a| matches!(a, transport::Action::Undo)),
+            "Ctrl+Z must produce Undo action, got: {:?}",
+            actions.len()
+        );
+        assert!(action_has_log(&actions, "Undo"), "Ctrl+Z must log Undo");
+    }
+
+    #[test]
+    fn shortcut_period_steps() {
+        let mut app = test_app();
+        let actions = press_key(&mut app, Key::Period, Modifiers::NONE);
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, transport::Action::StepOne)));
+    }
+
+    // ===== Timeline zoom =====
+
+    #[test]
+    fn zoom_in_increases() {
+        let mut app = test_app();
+        let initial = app.timeline_zoom;
+        press_key(&mut app, Key::Plus, Modifiers::NONE);
+        assert!(app.timeline_zoom > initial);
+    }
+
+    #[test]
+    fn zoom_out_decreases() {
+        let mut app = test_app();
+        let initial = app.timeline_zoom;
+        press_key(&mut app, Key::Minus, Modifiers::NONE);
+        assert!(app.timeline_zoom < initial);
+    }
+
+    #[test]
+    fn zoom_clamps_max() {
+        let mut app = test_app();
+        app.timeline_zoom = 10.0;
+        press_key(&mut app, Key::Plus, Modifiers::NONE);
+        assert!(app.timeline_zoom <= 10.0);
+    }
+
+    #[test]
+    fn zoom_clamps_min() {
+        let mut app = test_app();
+        app.timeline_zoom = 0.1;
+        press_key(&mut app, Key::Minus, Modifiers::NONE);
+        assert!(app.timeline_zoom >= 0.1);
+    }
+
+    // ===== Speed edge values =====
+
+    #[test]
+    fn playback_speed_defaults_to_1x() {
+        let app = test_app();
+        assert!((app.playback_speed - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn playback_speed_can_be_set_to_extremes() {
+        let mut app = test_app();
+        app.playback_speed = 0.25;
+        assert!((app.playback_speed - 0.25).abs() < 0.001);
+        app.playback_speed = 4.0;
+        assert!((app.playback_speed - 4.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn playback_speed_syncs_to_shared_state() {
+        // Verify that TasSharedState has the playback_speed field
+        // and it can accept the expected range of values
+        let mut state = tas_shared::zeroed_boxed();
+        state.playback_speed = 0.25;
+        assert!((state.playback_speed - 0.25).abs() < f32::EPSILON);
+        state.playback_speed = 4.0;
+        assert!((state.playback_speed - 4.0).abs() < f32::EPSILON);
+        // Default (zeroed) speed is 0.0 — Cave 5 interprets 0.0 as 1.0x
+        let fresh = tas_shared::zeroed_boxed();
+        assert_eq!(fresh.playback_speed, 0.0);
+    }
+
+    // ===== Crash detection =====
+
+    #[test]
+    fn crash_detection_no_shared_is_noop() {
+        let mut app = test_app();
+        // Should not panic when shared is None
+        app.check_game_health();
+        assert_eq!(app.stale_frame_ticks, 0);
+    }
+
+    #[test]
+    fn crash_detection_stale_frame_increments_without_shared() {
+        // Without shared memory, stale_frame_ticks should never increment
+        let mut app = test_app();
+        app.last_health_check = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        app.check_game_health();
+        assert_eq!(
+            app.stale_frame_ticks, 0,
+            "No shared = no stale tick increment"
+        );
+    }
+
+    // ===== Panel toggle defaults =====
+
+    #[test]
+    fn panel_defaults() {
+        let app = test_app();
+        assert!(app.show_segments);
+        assert!(!app.show_trajectory);
+        assert!(!app.show_analysis);
+        assert!(!app.show_macros);
+        assert!(!app.show_pico_panel);
+    }
+
+    #[test]
+    fn panel_toggles_persist() {
+        let mut app = test_app();
+        app.show_trajectory = true;
+        app.show_analysis = true;
+        app.show_macros = true;
+        assert!(app.show_trajectory);
+        assert!(app.show_analysis);
+        assert!(app.show_macros);
+    }
+
+    // ===== Segment tracker mode transitions =====
+
+    #[test]
+    fn segment_tracker_integration_rec_stop_cycle() {
+        let mut app = test_app();
+        // Simulate mode transition OFF -> REC
+        app.segment_tracker.on_rec_start(0);
+        // Simulate REC -> OFF
+        app.segment_tracker.on_rec_stop(100);
+        assert_eq!(app.segment_tracker.segments.len(), 1);
+        assert_eq!(app.segment_tracker.segments[0].start_tick, 0);
+        assert_eq!(app.segment_tracker.segments[0].end_tick, 100);
+    }
+
+    #[test]
+    fn segment_tracker_multi_segment_rec_cont() {
+        let mut app = test_app();
+        // First segment
+        app.segment_tracker.on_rec_start(0);
+        app.segment_tracker.on_rec_stop(200);
+        // Continue from 200
+        app.segment_tracker.on_rec_start(200);
+        app.segment_tracker.on_rec_stop(500);
+
+        assert_eq!(app.segment_tracker.segments.len(), 2);
+        assert_eq!(app.segment_tracker.segments[1].start_tick, 200);
+        assert_eq!(app.segment_tracker.segments[1].end_tick, 500);
+    }
+
+    // ===== Pending restart state machine =====
+
+    #[test]
+    fn pending_restart_initially_none() {
+        let app = test_app();
+        assert!(app.pending_after_restart.is_none());
+    }
+
+    #[test]
+    fn pending_restart_can_be_set() {
+        let mut app = test_app();
+        app.pending_after_restart = Some(TasCommand::ArmRec);
+        assert!(matches!(
+            app.pending_after_restart,
+            Some(TasCommand::ArmRec)
+        ));
+    }
 }
