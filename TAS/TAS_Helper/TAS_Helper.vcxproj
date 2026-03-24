@@ -11,6 +11,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="src\caves\cave1_replay.hpp" />
     <ClInclude Include="src\caves\cave1c.hpp" />
     <ClInclude Include="src\caves\cave1d.hpp" />
     <ClInclude Include="src\caves\cave2.hpp" />

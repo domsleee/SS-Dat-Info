@@ -13,6 +13,7 @@ pub enum Action {
     Log(String),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     mode: TasMode,
@@ -31,13 +32,18 @@ pub fn show(
         let is_play = mode == TasMode::Play;
 
         // REC button (red when recording)
-        let rec_text = egui::RichText::new("\u{23FA} REC [F9]");
+        let rec_text = egui::RichText::new("[R] REC [F9]");
         let rec_text = if is_rec {
-            rec_text.color(egui::Color32::from_rgb(255, 60, 60)).strong()
+            rec_text
+                .color(egui::Color32::from_rgb(255, 60, 60))
+                .strong()
         } else {
             rec_text
         };
-        if ui.add_enabled(is_off, egui::Button::new(rec_text)).clicked() {
+        if ui
+            .add_enabled(is_off, egui::Button::new(rec_text))
+            .clicked()
+        {
             if recorded > 0 {
                 actions.push(Action::AutoSave);
             }
@@ -45,9 +51,11 @@ pub fn show(
         }
 
         // PLAY button (green when playing)
-        let play_text = egui::RichText::new("\u{25B6} PLAY [F10]");
+        let play_text = egui::RichText::new("[>] PLAY [F10]");
         let play_text = if is_play {
-            play_text.color(egui::Color32::from_rgb(60, 200, 60)).strong()
+            play_text
+                .color(egui::Color32::from_rgb(60, 200, 60))
+                .strong()
         } else {
             play_text
         };
@@ -60,7 +68,7 @@ pub fn show(
 
         // STOP button
         if ui
-            .add_enabled(!is_off, egui::Button::new("\u{23F9} STOP [F11]"))
+            .add_enabled(!is_off, egui::Button::new("[S] STOP [F11]"))
             .clicked()
         {
             actions.push(Action::Send(TasCommand::Stop));
@@ -70,7 +78,7 @@ pub fn show(
 
         // Continue Record
         if ui
-            .add_enabled(is_off && recorded > 0, egui::Button::new("\u{23EF} CONT [F12]"))
+            .add_enabled(is_off && recorded > 0, egui::Button::new("[+] CONT [F12]"))
             .on_hover_text("Continue recording from a specific frame")
             .clicked()
         {
@@ -97,7 +105,7 @@ pub fn show(
         // Undo
         let undo_count = undo_ring.len();
         if ui
-            .add_enabled(undo_count > 0, egui::Button::new("\u{21B6} Undo"))
+            .add_enabled(undo_count > 0, egui::Button::new("<< Undo"))
             .on_hover_text(format!("{} saves in ring", undo_count))
             .clicked()
         {
@@ -106,7 +114,7 @@ pub fn show(
 
         ui.separator();
 
-        // Playback speed
+        // Playback speed (only enabled when actively playing or recording)
         ui.label("Speed:");
         for &spd in &[0.25f32, 0.5, 1.0, 2.0, 4.0] {
             let label = format!("{}x", spd);
@@ -116,7 +124,7 @@ pub fn show(
             } else {
                 btn
             };
-            if ui.add(btn).clicked() {
+            if ui.add_enabled(!is_off, btn).clicked() {
                 *playback_speed = spd;
                 actions.push(Action::Log(format!("Playback speed: {}x", spd)));
             }
@@ -126,10 +134,9 @@ pub fn show(
 
         // Step mode
         ui.checkbox(step_mode, "Step");
-        if *step_mode
-            && ui.button("\u{23ED}").on_hover_text("Advance one frame").clicked() {
-                actions.push(Action::StepOne);
-            }
+        if *step_mode && ui.button("|>").on_hover_text("Advance one frame").clicked() {
+            actions.push(Action::StepOne);
+        }
     });
 
     ui.horizontal(|ui| {

@@ -25,25 +25,36 @@ pub fn show(
     let segments = &tracker.segments;
 
     if segments.is_empty() {
-        ui.label("No segments recorded yet.");
-        ui.label("Use REC then CONT to build segments.");
+        ui.label("No segments yet");
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "Segments let you build a TAS run in pieces.\n\
+                 1. Press REC to record the first segment\n\
+                 2. Press CONT to continue from where you left off\n\
+                 3. Each CONT creates a new segment\n\
+                 4. Redo any segment to try a different approach",
+            )
+            .small()
+            .color(egui::Color32::from_rgb(120, 120, 120)),
+        );
         return actions;
     }
 
-    ui.label(format!("{} segment(s)", segments.len()));
+    ui.horizontal(|ui| {
+        ui.label(format!("{} segment(s)", segments.len()));
+        ui.add_space(8.0);
+        // Splice all button
+        if segments.len() > 1
+            && ui
+                .small_button("Merge All")
+                .on_hover_text("Combine all segments into one contiguous recording (removes boundaries)")
+                .clicked()
+            {
+                actions.push(SegmentAction::SpliceAll);
+            }
+    });
     ui.add_space(4.0);
-
-    // Splice all button at the top
-    if segments.len() > 1 {
-        if ui
-            .button("\u{1F517} Splice All")
-            .on_hover_text("Merge all segments into one contiguous recording")
-            .clicked()
-        {
-            actions.push(SegmentAction::SpliceAll);
-        }
-        ui.add_space(4.0);
-    }
 
     egui::ScrollArea::vertical()
         .max_height(300.0)
@@ -76,9 +87,9 @@ pub fn show(
                     ui.horizontal(|ui| {
                         // Redo from this segment (continue recording from its start)
                         if ui
-                            .small_button("\u{21BB} Redo")
+                            .small_button("Redo")
                             .on_hover_text(format!(
-                                "Continue recording from frame {} (replaces this segment and all after)",
+                                "Re-record from frame {}. Replaces this segment and everything after it.",
                                 seg.start_tick
                             ))
                             .clicked()
@@ -89,12 +100,16 @@ pub fn show(
                         // Delete this segment and everything after
                         if i > 0
                             && ui
-                                .small_button("\u{2702} Delete")
-                                .on_hover_text("Delete this segment and all subsequent ones")
+                                .small_button("Delete")
+                                .on_hover_text(format!(
+                                    "Remove segment #{} and all after. Recording truncates to frame {}.",
+                                    i + 1,
+                                    seg.start_tick
+                                ))
                                 .clicked()
-                            {
-                                actions.push(SegmentAction::DeleteFrom(i));
-                            }
+                        {
+                            actions.push(SegmentAction::DeleteFrom(i));
+                        }
                     });
                 });
 
@@ -117,7 +132,7 @@ pub fn show(
 }
 
 /// Summarize the input keys used in a tick range as a compact string.
-fn input_summary(input_log: &[u8], start: u32, end: u32) -> String {
+pub fn input_summary(input_log: &[u8], start: u32, end: u32) -> String {
     let start = start as usize;
     let end = (end as usize).min(input_log.len());
     if start >= end {
@@ -140,4 +155,66 @@ fn input_summary(input_log: &[u8], start: u32, end: u32) -> String {
         }
     }
     parts.join("+")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tas_shared::input_bits;
+
+    #[test]
+    fn input_summary_empty_range() {
+        let log = [0u8; 100];
+        assert_eq!(input_summary(&log, 5, 5), "empty");
+        assert_eq!(input_summary(&log, 10, 5), "empty");
+    }
+
+    #[test]
+    fn input_summary_no_input() {
+        let log = [0u8; 10];
+        assert_eq!(input_summary(&log, 0, 5), "no input");
+    }
+
+    #[test]
+    fn input_summary_single_key() {
+        let mut log = [0u8; 10];
+        log[2] = input_bits::UP;
+        log[3] = input_bits::UP;
+        assert_eq!(input_summary(&log, 0, 5), "U");
+    }
+
+    #[test]
+    fn input_summary_multiple_keys() {
+        let mut log = [0u8; 10];
+        log[0] = input_bits::LEFT;
+        log[1] = input_bits::UP | input_bits::JUMP;
+        // Seen: LEFT, UP, JUMP
+        assert_eq!(input_summary(&log, 0, 3), "L+U+J");
+    }
+
+    #[test]
+    fn input_summary_all_keys() {
+        let mut log = [0u8; 10];
+        log[0] = 0x3F; // all 6 bits
+        assert_eq!(input_summary(&log, 0, 1), "L+R+U+D+J+S");
+    }
+
+    #[test]
+    fn input_summary_clamped_to_log_length() {
+        let mut log = [0u8; 5];
+        log[3] = input_bits::RIGHT;
+        // end=100 but log only has 5 entries — should clamp
+        assert_eq!(input_summary(&log, 0, 100), "R");
+    }
+
+    #[test]
+    fn input_summary_partial_range() {
+        let mut log = [0u8; 20];
+        log[5] = input_bits::LEFT;
+        log[10] = input_bits::RIGHT;
+        // Only scan 5..8 — should see LEFT only
+        assert_eq!(input_summary(&log, 5, 8), "L");
+        // Only scan 8..12 — should see RIGHT only
+        assert_eq!(input_summary(&log, 8, 12), "R");
+    }
 }

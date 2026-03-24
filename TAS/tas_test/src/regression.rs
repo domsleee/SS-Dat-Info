@@ -129,7 +129,10 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
             "playback_speed must be 1.0 or 0.0 (got {})",
             s.playback_speed
         );
-        println!("Config OK: fft=0, inject_mode=6, force_direct=2, speed={}", s.playback_speed);
+        println!(
+            "Config OK: fft=0, inject_mode=6, force_direct=2, speed={}",
+            s.playback_speed
+        );
     }
 
     println!(
@@ -155,7 +158,11 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
             result.replay_drift_x,
             result.replay_drift_z,
             result.replay_zero,
-            if result.all_gates_pass { "PASS" } else { "FAIL" }
+            if result.all_gates_pass {
+                "PASS"
+            } else {
+                "FAIL"
+            }
         );
 
         results.push(result);
@@ -312,60 +319,9 @@ fn run_mock_case(
     }
 }
 
-/// Drive Pico HID according to the pattern step schedule.
+/// Drive Pico HID according to the pattern step schedule (delegates to harness).
 fn drive_pico_pattern(steps: &[PatternStep]) {
-    use std::io::Write;
-
-    let port = match std::fs::OpenOptions::new()
-        .write(true)
-        .open("\\\\.\\COM7")
-    {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("  ERROR: Cannot open COM7 for Pico HID: {}", e);
-            return;
-        }
-    };
-
-    let mut port = port;
-    let mut prev_mask = 0xFFu8; // force initial send
-    let start = std::time::Instant::now();
-
-    // Convert steps to a tick-by-tick schedule
-    let total = patterns::total_ticks(steps);
-    // Approximate: 100 ticks/sec (game runs at ~100fps with fft=0 or 2 ticks/frame at ~50fps)
-    // We use 10ms per tick as approximation
-    let ms_per_tick = 10u64;
-
-    let mut current_step = 0usize;
-    for tick in 0..total {
-        // Find which step we're in
-        while current_step < steps.len() && tick >= steps[current_step].stop_tick {
-            current_step += 1;
-        }
-        let mask = if current_step < steps.len() {
-            steps[current_step].mask
-        } else {
-            0
-        };
-
-        if mask != prev_mask {
-            let send_byte = if mask == 0 { 0xFF } else { mask };
-            let _ = port.write_all(&[send_byte]);
-            let _ = port.flush();
-            prev_mask = mask;
-        }
-
-        // Wait for next tick
-        let target = std::time::Duration::from_millis((tick as u64 + 1) * ms_per_tick);
-        if let Some(remaining) = target.checked_sub(start.elapsed()) {
-            std::thread::sleep(remaining);
-        }
-    }
-
-    // Release all keys
-    let _ = port.write_all(&[0xFF]);
-    let _ = port.flush();
+    harness::drive_pico_steps(steps, None);
 }
 
 fn error_result(case: &RegressionCase, msg: &str) -> CaseResult {

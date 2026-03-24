@@ -111,7 +111,10 @@ pub fn show_panel(
                         let count = lib.macros.len();
                         macro_state.library = lib;
                         macro_state.library_path = Some(path.clone());
-                        push_log(log, &format!("Loaded {} macros from {}", count, path.display()));
+                        push_log(
+                            log,
+                            &format!("Loaded {} macros from {}", count, path.display()),
+                        );
                     }
                     Err(e) => push_log(log, &format!("Macro load error: {}", e)),
                 }
@@ -233,4 +236,215 @@ pub fn show_panel(
 fn push_log(log: &mut Vec<String>, msg: &str) {
     let ts = chrono::Local::now().format("%H:%M:%S");
     log.push(format!("[{}] {}", ts, msg));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static MACRO_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn zeroed_state() -> Box<TasSharedState> {
+        tas_shared::zeroed_boxed()
+    }
+
+    fn unique_temp_path(prefix: &str, ext: &str) -> std::path::PathBuf {
+        let id = MACRO_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("{}_{}_{}.{}", prefix, std::process::id(), id, ext))
+    }
+
+    // ===== MacroState =====
+
+    #[test]
+    fn macro_state_defaults() {
+        let ms = MacroState::new();
+        assert!(ms.library.macros.is_empty());
+        assert!(ms.library_path.is_none());
+        assert!(ms.extract_name.is_empty());
+        assert_eq!(ms.extract_from, "0");
+        assert!(ms.extract_to.is_empty());
+        assert_eq!(ms.paste_at, "0");
+        assert!(ms.selected.is_none());
+    }
+
+    // ===== MacroLibrary =====
+
+    #[test]
+    fn macro_library_default_is_empty() {
+        let lib = MacroLibrary::default();
+        assert!(lib.macros.is_empty());
+    }
+
+    #[test]
+    fn extract_from_recording_valid_range() {
+        let mut state = zeroed_state();
+        state.recorded_count = 10;
+        for i in 0..10 {
+            state.input_log[i] = i as u8;
+        }
+
+        let m = MacroLibrary::extract_from_recording(&state, "test", 2, 5).unwrap();
+        assert_eq!(m.name, "test");
+        assert_eq!(m.inputs, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn extract_from_recording_full_range() {
+        let mut state = zeroed_state();
+        state.recorded_count = 5;
+        for i in 0..5 {
+            state.input_log[i] = 0x04;
+        }
+
+        let m = MacroLibrary::extract_from_recording(&state, "full", 0, 5).unwrap();
+        assert_eq!(m.inputs.len(), 5);
+    }
+
+    #[test]
+    fn extract_from_recording_invalid_ranges() {
+        let mut state = zeroed_state();
+        state.recorded_count = 5;
+
+        // from >= count
+        assert!(MacroLibrary::extract_from_recording(&state, "x", 5, 6).is_none());
+        // to > count
+        assert!(MacroLibrary::extract_from_recording(&state, "x", 0, 6).is_none());
+        // from >= to
+        assert!(MacroLibrary::extract_from_recording(&state, "x", 3, 3).is_none());
+        assert!(MacroLibrary::extract_from_recording(&state, "x", 4, 2).is_none());
+        // empty recording
+        let empty = zeroed_state();
+        assert!(MacroLibrary::extract_from_recording(&empty, "x", 0, 0).is_none());
+    }
+
+    #[test]
+    fn paste_into_recording_basic() {
+        let mut state = zeroed_state();
+        state.recorded_count = 10;
+
+        let m = InputMacro {
+            name: "turn".into(),
+            inputs: vec![0x01, 0x01, 0x02, 0x02], // L L R R
+        };
+
+        let len = MacroLibrary::paste_into_recording(&mut state, &m, 3).unwrap();
+        assert_eq!(len, 4);
+        assert_eq!(state.input_log[3], 0x01);
+        assert_eq!(state.input_log[4], 0x01);
+        assert_eq!(state.input_log[5], 0x02);
+        assert_eq!(state.input_log[6], 0x02);
+        assert_eq!(state.recorded_count, 10); // unchanged, paste within range
+    }
+
+    #[test]
+    fn paste_extends_recorded_count() {
+        let mut state = zeroed_state();
+        state.recorded_count = 5;
+
+        let m = InputMacro {
+            name: "extend".into(),
+            inputs: vec![0x04; 10],
+        };
+
+        let len = MacroLibrary::paste_into_recording(&mut state, &m, 3).unwrap();
+        assert_eq!(len, 10);
+        assert_eq!(state.recorded_count, 13); // 3 + 10
+    }
+
+    #[test]
+    fn paste_past_max_ticks_errors() {
+        let mut state = zeroed_state();
+        let m = InputMacro {
+            name: "huge".into(),
+            inputs: vec![0x04; 100],
+        };
+
+        let result = MacroLibrary::paste_into_recording(&mut state, &m, TAS_MAX_TICKS - 50);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn paste_at_zero_with_empty_recording() {
+        let mut state = zeroed_state();
+        assert_eq!(state.recorded_count, 0);
+
+        let m = InputMacro {
+            name: "from_zero".into(),
+            inputs: vec![0x01, 0x02, 0x04],
+        };
+
+        MacroLibrary::paste_into_recording(&mut state, &m, 0).unwrap();
+        assert_eq!(state.recorded_count, 3);
+        assert_eq!(state.input_log[0], 0x01);
+        assert_eq!(state.input_log[1], 0x02);
+        assert_eq!(state.input_log[2], 0x04);
+    }
+
+    // ===== Library save/load round-trip =====
+
+    #[test]
+    fn library_save_load_round_trip() {
+        let lib = MacroLibrary {
+            macros: vec![
+                InputMacro {
+                    name: "left_turn".into(),
+                    inputs: vec![0x01, 0x01, 0x00],
+                },
+                InputMacro {
+                    name: "right_turn".into(),
+                    inputs: vec![0x02, 0x02, 0x00],
+                },
+            ],
+        };
+
+        let path = unique_temp_path("macro_lib", "tasmacro");
+        lib.save_to_file(&path).unwrap();
+
+        let loaded = MacroLibrary::load_from_file(&path).unwrap();
+        assert_eq!(loaded.macros.len(), 2);
+        assert_eq!(loaded.macros[0].name, "left_turn");
+        assert_eq!(loaded.macros[0].inputs, vec![0x01, 0x01, 0x00]);
+        assert_eq!(loaded.macros[1].name, "right_turn");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn library_load_invalid_json_errors() {
+        let path = unique_temp_path("macro_bad", "tasmacro");
+        std::fs::write(&path, "not json").unwrap();
+        assert!(MacroLibrary::load_from_file(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn library_load_nonexistent_errors() {
+        let path = unique_temp_path("macro_nonexist", "tasmacro");
+        assert!(MacroLibrary::load_from_file(&path).is_err());
+    }
+
+    // ===== Extract + Paste integration =====
+
+    #[test]
+    fn extract_then_paste_round_trip() {
+        let mut state = zeroed_state();
+        state.recorded_count = 20;
+        for i in 0..20 {
+            state.input_log[i] = (i * 3) as u8;
+        }
+
+        // Extract ticks 5..10
+        let m = MacroLibrary::extract_from_recording(&state, "slice", 5, 10).unwrap();
+        assert_eq!(m.inputs.len(), 5);
+
+        // Paste at tick 15
+        MacroLibrary::paste_into_recording(&mut state, &m, 15).unwrap();
+        assert_eq!(state.recorded_count, 20);
+
+        // Verify pasted data matches extracted
+        for i in 0..5 {
+            assert_eq!(state.input_log[15 + i], state.input_log[5 + i]);
+        }
+    }
 }

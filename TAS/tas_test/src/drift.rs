@@ -57,9 +57,15 @@ pub fn compute_movement(coords: &[[f32; 3]], count: usize) -> (f64, f64, f64) {
         let dx = (coords[i][0] as f64 - coords[0][0] as f64).abs();
         let dy = (coords[i][1] as f64 - coords[0][1] as f64).abs();
         let dz = (coords[i][2] as f64 - coords[0][2] as f64).abs();
-        if dx > max_dx { max_dx = dx; }
-        if dy > max_dy { max_dy = dy; }
-        if dz > max_dz { max_dz = dz; }
+        if dx > max_dx {
+            max_dx = dx;
+        }
+        if dy > max_dy {
+            max_dy = dy;
+        }
+        if dz > max_dz {
+            max_dz = dz;
+        }
     }
     (max_dx, max_dy, max_dz)
 }
@@ -80,10 +86,161 @@ pub fn count_transitions(input_log: &[u8], count: usize) -> u32 {
 
 /// Find the first tick where input is non-zero (-1 if none).
 pub fn first_input_tick(input_log: &[u8], count: usize) -> i32 {
-    for i in 0..count {
-        if input_log[i] != 0 {
+    for (i, &byte) in input_log[..count].iter().enumerate() {
+        if byte != 0 {
             return i as i32;
         }
     }
     -1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn zeroed_state() -> Box<TasSharedState> {
+        tas_shared::zeroed_boxed()
+    }
+
+    // ========== compute_drift ==========
+
+    #[test]
+    fn drift_zero_when_coords_identical() {
+        let mut state = zeroed_state();
+        for i in 0..100 {
+            state.rec_coords[i] = [1.0, 2.0, 3.0 + i as f32];
+            state.play_coords[i] = [1.0, 2.0, 3.0 + i as f32];
+        }
+        let d = compute_drift(&state, 100);
+        assert!(d.is_zero());
+        assert_eq!(d.max_drift_frame_x, 0);
+        assert_eq!(d.max_drift_frame_z, 0);
+    }
+
+    #[test]
+    fn drift_detects_x_difference() {
+        let mut state = zeroed_state();
+        for i in 0..50 {
+            state.rec_coords[i] = [10.0, 0.0, 0.0];
+            state.play_coords[i] = [10.0, 0.0, 0.0];
+        }
+        // Introduce drift at frame 30
+        state.play_coords[30][0] = 15.0;
+
+        let d = compute_drift(&state, 50);
+        assert!(!d.is_zero());
+        assert_eq!(d.max_drift_x, 5.0);
+        assert_eq!(d.max_drift_frame_x, 30);
+        assert_eq!(d.max_drift_z, 0.0);
+    }
+
+    #[test]
+    fn drift_detects_z_difference() {
+        let mut state = zeroed_state();
+        state.rec_coords[10] = [0.0, 0.0, 100.0];
+        state.play_coords[10] = [0.0, 0.0, 100.5];
+
+        let d = compute_drift(&state, 20);
+        assert_eq!(d.max_drift_z as f32, 0.5);
+        assert_eq!(d.max_drift_frame_z, 10);
+    }
+
+    #[test]
+    fn drift_count_zero() {
+        let state = zeroed_state();
+        let d = compute_drift(&state, 0);
+        assert!(d.is_zero());
+    }
+
+    #[test]
+    fn drift_is_within() {
+        let d = DriftResult {
+            max_drift_x: 0.001,
+            max_drift_z: 0.002,
+            max_drift_frame_x: 0,
+            max_drift_frame_z: 0,
+        };
+        assert!(d.is_within(0.01));
+        assert!(!d.is_within(0.001));
+    }
+
+    // ========== compute_movement ==========
+
+    #[test]
+    fn movement_zero_with_single_coord() {
+        let coords = [[1.0, 2.0, 3.0]];
+        let (dx, dy, dz) = compute_movement(&coords, 1);
+        assert_eq!(dx, 0.0);
+        assert_eq!(dy, 0.0);
+        assert_eq!(dz, 0.0);
+    }
+
+    #[test]
+    fn movement_zero_with_empty() {
+        let coords: &[[f32; 3]] = &[];
+        let (dx, dy, dz) = compute_movement(coords, 0);
+        assert_eq!(dx, 0.0);
+        assert_eq!(dy, 0.0);
+        assert_eq!(dz, 0.0);
+    }
+
+    #[test]
+    fn movement_measures_from_first_coord() {
+        let coords = [[0.0, 0.0, 0.0], [5.0, 3.0, 10.0], [2.0, 1.0, 20.0]];
+        let (dx, dy, dz) = compute_movement(&coords, 3);
+        assert_eq!(dx, 5.0);
+        assert_eq!(dy, 3.0);
+        assert_eq!(dz, 20.0);
+    }
+
+    // ========== count_transitions ==========
+
+    #[test]
+    fn transitions_empty() {
+        assert_eq!(count_transitions(&[], 0), 0);
+    }
+
+    #[test]
+    fn transitions_single() {
+        assert_eq!(count_transitions(&[0x01], 1), 0);
+    }
+
+    #[test]
+    fn transitions_no_change() {
+        assert_eq!(count_transitions(&[0x01, 0x01, 0x01], 3), 0);
+    }
+
+    #[test]
+    fn transitions_every_tick() {
+        // 0→1→0→1 = 3 transitions
+        assert_eq!(count_transitions(&[0, 1, 0, 1], 4), 3);
+    }
+
+    #[test]
+    fn transitions_typical_lr() {
+        // L held 3 ticks, then R held 3 ticks = 1 transition
+        let log = [0x01, 0x01, 0x01, 0x02, 0x02, 0x02];
+        assert_eq!(count_transitions(&log, 6), 1);
+    }
+
+    // ========== first_input_tick ==========
+
+    #[test]
+    fn first_input_none() {
+        assert_eq!(first_input_tick(&[0, 0, 0], 3), -1);
+    }
+
+    #[test]
+    fn first_input_empty() {
+        assert_eq!(first_input_tick(&[], 0), -1);
+    }
+
+    #[test]
+    fn first_input_immediate() {
+        assert_eq!(first_input_tick(&[0x01, 0, 0], 3), 0);
+    }
+
+    #[test]
+    fn first_input_delayed() {
+        assert_eq!(first_input_tick(&[0, 0, 0, 0x04, 0x04], 5), 3);
+    }
 }

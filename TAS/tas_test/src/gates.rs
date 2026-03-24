@@ -185,3 +185,99 @@ pub fn run_gates_straight(state: &TasSharedState, rec_count: u32) -> GateAssessm
         drift: drift_result,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn zeroed_state() -> Box<TasSharedState> {
+        tas_shared::zeroed_boxed()
+    }
+
+    fn perfect_steered_state(n: usize) -> Box<TasSharedState> {
+        let mut state = zeroed_state();
+        for i in 0..n {
+            let z = 100.0 + i as f32 * 0.5;
+            let x = if (20..40).contains(&i) { 5.0 } else { 0.0 };
+            state.rec_coords[i] = [x, 0.0, z];
+            state.play_coords[i] = [x, 0.0, z];
+        }
+        for i in 0..n {
+            state.input_log[i] = if (20..40).contains(&i) { 0x01 } else { 0x00 };
+        }
+        state
+    }
+
+    #[test]
+    fn all_gates_pass_on_perfect_state() {
+        let state = perfect_steered_state(1000);
+        let assessment = run_gates(&state, 1000);
+        assert!(assessment.all_pass());
+    }
+
+    #[test]
+    fn gate0_fails_when_rec_coords_all_zero() {
+        let state = zeroed_state();
+        let assessment = run_gates(&state, 1000);
+        assert!(!assessment.gates[0].passed);
+    }
+
+    #[test]
+    fn gate0_passes_with_nonzero_z_at_reference_frames() {
+        let mut state = zeroed_state();
+        for &frame in &REFERENCE_FRAMES {
+            state.rec_coords[frame] = [0.0, 0.0, 100.0 + frame as f32];
+        }
+        let assessment = run_gates(&state, 1000);
+        assert!(assessment.gates[0].passed);
+    }
+
+    #[test]
+    fn gate0_short_recording_fails() {
+        let state = zeroed_state();
+        let assessment = run_gates(&state, 30);
+        assert!(!assessment.gates[0].passed);
+    }
+
+    #[test]
+    fn gate1_fails_without_input() {
+        let mut state = zeroed_state();
+        for i in 0..1000 {
+            state.rec_coords[i] = [0.0, 0.0, i as f32];
+            state.play_coords[i] = [0.0, 0.0, i as f32];
+        }
+        let assessment = run_gates(&state, 1000);
+        assert!(!assessment.gates[1].passed);
+    }
+
+    #[test]
+    fn gate2_fails_without_play_movement() {
+        let mut state = zeroed_state();
+        for i in 0..200 {
+            state.rec_coords[i] = [0.0, 0.0, i as f32];
+            state.input_log[i] = if i < 50 { 0x01 } else { 0x00 };
+        }
+        let assessment = run_gates(&state, 200);
+        assert!(!assessment.gates[2].passed);
+    }
+
+    #[test]
+    fn gate3_fails_with_drift() {
+        let mut state = perfect_steered_state(1000);
+        state.play_coords[500][0] += 1.0;
+        let assessment = run_gates(&state, 1000);
+        assert!(!assessment.gates[3].passed);
+        assert!(!assessment.drift.is_zero());
+    }
+
+    #[test]
+    fn run_gates_straight_skips_gate1() {
+        let mut state = zeroed_state();
+        for i in 0..1000 {
+            state.rec_coords[i] = [0.0, 0.0, i as f32];
+            state.play_coords[i] = [0.0, 0.0, i as f32];
+        }
+        let assessment = run_gates_straight(&state, 1000);
+        assert!(assessment.gates[1].passed);
+        assert!(assessment.all_pass());
+    }
+}

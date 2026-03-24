@@ -40,7 +40,7 @@ impl TrajectoryCache {
             }
         }
 
-        // PLAY trajectory + altitude
+        // PLAY trajectory (X/Z top-down) + altitude (frame vs Y)
         self.play_points.clear();
         self.play_altitude.clear();
         if play > 0 {
@@ -67,11 +67,11 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
     cache.refresh(state);
 
     let current_pos = [state.player_x as f64, state.player_z as f64];
-    let avail_height = ui.available_height().max(300.0);
-    let top_height = avail_height * 0.6;
-    let bottom_height = avail_height * 0.4 - 20.0; // leave room for label
+    let avail_height = ui.available_height().max(240.0);
+    let top_height = (avail_height * 0.6).max(120.0);
+    let bottom_height = (avail_height * 0.4).max(80.0);
 
-    // Top: X/Z top-down trajectory
+    ui.label(egui::RichText::new("Top-down (X/Z)").small());
     Plot::new("trajectory_xz")
         .height(top_height)
         .data_aspect(1.0)
@@ -107,11 +107,9 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
         });
 
     ui.add_space(4.0);
-    ui.label(egui::RichText::new("Altitude Profile").strong());
-
-    // Bottom: altitude profile (frame vs Y)
+    ui.label(egui::RichText::new("Altitude (Y)").small());
     Plot::new("trajectory_altitude")
-        .height(bottom_height.max(80.0))
+        .height(bottom_height)
         .allow_zoom(true)
         .allow_drag(true)
         .show_axes(true)
@@ -136,9 +134,10 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
                 );
             }
             // Current altitude marker
-            let current_alt = [state.playback_pos as f64, state.player_y as f64];
+            let current_frame = state.playback_pos.max(state.recorded_count) as f64;
+            let current_alt = state.player_y as f64;
             plot_ui.points(
-                Points::new(vec![current_alt])
+                Points::new(vec![[current_frame, current_alt]])
                     .name("Current alt")
                     .color(egui::Color32::from_rgb(255, 255, 100))
                     .radius(4.0),
