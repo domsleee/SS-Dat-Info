@@ -64,8 +64,8 @@ fn load_tasrec(path: &std::path::Path) -> Result<LoadedRecording, String> {
     if data.len() >= coords_start + coords_size {
         let mut offset = coords_start;
         for coord in rec_coords.iter_mut() {
-            for j in 0..3 {
-                coord[j] = f32::from_le_bytes([
+            for val in coord.iter_mut() {
+                *val = f32::from_le_bytes([
                     data[offset],
                     data[offset + 1],
                     data[offset + 2],
