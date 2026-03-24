@@ -6,3 +6,5 @@ description = "TAS test runner for Supreme Snowboarding regression + acceptance"
 
 [dependencies]
 tas_shared = { path = "../tas_shared" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
