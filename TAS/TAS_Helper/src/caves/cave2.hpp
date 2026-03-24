@@ -174,12 +174,19 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
 
     uint32_t raw[3];
     uint32_t rot_raw[9];
+    bool got_rot = false;
     __try {
         auto player = (uint8_t*)s->player_ptr;
         memcpy(&raw[0], player + GameAddresses::PLAYER_X, 4);
         memcpy(&raw[1], player + GameAddresses::PLAYER_Y, 4);
         memcpy(&raw[2], player + GameAddresses::PLAYER_Z, 4);
-        memcpy(rot_raw, player + GameAddresses::PLAYER_ROT, 36);
+        // Read rotation from physics sub-object
+        uint32_t physics = 0;
+        memcpy(&physics, player + GameAddresses::PLAYER_PHYSICS, 4);
+        if (physics) {
+            memcpy(rot_raw, (uint8_t*)physics + GameAddresses::PHYSICS_ROT, 36);
+            got_rot = true;
+        }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return;
     }
@@ -189,7 +196,9 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
     memcpy(&s->player_y, &raw[1], 4);
     memcpy(&s->player_z, &raw[2], 4);
     // Update rotation matrix (integer-width copy, no float ops)
-    memcpy(s->rotation_matrix, rot_raw, 36);
+    if (got_rot) {
+        memcpy(s->rotation_matrix, rot_raw, 36);
+    }
 
     if (index < TAS_MAX_TICKS) {
         if (isRec) {
@@ -276,6 +285,13 @@ static void ProcessCommand(TasSharedState* s) {
 
         case CMD_ARM_CONTINUE:
             // Continue Record: PLAY frames 0..continue_from_frame, then auto-switch to REC
+            // Validate splice point is within recorded range
+            if (s->continue_from_frame == 0 || s->continue_from_frame > s->recorded_count) {
+                LogRing(s, LOG_ERROR, "ARM_CONTINUE: invalid splice point");
+                s->mode = MODE_OFF;
+                g_cave2_pendingLog = 3;  // "stopped"
+                break;
+            }
             g_cave2_logParam = s->continue_from_frame;
             s->playback_pos = 0;
             s->prev_mask = 0;
@@ -367,8 +383,12 @@ static void __declspec(noinline) Cave2_Logic() {
             s->player_y = new_y;
             s->player_z = new_z;
 
-            // Update rotation matrix
-            memcpy(s->rotation_matrix, player + GameAddresses::PLAYER_ROT, 36);
+            // Update rotation matrix from physics sub-object
+            uint32_t physics = 0;
+            memcpy(&physics, player + GameAddresses::PLAYER_PHYSICS, 4);
+            if (physics) {
+                memcpy(s->rotation_matrix, (uint8_t*)physics + GameAddresses::PHYSICS_ROT, 36);
+            }
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
 

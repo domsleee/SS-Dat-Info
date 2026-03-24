@@ -3,6 +3,7 @@
 #include "helper.hpp"
 #include "shared_state.hpp"
 #include "game_addresses.hpp"
+#include "caves/cave1_replay.hpp"
 #include "caves/cave2.hpp"
 #include "caves/cave1c.hpp"
 #include "caves/cave1d.hpp"
@@ -12,7 +13,7 @@ static TasSharedMemory g_sharedMem;
 static GameAddresses g_addr;
 
 void run() {
-    Log("=== TAS_Helper.dll loading ===");
+    Log("=== TAS_Helper.dll loading (Phase 2) ===");
     Log(std::format("  sizeof(TasSharedState) = {}", sizeof(TasSharedState)));
 
     // Step 1: Create shared memory
@@ -31,23 +32,31 @@ void run() {
 
     auto* state = g_sharedMem.state;
 
-    // Step 3: Install hooks (Cave 2 first - it's the critical one)
-    bool cave2_ok = InstallCave2(g_addr, state);
-    bool cave1c_ok = InstallCave1C(g_addr, state);
+    // Step 3: Install hooks
+    // Order matters: Cave 1D (BB3B10 gate) must be installed before Cave 2
+    // because Cave 2 calls BB3B10 directly. Cave 1C (handler gate) must be
+    // installed before Cave 2 for the same reason.
+    bool replay_ok = InstallReplayCapture(g_addr, state);
     bool cave1d_ok = InstallCave1D(g_addr, state);
+    bool cave1c_ok = InstallCave1C(g_addr, state);
+    bool cave2_ok = InstallCave2(g_addr, state);
     bool cave5_ok = InstallCave5(g_addr, state);
 
     Log("=== Hook installation summary ===");
-    Log(std::format("  Cave 2  (Supreme::Cycle): {}", cave2_ok ? "OK" : "FAILED"));
-    Log(std::format("  Cave 1C (handler gate):   {}", cave1c_ok ? "OK" : "FAILED"));
-    Log(std::format("  Cave 1D (BB3B10):         {}", cave1d_ok ? "OK" : "FAILED"));
-    Log(std::format("  Cave 5  (fixed tick):     {}", cave5_ok ? "deferred" : "FAILED"));
+    Log(std::format("  Replay capture (SG+9E8F0):  {}", replay_ok ? "OK" : "FAILED"));
+    Log(std::format("  Cave 1D (BB3B10 gate):      {}", cave1d_ok ? "OK" : "FAILED"));
+    Log(std::format("  Cave 1C (handler gate):      {}", cave1c_ok ? "OK" : "FAILED"));
+    Log(std::format("  Cave 2  (Supreme::Cycle):    {}", cave2_ok ? "OK" : "FAILED"));
+    Log(std::format("  Cave 5  (fixed tick):        {}", cave5_ok ? "OK" : "FAILED"));
 
     if (!cave2_ok) {
         Log("CRITICAL: Cave 2 hook failed - TAS will not function");
     }
+    if (!cave1d_ok || !cave1c_ok) {
+        Log("WARNING: Gate hooks failed - input blocking won't work correctly");
+    }
 
-    Log("=== TAS_Helper.dll ready ===");
+    Log("=== TAS_Helper.dll ready (Phase 2) ===");
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {

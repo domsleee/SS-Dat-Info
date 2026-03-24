@@ -80,7 +80,10 @@ pub fn run(mock: bool) -> AcceptanceResult {
             "playback_speed must be 1.0 or 0.0 (got {})",
             s.playback_speed
         );
-        println!("Config OK: fft=0, inject_mode=6, force_direct=2, speed={}", s.playback_speed);
+        println!(
+            "Config OK: fft=0, inject_mode=6, force_direct=2, speed={}",
+            s.playback_speed
+        );
     }
 
     println!("\n=== Three-Phase Acceptance Test ===\n");
@@ -148,7 +151,10 @@ pub fn run(mock: bool) -> AcceptanceResult {
 
     // Capture REC start position for Phase 3 matching
     let rec_start = client.state().rec_coords[0];
-    println!("  REC start: ({:.4}, {:.4}, {:.4})", rec_start[0], rec_start[1], rec_start[2]);
+    println!(
+        "  REC start: ({:.4}, {:.4}, {:.4})",
+        rec_start[0], rec_start[1], rec_start[2]
+    );
 
     // ---- Phase 3: PLAYBACK ----
     println!("\n--- Phase 3: PLAYBACK ---");
@@ -185,8 +191,11 @@ pub fn run(mock: bool) -> AcceptanceResult {
     // Replay steered verdict: PLAY X coords vs BASELINE X coords must differ
     let mut max_play_vs_base_x: f64 = 0.0;
     let play_compare = baseline_count.min(state.playback_pos) as usize;
-    for i in 0..play_compare {
-        let dx = (state.play_coords[i][0] as f64 - baseline_coords[i][0] as f64).abs();
+    for (play, base) in state.play_coords[..play_compare]
+        .iter()
+        .zip(&baseline_coords[..play_compare])
+    {
+        let dx = (play[0] as f64 - base[0] as f64).abs();
         if dx > max_play_vs_base_x {
             max_play_vs_base_x = dx;
         }
@@ -244,53 +253,7 @@ pub fn run(mock: bool) -> AcceptanceResult {
     result
 }
 
-/// Drive Pico HID for acceptance test Phase 2.
+/// Drive Pico HID for acceptance test Phase 2 (delegates to harness).
 fn drive_pico_acceptance(steps: &[patterns::PatternStep]) {
-    use std::io::Write;
-
-    let port = match std::fs::OpenOptions::new()
-        .write(true)
-        .open("\\\\.\\COM7")
-    {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("  ERROR: Cannot open COM7: {}. Steering will be absent.", e);
-            std::thread::sleep(std::time::Duration::from_secs(REC_DURATION_SECS));
-            return;
-        }
-    };
-
-    let mut port = port;
-    let total = patterns::total_ticks(steps);
-    let ms_per_tick = 10u64;
-    let start = std::time::Instant::now();
-    let mut prev_mask = 0xFFu8;
-    let mut current_step = 0usize;
-
-    for tick in 0..total {
-        while current_step < steps.len() && tick >= steps[current_step].stop_tick {
-            current_step += 1;
-        }
-        let mask = if current_step < steps.len() {
-            steps[current_step].mask
-        } else {
-            0
-        };
-
-        if mask != prev_mask {
-            let send_byte = if mask == 0 { 0xFF } else { mask };
-            let _ = port.write_all(&[send_byte]);
-            let _ = port.flush();
-            prev_mask = mask;
-        }
-
-        let target = std::time::Duration::from_millis((tick as u64 + 1) * ms_per_tick);
-        if let Some(remaining) = target.checked_sub(start.elapsed()) {
-            std::thread::sleep(remaining);
-        }
-    }
-
-    // Release all
-    let _ = port.write_all(&[0xFF]);
-    let _ = port.flush();
+    harness::drive_pico_steps(steps, Some(REC_DURATION_SECS * 1000));
 }

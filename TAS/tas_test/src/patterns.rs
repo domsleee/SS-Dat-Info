@@ -75,7 +75,7 @@ pub fn build_from_pattern(pattern: &str, hold_ticks: u32, gap_ticks: u32) -> Vec
 }
 
 /// Build steps from explicit step definitions (like Lua's case.steps).
-pub fn build_from_explicit(defs: &[(& str, u8, u32)]) -> Vec<PatternStep> {
+pub fn build_from_explicit(defs: &[(&str, u8, u32)]) -> Vec<PatternStep> {
     let mut steps = Vec::new();
     let mut stop = 0u32;
     for (name, mask, ticks) in defs {
@@ -102,8 +102,8 @@ pub fn generate_input_log(steps: &[PatternStep]) -> Vec<u8> {
     let mut prev_stop = 0usize;
     for step in steps {
         let end = step.stop_tick as usize;
-        for tick in prev_stop..end.min(total) {
-            log[tick] = step.mask;
+        for entry in &mut log[prev_stop..end.min(total)] {
+            *entry = step.mask;
         }
         prev_stop = end;
     }
@@ -154,5 +154,81 @@ mod tests {
         assert_eq!(steps[0].stop_tick, 72);
         assert_eq!(steps[1].stop_tick, 108);
         assert_eq!(steps[2].stop_tick, 180);
+    }
+
+    #[test]
+    fn test_total_ticks_empty() {
+        assert_eq!(total_ticks(&[]), 0);
+    }
+
+    #[test]
+    fn test_total_ticks_matches_last_stop() {
+        let steps = build_from_pattern("LRL", 56, 0);
+        assert_eq!(total_ticks(&steps), 168); // 3 * 56
+    }
+
+    #[test]
+    fn test_total_ticks_with_gaps() {
+        let steps = build_from_pattern("LR", 56, 10);
+        // L(56) + GAP(10) + R(56) = 122
+        assert_eq!(total_ticks(&steps), 122);
+    }
+
+    #[test]
+    fn test_neutral_pattern() {
+        let steps = build_from_pattern("N", 10, 0);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].mask, 0x00);
+        let log = generate_input_log(&steps);
+        assert!(log.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_all_directions() {
+        let steps = build_from_pattern("LUDRSJ", 1, 0);
+        assert_eq!(steps.len(), 6);
+        assert_eq!(steps[0].mask, input_bits::LEFT);
+        assert_eq!(steps[1].mask, input_bits::UP);
+        assert_eq!(steps[2].mask, input_bits::DOWN);
+        assert_eq!(steps[3].mask, input_bits::RIGHT);
+        assert_eq!(steps[4].mask, input_bits::SHIFT);
+        assert_eq!(steps[5].mask, input_bits::JUMP);
+    }
+
+    #[test]
+    fn test_step_names() {
+        let steps = build_from_pattern("LR", 10, 0);
+        assert_eq!(steps[0].name, "LEFT1");
+        assert_eq!(steps[1].name, "RIGHT2");
+    }
+
+    #[test]
+    fn test_gap_not_after_last() {
+        // Gap should not be added after the last character
+        let steps = build_from_pattern("L", 56, 10);
+        assert_eq!(steps.len(), 1); // Just L, no trailing gap
+    }
+
+    #[test]
+    fn test_input_log_with_gap() {
+        let steps = build_from_pattern("LR", 3, 2);
+        // L(3) + GAP(2) + R(3) = 8
+        let log = generate_input_log(&steps);
+        assert_eq!(log.len(), 8);
+        assert_eq!(log[0..3], [0x01, 0x01, 0x01]);
+        assert_eq!(log[3..5], [0x00, 0x00]);
+        assert_eq!(log[5..8], [0x02, 0x02, 0x02]);
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported pattern token")]
+    fn test_invalid_token_panics() {
+        build_from_pattern("X", 10, 0);
+    }
+
+    #[test]
+    fn test_generate_input_log_empty() {
+        let log = generate_input_log(&[]);
+        assert!(log.is_empty());
     }
 }

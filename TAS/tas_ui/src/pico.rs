@@ -12,7 +12,7 @@ pub struct PicoState {
 impl PicoState {
     pub fn new() -> Self {
         Self {
-            port_name: "COM7".to_string(),
+            port_name: std::env::var("TAS_PICO_PORT").unwrap_or_else(|_| "COM7".into()),
             connected: false,
             port: None,
             error: None,
@@ -259,4 +259,74 @@ pub fn show_panel(ui: &mut egui::Ui, pico: &mut PicoState, log: &mut Vec<String>
     ui.label(egui::RichText::new("Space Stop  . Step  , Step back").small());
     ui.label(egui::RichText::new("Ctrl+Z Undo  Ctrl+S Save  Ctrl+O Open").small());
     ui.label(egui::RichText::new("+/- Timeline zoom").small());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pico_state_defaults() {
+        let pico = PicoState::new();
+        // Default is COM7 unless TAS_PICO_PORT is set
+        let expected = std::env::var("TAS_PICO_PORT").unwrap_or_else(|_| "COM7".into());
+        assert_eq!(pico.port_name, expected);
+        assert!(!pico.connected);
+        assert!(pico.port.is_none());
+        assert!(pico.error.is_none());
+        assert!(!pico.auto_detected);
+        assert!(!pico.scan_attempted);
+    }
+
+    #[test]
+    fn disconnect_clears_connected() {
+        let mut pico = PicoState::new();
+        // Simulate connected state (no real port)
+        pico.connected = true;
+        pico.disconnect();
+        assert!(!pico.connected);
+        assert!(pico.port.is_none());
+    }
+
+    #[test]
+    fn send_mask_without_port_errors() {
+        let mut pico = PicoState::new();
+        let result = pico.send_mask(0xFF);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Not connected");
+    }
+
+    #[test]
+    fn health_check_disconnected_returns_false() {
+        let mut pico = PicoState::new();
+        assert!(!pico.health_check());
+    }
+
+    #[test]
+    fn auto_detect_skips_when_already_scanned() {
+        let mut pico = PicoState::new();
+        pico.scan_attempted = true;
+        let logs = pico.auto_detect();
+        assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn auto_detect_skips_when_connected() {
+        let mut pico = PicoState::new();
+        pico.connected = true;
+        let logs = pico.auto_detect();
+        assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn send_f5_without_port_errors() {
+        let mut pico = PicoState::new();
+        assert!(pico.send_f5().is_err());
+    }
+
+    #[test]
+    fn soft_reconnect_without_port_errors() {
+        let mut pico = PicoState::new();
+        assert!(pico.soft_reconnect().is_err());
+    }
 }
