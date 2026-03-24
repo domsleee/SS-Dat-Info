@@ -87,15 +87,14 @@ pub fn show(
                         }
 
                         // Delete this segment and everything after
-                        if i > 0 {
-                            if ui
+                        if i > 0
+                            && ui
                                 .small_button("\u{2702} Delete")
                                 .on_hover_text("Delete this segment and all subsequent ones")
                                 .clicked()
                             {
                                 actions.push(SegmentAction::DeleteFrom(i));
                             }
-                        }
                     });
                 });
 
