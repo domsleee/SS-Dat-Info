@@ -728,10 +728,13 @@ impl eframe::App for TasApp {
                 // Telemetry + Diagnostics footer
                 ui.separator();
                 ui.horizontal(|ui| {
-                    let spd = (state.speed as f64).sqrt();
+                    let vx = state.velocity_x as f64;
+                    let vy = state.velocity_y as f64;
+                    let vz = state.velocity_z as f64;
+                    let speed_kmh = (vx * vx + vy * vy + vz * vz).sqrt() * 360.0;
                     ui.label(format!(
-                        "Speed: {:.2} | Vel: ({:.2}, {:.2}, {:.2}) | Tick: {}",
-                        spd,
+                        "Speed: {:.1} km/h | Vel: ({:.2}, {:.2}, {:.2}) | Tick: {}",
+                        speed_kmh,
                         state.velocity_x,
                         state.velocity_y,
                         state.velocity_z,
