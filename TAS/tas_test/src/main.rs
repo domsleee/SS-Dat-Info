@@ -10,6 +10,7 @@
 //!   speed       — Playback speed verification (0.25x, 1x, 2x)
 //!   speed-reset — Speed reset verification (2x stop restores normal)
 //!   drift-speed — Drift-at-speed verification (2x same-speed, 1x/2x cross-speed)
+//!   replay      — Load .tasrec file and replay N times, checking drift each time
 
 mod acceptance;
 mod cache;
@@ -20,6 +21,7 @@ mod harness;
 mod patterns;
 mod regression;
 mod drift_speed;
+mod replay;
 mod speed;
 mod speed_reset;
 
@@ -62,6 +64,33 @@ fn main() {
             let result = drift_speed::run();
             std::process::exit(if result.all_pass() { 0 } else { 1 });
         }
+        "replay" => {
+            let path = args.get(2).unwrap_or_else(|| {
+                eprintln!("Usage: tas_test replay <path.tasrec> [--iterations N] [--verbose]");
+                std::process::exit(1);
+            });
+            let mut iterations = 5u32;
+            let mut verbose = false;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--iterations" | "-n" => {
+                        iterations = args.get(i + 1)
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(5);
+                        i += 2;
+                    }
+                    "--verbose" | "-v" => {
+                        verbose = true;
+                        i += 1;
+                    }
+                    _ => { i += 1; }
+                }
+            }
+            let report = replay::run(path, iterations, verbose);
+            let any_drift = report.results.iter().any(|r| r.max_drift_x > 0.0 || r.max_drift_z > 0.0);
+            std::process::exit(if any_drift { 1 } else { 0 });
+        }
         "mock" => {
             let out = output_dir();
             let cache_dir = out.join("mock_cache");
@@ -85,6 +114,11 @@ fn main() {
             println!("  speed       Playback speed verification (0.25x, 1x, 2x)");
             println!("  speed-reset Speed reset verification (2x stop restores normal)");
             println!("  drift-speed Drift-at-speed verification (2x same, 1x/2x cross)");
+            println!("  replay      Load .tasrec file and play back N times (drift check)");
+            println!();
+            println!("Options for replay:");
+            println!("  --iterations N  Number of playback iterations (default: 5)");
+            println!("  --verbose       Show drift details for every iteration");
             println!();
             println!("Exit code: 0 = all pass, 1 = some failed");
         }
