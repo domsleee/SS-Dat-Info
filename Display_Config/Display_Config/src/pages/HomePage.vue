@@ -44,6 +44,7 @@ import { useUpdateDialogStore } from '@/stores/updateDialogStore';
 
 const playLoading = ref(false);
 const form = ref<VForm | undefined>();
+
 async function handleAutoplay() {
   if (!playLoading.value) {
     await handlePlay();
