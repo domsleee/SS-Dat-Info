@@ -43,6 +43,7 @@ import { commands } from '@/bindings';
 
 const playLoading = ref(false);
 const form = ref<VForm | undefined>();
+
 async function handleAutoplay() {
   if (!playLoading.value) {
     await handlePlay();

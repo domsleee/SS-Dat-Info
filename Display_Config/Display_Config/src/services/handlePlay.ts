@@ -18,10 +18,15 @@ export async function handlePlayAsync(playLoading: Ref<boolean>) {
     console.log(await writeDetailConfig());
     console.log(await commands.writeRdConfig(getAsRdConfig()));
     console.log(await commands.writeLanguage(useRenderSettingsStore().renderSettings.language));
-    const trainerSettings = getTrainerSettings();
+    const { trainerSettings: trainerUISettings } = useTrainerUISettingsStore();
+    const trainerSettings = getTrainerSettingsFromUI(trainerUISettings);
     if (requiresInject(trainerSettings)) {
       const r2 = await commands.runInject(trainerSettings);
       console.log(r2);
+    }
+    if (trainerUISettings.enableTas) {
+      const tasResult = await commands.runTasInject();
+      console.log(tasResult);
     }
     await getCurrentWindow().setFocus();
     playLoading.value = false;
@@ -56,11 +61,6 @@ export function requiresInject(trainerSettings: TrainerSettings): boolean {
     || trainerSettings.enableCustomControls
     || trainerSettings.hideBlinkingR
     || trainerSettings.showReplaySpeed;
-}
-
-function getTrainerSettings(): TrainerSettings {
-  const { trainerSettings } = useTrainerUISettingsStore();
-  return getTrainerSettingsFromUI(trainerSettings);
 }
 
 export function getTrainerSettingsFromUI(trainerSettings: TrainerUISettings): TrainerSettings {

@@ -76,6 +76,7 @@ pub fn get_tauri_specta_builder() -> tauri_specta::Builder {
         .commands(tauri_specta::collect_commands![
             show_window,
             inject::run_inject,
+            inject::run_tas_inject,
             rd_config::read_rd_config,
             rd_config::write_rd_config,
             file_commands::open_log_file,

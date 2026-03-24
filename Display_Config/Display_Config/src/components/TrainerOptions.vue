@@ -50,6 +50,10 @@
           />
         </div>
       </div>
+      <v-checkbox
+        v-model="trainerSettings.enableTas"
+        label="Enable TAS"
+      />
     </v-card-text>
   </v-card>
 </template>
