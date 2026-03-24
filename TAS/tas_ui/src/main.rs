@@ -713,7 +713,7 @@ impl eframe::App for TasApp {
                             ui.label(egui::RichText::new("Input Analysis").strong());
                             analysis::show(ui, state, &mut self.analysis_cache);
                         } else if self.show_trajectory {
-                            ui.label(egui::RichText::new("Trajectory (X-Z)").strong());
+                            ui.label(egui::RichText::new("Trajectory").strong());
                             trajectory::show(ui, state, &mut self.trajectory_cache);
                         } else if self.show_rotation {
                             ui.label(egui::RichText::new("Rotation").strong());
