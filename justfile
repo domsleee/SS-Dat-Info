@@ -4,6 +4,10 @@ set unstable
 # Default game folder — override with: just --set supreme_folder 'C:\path\to\game'
 supreme_folder := 'T:\Games\SupremeORIG'
 
+# Display_Config build profile — 'release' (slow, optimised) or 'debug' (fast)
+# Override with: just --set dc_profile debug deploy_all
+dc_profile := 'release'
+
 # ── Build Everything ──────────────────────────────────────────────
 
 # Build all components (Display_Config + TAS) — in parallel
@@ -14,7 +18,7 @@ all: display_config tas
 
 # Build Display_Config (Tauri app + helper DLL)
 display_config:
-    cd Display_Config && just all
+    cd Display_Config && just --set dc_profile {{dc_profile}} all
 
 # ── TAS ───────────────────────────────────────────────────────────
 
