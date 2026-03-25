@@ -1,11 +1,13 @@
 set shell := ["pwsh.exe", "-NoProfile", "-c"]
+set unstable
 
 # Default game folder — override with: just --set supreme_folder 'C:\path\to\game'
 supreme_folder := 'T:\Games\SupremeORIG'
 
 # ── Build Everything ──────────────────────────────────────────────
 
-# Build all components (Display_Config + TAS)
+# Build all components (Display_Config + TAS) — in parallel
+[parallel]
 all: display_config tas
 
 # ── Display Config ────────────────────────────────────────────────
@@ -16,7 +18,8 @@ display_config:
 
 # ── TAS ───────────────────────────────────────────────────────────
 
-# Build all TAS components (C++ DLL + Rust UI/test)
+# Build all TAS components (C++ DLL + Rust UI/test) — in parallel
+[parallel]
 tas: tas_dll tas_rust
 
 # Build TAS_Helper.dll + Injector.exe (C++ / MSBuild)
