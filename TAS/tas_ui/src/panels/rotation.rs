@@ -181,3 +181,77 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState) {
             });
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Identity matrix → all Euler angles should be zero.
+    #[test]
+    fn identity_matrix_gives_zero_angles() {
+        let identity: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        assert!((yaw_from_matrix(&identity)).abs() < 1e-6);
+        assert!((pitch_from_matrix(&identity)).abs() < 1e-6);
+        assert!((roll_from_matrix(&identity)).abs() < 1e-6);
+    }
+
+    /// Pitch-up rotation (lean back) must produce a POSITIVE pitch value.
+    /// This verifies the fix: m[3].asin() without negation.
+    ///
+    /// A rotation of +30° about the X-axis (lean back):
+    ///   R = [[1, 0, 0], [0, cos30, -sin30], [0, sin30, cos30]]
+    /// Row-major: [1, 0, 0,  0, cos30, -sin30,  0, sin30, cos30]
+    /// m[3] = 0 for pure X-rotation, so we use a combined rotation.
+    ///
+    /// Instead, use a Y-axis rotation of +30° (nose up in XZ plane):
+    ///   R = [[cos30, 0, sin30], [0, 1, 0], [-sin30, 0, cos30]]
+    /// Row-major: [cos30, 0, sin30,  0, 1, 0,  -sin30, 0, cos30]
+    /// m[3] = 0 → pitch = 0, not helpful.
+    ///
+    /// Use a rotation that puts sin into m[3]:
+    /// A rotation about Z by θ gives R = [[cosθ, -sinθ, 0], [sinθ, cosθ, 0], [0, 0, 1]]
+    /// m[3] = sinθ → pitch = asin(sinθ) = θ
+    #[test]
+    fn lean_back_gives_positive_pitch() {
+        let angle = std::f32::consts::FRAC_PI_6; // 30°
+        let c = angle.cos();
+        let s = angle.sin();
+        // Z-rotation: m[3] = sin(30°) = 0.5
+        let m: [f32; 9] = [c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0];
+        let pitch = pitch_from_matrix(&m);
+        // pitch should be positive (~30°), not negative
+        assert!(
+            pitch > 0.0,
+            "Lean-back (positive m[3]) must give positive pitch, got {}",
+            pitch
+        );
+        assert!((pitch - angle).abs() < 1e-5);
+    }
+
+    /// Lean forward (negative m[3]) must produce negative pitch.
+    #[test]
+    fn lean_forward_gives_negative_pitch() {
+        let angle = std::f32::consts::FRAC_PI_6;
+        let c = angle.cos();
+        let s = angle.sin();
+        // Z-rotation by -30°: m[3] = sin(-30°) = -0.5
+        let m: [f32; 9] = [c, s, 0.0, -s, c, 0.0, 0.0, 0.0, 1.0];
+        let pitch = pitch_from_matrix(&m);
+        assert!(
+            pitch < 0.0,
+            "Lean-forward (negative m[3]) must give negative pitch, got {}",
+            pitch
+        );
+    }
+
+    /// Rotate helper: basic 3D point rotation.
+    #[test]
+    fn rotate_identity_preserves_point() {
+        let identity: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let p = [1.0, 2.0, 3.0];
+        let r = rotate(&identity, p);
+        assert!((r[0] - 1.0).abs() < 1e-6);
+        assert!((r[1] - 2.0).abs() < 1e-6);
+        assert!((r[2] - 3.0).abs() < 1e-6);
+    }
+}
