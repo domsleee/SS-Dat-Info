@@ -36,7 +36,7 @@ impl TrajectoryCache {
                 self.rec_points
                     .push([state.rec_coords[i][0] as f64, state.rec_coords[i][2] as f64]);
                 self.rec_altitude
-                    .push([i as f64, state.rec_coords[i][1] as f64]);
+                    .push([i as f64, -(state.rec_coords[i][1] as f64)]);
             }
         }
 
@@ -51,7 +51,7 @@ impl TrajectoryCache {
                     state.play_coords[i][2] as f64,
                 ]);
                 self.play_altitude
-                    .push([i as f64, state.play_coords[i][1] as f64]);
+                    .push([i as f64, -(state.play_coords[i][1] as f64)]);
             }
         }
         true
@@ -135,7 +135,7 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
             }
             // Current altitude marker
             let current_frame = state.playback_pos.max(state.recorded_count) as f64;
-            let current_alt = state.player_y as f64;
+            let current_alt = -(state.player_y as f64);
             plot_ui.points(
                 Points::new(vec![[current_frame, current_alt]])
                     .name("Current alt")
