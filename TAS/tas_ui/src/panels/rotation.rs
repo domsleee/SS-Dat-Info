@@ -19,19 +19,29 @@ fn project(p: [f32; 3]) -> egui::Vec2 {
     egui::Vec2::new(x2d, y2d)
 }
 
-/// Extract yaw angle from rotation matrix (atan2 of r02/r00).
+/// Extract Euler angles from a 3x3 row-major rotation matrix.
+///
+/// Supreme Snowboarding uses a DirectX left-handed Y-up coordinate system.
+/// Rotation order: R = R_y(yaw) * R_x(pitch) * R_z(roll)
+///
+/// The matrix layout is:
+///   m[0]  m[1]  m[2]     cy*cz-sy*sp*sz   cy*sz+sy*sp*cz   -sy*cp
+///   m[3]  m[4]  m[5]  =  -cp*sz           cp*cz             sp
+///   m[6]  m[7]  m[8]     sy*cz+cy*sp*sz   sy*sz-cy*sp*cz    cy*cp
+///
+/// Extraction: pitch = asin(m[5]), yaw = atan2(-m[2], m[8]),
+///             roll = atan2(-m[3], m[4])
+
 fn yaw_from_matrix(m: &[f32; 9]) -> f32 {
-    m[2].atan2(m[0])
+    (-m[2]).atan2(m[8])
 }
 
-/// Extract pitch angle from rotation matrix.
 fn pitch_from_matrix(m: &[f32; 9]) -> f32 {
-    m[3].asin().clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2)
+    m[5].asin().clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2)
 }
 
-/// Extract roll angle from rotation matrix.
 fn roll_from_matrix(m: &[f32; 9]) -> f32 {
-    m[5].atan2(m[4])
+    (-m[3]).atan2(m[4])
 }
 
 /// Draw a 3D arrow (axis line with small arrowhead) and label.
@@ -117,33 +127,19 @@ fn draw_wireframe_body(
     }
 }
 
-/// Transform a rotation matrix from game coordinates (Y-down) to display
-/// coordinates (Y-up) via conjugation with S = diag(1, -1, 1).
-/// This negates the off-diagonal Y elements: m[1], m[3], m[5], m[7].
-fn flip_y(raw: &[f32; 9]) -> [f32; 9] {
-    [
-        raw[0], -raw[1], raw[2],
-        -raw[3], raw[4], -raw[5],
-        raw[6], -raw[7], raw[8],
-    ]
-}
-
 pub fn show(ui: &mut egui::Ui, state: &TasSharedState) {
-    let raw = &state.rotation_matrix;
+    let m = &state.rotation_matrix;
 
-    let has_data = raw.iter().any(|&v| v != 0.0);
+    let has_data = m.iter().any(|&v| v != 0.0);
 
     if !has_data {
         ui.label("No rotation data (DLL v5 required)");
         return;
     }
 
-    // Game uses Y-down; flip to Y-up for all display purposes.
-    let m = flip_y(raw);
-
-    let yaw = yaw_from_matrix(&m);
-    let pitch = pitch_from_matrix(&m);
-    let roll = roll_from_matrix(&m);
+    let yaw = yaw_from_matrix(m);
+    let pitch = pitch_from_matrix(m);
+    let roll = roll_from_matrix(m);
 
     let yaw_deg = yaw.to_degrees();
     let pitch_deg = pitch.to_degrees();
@@ -171,24 +167,24 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState) {
     );
 
     // Draw wireframe body showing board orientation
-    draw_wireframe_body(&painter, center, scale, &m);
+    draw_wireframe_body(&painter, center, scale, m);
 
     // Draw rotated coordinate axes: X=red, Y=green, Z=blue
-    draw_axis(&painter, center, scale, &m, [1.0, 0.0, 0.0], egui::Color32::from_rgb(220, 80, 80), "X");
-    draw_axis(&painter, center, scale, &m, [0.0, 1.0, 0.0], egui::Color32::from_rgb(80, 200, 80), "Y");
-    draw_axis(&painter, center, scale, &m, [0.0, 0.0, 1.0], egui::Color32::from_rgb(80, 130, 230), "Z");
+    draw_axis(&painter, center, scale, m, [1.0, 0.0, 0.0], egui::Color32::from_rgb(220, 80, 80), "X");
+    draw_axis(&painter, center, scale, m, [0.0, 1.0, 0.0], egui::Color32::from_rgb(80, 200, 80), "Y");
+    draw_axis(&painter, center, scale, m, [0.0, 0.0, 1.0], egui::Color32::from_rgb(80, 130, 230), "Z");
 
     // Center dot
     painter.circle_filled(center, 2.5, egui::Color32::WHITE);
 
-    // Raw matrix display (collapsible) — shows original game values
+    // Raw matrix display (collapsible)
     ui.collapsing("Raw 3x3 Matrix", |ui| {
         egui::Grid::new("rotation_grid")
             .striped(true)
             .show(ui, |ui| {
                 for row in 0..3 {
                     for col in 0..3 {
-                        ui.label(format!("{:+.4}", raw[row * 3 + col]));
+                        ui.label(format!("{:+.4}", m[row * 3 + col]));
                     }
                     ui.end_row();
                 }
@@ -209,76 +205,87 @@ mod tests {
         assert!((roll_from_matrix(&identity)).abs() < 1e-6);
     }
 
-    /// flip_y negates exactly the off-diagonal Y elements.
-    #[test]
-    fn flip_y_negates_correct_elements() {
-        let m: [f32; 9] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
-        let f = flip_y(&m);
-        // m[0], m[2], m[4], m[6], m[8] unchanged
-        assert_eq!(f[0], 1.0);
-        assert_eq!(f[2], 3.0);
-        assert_eq!(f[4], 5.0);
-        assert_eq!(f[6], 7.0);
-        assert_eq!(f[8], 9.0);
-        // m[1], m[3], m[5], m[7] negated
-        assert_eq!(f[1], -2.0);
-        assert_eq!(f[3], -4.0);
-        assert_eq!(f[5], -6.0);
-        assert_eq!(f[7], -8.0);
-    }
-
-    /// flip_y of identity is still identity (off-diag Y elements are 0).
-    #[test]
-    fn flip_y_identity_stays_identity() {
-        let identity: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-        let f = flip_y(&identity);
-        assert_eq!(f, identity);
-    }
-
-    /// Full pipeline: game matrix with positive raw m[3] (front flip in Y-down
-    /// game coords) should display as positive pitch after Y-flip.
+    /// Pure pitch rotation (X-axis, 30°) in left-handed YXZ convention.
     ///
-    /// In game coords (Y-down), raw m[3] > 0 means a front flip.
-    /// After flip_y, m[3] becomes negative → pitch_from_matrix gives negative.
-    /// But we interpret negative display-pitch as "nose down" = front flip.
+    /// R_x(30°) left-handed:
+    ///   [1   0      0   ]
+    ///   [0   cos30  sin30]
+    ///   [0  -sin30  cos30]
     ///
-    /// Conversely, raw m[3] < 0 in game = back flip.
-    /// After flip_y, m[3] becomes positive → positive pitch = "nose up" = back flip.
+    /// m[5] = sin(30°) → pitch = asin(m[5]) = 30° (positive = nose up)
     #[test]
-    fn front_flip_game_matrix_displays_correctly() {
-        let angle = std::f32::consts::FRAC_PI_6; // 30°
-        let c = angle.cos();
-        let s = angle.sin();
-        // Game matrix with positive m[3] (front flip in Y-down game)
-        let game_m: [f32; 9] = [c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0];
-        let display_m = flip_y(&game_m);
-        let pitch = pitch_from_matrix(&display_m);
-        // After Y-flip, m[3] is negated → pitch should be negative (nose-down = front flip)
-        assert!(
-            pitch < 0.0,
-            "Front flip (positive game m[3]) after Y-flip must give negative display pitch, got {}",
-            pitch
-        );
-    }
-
-    /// Back flip: negative game m[3] → after Y-flip → positive pitch (nose-up).
-    #[test]
-    fn back_flip_game_matrix_displays_correctly() {
+    fn pure_pitch_30_degrees() {
         let angle = std::f32::consts::FRAC_PI_6;
         let c = angle.cos();
         let s = angle.sin();
-        // Game matrix with negative m[3] (back flip in Y-down game)
-        let game_m: [f32; 9] = [c, s, 0.0, -s, c, 0.0, 0.0, 0.0, 1.0];
-        let display_m = flip_y(&game_m);
-        let pitch = pitch_from_matrix(&display_m);
-        assert!(
-            pitch > 0.0,
-            "Back flip (negative game m[3]) after Y-flip must give positive display pitch, got {}",
-            pitch
-        );
+        let m: [f32; 9] = [1.0, 0.0, 0.0, 0.0, c, s, 0.0, -s, c];
+        let pitch = pitch_from_matrix(&m);
+        assert!((pitch - angle).abs() < 1e-5, "Expected ~30° pitch, got {}", pitch.to_degrees());
+        assert!((yaw_from_matrix(&m)).abs() < 1e-5);
+        assert!((roll_from_matrix(&m)).abs() < 1e-5);
     }
 
-    /// Rotate helper: basic 3D point rotation.
+    /// Front flip = negative pitch (nose down). In a left-handed system,
+    /// forward rotation around X means pitch decreases.
+    ///
+    /// R_x(-30°): m[5] = sin(-30°) = -0.5 → pitch = -30°
+    #[test]
+    fn front_flip_gives_negative_pitch() {
+        let angle = std::f32::consts::FRAC_PI_6;
+        let c = angle.cos();
+        let s = angle.sin();
+        // R_x(-30°) left-handed
+        let m: [f32; 9] = [1.0, 0.0, 0.0, 0.0, c, -s, 0.0, s, c];
+        let pitch = pitch_from_matrix(&m);
+        assert!(
+            pitch < 0.0,
+            "Front flip (negative X rotation) must give negative pitch, got {}",
+            pitch.to_degrees()
+        );
+        assert!((pitch + angle).abs() < 1e-5);
+    }
+
+    /// Pure yaw rotation (Y-axis, 45°) in left-handed convention.
+    ///
+    /// R_y(45°) left-handed:
+    ///   [cos45  0  -sin45]
+    ///   [  0    1    0   ]
+    ///   [sin45  0   cos45]
+    ///
+    /// yaw = atan2(-m[2], m[8]) = atan2(sin45, cos45) = 45°
+    #[test]
+    fn pure_yaw_45_degrees() {
+        let angle = std::f32::consts::FRAC_PI_4;
+        let c = angle.cos();
+        let s = angle.sin();
+        let m: [f32; 9] = [c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c];
+        let yaw = yaw_from_matrix(&m);
+        assert!((yaw - angle).abs() < 1e-5, "Expected ~45° yaw, got {}", yaw.to_degrees());
+        assert!((pitch_from_matrix(&m)).abs() < 1e-5);
+        assert!((roll_from_matrix(&m)).abs() < 1e-5);
+    }
+
+    /// Pure roll rotation (Z-axis, 20°) in left-handed convention.
+    ///
+    /// R_z(20°) left-handed:
+    ///   [cos20   sin20  0]
+    ///   [-sin20  cos20  0]
+    ///   [  0       0    1]
+    ///
+    /// roll = atan2(-m[3], m[4]) = atan2(sin20, cos20) = 20°
+    #[test]
+    fn pure_roll_20_degrees() {
+        let angle = 20.0_f32.to_radians();
+        let c = angle.cos();
+        let s = angle.sin();
+        let m: [f32; 9] = [c, s, 0.0, -s, c, 0.0, 0.0, 0.0, 1.0];
+        let roll = roll_from_matrix(&m);
+        assert!((roll - angle).abs() < 1e-5, "Expected ~20° roll, got {}", roll.to_degrees());
+        assert!((yaw_from_matrix(&m)).abs() < 1e-5);
+        assert!((pitch_from_matrix(&m)).abs() < 1e-5);
+    }
+
+    /// Rotate helper: identity preserves point.
     #[test]
     fn rotate_identity_preserves_point() {
         let identity: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
