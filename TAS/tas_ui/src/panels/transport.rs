@@ -32,7 +32,8 @@ pub fn show(
         let is_play = mode == TasMode::Play;
 
         // REC button (red when recording)
-        let rec_text = egui::RichText::new("[R] REC [F9]");
+        let rec_label = "\u{23FA} REC  F9"; // Unicode record symbol
+        let rec_text = egui::RichText::new(rec_label);
         let rec_text = if is_rec {
             rec_text
                 .color(egui::Color32::from_rgb(255, 60, 60))
@@ -51,7 +52,8 @@ pub fn show(
         }
 
         // PLAY button (green when playing)
-        let play_text = egui::RichText::new("[>] PLAY [F10]");
+        let play_label = "\u{25B6} PLAY  F10"; // Unicode play triangle
+        let play_text = egui::RichText::new(play_label);
         let play_text = if is_play {
             play_text
                 .color(egui::Color32::from_rgb(60, 200, 60))
@@ -67,8 +69,9 @@ pub fn show(
         }
 
         // STOP button
+        let stop_label = "\u{23F9} STOP  F11"; // Unicode stop symbol
         if ui
-            .add_enabled(!is_off, egui::Button::new("[S] STOP [F11]"))
+            .add_enabled(!is_off, egui::Button::new(stop_label))
             .clicked()
         {
             actions.push(Action::Send(TasCommand::Stop));
@@ -77,9 +80,10 @@ pub fn show(
         ui.separator();
 
         // Continue Record
+        let cont_label = "\u{23ED} CONT  F12"; // Unicode next track symbol
         if ui
-            .add_enabled(is_off && recorded > 0, egui::Button::new("[+] CONT [F12]"))
-            .on_hover_text("Continue recording from a specific frame")
+            .add_enabled(is_off && recorded > 0, egui::Button::new(cont_label))
+            .on_hover_text("Continue recording from a specific frame (plays back at 4x)")
             .clicked()
         {
             actions.push(Action::AutoSave);
@@ -105,7 +109,7 @@ pub fn show(
         // Undo
         let undo_count = undo_ring.len();
         if ui
-            .add_enabled(undo_count > 0, egui::Button::new("<< Undo"))
+            .add_enabled(undo_count > 0, egui::Button::new("\u{21A9} Undo"))
             .on_hover_text(format!("{} saves in ring", undo_count))
             .clicked()
         {
@@ -132,11 +136,9 @@ pub fn show(
 
         ui.separator();
 
-        // Step mode
-        ui.checkbox(step_mode, "Step");
-        if *step_mode && ui.button("|>").on_hover_text("Advance one frame").clicked() {
-            actions.push(Action::StepOne);
-        }
+        // Step mode — greyed out (stub, requires DLL pause mechanism)
+        ui.add_enabled(false, egui::Checkbox::new(step_mode, "Step"))
+            .on_disabled_hover_text("Step mode requires DLL pause support (not yet implemented)");
     });
 
     ui.horizontal(|ui| {
