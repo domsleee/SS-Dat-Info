@@ -665,6 +665,32 @@ impl eframe::App for TasApp {
 
                 ui.separator();
 
+                // DRIFT ALERT BANNER — large, unmissable warning when drift is detected
+                let max_drift = self.cached_max_drift_x.max(self.cached_max_drift_z);
+                if max_drift > 0.0 && state.mode_enum() == TasMode::Play {
+                    let (bg, text, msg) = if max_drift >= 1.0 {
+                        (
+                            egui::Color32::from_rgb(180, 30, 30),
+                            egui::Color32::WHITE,
+                            format!("DRIFT DETECTED — TAS INVALID  (X={:.6}  Z={:.6})", self.cached_max_drift_x, self.cached_max_drift_z),
+                        )
+                    } else {
+                        (
+                            egui::Color32::from_rgb(180, 140, 20),
+                            egui::Color32::BLACK,
+                            format!("DRIFT WARNING  (X={:.9}  Z={:.9})", self.cached_max_drift_x, self.cached_max_drift_z),
+                        )
+                    };
+                    egui::Frame::none()
+                        .fill(bg)
+                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                        .rounding(4.0)
+                        .show(ui, |ui: &mut egui::Ui| {
+                            ui.label(egui::RichText::new(msg).color(text).strong().size(16.0));
+                        });
+                    ui.separator();
+                }
+
                 // Segment list panel (collapsible)
                 let mut seg_actions = Vec::new();
                 if self.show_segments {
