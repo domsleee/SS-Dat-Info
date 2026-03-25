@@ -650,7 +650,20 @@ impl eframe::App for TasApp {
                         egui::RichText::new(state.mode_str()).strong(),
                     );
                     ui.separator();
-                    ui.label(format!("Frame: {}", state.frame_count));
+                    // Tick counts (primary) — playback position and total recorded
+                    let play_pos = state.playback_pos;
+                    let rec_count = state.recorded_count;
+                    if state.mode_enum() == TasMode::Play && play_pos > 0 {
+                        ui.label(egui::RichText::new(
+                            format!("Tick: {} / {}", play_pos, rec_count)
+                        ).strong());
+                    } else if rec_count > 0 {
+                        ui.label(egui::RichText::new(
+                            format!("Ticks: {}", rec_count)
+                        ).strong());
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new(format!("Frame: {}", state.frame_count)).weak());
                     ui.separator();
                     ui.label(format!(
                         "Pos: ({:.1}, {:.1}, {:.1})",
