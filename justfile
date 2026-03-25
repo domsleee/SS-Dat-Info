@@ -4,9 +4,9 @@ set unstable
 # Default game folder — override with: just --set supreme_folder 'C:\path\to\game'
 supreme_folder := 'T:\Games\SupremeORIG'
 
-# Display_Config build profile — 'release' (slow, optimised) or 'debug' (fast)
-# Override with: just --set dc_profile debug deploy_all
-dc_profile := 'release'
+# Display_Config build profile — 'debug' (fast, default) or 'release' (slow, optimised)
+# Display_Config is a launcher UI, debug is fast enough. Override with: just --set dc_profile release deploy_all
+dc_profile := 'debug'
 
 # ── Build Everything ──────────────────────────────────────────────
 
@@ -43,6 +43,13 @@ tas_rust:
 # Deploy TAS to the game folder (creates TAS_Helper/ next to Supreme.exe)
 deploy: tas
     $ErrorActionPreference = 'Stop'; \
+    $running = @(Get-Process -Name Supreme,Supreme_v1.035,Display_Config,'display-config',tas_ui,tas_test -ErrorAction SilentlyContinue | Sort-Object Id -Unique); \
+    if ($running.Count -gt 0) { \
+        $names = ($running | ForEach-Object { "$($_.ProcessName) [$($_.Id)]" }) -join ', '; \
+        $running | Stop-Process -Force; \
+        Start-Sleep -Milliseconds 500; \
+        Write-Host "Stopped running processes for deploy: $names"; \
+    }; \
     $dest = '{{supreme_folder}}\TAS_Helper'; \
     if (!(Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }; \
     Copy-Item .\TAS\TAS_Helper\Release\TAS_Helper.dll $dest\ -Force; \
@@ -54,6 +61,13 @@ deploy: tas
 # Deploy Display_Config to the game folder
 deploy_display_config: display_config
     $ErrorActionPreference = 'Stop'; \
+    $running = @(Get-Process -Name Supreme,Supreme_v1.035,Display_Config,'display-config',tas_ui,tas_test -ErrorAction SilentlyContinue | Sort-Object Id -Unique); \
+    if ($running.Count -gt 0) { \
+        $names = ($running | ForEach-Object { "$($_.ProcessName) [$($_.Id)]" }) -join ', '; \
+        $running | Stop-Process -Force; \
+        Start-Sleep -Milliseconds 500; \
+        Write-Host "Stopped running processes for deploy: $names"; \
+    }; \
     Copy-Item .\Display_Config\output\Display_Config.exe '{{supreme_folder}}\' -Force; \
     $dest = '{{supreme_folder}}\Display_Config_Resources'; \
     if (!(Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }; \
