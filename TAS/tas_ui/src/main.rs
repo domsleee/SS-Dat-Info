@@ -68,6 +68,7 @@ struct TasApp {
     macro_state: macros::MacroState,
     segment_tracker: recording::SegmentTracker,
     last_mode: u32,
+    cont_catchup_speed: Option<f32>, // saved speed to restore after CONT catch-up
     log_read_cursor: u32,
 
     // Cached max drift (incremental scan instead of per-frame O(n))
@@ -123,6 +124,7 @@ impl TasApp {
             macro_state: macros::MacroState::new(),
             segment_tracker: recording::SegmentTracker::new(),
             last_mode: 0,
+            cont_catchup_speed: None,
             log_read_cursor: 0,
             cached_max_drift_x: 0.0,
             cached_max_drift_z: 0.0,
@@ -383,6 +385,10 @@ impl eframe::App for TasApp {
                         self.segment_tracker.clear();
                     }
                     self.segment_tracker.on_rec_start(start);
+                    // CONT catch-up complete: restore original playback speed
+                    if let Some(saved) = self.cont_catchup_speed.take() {
+                        self.playback_speed = saved;
+                    }
                 }
                 // REC stopped (mode went from REC to OFF)
                 if self.last_mode == 1 && current_mode == 0 {
@@ -540,6 +546,11 @@ impl eframe::App for TasApp {
                         self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
                     }
                     transport::Action::RestartThen(c) => {
+                        // CONT catch-up: boost speed to 4x during playback phase
+                        if c == TasCommand::ArmContinue {
+                            self.cont_catchup_speed = Some(self.playback_speed);
+                            self.playback_speed = 4.0;
+                        }
                         shared.reset_restart_state();
                         shared.send_command(TasCommand::Restart);
                         self.pending_after_restart = Some(c);
@@ -1078,6 +1089,7 @@ mod tests {
             macro_state: macros::MacroState::new(),
             segment_tracker: recording::SegmentTracker::new(),
             last_mode: 0,
+            cont_catchup_speed: None,
             log_read_cursor: 0,
             cached_max_drift_x: 0.0,
             cached_max_drift_z: 0.0,
