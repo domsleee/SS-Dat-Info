@@ -36,7 +36,7 @@ impl TrajectoryCache {
                 self.rec_points
                     .push([state.rec_coords[i][0] as f64, state.rec_coords[i][2] as f64]);
                 self.rec_altitude
-                    .push([i as f64, -(state.rec_coords[i][1] as f64)]);
+                    .push([i as f64, state.rec_coords[i][1] as f64]);
             }
         }
 
@@ -51,7 +51,7 @@ impl TrajectoryCache {
                     state.play_coords[i][2] as f64,
                 ]);
                 self.play_altitude
-                    .push([i as f64, -(state.play_coords[i][1] as f64)]);
+                    .push([i as f64, state.play_coords[i][1] as f64]);
             }
         }
         true
@@ -135,7 +135,7 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
             }
             // Current altitude marker
             let current_frame = state.playback_pos.max(state.recorded_count) as f64;
-            let current_alt = -(state.player_y as f64);
+            let current_alt = state.player_y as f64;
             plot_ui.points(
                 Points::new(vec![[current_frame, current_alt]])
                     .name("Current alt")
@@ -153,10 +153,9 @@ mod tests {
         tas_shared::zeroed_boxed()
     }
 
-    /// Altitude values must be negated: positive game-Y (up in engine)
-    /// should display as negative altitude (down on screen = downhill).
+    /// Altitude values pass through directly (game uses Y-up).
     #[test]
-    fn altitude_negates_y_for_rec() {
+    fn altitude_passes_y_directly_for_rec() {
         let mut state = zeroed_state();
         state.recorded_count = 3;
         state.rec_coords[0] = [0.0, 100.0, 0.0];
@@ -167,16 +166,16 @@ mod tests {
         cache.refresh(&state);
 
         assert_eq!(cache.rec_altitude.len(), 3);
-        assert_eq!(cache.rec_altitude[0][1], -100.0);
-        assert_eq!(cache.rec_altitude[1][1], -50.0);
-        assert_eq!(cache.rec_altitude[2][1], 20.0); // -(-20) = +20
+        assert_eq!(cache.rec_altitude[0][1], 100.0);
+        assert_eq!(cache.rec_altitude[1][1], 50.0);
+        assert_eq!(cache.rec_altitude[2][1], -20.0);
     }
 
-    /// Same negation for PLAY altitude.
+    /// Same pass-through for PLAY altitude.
     #[test]
-    fn altitude_negates_y_for_play() {
+    fn altitude_passes_y_directly_for_play() {
         let mut state = zeroed_state();
-        state.recorded_count = 1; // need at least 1 to not early-return in show()
+        state.recorded_count = 1;
         state.rec_coords[0] = [0.0, 0.0, 0.0];
         state.playback_pos = 2;
         state.play_coords[0] = [0.0, 200.0, 0.0];
@@ -186,8 +185,8 @@ mod tests {
         cache.refresh(&state);
 
         assert_eq!(cache.play_altitude.len(), 2);
-        assert_eq!(cache.play_altitude[0][1], -200.0);
-        assert_eq!(cache.play_altitude[1][1], 75.0);
+        assert_eq!(cache.play_altitude[0][1], 200.0);
+        assert_eq!(cache.play_altitude[1][1], -75.0);
     }
 
     /// Top-down X/Z coordinates are NOT negated.
