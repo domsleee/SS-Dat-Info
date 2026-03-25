@@ -226,16 +226,16 @@ impl TasApp {
                 }
             }
 
-            // F9: Arm REC (only when OFF)
+            // F9: Arm REC — same as clicking REC button (restart first)
             if input.key_pressed(egui::Key::F9) {
                 actions.push(transport::Action::AutoSave);
-                actions.push(transport::Action::Send(TasCommand::ArmRec));
+                actions.push(transport::Action::RestartThen(TasCommand::ArmRec));
                 actions.push(transport::Action::Log("Shortcut: F9 REC".into()));
             }
 
-            // F10: Arm PLAY (only when OFF with data)
+            // F10: Arm PLAY — same as clicking PLAY button (restart first)
             if input.key_pressed(egui::Key::F10) {
-                actions.push(transport::Action::Send(TasCommand::ArmPlay));
+                actions.push(transport::Action::RestartThen(TasCommand::ArmPlay));
                 actions.push(transport::Action::Log("Shortcut: F10 PLAY".into()));
             }
 
@@ -245,10 +245,11 @@ impl TasApp {
                 actions.push(transport::Action::Log("Shortcut: F11 STOP".into()));
             }
 
-            // F12: Continue record
+            // F12: Continue record — same as clicking CONT button (restart first)
             if input.key_pressed(egui::Key::F12) {
                 actions.push(transport::Action::AutoSave);
-                actions.push(transport::Action::Send(TasCommand::ArmContinue));
+                actions.push(transport::Action::SetContinueFrame(self.continue_from_frame));
+                actions.push(transport::Action::RestartThen(TasCommand::ArmContinue));
                 actions.push(transport::Action::Log("Shortcut: F12 CONT".into()));
             }
 
@@ -927,6 +928,30 @@ fn hook_status_dot(ui: &mut egui::Ui, name: &str, hooked: u32) {
 }
 
 fn main() -> eframe::Result {
+    // Single-instance guard via named mutex (cross-platform crate, uses Windows mutex underneath).
+    let instance = single_instance::SingleInstance::new("SSBInspect").unwrap();
+    if !instance.is_single() {
+        eprintln!("SSB Inspect is already running.");
+        #[cfg(windows)]
+        unsafe {
+            use std::ffi::c_void;
+            type HWND = *mut c_void;
+            extern "system" {
+                fn FindWindowW(class: *const u16, title: *const u16) -> HWND;
+                fn SetForegroundWindow(hwnd: HWND) -> i32;
+            }
+            let title: Vec<u16> = "SSB Inspect"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+            if !hwnd.is_null() {
+                SetForegroundWindow(hwnd);
+            }
+        }
+        std::process::exit(0);
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 640.0]),
         ..Default::default()
@@ -1058,6 +1083,12 @@ mod tests {
             .any(|a| matches!(a, transport::Action::Send(c) if *c == cmd))
     }
 
+    fn action_has_restart_then(actions: &[transport::Action], cmd: TasCommand) -> bool {
+        actions
+            .iter()
+            .any(|a| matches!(a, transport::Action::RestartThen(c) if *c == cmd))
+    }
+
     fn action_has_log(actions: &[transport::Action], needle: &str) -> bool {
         actions
             .iter()
@@ -1088,7 +1119,7 @@ mod tests {
     fn shortcut_f9_arms_rec() {
         let mut app = test_app();
         let actions = press_key(&mut app, Key::F9, Modifiers::NONE);
-        assert!(action_has_command(&actions, TasCommand::ArmRec));
+        assert!(action_has_restart_then(&actions, TasCommand::ArmRec));
         assert!(action_has_auto_save(&actions));
         assert!(action_has_log(&actions, "F9"));
     }
@@ -1097,7 +1128,7 @@ mod tests {
     fn shortcut_f10_arms_play() {
         let mut app = test_app();
         let actions = press_key(&mut app, Key::F10, Modifiers::NONE);
-        assert!(action_has_command(&actions, TasCommand::ArmPlay));
+        assert!(action_has_restart_then(&actions, TasCommand::ArmPlay));
         assert!(action_has_log(&actions, "F10"));
     }
 
@@ -1113,7 +1144,7 @@ mod tests {
     fn shortcut_f12_arms_continue() {
         let mut app = test_app();
         let actions = press_key(&mut app, Key::F12, Modifiers::NONE);
-        assert!(action_has_command(&actions, TasCommand::ArmContinue));
+        assert!(action_has_restart_then(&actions, TasCommand::ArmContinue));
         assert!(action_has_auto_save(&actions));
         assert!(action_has_log(&actions, "F12"));
     }
