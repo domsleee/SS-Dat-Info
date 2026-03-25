@@ -1,15 +1,21 @@
 set shell := ["pwsh.exe", "-NoProfile", "-c"]
 
-all:
-    just clean; \
-    task build
+# Build profile for Display_Config Tauri app — 'release' (slow, optimised) or 'debug' (fast)
+# Override with: just --set dc_profile debug all
+dc_profile := 'release'
+
+all: clean display_config display_config_helper
 
 display_config:
     $ErrorActionPreference = 'Stop'; \
-    cd Display_Config && bun tauri build;
-    $ErrorActionPreference = 'Stop'; \
+    $prof = '{{dc_profile}}'; \
+    if ($prof -eq 'debug') { \
+        cd Display_Config\src-tauri && cargo build; \
+    } else { \
+        cd Display_Config && bun tauri build; \
+    }; \
     if (!(Test-Path ./output)) { mkdir output > $null }; \
-    cp Display_Config\src-tauri\target\release\display-config.exe ./output/Display_Config.exe
+    cp "Display_Config\src-tauri\target\$prof\display-config.exe" ./output/Display_Config.exe
 
 display_config_helper:
     $ErrorActionPreference = 'Stop'; \
