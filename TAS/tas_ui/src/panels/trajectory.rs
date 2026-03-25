@@ -144,3 +144,75 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
             );
         });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zeroed_state() -> Box<TasSharedState> {
+        tas_shared::zeroed_boxed()
+    }
+
+    /// Altitude values must be negated: positive game-Y (up in engine)
+    /// should display as negative altitude (down on screen = downhill).
+    #[test]
+    fn altitude_negates_y_for_rec() {
+        let mut state = zeroed_state();
+        state.recorded_count = 3;
+        state.rec_coords[0] = [0.0, 100.0, 0.0];
+        state.rec_coords[1] = [1.0, 50.0, 1.0];
+        state.rec_coords[2] = [2.0, -20.0, 2.0];
+
+        let mut cache = TrajectoryCache::default();
+        cache.refresh(&state);
+
+        assert_eq!(cache.rec_altitude.len(), 3);
+        assert_eq!(cache.rec_altitude[0][1], -100.0);
+        assert_eq!(cache.rec_altitude[1][1], -50.0);
+        assert_eq!(cache.rec_altitude[2][1], 20.0); // -(-20) = +20
+    }
+
+    /// Same negation for PLAY altitude.
+    #[test]
+    fn altitude_negates_y_for_play() {
+        let mut state = zeroed_state();
+        state.recorded_count = 1; // need at least 1 to not early-return in show()
+        state.rec_coords[0] = [0.0, 0.0, 0.0];
+        state.playback_pos = 2;
+        state.play_coords[0] = [0.0, 200.0, 0.0];
+        state.play_coords[1] = [1.0, -75.0, 1.0];
+
+        let mut cache = TrajectoryCache::default();
+        cache.refresh(&state);
+
+        assert_eq!(cache.play_altitude.len(), 2);
+        assert_eq!(cache.play_altitude[0][1], -200.0);
+        assert_eq!(cache.play_altitude[1][1], 75.0);
+    }
+
+    /// Top-down X/Z coordinates are NOT negated.
+    #[test]
+    fn xz_coordinates_not_negated() {
+        let mut state = zeroed_state();
+        state.recorded_count = 1;
+        state.rec_coords[0] = [10.0, 999.0, 30.0];
+
+        let mut cache = TrajectoryCache::default();
+        cache.refresh(&state);
+
+        assert_eq!(cache.rec_points[0][0], 10.0); // X
+        assert_eq!(cache.rec_points[0][1], 30.0); // Z
+    }
+
+    /// Cache dedup: refresh returns false when data hasn't changed.
+    #[test]
+    fn cache_dedup_skips_unchanged() {
+        let mut state = zeroed_state();
+        state.recorded_count = 1;
+        state.rec_coords[0] = [1.0, 2.0, 3.0];
+
+        let mut cache = TrajectoryCache::default();
+        assert!(cache.refresh(&state)); // first call: changed
+        assert!(!cache.refresh(&state)); // second call: no change
+    }
+}
