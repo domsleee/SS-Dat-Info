@@ -1,21 +1,27 @@
 set shell := ["pwsh.exe", "-NoProfile", "-c"]
+set unstable
 
 # Build profile for Display_Config Tauri app — 'release' (slow, optimised) or 'debug' (fast)
 # Override with: just --set dc_profile debug all
 dc_profile := 'release'
 
-all: clean display_config display_config_helper
+all: clean build_components
+
+[parallel]
+build_components: display_config display_config_helper
 
 display_config:
     $ErrorActionPreference = 'Stop'; \
     $prof = '{{dc_profile}}'; \
+    Push-Location .\Display_Config; \
     if ($prof -eq 'debug') { \
-        cd Display_Config\src-tauri && cargo build; \
+        bun tauri build --debug --no-bundle; \
     } else { \
-        cd Display_Config && bun tauri build; \
+        bun tauri build --no-bundle; \
     }; \
-    if (!(Test-Path ./output)) { mkdir output > $null }; \
-    cp "Display_Config\src-tauri\target\$prof\display-config.exe" ./output/Display_Config.exe
+    Pop-Location; \
+    New-Item -ItemType Directory -Path .\output -Force | Out-Null; \
+    cp ".\Display_Config\src-tauri\target\$prof\display-config.exe" .\output\Display_Config.exe
 
 display_config_helper:
     $ErrorActionPreference = 'Stop'; \
@@ -25,8 +31,8 @@ display_config_helper:
     if (Test-Path .\Display_Config_Resources\Display_Config_Helper\Release) { Remove-Item .\Display_Config_Resources\Display_Config_Helper\Release -Recurse -Force }; \
     msbuild .\Display_Config_Resources\Display_Config_Helper\Display_Config_Helper.vcxproj /v:minimal /p:Configuration=Release /m; \
     msbuild .\Display_Config_Resources\Injector\Injector.vcxproj /v:minimal /p:Configuration=Release /m; \
-    if (!(Test-Path ./output)) { mkdir output > $null }; \
-    if (!(Test-Path ./output/Display_Config_Resources)) { mkdir ./output/Display_Config_Resources > $null }; \
+    New-Item -ItemType Directory -Path .\output -Force | Out-Null; \
+    New-Item -ItemType Directory -Path .\output\Display_Config_Resources -Force | Out-Null; \
     cp .\Display_Config_Resources\Display_Config_Helper\Release\Display_Config_Helper.dll ./output/Display_Config_Resources/; \
     cp .\Display_Config_Resources\Injector\Release\Injector.exe ./output/Display_Config_Resources/
 
