@@ -165,7 +165,7 @@ impl ReplayReport {
     }
 }
 
-pub fn run(path: &str, iterations: u32, verbose: bool) -> ReplayReport {
+pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> ReplayReport {
     println!("=== Replay Drift Test ===");
     println!("File: {}", path);
     println!("Iterations: {}", iterations);
@@ -212,10 +212,22 @@ pub fn run(path: &str, iterations: u32, verbose: bool) -> ReplayReport {
     for i in 1..=iterations {
         println!("\n--- Iteration {}/{} ---", i, iterations);
 
-        let matched = harness::restart_play_and_match(&mut client, target, 20);
-        if !matched {
-            println!("  WARNING: Position match failed");
-        }
+        // Focus game for full framerate playback
+        harness::focus_game();
+
+        let matched = if no_match {
+            // Just restart and immediately arm play (no position matching)
+            harness::restart_and_stabilize(&client);
+            harness::arm_play(&mut client);
+            println!("  Position matching skipped (--no-match)");
+            false
+        } else {
+            let m = harness::restart_play_and_match(&mut client, target, 20);
+            if !m {
+                println!("  WARNING: Position match failed");
+            }
+            m
+        };
 
         let play_ok = harness::wait_playback(&client, rec.count);
 

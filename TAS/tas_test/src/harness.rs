@@ -18,8 +18,8 @@ pub fn pico_port() -> String {
 const F5_SETTLE_MS: u64 = 4000;
 /// Frames to wait for physics stabilization after restart.
 const STABILIZE_FRAMES: u32 = 500;
-/// Playback timeout.
-const PLAYBACK_TIMEOUT_SECS: u64 = 30;
+/// Playback timeout (long enough for 65536 frames at ~50fps unfocused).
+const PLAYBACK_TIMEOUT_SECS: u64 = 120;
 
 /// Focus the Supreme Snowboarding window.
 pub fn focus_game() {
@@ -35,6 +35,52 @@ pub fn focus_game() {
         ])
         .output();
     thread::sleep(Duration::from_millis(200));
+}
+
+/// Find the Supreme window handle via PowerShell.
+fn find_supreme_hwnd() -> Option<isize> {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            r#"(Get-Process Supreme -EA SilentlyContinue | Where {$_.Name -notmatch 'service'} | Select -First 1).MainWindowHandle"#,
+        ])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&output.stdout);
+    s.trim().parse::<isize>().ok().filter(|&h| h != 0)
+}
+
+/// Send F5 via PostMessage (no focus required).
+fn send_f5_postmessage() {
+    if let Some(hwnd) = find_supreme_hwnd() {
+        #[allow(non_snake_case)]
+        let WM_KEYDOWN: u32 = 0x0100;
+        #[allow(non_snake_case)]
+        let WM_KEYUP: u32 = 0x0101;
+        #[allow(non_snake_case)]
+        let VK_F5: usize = 0x74;
+        // Use PowerShell to call PostMessage since we can't link user32 from pure Rust easily
+        let script = format!(
+            r#"
+            Add-Type @'
+using System; using System.Runtime.InteropServices;
+public class W {{ [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l); }}
+'@
+            [W]::PostMessage([IntPtr]::new({}), {}, [IntPtr]::new({}), [IntPtr]::Zero) | Out-Null
+            Start-Sleep -Milliseconds 50
+            [W]::PostMessage([IntPtr]::new({}), {}, [IntPtr]::new({}), [IntPtr]::Zero) | Out-Null
+            "#,
+            hwnd, WM_KEYDOWN, VK_F5,
+            hwnd, WM_KEYUP, VK_F5,
+        );
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output();
+        println!("  F5 sent via PostMessage (hwnd={})", hwnd);
+    } else {
+        eprintln!("  ERROR: Cannot find Supreme window for PostMessage F5");
+    }
 }
 
 /// Send F5 via Pico HID to restart the race.
@@ -53,19 +99,10 @@ pub fn send_f5_pico() {
         }
         Err(e) => {
             eprintln!(
-                "  WARNING: Failed to open {}: {}. Using SendKeys fallback.",
+                "  WARNING: Failed to open {}: {}. Using PostMessage fallback.",
                 port, e
             );
-            let _ = Command::new("powershell")
-                .args([
-                    "-NoProfile",
-                    "-Command",
-                    r#"
-                    $wshell = New-Object -ComObject wscript.shell
-                    $wshell.SendKeys('{F5}')
-                "#,
-                ])
-                .output();
+            send_f5_postmessage();
         }
     }
 }
@@ -94,8 +131,18 @@ pub fn check_liveness(client: &TasSharedMemoryClient) -> bool {
 }
 
 /// F5 restart + wait for stabilization. Returns true if successful.
+/// Uses double-F5: first F5 normalizes game state, second F5 produces
+/// the deterministic restart position. This ensures consistent starting
+/// positions regardless of what the game was doing before.
 pub fn restart_and_stabilize(client: &TasSharedMemoryClient) -> bool {
-    println!("  Sending F5 to restart...");
+    // First F5: normalize game state
+    println!("  Sending F5 (normalize)...");
+    send_f5_pico();
+    thread::sleep(Duration::from_millis(F5_SETTLE_MS));
+    wait_frames(client, 100); // brief wait for game to restart
+
+    // Second F5: deterministic restart from normalized state
+    println!("  Sending F5 (restart)...");
     send_f5_pico();
     thread::sleep(Duration::from_millis(F5_SETTLE_MS));
     wait_frames(client, STABILIZE_FRAMES);
@@ -182,9 +229,110 @@ pub fn get_position(client: &TasSharedMemoryClient) -> [f32; 3] {
     [s.player_x, s.player_y, s.player_z]
 }
 
-/// F5 restart + stabilize, then start PLAY and check if play_coords[0]
-/// matches the target (rec_coords[0]). If not, stop and retry F5.
-/// Returns true if matched and playback is running.
+/// Find the Supreme Snowboarding process ID.
+fn find_game_pid() -> Option<u32> {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            r#"(Get-Process Supreme -EA SilentlyContinue | Where {$_.Name -notmatch 'service'} | Select -First 1).Id"#,
+        ])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&output.stdout);
+    s.trim().parse::<u32>().ok().filter(|&id| id != 0)
+}
+
+/// Force the player position in game memory via WriteProcessMemory.
+/// Writes to player struct offsets +0xF8/FC/100 (pos) and +0x104/108/10C (prev),
+/// plus physics sub-object at [player+0x110]+0x3B4..3C8.
+fn force_position_in_game(player_ptr: u32, target: [f32; 3]) -> bool {
+    let pid = match find_game_pid() {
+        Some(p) => p,
+        None => {
+            eprintln!("  WARNING: Cannot find game PID for position forcing");
+            return false;
+        }
+    };
+
+    // Build a PowerShell script to WriteProcessMemory
+    let script = format!(
+        r#"
+Add-Type @'
+using System; using System.Runtime.InteropServices;
+public class Mem {{
+    [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(int a, bool b, int pid);
+    [DllImport("kernel32.dll")] public static extern bool WriteProcessMemory(IntPtr h, IntPtr addr, byte[] buf, int sz, out int written);
+    [DllImport("kernel32.dll")] public static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, int sz, out int read);
+    [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+}}
+'@
+$h = [Mem]::OpenProcess(0x38, $false, {pid})
+if ($h -eq [IntPtr]::Zero) {{ Write-Output "FAIL:OpenProcess"; exit }}
+$w = 0
+$xb = [BitConverter]::GetBytes([float]{x})
+$yb = [BitConverter]::GetBytes([float]{y})
+$zb = [BitConverter]::GetBytes([float]{z})
+$pp = [IntPtr]::new({pp})
+# Primary position
+[Mem]::WriteProcessMemory($h, [IntPtr]::new({pp} + 0xF8), $xb, 4, [ref]$w) | Out-Null
+[Mem]::WriteProcessMemory($h, [IntPtr]::new({pp} + 0xFC), $yb, 4, [ref]$w) | Out-Null
+[Mem]::WriteProcessMemory($h, [IntPtr]::new({pp} + 0x100), $zb, 4, [ref]$w) | Out-Null
+# Secondary/prev position
+[Mem]::WriteProcessMemory($h, [IntPtr]::new({pp} + 0x104), $xb, 4, [ref]$w) | Out-Null
+[Mem]::WriteProcessMemory($h, [IntPtr]::new({pp} + 0x108), $yb, 4, [ref]$w) | Out-Null
+[Mem]::WriteProcessMemory($h, [IntPtr]::new({pp} + 0x10C), $zb, 4, [ref]$w) | Out-Null
+# Read physics sub-object pointer at player+0x110
+$buf4 = New-Object byte[] 4
+[Mem]::ReadProcessMemory($h, [IntPtr]::new({pp} + 0x110), $buf4, 4, [ref]$w) | Out-Null
+$physPtr = [BitConverter]::ToUInt32($buf4, 0)
+if ($physPtr -ne 0) {{
+    [Mem]::WriteProcessMemory($h, [IntPtr]::new($physPtr + 0x3B4), $xb, 4, [ref]$w) | Out-Null
+    [Mem]::WriteProcessMemory($h, [IntPtr]::new($physPtr + 0x3B8), $yb, 4, [ref]$w) | Out-Null
+    [Mem]::WriteProcessMemory($h, [IntPtr]::new($physPtr + 0x3BC), $zb, 4, [ref]$w) | Out-Null
+    [Mem]::WriteProcessMemory($h, [IntPtr]::new($physPtr + 0x3C0), $xb, 4, [ref]$w) | Out-Null
+    [Mem]::WriteProcessMemory($h, [IntPtr]::new($physPtr + 0x3C4), $yb, 4, [ref]$w) | Out-Null
+    [Mem]::WriteProcessMemory($h, [IntPtr]::new($physPtr + 0x3C8), $zb, 4, [ref]$w) | Out-Null
+}}
+[Mem]::CloseHandle($h) | Out-Null
+Write-Output "OK"
+"#,
+        pid = pid,
+        pp = player_ptr,
+        x = target[0],
+        y = target[1],
+        z = target[2],
+    );
+
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output();
+
+    match output {
+        Ok(o) => {
+            let out = String::from_utf8_lossy(&o.stdout);
+            if out.trim() == "OK" {
+                println!(
+                    "  Forced start position: ({:.3}, {:.3}, {:.3}) at player_ptr=0x{:X}",
+                    target[0], target[1], target[2], player_ptr
+                );
+                true
+            } else {
+                eprintln!("  WARNING: Position force failed: {}", out.trim());
+                false
+            }
+        }
+        Err(e) => {
+            eprintln!("  WARNING: Position force PS error: {}", e);
+            false
+        }
+    }
+}
+
+/// F5 restart + stabilize, then start PLAY and check if play_coords[0] matches target.
+/// No position forcing — relies on F5 producing deterministic restart positions.
+/// F5 produces ~3 quantized positions; retries until one matches naturally.
+/// Returns true if playback is running with correct start position.
 pub fn restart_play_and_match(
     client: &mut TasSharedMemoryClient,
     target: [f32; 3],
@@ -193,7 +341,7 @@ pub fn restart_play_and_match(
     for attempt in 0..=max_retries {
         if attempt > 0 {
             println!(
-                "  Retry {}/{}: play_coords[0] mismatch, restarting...",
+                "  Retry {}/{}: restarting...",
                 attempt, max_retries
             );
         }
@@ -201,6 +349,7 @@ pub fn restart_play_and_match(
             eprintln!("  ERROR: Game not alive after F5");
             return false;
         }
+
         arm_play(client);
         // Wait for at least 1 frame of playback to capture play_coords[0]
         thread::sleep(Duration::from_millis(100));
@@ -215,9 +364,7 @@ pub fn restart_play_and_match(
         let match_y = pc0[1].to_bits() == target[1].to_bits();
         let match_z = pc0[2].to_bits() == target[2].to_bits();
         if match_x && match_y && match_z {
-            if attempt > 0 {
-                println!("  Position matched on attempt {}", attempt + 1);
-            }
+            println!("  Position matched (attempt {})", attempt + 1);
             return true;
         }
         let dx = (pc0[0] as f64 - target[0] as f64).abs();
@@ -232,8 +379,8 @@ pub fn restart_play_and_match(
     false
 }
 
-/// F5 restart + stabilize, then start REC and check if rec_coords[0]
-/// matches the target. If not, stop and retry F5.
+/// F5 restart + stabilize, force start position, then start REC and check if
+/// rec_coords[0] matches the target.
 /// Returns true if matched and recording is running.
 pub fn restart_rec_and_match(
     client: &mut TasSharedMemoryClient,
@@ -251,6 +398,14 @@ pub fn restart_rec_and_match(
             eprintln!("  ERROR: Game not alive after F5");
             return false;
         }
+
+        // Force the start position before recording
+        let player_ptr = client.state().player_ptr;
+        if player_ptr != 0 && (target[0] != 0.0 || target[1] != 0.0 || target[2] != 0.0) {
+            force_position_in_game(player_ptr, target);
+            thread::sleep(Duration::from_millis(50));
+        }
+
         arm_rec(client);
         // Wait for at least 1 frame of recording to capture rec_coords[0]
         thread::sleep(Duration::from_millis(100));
@@ -265,10 +420,8 @@ pub fn restart_rec_and_match(
         let match_y = rc0[1].to_bits() == target[1].to_bits();
         let match_z = rc0[2].to_bits() == target[2].to_bits();
         if match_x && match_y && match_z {
-            if attempt > 0 {
-                println!("  Position matched on attempt {}", attempt + 1);
-            }
-            return true; // Recording is running, caller continues
+            println!("  Position matched (attempt {})", attempt + 1);
+            return true;
         }
         let dx = (rc0[0] as f64 - target[0] as f64).abs();
         let dz = (rc0[2] as f64 - target[2] as f64).abs();
