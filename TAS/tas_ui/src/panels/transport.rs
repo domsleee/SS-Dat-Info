@@ -20,6 +20,7 @@ pub fn show(
     recorded: u32,
     continue_from: &mut u32,
     playback_speed: &mut f32,
+    cont_catchup_speed: &mut f32,
     step_mode: &mut bool,
     undo_ring: &UndoRing,
     _state: &TasSharedState,
@@ -83,13 +84,13 @@ pub fn show(
         let cont_label = "\u{23ED} CONT  F12"; // Unicode next track symbol
         if ui
             .add_enabled(is_off && recorded > 0, egui::Button::new(cont_label))
-            .on_hover_text("Continue recording from a specific frame (plays back at 4x)")
+            .on_hover_text(format!("Continue recording from a specific frame (catch-up at {}x)", *cont_catchup_speed))
             .clicked()
         {
             actions.push(Action::AutoSave);
             actions.push(Action::Log(format!(
-                "Continue recording from frame {}",
-                *continue_from
+                "Continue recording from frame {} ({}x catch-up)",
+                *continue_from, *cont_catchup_speed
             )));
             actions.push(Action::SetContinueFrame(*continue_from));
             actions.push(Action::RestartThen(TasCommand::ArmContinue));
@@ -103,6 +104,13 @@ pub fn show(
                     .speed(1.0),
             );
         }
+        ui.add(
+            egui::DragValue::new(cont_catchup_speed)
+                .range(1.0..=20.0)
+                .prefix("catch-up: ")
+                .suffix("x")
+                .speed(0.5),
+        ).on_hover_text("CONT catch-up speed (max effective ~12x at 60 FPS)");
 
         ui.separator();
 

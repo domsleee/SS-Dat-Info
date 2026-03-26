@@ -15,6 +15,7 @@ pub struct Settings {
 
     // Playback
     pub playback_speed: f32,
+    pub cont_catchup_speed: f32,
 }
 
 impl Default for Settings {
@@ -28,6 +29,7 @@ impl Default for Settings {
             show_macros: false,
             show_config: false,
             playback_speed: 1.0,
+            cont_catchup_speed: 12.0,
         }
     }
 }
