@@ -69,6 +69,7 @@ struct TasApp {
     segment_tracker: recording::SegmentTracker,
     last_mode: u32,
     cont_catchup_speed: Option<f32>, // saved speed to restore after CONT catch-up
+    cont_catchup_multiplier: f32,   // configurable CONT catch-up speed (default 12x)
     log_read_cursor: u32,
 
     // Cached max drift (incremental scan instead of per-frame O(n))
@@ -125,6 +126,7 @@ impl TasApp {
             segment_tracker: recording::SegmentTracker::new(),
             last_mode: 0,
             cont_catchup_speed: None,
+            cont_catchup_multiplier: settings.cont_catchup_speed,
             log_read_cursor: 0,
             cached_max_drift_x: 0.0,
             cached_max_drift_z: 0.0,
@@ -356,6 +358,7 @@ impl eframe::App for TasApp {
             show_macros: self.show_macros,
             show_config: self.show_config,
             playback_speed: self.playback_speed,
+            cont_catchup_speed: self.cont_catchup_multiplier,
         };
         s.save();
     }
@@ -546,10 +549,10 @@ impl eframe::App for TasApp {
                         self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
                     }
                     transport::Action::RestartThen(c) => {
-                        // CONT catch-up: boost speed to 4x during playback phase
+                        // CONT catch-up: boost speed during playback phase
                         if c == TasCommand::ArmContinue {
                             self.cont_catchup_speed = Some(self.playback_speed);
-                            self.playback_speed = 4.0;
+                            self.playback_speed = self.cont_catchup_multiplier;
                         }
                         shared.reset_restart_state();
                         shared.send_command(TasCommand::Restart);
@@ -594,6 +597,7 @@ impl eframe::App for TasApp {
                     recorded,
                     &mut self.continue_from_frame,
                     &mut self.playback_speed,
+                    &mut self.cont_catchup_multiplier,
                     &mut self.step_mode,
                     &self.undo_ring,
                     shared.state(),
@@ -1091,6 +1095,7 @@ mod tests {
             segment_tracker: recording::SegmentTracker::new(),
             last_mode: 0,
             cont_catchup_speed: None,
+            cont_catchup_multiplier: 12.0,
             log_read_cursor: 0,
             cached_max_drift_x: 0.0,
             cached_max_drift_z: 0.0,
