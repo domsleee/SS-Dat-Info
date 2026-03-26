@@ -834,8 +834,10 @@ mod tests {
         let Some(mut client) = make_client_or_skip() else {
             return;
         };
-        assert_eq!(client.restart_state(), 0);
-        // On stub, reset is a no-op but should not panic
+        let initial = client.restart_state();
+        // Live shared memory may have any valid state (0=idle, 1=in_progress, 2=done)
+        assert!(initial <= 2, "restart_state out of range: {}", initial);
+        // Reset brings it to idle; on stub this is a no-op but should not panic
         client.reset_restart_state();
         assert_eq!(client.restart_state(), 0);
     }
