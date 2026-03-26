@@ -279,6 +279,12 @@ static void ProcessCommand(TasSharedState* s) {
             s->bb3b10_call_count = 0;
             s->handler_block_count = 0;
             s->bb3b10_block_count = 0;
+
+            // No position forcing — F5 matching must happen naturally.
+            // Position forcing (even velocity-preserving) creates physics state
+            // inconsistency: position says rc0 but terrain/rotation/angular state
+            // is from wherever F5 actually spawned. This causes drift with steering.
+
             s->mode = MODE_PLAY;
             g_cave2_pendingLog = 2;
             break;
