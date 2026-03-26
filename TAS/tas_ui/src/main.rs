@@ -656,25 +656,26 @@ impl eframe::App for TasApp {
                         TasMode::Rec => egui::Color32::from_rgb(255, 80, 80),
                         TasMode::Play => egui::Color32::from_rgb(80, 200, 80),
                     };
-                    ui.colored_label(
-                        mode_color,
-                        egui::RichText::new(state.mode_str()).strong(),
-                    );
-                    ui.separator();
-                    // Tick counts (primary) — playback position and total recorded
+                    // Headline: MODE + tick progress (16pt, prominent)
                     let play_pos = state.playback_pos;
                     let rec_count = state.recorded_count;
-                    if state.mode_enum() == TasMode::Play && play_pos > 0 {
-                        ui.label(egui::RichText::new(
-                            format!("Tick: {} / {}", play_pos, rec_count)
-                        ).strong());
-                    } else if rec_count > 0 {
-                        ui.label(egui::RichText::new(
-                            format!("Ticks: {}", rec_count)
-                        ).strong());
-                    }
-                    ui.separator();
-                    ui.label(egui::RichText::new(format!("Frame: {}", state.frame_count)).weak());
+                    let headline = match state.mode_enum() {
+                        TasMode::Play if play_pos > 0 && rec_count > 0 => {
+                            let pct = (play_pos as f64 / rec_count as f64 * 100.0).min(100.0);
+                            format!("{} {} / {} ticks ({:.0}%)", state.mode_str(), play_pos, rec_count, pct)
+                        }
+                        TasMode::Rec if rec_count > 0 => {
+                            format!("{} {} ticks", state.mode_str(), rec_count)
+                        }
+                        _ if rec_count > 0 => {
+                            format!("{} ({} ticks recorded)", state.mode_str(), rec_count)
+                        }
+                        _ => state.mode_str().to_string(),
+                    };
+                    ui.colored_label(
+                        mode_color,
+                        egui::RichText::new(headline).strong().size(16.0),
+                    );
                     ui.separator();
                     ui.label(format!(
                         "Pos: ({:.1}, {:.1}, {:.1})",
