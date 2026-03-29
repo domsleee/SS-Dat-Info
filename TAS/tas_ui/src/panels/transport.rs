@@ -21,7 +21,7 @@ pub fn show(
     continue_from: &mut u32,
     playback_speed: &mut f32,
     cont_catchup_speed: &mut f32,
-    step_mode: &mut bool,
+    _step_mode: &mut bool,
     undo_ring: &UndoRing,
     _state: &TasSharedState,
     catchup_active: bool,
