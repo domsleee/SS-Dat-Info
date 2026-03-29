@@ -22,7 +22,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             show_pico_panel: false,
-            show_segments: true,
+            show_segments: false,
             show_trajectory: false,
             show_rotation: false,
             show_analysis: false,

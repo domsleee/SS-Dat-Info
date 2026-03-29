@@ -601,6 +601,7 @@ impl eframe::App for TasApp {
                     &mut self.step_mode,
                     &self.undo_ring,
                     shared.state(),
+                    self.cont_catchup_speed.is_some(),
                 );
 
                 // Process actions - use log_lines directly to avoid borrow conflicts
@@ -612,6 +613,11 @@ impl eframe::App for TasApp {
                             self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
                         }
                         transport::Action::RestartThen(c) => {
+                            // CONT catch-up: boost speed during playback phase
+                            if c == TasCommand::ArmContinue {
+                                self.cont_catchup_speed = Some(self.playback_speed);
+                                self.playback_speed = self.cont_catchup_multiplier;
+                            }
                             shared.reset_restart_state();
                             shared.send_command(TasCommand::Restart);
                             self.pending_after_restart = Some(c);
@@ -1090,7 +1096,7 @@ mod tests {
             show_analysis: false,
             show_rotation: false,
             show_macros: false,
-            show_segments: true,
+            show_segments: false,
             macro_state: macros::MacroState::new(),
             segment_tracker: recording::SegmentTracker::new(),
             last_mode: 0,
@@ -1335,7 +1341,7 @@ mod tests {
     #[test]
     fn panel_defaults() {
         let app = test_app();
-        assert!(app.show_segments);
+        assert!(!app.show_segments);
         assert!(!app.show_trajectory);
         assert!(!app.show_analysis);
         assert!(!app.show_macros);

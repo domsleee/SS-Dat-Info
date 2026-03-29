@@ -37,8 +37,8 @@ fn pitch_from_matrix(m: &[f32; 9]) -> f32 {
 
 fn yaw_from_matrix(m: &[f32; 9]) -> f32 {
     // Three.js XYZ: euler.y = asin(m13) = asin(m[2])
-    // Negate for display correction (reference negates euler.y)
-    -(m[2].clamp(-1.0, 1.0).asin())
+    // NOT negated: positive yaw = turning left in-game shows as turning left
+    m[2].clamp(-1.0, 1.0).asin()
 }
 
 fn roll_from_matrix(m: &[f32; 9]) -> f32 {
@@ -272,7 +272,7 @@ mod tests {
     ///   [sin45  0   cos45]
     ///
     /// XYZ extraction: euler.y = asin(-sin45) = -45 deg
-    /// After negate: yaw = +45 deg
+    /// Yaw is NOT negated: left-handed +45 maps to display -45.
     #[test]
     fn pure_yaw_45_degrees() {
         let angle = std::f32::consts::FRAC_PI_4;
@@ -280,7 +280,7 @@ mod tests {
         let s = angle.sin();
         let m: [f32; 9] = [c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c];
         let yaw = yaw_from_matrix(&m);
-        assert!((yaw - angle).abs() < 1e-5, "Expected ~45 deg yaw, got {}", yaw.to_degrees());
+        assert!((yaw + angle).abs() < 1e-5, "Expected ~-45 deg yaw, got {}", yaw.to_degrees());
         assert!((pitch_from_matrix(&m)).abs() < 1e-5);
         assert!((roll_from_matrix(&m)).abs() < 1e-5);
     }
@@ -338,9 +338,9 @@ mod tests {
         let pitch = pitch_from_matrix(&m).to_degrees();
         let yaw = yaw_from_matrix(&m).to_degrees();
         let roll = roll_from_matrix(&m).to_degrees();
-        // Reference: pitch=-114.06, yaw=0.75, roll=-4.13
+        // Reference: pitch=-114.06, yaw=-0.75 (inverted from ref), roll=-4.13
         assert!((pitch - (-114.06)).abs() < 0.5, "pitch={}", pitch);
-        assert!((yaw - 0.75).abs() < 0.5, "yaw={}", yaw);
+        assert!((yaw - (-0.75)).abs() < 0.5, "yaw={}", yaw);
         assert!((roll - (-4.13)).abs() < 0.5, "roll={}", roll);
     }
 
@@ -356,9 +356,9 @@ mod tests {
         let pitch = pitch_from_matrix(&m).to_degrees();
         let yaw = yaw_from_matrix(&m).to_degrees();
         let roll = roll_from_matrix(&m).to_degrees();
-        // Reference: pitch=46.21, yaw=10.08, roll=-7.49
+        // Reference: pitch=46.21, yaw=-10.08 (inverted from ref), roll=-7.49
         assert!((pitch - 46.21).abs() < 0.5, "pitch={}", pitch);
-        assert!((yaw - 10.08).abs() < 0.5, "yaw={}", yaw);
+        assert!((yaw - (-10.08)).abs() < 0.5, "yaw={}", yaw);
         assert!((roll - (-7.49)).abs() < 0.5, "roll={}", roll);
     }
 }

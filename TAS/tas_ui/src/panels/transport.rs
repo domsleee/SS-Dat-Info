@@ -24,6 +24,7 @@ pub fn show(
     step_mode: &mut bool,
     undo_ring: &UndoRing,
     _state: &TasSharedState,
+    catchup_active: bool,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
 
@@ -126,27 +127,28 @@ pub fn show(
 
         ui.separator();
 
-        // Playback speed (only enabled when actively playing or recording)
-        ui.label("Speed:");
-        for &spd in &[0.25f32, 0.5, 1.0, 2.0, 4.0] {
-            let label = format!("{}x", spd);
-            let btn = egui::Button::new(&label);
-            let btn = if (*playback_speed - spd).abs() < 0.01 {
-                btn.fill(egui::Color32::from_rgb(70, 70, 120))
-            } else {
-                btn
-            };
-            if ui.add_enabled(!is_off, btn).clicked() {
-                *playback_speed = spd;
-                actions.push(Action::Log(format!("Playback speed: {}x", spd)));
+        // Playback speed (disabled during CONT catch-up to avoid state conflicts)
+        if catchup_active {
+            ui.label(
+                egui::RichText::new(format!("Catching up at {}x...", *cont_catchup_speed))
+                    .color(egui::Color32::from_rgb(200, 160, 60)),
+            );
+        } else {
+            ui.label("Speed:");
+            for &spd in &[0.25f32, 0.5, 1.0, 2.0, 4.0] {
+                let label = format!("{}x", spd);
+                let btn = egui::Button::new(&label);
+                let btn = if (*playback_speed - spd).abs() < 0.01 {
+                    btn.fill(egui::Color32::from_rgb(70, 70, 120))
+                } else {
+                    btn
+                };
+                if ui.add_enabled(!is_off, btn).clicked() {
+                    *playback_speed = spd;
+                    actions.push(Action::Log(format!("Playback speed: {}x", spd)));
+                }
             }
         }
-
-        ui.separator();
-
-        // Step mode — greyed out (stub, requires DLL pause mechanism)
-        ui.add_enabled(false, egui::Checkbox::new(step_mode, "Step"))
-            .on_disabled_hover_text("Step mode requires DLL pause support (not yet implemented)");
     });
 
     ui.horizontal(|ui| {
