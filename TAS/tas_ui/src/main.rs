@@ -1,3 +1,4 @@
+mod history_store;
 mod macros;
 mod panels;
 mod pico;
@@ -42,7 +43,14 @@ use panels::{
     transport,
 };
 use pico::PicoState;
-use recording::RecordingHistory;
+use recording::{RecordingHistory, RecordingSessionKind};
+
+#[derive(Clone, Copy)]
+struct ActiveRecordingSession {
+    kind: RecordingSessionKind,
+    start_tick: u32,
+    max_recorded_count: u32,
+}
 
 struct TasApp {
     shared: Option<TasSharedMemoryClient>,
@@ -53,6 +61,9 @@ struct TasApp {
     show_pico_panel: bool,
     pico: PicoState,
     history: RecordingHistory,
+    history_store: Option<history_store::HistoryStore>,
+    recovery_store: Option<recording::RecoveryStore>,
+    pending_recovery: Option<recording::RecoveryCheckpoint>,
     log_lines: Vec<String>,
     timeline_zoom: f32,
     timeline_scroll: f32,
@@ -69,6 +80,8 @@ struct TasApp {
     show_history: bool,
     macro_state: macros::MacroState,
     segment_tracker: recording::SegmentTracker,
+    active_recording_session: Option<ActiveRecordingSession>,
+    pending_session_kind: Option<RecordingSessionKind>,
     last_mode: u32,
     cont_catchup_speed: Option<f32>, // saved speed to restore after CONT catch-up
     cont_catchup_multiplier: f32,    // configurable CONT catch-up speed (default 12x)
@@ -106,6 +119,27 @@ impl TasApp {
         };
 
         let settings = settings::Settings::load();
+        let history_store = history_store::HistoryStore::new().ok();
+        let history_store_notice = history_store
+            .as_ref()
+            .map(|store| format!("History autosave: {}", store.path().display()));
+        let mut recovery_store = recording::RecoveryStore::new().ok();
+        let recovery_store_notice = recovery_store
+            .as_ref()
+            .map(|store| format!("Crash recovery checkpoints: {}", store.root().display()));
+        let mut recovery_load_notice = None;
+        let pending_recovery = if let Some(store) = recovery_store.as_ref() {
+            match store.load_pending() {
+                Ok(checkpoint) => checkpoint,
+                Err(err) => {
+                    recovery_store = None;
+                    recovery_load_notice = Some(format!("Crash recovery disabled: {}", err));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut app = Self {
             shared,
             connect_error,
@@ -113,6 +147,9 @@ impl TasApp {
             show_pico_panel: settings.show_pico_panel,
             pico: PicoState::new(),
             history: RecordingHistory::new(64),
+            history_store,
+            recovery_store,
+            pending_recovery,
             log_lines: Vec::new(),
             timeline_zoom: 1.0,
             timeline_scroll: 0.0,
@@ -129,6 +166,8 @@ impl TasApp {
             show_history: settings.show_history,
             macro_state: macros::MacroState::new(),
             segment_tracker: recording::SegmentTracker::new(),
+            active_recording_session: None,
+            pending_session_kind: None,
             last_mode: 0,
             cont_catchup_speed: None,
             cont_catchup_multiplier: settings.cont_catchup_speed,
@@ -156,6 +195,23 @@ impl TasApp {
         }
         // Pico auto-detected but panel hidden by default (use View menu to show)
         let _ = app.pico.auto_detected;
+        if let Some(msg) = history_store_notice {
+            app.push_log(&msg);
+        }
+        if let Some(msg) = recovery_store_notice {
+            app.push_log(&msg);
+        }
+        if let Some(msg) = recovery_load_notice {
+            app.push_log(&msg);
+        }
+        if let Some(recovery) = app.pending_recovery.as_ref() {
+            app.push_log(&format!(
+                "Recovery available: {} (saved {})",
+                recovery.label(),
+                recovery.saved_at
+            ));
+        }
+        app.persist_history_if_needed();
 
         app
     }
@@ -177,6 +233,145 @@ impl TasApp {
         if self.log_lines.len() > 500 {
             self.log_lines.drain(..100);
         }
+    }
+
+    fn persist_history_if_needed(&mut self) {
+        let persist_result = match self.history_store.as_mut() {
+            Some(store) => Some(store.persist_if_changed(&self.history)),
+            None => None,
+        };
+
+        if let Some(Err(err)) = persist_result {
+            self.history_store = None;
+            self.push_log(&format!("History autosave disabled: {}", err));
+        }
+    }
+
+    fn start_recording_session(&mut self, continue_from_frame: u32, recorded_count: u32) {
+        let kind = self
+            .pending_session_kind
+            .take()
+            .unwrap_or_else(|| {
+                if continue_from_frame > 0 {
+                    RecordingSessionKind::Continue
+                } else {
+                    RecordingSessionKind::Rec
+                }
+            });
+        let start_tick = match kind {
+            RecordingSessionKind::Rec => 0,
+            RecordingSessionKind::Continue => continue_from_frame,
+        };
+
+        if kind == RecordingSessionKind::Rec && self.last_mode == 0 {
+            self.segment_tracker.clear();
+        }
+        self.segment_tracker.on_rec_start(start_tick);
+        self.active_recording_session = Some(ActiveRecordingSession {
+            kind,
+            start_tick,
+            max_recorded_count: recorded_count.max(start_tick),
+        });
+    }
+
+    fn persist_recovery_snapshot_if_needed(
+        &mut self,
+        snapshot: &recording::RecordingSnapshot,
+        session: &recording::RecoverySessionContext,
+        force: bool,
+    ) {
+        let persist_result = match self.recovery_store.as_mut() {
+            Some(store) => Some(store.persist_snapshot_if_needed(
+                snapshot,
+                &self.segment_tracker.segments,
+                session,
+                force,
+            )),
+            None => None,
+        };
+
+        if let Some(Err(err)) = persist_result {
+            self.recovery_store = None;
+            self.push_log(&format!("Crash recovery disabled: {}", err));
+        }
+    }
+
+    fn update_recording_recovery_progress(&mut self, snapshot: &recording::RecordingSnapshot) {
+        let maybe_session = {
+            let Some(session) = self.active_recording_session.as_mut() else {
+                return;
+            };
+            session.max_recorded_count = session.max_recorded_count.max(snapshot.recorded_count);
+            recording::RecoverySessionContext::from_ticks(
+                session.kind,
+                session.start_tick,
+                session.max_recorded_count,
+            )
+        };
+
+        if let Some(session_context) = maybe_session {
+            self.persist_recovery_snapshot_if_needed(snapshot, &session_context, false);
+        }
+    }
+
+    fn finalize_recording_session(
+        &mut self,
+        snapshot: &recording::RecordingSnapshot,
+        recorded_count: u32,
+    ) {
+        let Some(session) = self.active_recording_session.take() else {
+            return;
+        };
+
+        let end_tick = recorded_count.max(session.max_recorded_count);
+        let Some(session_context) =
+            recording::RecoverySessionContext::from_ticks(session.kind, session.start_tick, end_tick)
+        else {
+            return;
+        };
+
+        let _ = self
+            .history
+            .push_snapshot_data(snapshot.clone(), session_context.label.clone());
+        self.persist_recovery_snapshot_if_needed(snapshot, &session_context, true);
+    }
+
+    fn restore_pending_recovery(&mut self) {
+        let Some(recovery) = self.pending_recovery.take() else {
+            return;
+        };
+
+        if let Some(ref mut shared) = self.shared {
+            let recovery_label = recovery.label().to_string();
+            recovery.snapshot.restore_to(shared.state_mut());
+            self.segment_tracker.restore_from(recovery.segments);
+            self.continue_from_frame = shared.state().recorded_count;
+            self.continue_from_text = self.continue_from_frame.to_string();
+            let _ = self.history.push_snapshot(shared.state(), recovery_label.clone());
+            self.push_log(&format!("Restored crash recovery: {}", recovery_label));
+
+            if let Some(store) = self.recovery_store.as_mut() {
+                if let Err(err) = store.clear_pending() {
+                    self.recovery_store = None;
+                    self.push_log(&format!("Crash recovery disabled: {}", err));
+                }
+            }
+        } else {
+            self.push_log("Crash recovery restore requires an active game connection.");
+            self.pending_recovery = Some(recovery);
+        }
+    }
+
+    fn discard_pending_recovery(&mut self) {
+        self.pending_recovery = None;
+        if let Some(store) = self.recovery_store.as_mut() {
+            if let Err(err) = store.clear_pending() {
+                self.recovery_store = None;
+                self.push_log(&format!("Crash recovery disabled: {}", err));
+                return;
+            }
+        }
+        self.push_log("Discarded pending crash recovery checkpoint.");
     }
 
     /// Check if the game process is still alive by monitoring frame_count advancement.
@@ -237,7 +432,6 @@ impl TasApp {
 
             // F9: Arm REC — same as clicking REC button (restart first)
             if input.key_pressed(egui::Key::F9) {
-                actions.push(transport::Action::AutoSave("Before REC"));
                 actions.push(transport::Action::RestartThen(TasCommand::ArmRec));
                 actions.push(transport::Action::Log("Shortcut: F9 REC".into()));
             }
@@ -256,7 +450,6 @@ impl TasApp {
 
             // F12: Continue record — same as clicking CONT button (restart first)
             if input.key_pressed(egui::Key::F12) {
-                actions.push(transport::Action::AutoSave("Before CONT"));
                 actions.push(transport::Action::SetContinueFrame(
                     self.continue_from_frame,
                 ));
@@ -409,19 +602,21 @@ impl eframe::App for TasApp {
         // Check game health (crash detection)
         self.check_game_health();
 
-        // Track mode transitions for segment tracking
+        // Track mode transitions for segment history + recovery checkpoints.
+        let mut mode_snapshot: Option<(u32, u32, u32, recording::RecordingSnapshot)> = None;
         if let Some(ref shared) = self.shared {
-            let current_mode = shared.mode_volatile();
+            mode_snapshot = Some((
+                shared.mode_volatile(),
+                shared.recorded_count_volatile(),
+                shared.state().continue_from_frame,
+                recording::RecordingSnapshot::from_state(shared.state()),
+            ));
+        }
+        if let Some((current_mode, recorded, continue_from, state_snapshot)) = mode_snapshot {
             if current_mode != self.last_mode {
-                let recorded = shared.recorded_count_volatile();
                 // REC started
                 if current_mode == 1 {
-                    let start = shared.state().continue_from_frame;
-                    if start == 0 && self.last_mode == 0 {
-                        // Fresh recording — clear old segments
-                        self.segment_tracker.clear();
-                    }
-                    self.segment_tracker.on_rec_start(start);
+                    self.start_recording_session(continue_from, recorded);
                     // CONT catch-up complete: restore original playback speed
                     if let Some(saved) = self.cont_catchup_speed.take() {
                         self.playback_speed = saved;
@@ -430,13 +625,19 @@ impl eframe::App for TasApp {
                 // REC stopped (mode went from REC to OFF)
                 if self.last_mode == 1 && current_mode == 0 {
                     self.segment_tracker.on_rec_stop(recorded);
+                    self.finalize_recording_session(&state_snapshot, recorded);
                 }
                 self.last_mode = current_mode;
+            }
+            if current_mode == 1 {
+                self.update_recording_recovery_progress(&state_snapshot);
             }
         }
 
         // Process keyboard shortcuts first
         let shortcut_actions = self.handle_shortcuts(ctx);
+        let mut restore_pending_recovery = false;
+        let mut discard_pending_recovery = false;
 
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -466,6 +667,24 @@ impl eframe::App for TasApp {
                             }
                         }
                     }
+                    if let Some(recovery) = self.pending_recovery.as_ref() {
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Crash recovery: {}",
+                                recovery.label()
+                            ))
+                            .small(),
+                        );
+                        if ui.button("Restore Crash Recovery").clicked() {
+                            ui.close_menu();
+                            restore_pending_recovery = true;
+                        }
+                        if ui.button("Discard Crash Recovery").clicked() {
+                            ui.close_menu();
+                            discard_pending_recovery = true;
+                        }
+                    }
                     ui.separator();
                     if ui.button("Dump Diagnostics...").clicked() {
                         ui.close_menu();
@@ -492,6 +711,15 @@ impl eframe::App for TasApp {
                 });
             });
         });
+
+        if restore_pending_recovery {
+            self.restore_pending_recovery();
+            restore_pending_recovery = false;
+        }
+        if discard_pending_recovery {
+            self.discard_pending_recovery();
+            discard_pending_recovery = false;
+        }
 
         // Bottom log panel
         egui::TopBottomPanel::bottom("log_panel")
@@ -567,15 +795,63 @@ impl eframe::App for TasApp {
 
         // Right-side history panel (optional)
         let mut history_actions = Vec::new();
+        let history_dir = self
+            .history_store
+            .as_ref()
+            .and_then(|store| store.path().parent().map(|path| path.to_path_buf()));
+        let mut open_history_dir = false;
         if self.show_history {
             egui::SidePanel::right("history_panel")
                 .resizable(true)
                 .default_width(280.0)
                 .show(ctx, |ui| {
                     ui.label(egui::RichText::new("History").strong());
+                    if let Some(store) = self.history_store.as_ref() {
+                        ui.label(
+                            egui::RichText::new(format!("Autosave: {}", store.path().display()))
+                                .small()
+                                .color(egui::Color32::from_gray(145)),
+                        );
+                    }
+                    if history_dir.is_some() && ui.button("Open History Folder").clicked() {
+                        open_history_dir = true;
+                    }
+                    if let Some(recovery) = self.pending_recovery.as_ref() {
+                        ui.separator();
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 180, 90),
+                            format!("Crash recovery: {}", recovery.label()),
+                        );
+                        if ui.button("Restore Recovery").clicked() {
+                            restore_pending_recovery = true;
+                        }
+                        if ui.button("Discard Recovery").clicked() {
+                            discard_pending_recovery = true;
+                        }
+                    }
                     ui.separator();
                     history_actions = history::show(ui, &self.history);
                 });
+        }
+
+        if open_history_dir {
+            if let Some(dir) = history_dir.as_deref() {
+                match open_in_file_browser(dir) {
+                    Ok(()) => {
+                        self.push_log(&format!("Opened history folder: {}", dir.display()));
+                    }
+                    Err(err) => {
+                        self.push_log(&format!("Open history folder failed: {}", err));
+                    }
+                }
+            }
+        }
+
+        if restore_pending_recovery {
+            self.restore_pending_recovery();
+        }
+        if discard_pending_recovery {
+            self.discard_pending_recovery();
         }
 
         // Process history panel restores
@@ -635,14 +911,20 @@ impl eframe::App for TasApp {
                             self.cont_catchup_speed = Some(self.playback_speed);
                             self.playback_speed = self.cont_catchup_multiplier;
                         }
+                        match c {
+                            TasCommand::ArmRec => {
+                                self.pending_session_kind = Some(RecordingSessionKind::Rec)
+                            }
+                            TasCommand::ArmContinue => {
+                                self.pending_session_kind = Some(RecordingSessionKind::Continue)
+                            }
+                            _ => {}
+                        }
                         shared.reset_restart_state();
                         shared.send_command(TasCommand::Restart);
                         self.pending_after_restart = Some(c);
                         self.log_lines
                             .push(format!("[{}] In-process F5 restart → {:?}", ts, c));
-                    }
-                    transport::Action::AutoSave(label) => {
-                        let _ = self.history.push_snapshot(shared.state(), label);
                     }
                     transport::Action::Undo => {
                         if let Some(snap) = self.history.undo() {
@@ -709,16 +991,20 @@ impl eframe::App for TasApp {
                                 self.cont_catchup_speed = Some(self.playback_speed);
                                 self.playback_speed = self.cont_catchup_multiplier;
                             }
+                            match c {
+                                TasCommand::ArmRec => {
+                                    self.pending_session_kind = Some(RecordingSessionKind::Rec)
+                                }
+                                TasCommand::ArmContinue => {
+                                    self.pending_session_kind = Some(RecordingSessionKind::Continue)
+                                }
+                                _ => {}
+                            }
                             shared.reset_restart_state();
                             shared.send_command(TasCommand::Restart);
                             self.pending_after_restart = Some(c);
                             self.log_lines
                                 .push(format!("[{}] In-process F5 restart → {:?}", ts, c));
-                        }
-                        transport::Action::AutoSave(label) => {
-                            let _ = self.history.push_snapshot(shared.state(), label);
-                            self.log_lines
-                                .push(format!("[{}] Snapshot: {}", ts, label));
                         }
                         transport::Action::Undo => {
                             if let Some(snap) = self.history.undo() {
@@ -1065,6 +1351,7 @@ impl eframe::App for TasApp {
                             self.continue_from_frame = frame;
                             self.continue_from_text = frame.to_string();
                             shared.state_mut().continue_from_frame = frame;
+                            self.pending_session_kind = Some(RecordingSessionKind::Continue);
                             shared.send_command(TasCommand::ArmContinue);
                             self.segment_tracker.segments.retain(|s| s.start_tick < frame);
                             self.log_lines.push(format!(
@@ -1092,6 +1379,8 @@ impl eframe::App for TasApp {
                 self.log_lines.push(format!("[{}] {} {}", ts, prefix, text));
             }
         }
+
+        self.persist_history_if_needed();
 
         // Auto-refresh at ~30fps
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
@@ -1136,6 +1425,38 @@ fn all_core_hooks_ok(state: &tas_shared::TasSharedState) -> bool {
         && state.cave1c_hooked == 1
         && state.cave1d_hooked == 1
         && state.cave5_hooked == 1
+}
+
+fn open_in_file_browser(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("failed to launch explorer: {}", e))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("failed to launch open: {}", e))?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("failed to launch xdg-open: {}", e))?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("opening folders is not supported on this platform".to_string())
 }
 
 fn main() -> eframe::Result {
@@ -1238,6 +1559,9 @@ mod tests {
             show_pico_panel: false,
             pico: PicoState::new(),
             history: RecordingHistory::new(64),
+            history_store: None,
+            recovery_store: None,
+            pending_recovery: None,
             log_lines: Vec::new(),
             timeline_zoom: 1.0,
             timeline_scroll: 0.0,
@@ -1254,6 +1578,8 @@ mod tests {
             show_history: false,
             macro_state: macros::MacroState::new(),
             segment_tracker: recording::SegmentTracker::new(),
+            active_recording_session: None,
+            pending_session_kind: None,
             last_mode: 0,
             cont_catchup_speed: None,
             cont_catchup_multiplier: 12.0,
@@ -1313,12 +1639,6 @@ mod tests {
             .any(|a| matches!(a, transport::Action::Log(s) if s.contains(needle)))
     }
 
-    fn action_has_auto_save(actions: &[transport::Action]) -> bool {
-        actions
-            .iter()
-            .any(|a| matches!(a, transport::Action::AutoSave(_)))
-    }
-
     // ===== App startup without DLL =====
 
     #[test]
@@ -1338,7 +1658,6 @@ mod tests {
         let mut app = test_app();
         let actions = press_key(&mut app, Key::F9, Modifiers::NONE);
         assert!(action_has_restart_then(&actions, TasCommand::ArmRec));
-        assert!(action_has_auto_save(&actions));
         assert!(action_has_log(&actions, "F9"));
     }
 
@@ -1363,7 +1682,6 @@ mod tests {
         let mut app = test_app();
         let actions = press_key(&mut app, Key::F12, Modifiers::NONE);
         assert!(action_has_restart_then(&actions, TasCommand::ArmContinue));
-        assert!(action_has_auto_save(&actions));
         assert!(action_has_log(&actions, "F12"));
     }
 
@@ -1558,6 +1876,71 @@ mod tests {
         assert_eq!(app.segment_tracker.segments.len(), 2);
         assert_eq!(app.segment_tracker.segments[1].start_tick, 200);
         assert_eq!(app.segment_tracker.segments[1].end_tick, 500);
+    }
+
+    fn state_with_recorded_count(recorded_count: u32) -> Box<TasSharedState> {
+        let mut state = tas_shared::zeroed_boxed();
+        state.recorded_count = recorded_count;
+        for i in 0..(recorded_count as usize).min(tas_shared::TAS_MAX_TICKS) {
+            state.input_log[i] = 0x01;
+            state.rec_coords[i] = [i as f32, 0.0, i as f32];
+        }
+        state
+    }
+
+    #[test]
+    fn completed_rec_session_pushes_history_entry() {
+        let mut app = test_app();
+        let state = state_with_recorded_count(2303);
+        app.active_recording_session = Some(ActiveRecordingSession {
+            kind: RecordingSessionKind::Rec,
+            start_tick: 0,
+            max_recorded_count: 2303,
+        });
+
+        let snapshot = recording::RecordingSnapshot::from_state(&state);
+        app.finalize_recording_session(&snapshot, 2303);
+
+        assert_eq!(app.history.len(), 1);
+        assert_eq!(app.history.entries()[0].label, "Recorded 23:03");
+    }
+
+    #[test]
+    fn completed_cont_session_pushes_history_entry() {
+        let mut app = test_app();
+        let state = state_with_recorded_count(5303);
+        app.active_recording_session = Some(ActiveRecordingSession {
+            kind: RecordingSessionKind::Continue,
+            start_tick: 3000,
+            max_recorded_count: 5303,
+        });
+
+        let snapshot = recording::RecordingSnapshot::from_state(&state);
+        app.finalize_recording_session(&snapshot, 5303);
+
+        assert_eq!(app.history.len(), 1);
+        assert_eq!(
+            app.history.entries()[0].label,
+            "Continued 23:03, total 53:03"
+        );
+    }
+
+    #[test]
+    fn play_stop_noop_does_not_push_history_entry() {
+        let mut app = test_app();
+        let state = state_with_recorded_count(100);
+
+        let snapshot = recording::RecordingSnapshot::from_state(&state);
+        app.finalize_recording_session(&snapshot, 100);
+        assert_eq!(app.history.len(), 0);
+
+        app.active_recording_session = Some(ActiveRecordingSession {
+            kind: RecordingSessionKind::Rec,
+            start_tick: 100,
+            max_recorded_count: 100,
+        });
+        app.finalize_recording_session(&snapshot, 100);
+        assert_eq!(app.history.len(), 0);
     }
 
     // ===== Pending restart state machine =====

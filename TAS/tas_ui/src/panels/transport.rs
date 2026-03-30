@@ -6,7 +6,6 @@ use crate::recording::RecordingHistory;
 pub enum Action {
     Send(TasCommand),
     RestartThen(TasCommand),
-    AutoSave(&'static str),
     Undo,
     Redo,
     StepOne,
@@ -49,9 +48,6 @@ pub fn show(
             .add_enabled(is_off, egui::Button::new(rec_text))
             .clicked()
         {
-            if recorded > 0 {
-                actions.push(Action::AutoSave("Before REC"));
-            }
             actions.push(Action::RestartThen(TasCommand::ArmRec));
         }
 
@@ -94,7 +90,6 @@ pub fn show(
             .clicked()
         {
             normalize_continue_frame_text(continue_from_text, continue_from, recorded);
-            actions.push(Action::AutoSave("Before CONT"));
             actions.push(Action::Log(format!(
                 "Continue recording from frame {} ({}x catch-up)",
                 *continue_from, *cont_catchup_speed
