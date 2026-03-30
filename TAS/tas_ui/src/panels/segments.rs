@@ -48,11 +48,13 @@ pub fn show(
         if segments.len() > 1
             && ui
                 .small_button("Merge All")
-                .on_hover_text("Combine all segments into one contiguous recording (removes boundaries)")
+                .on_hover_text(
+                    "Combine all segments into one contiguous recording (removes boundaries)",
+                )
                 .clicked()
-            {
-                actions.push(SegmentAction::SpliceAll);
-            }
+        {
+            actions.push(SegmentAction::SpliceAll);
+        }
     });
     ui.add_space(4.0);
 

@@ -57,10 +57,12 @@ struct TasApp {
     timeline_zoom: f32,
     timeline_scroll: f32,
     continue_from_frame: u32,
+    continue_from_text: String,
     playback_speed: f32,
     step_mode: bool,
     show_trajectory: bool,
     show_analysis: bool,
+    show_debug_drift: bool,
     show_rotation: bool,
     show_macros: bool,
     show_segments: bool,
@@ -115,10 +117,12 @@ impl TasApp {
             timeline_zoom: 1.0,
             timeline_scroll: 0.0,
             continue_from_frame: 0,
+            continue_from_text: "0".to_string(),
             playback_speed: settings.playback_speed,
             step_mode: false,
             show_trajectory: settings.show_trajectory,
             show_analysis: settings.show_analysis,
+            show_debug_drift: settings.show_debug_drift,
             show_rotation: settings.show_rotation,
             show_macros: settings.show_macros,
             show_segments: settings.show_segments,
@@ -383,6 +387,7 @@ impl eframe::App for TasApp {
             show_trajectory: self.show_trajectory,
             show_rotation: self.show_rotation,
             show_analysis: self.show_analysis,
+            show_debug_drift: self.show_debug_drift,
             show_macros: self.show_macros,
             show_history: self.show_history,
             show_config: self.show_config,
@@ -479,6 +484,7 @@ impl eframe::App for TasApp {
                     ui.checkbox(&mut self.show_trajectory, "Trajectory Viewer");
                     ui.checkbox(&mut self.show_rotation, "Rotation Display");
                     ui.checkbox(&mut self.show_analysis, "Analysis Panel");
+                    ui.checkbox(&mut self.show_debug_drift, "Debug drift");
                     ui.checkbox(&mut self.show_macros, "Macro Panel");
                     ui.checkbox(&mut self.show_history, "History Panel");
                     ui.separator();
@@ -653,6 +659,8 @@ impl eframe::App for TasApp {
                         }
                     }
                     transport::Action::SetContinueFrame(frame) => {
+                        self.continue_from_frame = frame;
+                        self.continue_from_text = frame.to_string();
                         shared.state_mut().continue_from_frame = frame;
                     }
                     transport::Action::StepOne => {
@@ -678,6 +686,7 @@ impl eframe::App for TasApp {
                     mode,
                     recorded,
                     &mut self.continue_from_frame,
+                    &mut self.continue_from_text,
                     &mut self.playback_speed,
                     &mut self.cont_catchup_multiplier,
                     &mut self.step_mode,
@@ -730,6 +739,8 @@ impl eframe::App for TasApp {
                             }
                         }
                         transport::Action::SetContinueFrame(frame) => {
+                            self.continue_from_frame = frame;
+                            self.continue_from_text = frame.to_string();
                             shared.state_mut().continue_from_frame = frame;
                         }
                         transport::Action::StepOne => {
@@ -749,44 +760,62 @@ impl eframe::App for TasApp {
 
                 ui.separator();
 
-                // Status line
+                // Status block
                 let state = shared.state();
-                ui.horizontal(|ui| {
-                    let mode_color = match state.mode_enum() {
-                        TasMode::Off => egui::Color32::GRAY,
-                        TasMode::Rec => egui::Color32::from_rgb(255, 80, 80),
-                        TasMode::Play => egui::Color32::from_rgb(80, 200, 80),
-                    };
-                    // Headline: MODE + tick progress (16pt, prominent)
-                    let play_pos = state.playback_pos;
-                    let rec_count = state.recorded_count;
-                    let headline = match state.mode_enum() {
-                        TasMode::Play if play_pos > 0 && rec_count > 0 => {
-                            let pct = (play_pos as f64 / rec_count as f64 * 100.0).min(100.0);
-                            format!("{} {} / {} ticks ({:.0}%)", state.mode_str(), play_pos, rec_count, pct)
-                        }
-                        TasMode::Rec if rec_count > 0 => {
-                            format!("{} {} ticks", state.mode_str(), rec_count)
-                        }
-                        _ if rec_count > 0 => {
-                            format!("{} ({} ticks recorded)", state.mode_str(), rec_count)
-                        }
-                        _ => state.mode_str().to_string(),
-                    };
-                    ui.colored_label(
-                        mode_color,
-                        egui::RichText::new(headline).strong().size(16.0),
-                    );
-                    ui.separator();
+                let mode_color = match state.mode_enum() {
+                    TasMode::Off => egui::Color32::GRAY,
+                    TasMode::Rec => egui::Color32::from_rgb(255, 80, 80),
+                    TasMode::Play => egui::Color32::from_rgb(80, 200, 80),
+                };
+                let play_pos = state.playback_pos;
+                let rec_count = state.recorded_count;
+                let headline = match state.mode_enum() {
+                    TasMode::Play if play_pos > 0 && rec_count > 0 => {
+                        let pct = (play_pos as f64 / rec_count as f64 * 100.0).min(100.0);
+                        format!(
+                            "{} {} / {} ticks ({:.0}%)",
+                            state.mode_str(),
+                            play_pos,
+                            rec_count,
+                            pct
+                        )
+                    }
+                    TasMode::Rec if rec_count > 0 => {
+                        format!("{} {} ticks", state.mode_str(), rec_count)
+                    }
+                    _ if rec_count > 0 => {
+                        format!("{} ({} ticks recorded)", state.mode_str(), rec_count)
+                    }
+                    _ => state.mode_str().to_string(),
+                };
+                let hooks_ok = all_core_hooks_ok(state);
+                let hooks_color = if hooks_ok {
+                    egui::Color32::from_rgb(80, 200, 80)
+                } else {
+                    egui::Color32::from_rgb(255, 120, 60)
+                };
+                let vx = state.velocity_x as f64;
+                let vy = state.velocity_y as f64;
+                let vz = state.velocity_z as f64;
+                let speed_kmh = (vx * vx + vy * vy + vz * vz).sqrt() * 360.0;
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            mode_color,
+                            egui::RichText::new(headline.clone()).strong().size(16.0),
+                        );
+                        ui.separator();
+                        ui.colored_label(hooks_color, egui::RichText::new("●").size(15.0));
+                        ui.label("Hooks");
+                    });
                     ui.label(format!(
-                        "Pos: ({:.1}, {:.1}, {:.1})",
-                        state.player_x, state.player_y, state.player_z
+                        "Pos: ({:.1}, {:.1}, {:.1})    Speed: {:.1} km/h",
+                        state.player_x, state.player_y, state.player_z, speed_kmh
                     ));
-                    ui.separator();
-                    hook_status_dot(ui, "C2", state.cave2_hooked);
-                    hook_status_dot(ui, "C1C", state.cave1c_hooked);
-                    hook_status_dot(ui, "C1D", state.cave1d_hooked);
-                    hook_status_dot(ui, "C5", state.cave5_hooked);
+                    ui.label(format!(
+                        "Vel: ({:.2}, {:.2}, {:.2})    Tick: {}",
+                        state.velocity_x, state.velocity_y, state.velocity_z, state.tick_count
+                    ));
                 });
 
                 ui.separator();
@@ -850,24 +879,38 @@ impl eframe::App for TasApp {
                     ui.vertical(|ui| {
                         ui.set_width(timeline_width);
                         ui.label(egui::RichText::new("Input Timeline").strong());
-                        timeline::show(
+                        let continue_changed = timeline::show(
                             ui,
                             state,
                             &mut self.timeline_zoom,
                             &mut self.timeline_scroll,
+                            &mut self.continue_from_frame,
                         );
+                        if continue_changed {
+                            self.continue_from_text = self.continue_from_frame.to_string();
+                        }
                     });
 
                     ui.separator();
 
-                    // Right panel: analysis or drift monitor (trajectory/rotation are rendered below)
+                    // Right panel: optional analysis/debug widgets (trajectory/rotation are rendered below)
                     ui.vertical(|ui| {
                         if self.show_analysis {
                             ui.label(egui::RichText::new("Input Analysis").strong());
                             analysis::show(ui, state, &mut self.analysis_cache);
-                        } else {
-                            ui.label(egui::RichText::new("Drift Monitor").strong());
+                        }
+                        if self.show_debug_drift {
+                            if self.show_analysis {
+                                ui.separator();
+                            }
+                            ui.label(egui::RichText::new("Debug drift").strong());
                             drift::show(ui, state, &mut self.drift_cache);
+                        }
+                        if !self.show_analysis && !self.show_debug_drift {
+                            ui.colored_label(
+                                egui::Color32::from_gray(140),
+                                "Enable Analysis Panel or Debug drift from View.",
+                            );
                         }
                     });
                 });
@@ -902,22 +945,8 @@ impl eframe::App for TasApp {
                     });
                 }
 
-                // Telemetry + Diagnostics footer
+                // Diagnostics footer
                 ui.separator();
-                ui.horizontal(|ui| {
-                    let vx = state.velocity_x as f64;
-                    let vy = state.velocity_y as f64;
-                    let vz = state.velocity_z as f64;
-                    let speed_kmh = (vx * vx + vy * vy + vz * vz).sqrt() * 360.0;
-                    ui.label(format!(
-                        "Speed: {:.1} km/h | Vel: ({:.2}, {:.2}, {:.2}) | Tick: {}",
-                        speed_kmh,
-                        state.velocity_x,
-                        state.velocity_y,
-                        state.velocity_z,
-                        state.tick_count,
-                    ));
-                });
                 ui.horizontal(|ui| {
                     ui.label(format!(
                         "Recorded: {} | Playback: {} | BB3B10: {} | Blocks: {} | Events: {}",
@@ -982,6 +1011,9 @@ impl eframe::App for TasApp {
                     );
                 });
 
+                // Keep shared continue target aligned with transport text field / timeline marker.
+                shared.state_mut().continue_from_frame = self.continue_from_frame;
+
                 // Process segment actions (after state borrow is no longer needed)
                 let recorded_count = shared.state().recorded_count;
                 for action in seg_actions {
@@ -1031,6 +1063,7 @@ impl eframe::App for TasApp {
                                 .history
                                 .push_snapshot(shared.state(), "Before segment redo");
                             self.continue_from_frame = frame;
+                            self.continue_from_text = frame.to_string();
                             shared.state_mut().continue_from_frame = frame;
                             shared.send_command(TasCommand::ArmContinue);
                             self.segment_tracker.segments.retain(|s| s.start_tick < frame);
@@ -1098,13 +1131,11 @@ fn is_supreme_running() -> bool {
     false
 }
 
-fn hook_status_dot(ui: &mut egui::Ui, name: &str, hooked: u32) {
-    let (label, color) = if hooked == 1 {
-        (format!("[{}]", name), egui::Color32::from_rgb(80, 200, 80))
-    } else {
-        (format!("({})", name), egui::Color32::from_rgb(255, 80, 80))
-    };
-    ui.colored_label(color, label);
+fn all_core_hooks_ok(state: &tas_shared::TasSharedState) -> bool {
+    state.cave2_hooked == 1
+        && state.cave1c_hooked == 1
+        && state.cave1d_hooked == 1
+        && state.cave5_hooked == 1
 }
 
 fn main() -> eframe::Result {
@@ -1211,10 +1242,12 @@ mod tests {
             timeline_zoom: 1.0,
             timeline_scroll: 0.0,
             continue_from_frame: 0,
+            continue_from_text: "0".to_string(),
             playback_speed: 1.0,
             step_mode: false,
             show_trajectory: false,
             show_analysis: false,
+            show_debug_drift: false,
             show_rotation: false,
             show_macros: false,
             show_segments: false,
@@ -1477,6 +1510,7 @@ mod tests {
         assert!(!app.show_segments);
         assert!(!app.show_trajectory);
         assert!(!app.show_analysis);
+        assert!(!app.show_debug_drift);
         assert!(!app.show_macros);
         assert!(!app.show_pico_panel);
         assert!(!app.show_history);
@@ -1487,10 +1521,12 @@ mod tests {
         let mut app = test_app();
         app.show_trajectory = true;
         app.show_analysis = true;
+        app.show_debug_drift = true;
         app.show_macros = true;
         app.show_history = true;
         assert!(app.show_trajectory);
         assert!(app.show_analysis);
+        assert!(app.show_debug_drift);
         assert!(app.show_macros);
         assert!(app.show_history);
     }

@@ -20,6 +20,7 @@ pub fn show(
     mode: TasMode,
     recorded: u32,
     continue_from: &mut u32,
+    continue_from_text: &mut String,
     playback_speed: &mut f32,
     cont_catchup_speed: &mut f32,
     _step_mode: &mut bool,
@@ -92,6 +93,7 @@ pub fn show(
             ))
             .clicked()
         {
+            normalize_continue_frame_text(continue_from_text, continue_from, recorded);
             actions.push(Action::AutoSave("Before CONT"));
             actions.push(Action::Log(format!(
                 "Continue recording from frame {} ({}x catch-up)",
@@ -102,12 +104,19 @@ pub fn show(
         }
 
         if recorded > 0 {
-            ui.add(
-                egui::DragValue::new(continue_from)
-                    .range(0..=recorded)
-                    .prefix("from: ")
-                    .speed(1.0),
+            ui.label("from:");
+            let response = ui.add_sized(
+                [72.0, 22.0],
+                egui::TextEdit::singleline(continue_from_text).hint_text("frame"),
             );
+            if response.changed() {
+                if let Some(parsed) = parse_continue_frame(continue_from_text, recorded) {
+                    *continue_from = parsed;
+                }
+            }
+            if response.lost_focus() {
+                normalize_continue_frame_text(continue_from_text, continue_from, recorded);
+            }
         }
         ui.add(
             egui::DragValue::new(cont_catchup_speed)
@@ -171,4 +180,23 @@ pub fn show(
     });
 
     actions
+}
+
+fn parse_continue_frame(text: &str, recorded: u32) -> Option<u32> {
+    text.trim()
+        .parse::<u32>()
+        .ok()
+        .map(|v| if recorded > 0 { v.min(recorded) } else { 0 })
+}
+
+fn normalize_continue_frame_text(text: &mut String, continue_from: &mut u32, recorded: u32) {
+    if let Some(parsed) = parse_continue_frame(text, recorded) {
+        *continue_from = parsed;
+    }
+    if recorded > 0 {
+        *continue_from = (*continue_from).min(recorded);
+    } else {
+        *continue_from = 0;
+    }
+    *text = continue_from.to_string();
 }
