@@ -1,11 +1,16 @@
-use crate::recording::{HistoryEntryKind, RecordingHistory};
-use serde::Serialize;
+use crate::recording::{PersistedHistory, RecordingHistory};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 pub struct HistoryStore {
     path: PathBuf,
     last_len: usize,
     last_current_index: Option<usize>,
+}
+
+pub struct LoadedHistory {
+    pub path: PathBuf,
+    pub history: PersistedHistory,
 }
 
 impl HistoryStore {
@@ -43,7 +48,7 @@ impl HistoryStore {
             return Ok(false);
         }
 
-        let payload = PersistedHistory::from_history(history);
+        let payload = history.to_persisted();
         let json = serde_json::to_string_pretty(&payload)
             .map_err(|e| format!("failed to serialize history: {}", e))?;
         std::fs::write(&self.path, json).map_err(|e| {
@@ -58,6 +63,60 @@ impl HistoryStore {
         self.last_current_index = current_index;
         Ok(true)
     }
+}
+
+pub fn load_latest_history() -> Result<Option<LoadedHistory>, String> {
+    load_latest_history_from_root(&default_history_root_dir())
+}
+
+fn load_latest_history_from_root(root: &Path) -> Result<Option<LoadedHistory>, String> {
+    if !root.exists() {
+        return Ok(None);
+    }
+
+    let mut latest: Option<(SystemTime, PathBuf)> = None;
+    let dir_entries = std::fs::read_dir(root)
+        .map_err(|e| format!("failed to read history root {}: {}", root.display(), e))?;
+
+    for dir_entry in dir_entries.flatten() {
+        let path = dir_entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let history_path = path.join("history.json");
+        if !history_path.is_file() {
+            continue;
+        }
+
+        let modified = history_path
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+
+        let replace = latest
+            .as_ref()
+            .map(|(current_time, _)| modified > *current_time)
+            .unwrap_or(true);
+        if replace {
+            latest = Some((modified, history_path));
+        }
+    }
+
+    let Some((_, path)) = latest else {
+        return Ok(None);
+    };
+
+    let json = std::fs::read_to_string(&path)
+        .map_err(|e| format!("failed to read persisted history {}: {}", path.display(), e))?;
+    let history: PersistedHistory = serde_json::from_str(&json).map_err(|e| {
+        format!(
+            "failed to parse persisted history {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+
+    Ok(Some(LoadedHistory { path, history }))
 }
 
 fn session_dir_name() -> String {
@@ -83,61 +142,10 @@ fn user_home_dir() -> Option<PathBuf> {
         })
 }
 
-#[derive(Serialize)]
-struct PersistedHistory {
-    version: u32,
-    saved_at: String,
-    current_index: Option<usize>,
-    entries: Vec<PersistedHistoryEntry>,
-}
-
-impl PersistedHistory {
-    fn from_history(history: &RecordingHistory) -> Self {
-        let current_index = history.current_index();
-        let entries = history
-            .entries()
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| PersistedHistoryEntry {
-                index,
-                timestamp: entry.timestamp.clone(),
-                label: entry.label.clone(),
-                kind: kind_name(entry.kind),
-                can_restore: entry.can_restore(),
-                is_current: current_index == Some(index),
-            })
-            .collect();
-
-        Self {
-            version: 1,
-            saved_at: chrono::Local::now().to_rfc3339(),
-            current_index,
-            entries,
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct PersistedHistoryEntry {
-    index: usize,
-    timestamp: String,
-    label: String,
-    kind: &'static str,
-    can_restore: bool,
-    is_current: bool,
-}
-
-fn kind_name(kind: HistoryEntryKind) -> &'static str {
-    match kind {
-        HistoryEntryKind::Snapshot => "snapshot",
-        HistoryEntryKind::SaveMarker => "save_marker",
-        HistoryEntryKind::LoadSnapshot => "load_snapshot",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tas_shared::zeroed_boxed;
 
     fn unique_temp_root(prefix: &str) -> PathBuf {
@@ -163,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn persist_if_changed_writes_history_json() {
+    fn persist_if_changed_writes_restorable_history_json() {
         let root = unique_temp_root("tas_ui_history_store_write");
         std::fs::create_dir_all(&root).unwrap();
 
@@ -174,10 +182,33 @@ mod tests {
         let json = std::fs::read_to_string(store.path()).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(value["version"], 1);
+        assert_eq!(value["version"], 2);
         assert_eq!(value["entries"].as_array().unwrap().len(), 3);
         assert_eq!(value["entries"][0]["kind"], "snapshot");
         assert_eq!(value["entries"][2]["kind"], "save_marker");
+        assert_eq!(value["entries"][0]["snapshot"]["recorded_count"], 1);
+        assert_eq!(value["entries"][0]["snapshot"]["input_log"][0], 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_latest_history_round_trips_snapshots() {
+        let root = unique_temp_root("tas_ui_history_store_load");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut store = HistoryStore::new_in_root(root.clone()).unwrap();
+        let history = sample_history();
+        assert!(store.persist_if_changed(&history).unwrap());
+
+        let loaded = load_latest_history_from_root(&root).unwrap().unwrap();
+        let mut restored = RecordingHistory::new(8);
+        restored.apply_persisted(loaded.history).unwrap();
+
+        assert_eq!(restored.len(), history.len());
+        let snap = restored.restore_index(0).unwrap();
+        assert_eq!(snap.recorded_count, 1);
+        assert_eq!(snap.input_log[0], 0x01);
 
         let _ = std::fs::remove_dir_all(root);
     }

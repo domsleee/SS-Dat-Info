@@ -119,6 +119,14 @@ impl TasApp {
         };
 
         let settings = settings::Settings::load();
+        let mut history_load_notice = None;
+        let pending_history = match history_store::load_latest_history() {
+            Ok(history) => history,
+            Err(err) => {
+                history_load_notice = Some(format!("History restore disabled: {}", err));
+                None
+            }
+        };
         let history_store = history_store::HistoryStore::new().ok();
         let history_store_notice = history_store
             .as_ref()
@@ -195,7 +203,17 @@ impl TasApp {
         }
         // Pico auto-detected but panel hidden by default (use View menu to show)
         let _ = app.pico.auto_detected;
+        if let Some(loaded) = pending_history {
+            let source = loaded.path.display().to_string();
+            match app.history.apply_persisted(loaded.history) {
+                Ok(()) => app.push_log(&format!("Recovered history from {}", source)),
+                Err(err) => app.push_log(&format!("History restore skipped: {}", err)),
+            }
+        }
         if let Some(msg) = history_store_notice {
+            app.push_log(&msg);
+        }
+        if let Some(msg) = history_load_notice {
             app.push_log(&msg);
         }
         if let Some(msg) = recovery_store_notice {
@@ -235,6 +253,44 @@ impl TasApp {
         }
     }
 
+    #[cfg(test)]
+    fn begin_cont_catchup(&mut self) {
+        if self.cont_catchup_speed.is_none() {
+            self.cont_catchup_speed = Some(self.playback_speed);
+        }
+        self.playback_speed = self.cont_catchup_multiplier;
+    }
+
+    fn clear_cont_catchup(&mut self) {
+        if let Some(saved) = self.cont_catchup_speed.take() {
+            self.playback_speed = saved;
+        }
+    }
+
+    #[cfg(test)]
+    fn prepare_send_action(&mut self, command: TasCommand) {
+        if command == TasCommand::Stop {
+            self.clear_cont_catchup();
+            self.pending_session_kind = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn prepare_restart_action(&mut self, command: TasCommand) {
+        if command == TasCommand::ArmContinue {
+            self.begin_cont_catchup();
+        } else {
+            self.clear_cont_catchup();
+        }
+        match command {
+            TasCommand::ArmRec => self.pending_session_kind = Some(RecordingSessionKind::Rec),
+            TasCommand::ArmContinue => {
+                self.pending_session_kind = Some(RecordingSessionKind::Continue)
+            }
+            _ => self.pending_session_kind = None,
+        }
+    }
+
     fn persist_history_if_needed(&mut self) {
         let persist_result = match self.history_store.as_mut() {
             Some(store) => Some(store.persist_if_changed(&self.history)),
@@ -248,16 +304,13 @@ impl TasApp {
     }
 
     fn start_recording_session(&mut self, continue_from_frame: u32, recorded_count: u32) {
-        let kind = self
-            .pending_session_kind
-            .take()
-            .unwrap_or_else(|| {
-                if continue_from_frame > 0 {
-                    RecordingSessionKind::Continue
-                } else {
-                    RecordingSessionKind::Rec
-                }
-            });
+        let kind = self.pending_session_kind.take().unwrap_or({
+            if continue_from_frame > 0 {
+                RecordingSessionKind::Continue
+            } else {
+                RecordingSessionKind::Rec
+            }
+        });
         let start_tick = match kind {
             RecordingSessionKind::Rec => 0,
             RecordingSessionKind::Continue => continue_from_frame,
@@ -324,9 +377,11 @@ impl TasApp {
         };
 
         let end_tick = recorded_count.max(session.max_recorded_count);
-        let Some(session_context) =
-            recording::RecoverySessionContext::from_ticks(session.kind, session.start_tick, end_tick)
-        else {
+        let Some(session_context) = recording::RecoverySessionContext::from_ticks(
+            session.kind,
+            session.start_tick,
+            end_tick,
+        ) else {
             return;
         };
 
@@ -347,7 +402,9 @@ impl TasApp {
             self.segment_tracker.restore_from(recovery.segments);
             self.continue_from_frame = shared.state().recorded_count;
             self.continue_from_text = self.continue_from_frame.to_string();
-            let _ = self.history.push_snapshot(shared.state(), recovery_label.clone());
+            let _ = self
+                .history
+                .push_snapshot(shared.state(), recovery_label.clone());
             self.push_log(&format!("Restored crash recovery: {}", recovery_label));
 
             if let Some(store) = self.recovery_store.as_mut() {
@@ -617,10 +674,7 @@ impl eframe::App for TasApp {
                 // REC started
                 if current_mode == 1 {
                     self.start_recording_session(continue_from, recorded);
-                    // CONT catch-up complete: restore original playback speed
-                    if let Some(saved) = self.cont_catchup_speed.take() {
-                        self.playback_speed = saved;
-                    }
+                    self.clear_cont_catchup();
                 }
                 // REC stopped (mode went from REC to OFF)
                 if self.last_mode == 1 && current_mode == 0 {
@@ -670,11 +724,8 @@ impl eframe::App for TasApp {
                     if let Some(recovery) = self.pending_recovery.as_ref() {
                         ui.separator();
                         ui.label(
-                            egui::RichText::new(format!(
-                                "Crash recovery: {}",
-                                recovery.label()
-                            ))
-                            .small(),
+                            egui::RichText::new(format!("Crash recovery: {}", recovery.label()))
+                                .small(),
                         );
                         if ui.button("Restore Crash Recovery").clicked() {
                             ui.close_menu();
@@ -902,23 +953,31 @@ impl eframe::App for TasApp {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 match cmd {
                     transport::Action::Send(c) => {
+                        if c == TasCommand::Stop {
+                            if let Some(saved) = self.cont_catchup_speed.take() {
+                                self.playback_speed = saved;
+                            }
+                            self.pending_session_kind = None;
+                        }
                         shared.send_command(c);
                         self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
                     }
                     transport::Action::RestartThen(c) => {
-                        // CONT catch-up: boost speed during playback phase
                         if c == TasCommand::ArmContinue {
-                            self.cont_catchup_speed = Some(self.playback_speed);
+                            if self.cont_catchup_speed.is_none() {
+                                self.cont_catchup_speed = Some(self.playback_speed);
+                            }
                             self.playback_speed = self.cont_catchup_multiplier;
-                        }
-                        match c {
-                            TasCommand::ArmRec => {
-                                self.pending_session_kind = Some(RecordingSessionKind::Rec)
+                            self.pending_session_kind = Some(RecordingSessionKind::Continue);
+                        } else {
+                            if let Some(saved) = self.cont_catchup_speed.take() {
+                                self.playback_speed = saved;
                             }
-                            TasCommand::ArmContinue => {
-                                self.pending_session_kind = Some(RecordingSessionKind::Continue)
-                            }
-                            _ => {}
+                            self.pending_session_kind = if c == TasCommand::ArmRec {
+                                Some(RecordingSessionKind::Rec)
+                            } else {
+                                None
+                            };
                         }
                         shared.reset_restart_state();
                         shared.send_command(TasCommand::Restart);
@@ -982,23 +1041,31 @@ impl eframe::App for TasApp {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     match cmd {
                         transport::Action::Send(c) => {
+                            if c == TasCommand::Stop {
+                                if let Some(saved) = self.cont_catchup_speed.take() {
+                                    self.playback_speed = saved;
+                                }
+                                self.pending_session_kind = None;
+                            }
                             shared.send_command(c);
                             self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
                         }
                         transport::Action::RestartThen(c) => {
-                            // CONT catch-up: boost speed during playback phase
                             if c == TasCommand::ArmContinue {
-                                self.cont_catchup_speed = Some(self.playback_speed);
+                                if self.cont_catchup_speed.is_none() {
+                                    self.cont_catchup_speed = Some(self.playback_speed);
+                                }
                                 self.playback_speed = self.cont_catchup_multiplier;
-                            }
-                            match c {
-                                TasCommand::ArmRec => {
-                                    self.pending_session_kind = Some(RecordingSessionKind::Rec)
+                                self.pending_session_kind = Some(RecordingSessionKind::Continue);
+                            } else {
+                                if let Some(saved) = self.cont_catchup_speed.take() {
+                                    self.playback_speed = saved;
                                 }
-                                TasCommand::ArmContinue => {
-                                    self.pending_session_kind = Some(RecordingSessionKind::Continue)
-                                }
-                                _ => {}
+                                self.pending_session_kind = if c == TasCommand::ArmRec {
+                                    Some(RecordingSessionKind::Rec)
+                                } else {
+                                    None
+                                };
                             }
                             shared.reset_restart_state();
                             shared.send_command(TasCommand::Restart);
@@ -1796,6 +1863,26 @@ mod tests {
         // Default (zeroed) speed is 0.0 — Cave 5 interprets 0.0 as 1.0x
         let fresh = tas_shared::zeroed_boxed();
         assert_eq!(fresh.playback_speed, 0.0);
+    }
+
+    #[test]
+    fn cont_stop_play_clears_catchup_state() {
+        let mut app = test_app();
+        app.playback_speed = 1.0;
+        app.cont_catchup_multiplier = 12.0;
+
+        app.prepare_restart_action(TasCommand::ArmContinue);
+        assert_eq!(app.cont_catchup_speed, Some(1.0));
+        assert!((app.playback_speed - 12.0).abs() < 0.001);
+
+        app.prepare_send_action(TasCommand::Stop);
+        assert!(app.cont_catchup_speed.is_none());
+        assert!((app.playback_speed - 1.0).abs() < 0.001);
+
+        app.prepare_restart_action(TasCommand::ArmPlay);
+        assert!(app.cont_catchup_speed.is_none());
+        assert!((app.playback_speed - 1.0).abs() < 0.001);
+        assert!(app.pending_session_kind.is_none());
     }
 
     // ===== Crash detection =====

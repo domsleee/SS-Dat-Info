@@ -14,7 +14,11 @@ pub enum RecordingSessionKind {
 
 /// Format TAS tick durations as `<seconds>:<centiseconds>` at 100 Hz.
 pub fn format_recording_duration(ticks: u32) -> String {
-    format!("{}:{:02}", ticks / TAS_TICKS_PER_SECOND, ticks % TAS_TICKS_PER_SECOND)
+    format!(
+        "{}:{:02}",
+        ticks / TAS_TICKS_PER_SECOND,
+        ticks % TAS_TICKS_PER_SECOND
+    )
 }
 
 pub fn completed_session_label(
@@ -485,9 +489,49 @@ impl RecordingSnapshot {
         }
         state.rec_coords[..count].copy_from_slice(&self.rec_coords[..count]);
     }
+
+    fn to_persisted(&self) -> PersistedSnapshot {
+        let count = self.recorded_count as usize;
+        PersistedSnapshot {
+            recorded_count: self.recorded_count,
+            input_log: self.input_log[..count].to_vec(),
+            rec_coords: self.rec_coords[..count].to_vec(),
+        }
+    }
+
+    fn from_persisted(persisted: PersistedSnapshot) -> Result<Self, String> {
+        let count = persisted.recorded_count as usize;
+        if count > TAS_MAX_TICKS {
+            return Err(format!(
+                "persisted snapshot too large: {} ticks (max {})",
+                count, TAS_MAX_TICKS
+            ));
+        }
+        if persisted.input_log.len() != count {
+            return Err(format!(
+                "persisted input_log length mismatch: expected {}, got {}",
+                count,
+                persisted.input_log.len()
+            ));
+        }
+        if persisted.rec_coords.len() != count {
+            return Err(format!(
+                "persisted rec_coords length mismatch: expected {}, got {}",
+                count,
+                persisted.rec_coords.len()
+            ));
+        }
+
+        let mut snap = RecordingSnapshot::new_empty();
+        snap.recorded_count = persisted.recorded_count;
+        snap.input_log[..count].copy_from_slice(&persisted.input_log);
+        snap.rec_coords[..count].copy_from_slice(&persisted.rec_coords);
+        Ok(snap)
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HistoryEntryKind {
     Snapshot,
     SaveMarker,
@@ -523,6 +567,29 @@ impl HistoryEntry {
     pub fn can_restore(&self) -> bool {
         self.snapshot.is_some()
     }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PersistedSnapshot {
+    pub recorded_count: u32,
+    pub input_log: Vec<u8>,
+    pub rec_coords: Vec<[f32; 3]>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PersistedHistoryEntry {
+    pub label: String,
+    pub timestamp: String,
+    pub kind: HistoryEntryKind,
+    pub snapshot: Option<PersistedSnapshot>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PersistedHistory {
+    pub version: u32,
+    pub saved_at: String,
+    pub current_index: Option<usize>,
+    pub entries: Vec<PersistedHistoryEntry>,
 }
 
 pub struct RecordingHistory {
@@ -648,6 +715,56 @@ impl RecordingHistory {
 
     pub fn entries(&self) -> &[HistoryEntry] {
         &self.entries
+    }
+
+    pub fn to_persisted(&self) -> PersistedHistory {
+        let entries = self
+            .entries
+            .iter()
+            .map(|entry| PersistedHistoryEntry {
+                label: entry.label.clone(),
+                timestamp: entry.timestamp.clone(),
+                kind: entry.kind,
+                snapshot: entry.snapshot.as_ref().map(RecordingSnapshot::to_persisted),
+            })
+            .collect();
+
+        PersistedHistory {
+            version: 2,
+            saved_at: chrono::Local::now().to_rfc3339(),
+            current_index: self.current_index,
+            entries,
+        }
+    }
+
+    pub fn apply_persisted(&mut self, persisted: PersistedHistory) -> Result<(), String> {
+        let mut entries = Vec::with_capacity(persisted.entries.len());
+        for entry in persisted.entries {
+            let snapshot = match entry.snapshot {
+                Some(snapshot) => Some(RecordingSnapshot::from_persisted(snapshot)?),
+                None => None,
+            };
+            entries.push(HistoryEntry {
+                label: entry.label,
+                timestamp: entry.timestamp,
+                kind: entry.kind,
+                snapshot,
+            });
+        }
+
+        self.entries = entries;
+        self.current_index = persisted
+            .current_index
+            .filter(|idx| *idx < self.entries.len());
+
+        if let Some(idx) = self.current_index {
+            if self.entries[idx].snapshot.is_none() {
+                self.current_index = None;
+            }
+        }
+
+        self.enforce_capacity();
+        Ok(())
     }
 
     fn truncate_future(&mut self) {
@@ -1077,6 +1194,50 @@ mod tests {
         assert_eq!(history.current_index(), Some(1));
     }
 
+    #[test]
+    fn history_persist_round_trip_preserves_snapshots() {
+        let mut history = RecordingHistory::new(8);
+        let a = one_tick_state(0x01);
+        let b = one_tick_state(0x02);
+        assert!(history.push_snapshot(&a, "A"));
+        assert!(history.push_snapshot(&b, "B"));
+        history.push_save_marker(&b, Path::new("C:\\temp\\run.tasrec"));
+        let _ = history.undo();
+
+        let persisted = history.to_persisted();
+        let mut restored = RecordingHistory::new(8);
+        restored.apply_persisted(persisted).unwrap();
+
+        assert_eq!(restored.len(), history.len());
+        assert_eq!(restored.current_index(), history.current_index());
+        assert_eq!(restored.entries()[2].kind, HistoryEntryKind::SaveMarker);
+        assert!(!restored.entries()[2].can_restore());
+        assert_eq!(restored.restore_index(1).unwrap().input_log[0], 0x02);
+    }
+
+    #[test]
+    fn history_apply_persisted_rejects_invalid_snapshot_lengths() {
+        let mut history = RecordingHistory::new(8);
+        let bad = PersistedHistory {
+            version: 2,
+            saved_at: chrono::Local::now().to_rfc3339(),
+            current_index: Some(0),
+            entries: vec![PersistedHistoryEntry {
+                label: "bad".to_string(),
+                timestamp: "00:00:00".to_string(),
+                kind: HistoryEntryKind::Snapshot,
+                snapshot: Some(PersistedSnapshot {
+                    recorded_count: 2,
+                    input_log: vec![1], // invalid: expected len=2
+                    rec_coords: vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
+                }),
+            }],
+        };
+
+        let err = history.apply_persisted(bad).unwrap_err();
+        assert!(err.contains("input_log length mismatch"));
+    }
+
     // ===== RecordingSnapshot =====
 
     #[test]
@@ -1244,11 +1405,9 @@ mod tests {
         }];
         let session = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 5).unwrap();
 
-        assert!(
-            store
-                .persist_if_needed(&state, &segments, &session, true)
-                .unwrap()
-        );
+        assert!(store
+            .persist_if_needed(&state, &segments, &session, true)
+            .unwrap());
         let pending = store.load_pending().unwrap().expect("expected checkpoint");
         assert_eq!(pending.snapshot.recorded_count, 5);
         assert_eq!(pending.session.label, "Recorded 0:05");
@@ -1271,13 +1430,19 @@ mod tests {
         state.input_log[2] = 0x04;
         let session3 = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 3).unwrap();
 
-        assert!(store.persist_if_needed(&state, &[], &session3, true).unwrap());
-        assert!(!store.persist_if_needed(&state, &[], &session3, false).unwrap());
+        assert!(store
+            .persist_if_needed(&state, &[], &session3, true)
+            .unwrap());
+        assert!(!store
+            .persist_if_needed(&state, &[], &session3, false)
+            .unwrap());
 
         state.recorded_count = 4;
         state.input_log[3] = 0x08;
         let session4 = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 4).unwrap();
-        assert!(store.persist_if_needed(&state, &[], &session4, false).unwrap());
+        assert!(store
+            .persist_if_needed(&state, &[], &session4, false)
+            .unwrap());
 
         let pending = store.load_pending().unwrap().expect("expected checkpoint");
         assert_eq!(pending.snapshot.recorded_count, 4);
@@ -1295,14 +1460,18 @@ mod tests {
         state.input_log[0] = 0x01;
         state.input_log[1] = 0x02;
         let session2 = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 2).unwrap();
-        assert!(store.persist_if_needed(&state, &[], &session2, true).unwrap());
+        assert!(store
+            .persist_if_needed(&state, &[], &session2, true)
+            .unwrap());
 
         state.recorded_count = 6;
         for i in 2..6 {
             state.input_log[i] = 0x08;
         }
         let session6 = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 6).unwrap();
-        assert!(store.persist_if_needed(&state, &[], &session6, true).unwrap());
+        assert!(store
+            .persist_if_needed(&state, &[], &session6, true)
+            .unwrap());
 
         let metadata_path = root.join("recovery_checkpoint.json");
         let metadata_json = std::fs::read_to_string(metadata_path).unwrap();
