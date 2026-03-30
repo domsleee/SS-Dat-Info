@@ -1,5 +1,5 @@
 use eframe::egui;
-use tas_shared::{input_bits, TasSharedState, TAS_MAX_TICKS};
+use tas_shared::{input_bits, TasMode, TasSharedState, TAS_MAX_TICKS};
 
 const ROW_COLORS: &[(u8, egui::Color32)] = &[
     (input_bits::LEFT, egui::Color32::from_rgb(100, 149, 237)), // cornflower blue
@@ -11,6 +11,12 @@ const ROW_COLORS: &[(u8, egui::Color32)] = &[
 ];
 
 const ROW_LABELS: &[&str] = &["L", "R", "U", "D", "J", "S"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveTickMode {
+    Rec,
+    Play,
+}
 
 pub fn show(ui: &mut egui::Ui, state: &TasSharedState, zoom: &mut f32, scroll: &mut f32) {
     let total = state.recorded_count as usize;
@@ -31,26 +37,20 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, zoom: &mut f32, scroll: &
     let avail = ui.available_size();
     let row_height = 12.0;
     let num_rows = ROW_LABELS.len();
-    let total_height = row_height * num_rows as f32 + 20.0; // +20 for header
+    let header_height = 14.0;
+    let axis_height = 16.0;
+    let total_height = header_height + row_height * num_rows as f32 + axis_height + 6.0;
     let left_margin = 8.0;
     let right_padding = 20.0;
-    let width = avail.x.min(800.0) - right_padding - left_margin;
+    let width = (avail.x.min(800.0) - right_padding - left_margin).max(120.0);
 
     // Visible tick range
     let ticks_visible = (width / *zoom).max(1.0) as usize;
     let max_scroll = total.saturating_sub(ticks_visible);
 
     // Auto-scroll: keep playback position visible during REC or PLAY
-    let playback = state.playback_pos as usize;
-    let rec_count = state.recorded_count as usize;
-    let active_pos = if state.mode == tas_shared::TasMode::Play as u32 && playback > 0 {
-        Some(playback)
-    } else if state.mode == tas_shared::TasMode::Rec as u32 && rec_count > 0 {
-        Some(rec_count.saturating_sub(1))
-    } else {
-        None
-    };
-    if let Some(pos) = active_pos {
+    let active_tick = active_timeline_tick(state);
+    if let Some((pos, _)) = active_tick {
         *scroll = auto_scroll_position(pos, *scroll as usize, ticks_visible, max_scroll) as f32;
     }
 
@@ -75,19 +75,58 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, zoom: &mut f32, scroll: &
     let bar_left = rect.left() + label_width;
     let bar_width = width - label_width - 4.0; // 4px right inset
 
-    // Playback position marker
-    let playback = state.playback_pos as usize;
-    if playback >= scroll_start && playback < scroll_end {
-        let px =
-            bar_left + ((playback - scroll_start) as f32 / ticks_visible as f32) * bar_width;
-        painter.line_segment(
-            [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 255, 100)),
-        );
+    let rows_top = rect.top() + header_height;
+    let rows_bottom = rows_top + row_height * num_rows as f32;
+    let axis_y = rows_bottom + 2.0;
+
+    let marker_status = match active_tick {
+        Some((tick, ActiveTickMode::Rec)) => format!("REC @ frame {}", tick),
+        Some((tick, ActiveTickMode::Play)) => format!("PLAY @ frame {}", tick),
+        None => "OFF".to_string(),
+    };
+    let marker_status_color = match active_tick.map(|(_, mode)| mode) {
+        Some(ActiveTickMode::Rec) => egui::Color32::from_rgb(120, 255, 120),
+        Some(ActiveTickMode::Play) => egui::Color32::from_rgb(255, 235, 120),
+        None => egui::Color32::from_rgb(150, 150, 150),
+    };
+    painter.text(
+        egui::pos2(bar_left, rect.top() + 1.0),
+        egui::Align2::LEFT_TOP,
+        marker_status,
+        egui::FontId::monospace(9.0),
+        marker_status_color,
+    );
+    painter.text(
+        egui::pos2(rect.right() - 4.0, rect.top() + 1.0),
+        egui::Align2::RIGHT_TOP,
+        format!("{}..{}", scroll_start, scroll_end.saturating_sub(1)),
+        egui::FontId::monospace(9.0),
+        egui::Color32::from_rgb(150, 150, 150),
+    );
+
+    // Active position marker
+    if let Some((tick, mode)) = active_tick {
+        if tick >= scroll_start && tick < scroll_end {
+            let px = bar_left + ((tick - scroll_start) as f32 / ticks_visible as f32) * bar_width;
+            let marker_color = match mode {
+                ActiveTickMode::Rec => egui::Color32::from_rgb(120, 255, 120),
+                ActiveTickMode::Play => egui::Color32::from_rgb(255, 235, 120),
+            };
+
+            let highlight_rect = egui::Rect::from_min_max(
+                egui::pos2((px - 2.0).max(bar_left), rows_top),
+                egui::pos2((px + 2.0).min(bar_left + bar_width), rows_bottom),
+            );
+            painter.rect_filled(highlight_rect, 1.0, marker_color.gamma_multiply(0.35));
+            painter.line_segment(
+                [egui::pos2(px, rows_top), egui::pos2(px, rows_bottom)],
+                egui::Stroke::new(2.0, marker_color),
+            );
+        }
     }
 
     // Draw rows
-    let y_start = rect.top() + 2.0;
+    let y_start = rows_top + 2.0;
     for (row_idx, &(bit, color)) in ROW_COLORS.iter().enumerate() {
         let y = y_start + row_idx as f32 * row_height;
 
@@ -147,6 +186,39 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, zoom: &mut f32, scroll: &
         }
     }
 
+    // X-axis frame labels (start / mid / end)
+    painter.line_segment(
+        [
+            egui::pos2(bar_left, axis_y),
+            egui::pos2(bar_left + bar_width, axis_y),
+        ],
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 70, 85)),
+    );
+
+    let end_tick = scroll_end.saturating_sub(1);
+    let mid_tick = scroll_start + (end_tick.saturating_sub(scroll_start) / 2);
+    let mut axis_ticks = vec![scroll_start, mid_tick, end_tick];
+    axis_ticks.dedup();
+
+    for tick in axis_ticks {
+        let px = if tick >= scroll_start {
+            bar_left + ((tick - scroll_start) as f32 / ticks_visible as f32) * bar_width
+        } else {
+            bar_left
+        };
+        painter.line_segment(
+            [egui::pos2(px, axis_y), egui::pos2(px, axis_y + 4.0)],
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 90, 105)),
+        );
+        painter.text(
+            egui::pos2(px, axis_y + 5.0),
+            egui::Align2::CENTER_TOP,
+            tick.to_string(),
+            egui::FontId::monospace(9.0),
+            egui::Color32::from_rgb(165, 165, 180),
+        );
+    }
+
     // Tick range label
     ui.label(format!(
         "Showing ticks {}-{} of {} ({:.1}x zoom)",
@@ -171,9 +243,28 @@ fn auto_scroll_position(
     }
 }
 
+fn active_timeline_tick(state: &TasSharedState) -> Option<(usize, ActiveTickMode)> {
+    let total = state.recorded_count as usize;
+    if total == 0 {
+        return None;
+    }
+
+    if state.mode == TasMode::Play as u32 {
+        let playback = state.playback_pos as usize;
+        return Some((playback.min(total.saturating_sub(1)), ActiveTickMode::Play));
+    }
+
+    if state.mode == TasMode::Rec as u32 {
+        return Some((total.saturating_sub(1), ActiveTickMode::Rec));
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tas_shared::{zeroed_boxed, TasMode};
 
     #[test]
     fn auto_scroll_stays_when_visible() {
@@ -209,5 +300,59 @@ mod tests {
         // Position near end, max_scroll=50
         let result = auto_scroll_position(900, 0, 100, 50);
         assert_eq!(result, 50);
+    }
+
+    #[test]
+    fn active_tick_rec_uses_last_recorded_frame() {
+        let mut state = zeroed_boxed();
+        state.mode = TasMode::Rec as u32;
+        state.recorded_count = 42;
+        state.playback_pos = 0;
+        assert_eq!(
+            active_timeline_tick(&state),
+            Some((41, ActiveTickMode::Rec))
+        );
+    }
+
+    #[test]
+    fn active_tick_play_uses_playback_frame() {
+        let mut state = zeroed_boxed();
+        state.mode = TasMode::Play as u32;
+        state.recorded_count = 100;
+        state.playback_pos = 37;
+        assert_eq!(
+            active_timeline_tick(&state),
+            Some((37, ActiveTickMode::Play))
+        );
+    }
+
+    #[test]
+    fn active_tick_play_clamps_to_last_recorded_frame() {
+        let mut state = zeroed_boxed();
+        state.mode = TasMode::Play as u32;
+        state.recorded_count = 10;
+        state.playback_pos = 9999;
+        assert_eq!(
+            active_timeline_tick(&state),
+            Some((9, ActiveTickMode::Play))
+        );
+    }
+
+    #[test]
+    fn active_tick_off_has_no_marker() {
+        let mut state = zeroed_boxed();
+        state.mode = TasMode::Off as u32;
+        state.recorded_count = 20;
+        state.playback_pos = 7;
+        assert_eq!(active_timeline_tick(&state), None);
+    }
+
+    #[test]
+    fn active_tick_none_with_empty_recording() {
+        let mut state = zeroed_boxed();
+        state.mode = TasMode::Rec as u32;
+        state.recorded_count = 0;
+        state.playback_pos = 0;
+        assert_eq!(active_timeline_tick(&state), None);
     }
 }

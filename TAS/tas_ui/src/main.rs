@@ -19,12 +19,8 @@ fn set_dark_title_bar(title: &str) {
     const DWMWA_USE_IMMERSIVE_DARK_MODE: DWORD = 20;
     extern "system" {
         fn FindWindowW(class: *const u16, title: *const u16) -> HWND;
-        fn DwmSetWindowAttribute(
-            hwnd: HWND,
-            attr: DWORD,
-            value: *const c_void,
-            size: DWORD,
-        ) -> i32;
+        fn DwmSetWindowAttribute(hwnd: HWND, attr: DWORD, value: *const c_void, size: DWORD)
+            -> i32;
     }
     unsafe {
         let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
@@ -41,9 +37,12 @@ fn set_dark_title_bar(title: &str) {
     }
 }
 
-use panels::{analysis, config, drift, log_panel, rotation, segments, timeline, trajectory, transport};
+use panels::{
+    analysis, config, drift, history, log_panel, rotation, segments, timeline, trajectory,
+    transport,
+};
 use pico::PicoState;
-use recording::UndoRing;
+use recording::RecordingHistory;
 
 struct TasApp {
     shared: Option<TasSharedMemoryClient>,
@@ -53,7 +52,7 @@ struct TasApp {
     show_config: bool,
     show_pico_panel: bool,
     pico: PicoState,
-    undo_ring: UndoRing,
+    history: RecordingHistory,
     log_lines: Vec<String>,
     timeline_zoom: f32,
     timeline_scroll: f32,
@@ -65,11 +64,12 @@ struct TasApp {
     show_rotation: bool,
     show_macros: bool,
     show_segments: bool,
+    show_history: bool,
     macro_state: macros::MacroState,
     segment_tracker: recording::SegmentTracker,
     last_mode: u32,
     cont_catchup_speed: Option<f32>, // saved speed to restore after CONT catch-up
-    cont_catchup_multiplier: f32,   // configurable CONT catch-up speed (default 12x)
+    cont_catchup_multiplier: f32,    // configurable CONT catch-up speed (default 12x)
     log_read_cursor: u32,
 
     // Cached max drift (incremental scan instead of per-frame O(n))
@@ -110,7 +110,7 @@ impl TasApp {
             show_config: settings.show_config,
             show_pico_panel: settings.show_pico_panel,
             pico: PicoState::new(),
-            undo_ring: UndoRing::new(5),
+            history: RecordingHistory::new(64),
             log_lines: Vec::new(),
             timeline_zoom: 1.0,
             timeline_scroll: 0.0,
@@ -122,6 +122,7 @@ impl TasApp {
             show_rotation: settings.show_rotation,
             show_macros: settings.show_macros,
             show_segments: settings.show_segments,
+            show_history: settings.show_history,
             macro_state: macros::MacroState::new(),
             segment_tracker: recording::SegmentTracker::new(),
             last_mode: 0,
@@ -232,7 +233,7 @@ impl TasApp {
 
             // F9: Arm REC — same as clicking REC button (restart first)
             if input.key_pressed(egui::Key::F9) {
-                actions.push(transport::Action::AutoSave);
+                actions.push(transport::Action::AutoSave("Before REC"));
                 actions.push(transport::Action::RestartThen(TasCommand::ArmRec));
                 actions.push(transport::Action::Log("Shortcut: F9 REC".into()));
             }
@@ -251,8 +252,10 @@ impl TasApp {
 
             // F12: Continue record — same as clicking CONT button (restart first)
             if input.key_pressed(egui::Key::F12) {
-                actions.push(transport::Action::AutoSave);
-                actions.push(transport::Action::SetContinueFrame(self.continue_from_frame));
+                actions.push(transport::Action::AutoSave("Before CONT"));
+                actions.push(transport::Action::SetContinueFrame(
+                    self.continue_from_frame,
+                ));
                 actions.push(transport::Action::RestartThen(TasCommand::ArmContinue));
                 actions.push(transport::Action::Log("Shortcut: F12 CONT".into()));
             }
@@ -283,6 +286,23 @@ impl TasApp {
             if ctrl_z_raw {
                 actions.push(transport::Action::Undo);
                 actions.push(transport::Action::Log("Shortcut: Ctrl+Z Undo".into()));
+            }
+
+            // Ctrl+Y or Ctrl+Shift+Z: Redo
+            let ctrl_redo_raw = input.events.iter().any(|e| {
+                matches!(e,
+                    egui::Event::Key { key: egui::Key::Y, pressed: true, modifiers, .. }
+                    if modifiers.ctrl || modifiers.mac_cmd
+                )
+            }) || input.events.iter().any(|e| {
+                matches!(e,
+                    egui::Event::Key { key: egui::Key::Z, pressed: true, modifiers, .. }
+                    if (modifiers.ctrl || modifiers.mac_cmd) && modifiers.shift
+                )
+            });
+            if ctrl_redo_raw {
+                actions.push(transport::Action::Redo);
+                actions.push(transport::Action::Log("Shortcut: Redo".into()));
             }
 
             // Ctrl+S: Save recording
@@ -326,16 +346,24 @@ impl TasApp {
         }
         if save {
             if let Some(ref shared) = self.shared {
-                recording::save_dialog_with_segments(
+                if let Some(path) = recording::save_dialog_with_segments(
                     shared.state(),
                     &self.segment_tracker.segments,
                     &mut self.log_lines,
-                );
+                ) {
+                    self.history.push_save_marker(shared.state(), &path);
+                }
             }
         }
         if open {
             if let Some(ref mut shared) = self.shared {
-                recording::load_dialog(shared.state_mut(), &mut self.segment_tracker, &mut self.log_lines);
+                if let Some(path) = recording::load_dialog(
+                    shared.state_mut(),
+                    &mut self.segment_tracker,
+                    &mut self.log_lines,
+                ) {
+                    let _ = self.history.push_loaded_snapshot(shared.state(), &path);
+                }
             }
         }
 
@@ -356,6 +384,7 @@ impl eframe::App for TasApp {
             show_rotation: self.show_rotation,
             show_analysis: self.show_analysis,
             show_macros: self.show_macros,
+            show_history: self.show_history,
             show_config: self.show_config,
             playback_speed: self.playback_speed,
             cont_catchup_speed: self.cont_catchup_multiplier,
@@ -411,17 +440,25 @@ impl eframe::App for TasApp {
                     if ui.button("Save Recording...  Ctrl+S").clicked() {
                         ui.close_menu();
                         if let Some(ref shared) = self.shared {
-                            recording::save_dialog_with_segments(
+                            if let Some(path) = recording::save_dialog_with_segments(
                                 shared.state(),
                                 &self.segment_tracker.segments,
                                 &mut self.log_lines,
-                            );
+                            ) {
+                                self.history.push_save_marker(shared.state(), &path);
+                            }
                         }
                     }
                     if ui.button("Load Recording...  Ctrl+O").clicked() {
                         ui.close_menu();
                         if let Some(ref mut shared) = self.shared {
-                            recording::load_dialog(shared.state_mut(), &mut self.segment_tracker, &mut self.log_lines);
+                            if let Some(path) = recording::load_dialog(
+                                shared.state_mut(),
+                                &mut self.segment_tracker,
+                                &mut self.log_lines,
+                            ) {
+                                let _ = self.history.push_loaded_snapshot(shared.state(), &path);
+                            }
                         }
                     }
                     ui.separator();
@@ -443,6 +480,7 @@ impl eframe::App for TasApp {
                     ui.checkbox(&mut self.show_rotation, "Rotation Display");
                     ui.checkbox(&mut self.show_analysis, "Analysis Panel");
                     ui.checkbox(&mut self.show_macros, "Macro Panel");
+                    ui.checkbox(&mut self.show_history, "History Panel");
                     ui.separator();
                     ui.checkbox(&mut self.show_config, "Debug Config");
                 });
@@ -488,38 +526,75 @@ impl eframe::App for TasApp {
         // Left side panel: only shown if at least one sub-panel is visible
         let left_panel_visible = self.show_config || self.show_pico_panel || self.show_macros;
         if left_panel_visible {
-        egui::SidePanel::left("config_panel")
-            .resizable(true)
-            .default_width(200.0)
-            .show(ctx, |ui| {
-                if let Some(ref mut shared) = self.shared {
-                    if self.show_config {
-                        egui::CollapsingHeader::new("Debug Config")
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                config::show(ui, shared.state_mut());
-                            });
-                        ui.separator();
+            egui::SidePanel::left("config_panel")
+                .resizable(true)
+                .default_width(200.0)
+                .show(ctx, |ui| {
+                    if let Some(ref mut shared) = self.shared {
+                        if self.show_config {
+                            egui::CollapsingHeader::new("Debug Config")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    config::show(ui, shared.state_mut());
+                                });
+                            ui.separator();
+                        }
+                        if self.show_pico_panel {
+                            pico::show_panel(ui, &mut self.pico, &mut self.log_lines);
+                        }
+                        if self.show_macros {
+                            ui.separator();
+                            egui::CollapsingHeader::new("Input Macros")
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    macros::show_panel(
+                                        ui,
+                                        &mut self.macro_state,
+                                        shared.state_mut(),
+                                        &mut self.log_lines,
+                                    );
+                                });
+                        }
                     }
-                    if self.show_pico_panel {
-                        pico::show_panel(ui, &mut self.pico, &mut self.log_lines);
-                    }
-                    if self.show_macros {
-                        ui.separator();
-                        egui::CollapsingHeader::new("Input Macros")
-                            .default_open(true)
-                            .show(ui, |ui| {
-                                macros::show_panel(
-                                    ui,
-                                    &mut self.macro_state,
-                                    shared.state_mut(),
-                                    &mut self.log_lines,
-                                );
-                            });
+                });
+        } // left_panel_visible
+
+        // Right-side history panel (optional)
+        let mut history_actions = Vec::new();
+        if self.show_history {
+            egui::SidePanel::right("history_panel")
+                .resizable(true)
+                .default_width(280.0)
+                .show(ctx, |ui| {
+                    ui.label(egui::RichText::new("History").strong());
+                    ui.separator();
+                    history_actions = history::show(ui, &self.history);
+                });
+        }
+
+        // Process history panel restores
+        if !history_actions.is_empty() {
+            if let Some(ref mut shared) = self.shared {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                for action in history_actions {
+                    match action {
+                        history::HistoryAction::Restore(idx) => {
+                            if let Some(snap) = self.history.restore_index(idx) {
+                                snap.restore_to(shared.state_mut());
+                                let label = self
+                                    .history
+                                    .entries()
+                                    .get(idx)
+                                    .map(|entry| entry.label.clone())
+                                    .unwrap_or_else(|| format!("Entry {}", idx + 1));
+                                self.log_lines
+                                    .push(format!("[{}] History restore: {}", ts, label));
+                            }
+                        }
                     }
                 }
-            });
-        } // left_panel_visible
+            }
+        }
 
         // Poll in-process restart state machine
         if let (Some(pending_cmd), Some(ref mut shared)) =
@@ -560,14 +635,21 @@ impl eframe::App for TasApp {
                         self.log_lines
                             .push(format!("[{}] In-process F5 restart → {:?}", ts, c));
                     }
-                    transport::Action::AutoSave => {
-                        self.undo_ring.push(shared.state());
+                    transport::Action::AutoSave(label) => {
+                        let _ = self.history.push_snapshot(shared.state(), label);
                     }
                     transport::Action::Undo => {
-                        if let Some(snap) = self.undo_ring.pop() {
+                        if let Some(snap) = self.history.undo() {
                             snap.restore_to(shared.state_mut());
                             self.log_lines
                                 .push(format!("[{}] Undo: restored previous recording", ts));
+                        }
+                    }
+                    transport::Action::Redo => {
+                        if let Some(snap) = self.history.redo() {
+                            snap.restore_to(shared.state_mut());
+                            self.log_lines
+                                .push(format!("[{}] Redo: restored next recording", ts));
                         }
                     }
                     transport::Action::SetContinueFrame(frame) => {
@@ -599,7 +681,7 @@ impl eframe::App for TasApp {
                     &mut self.playback_speed,
                     &mut self.cont_catchup_multiplier,
                     &mut self.step_mode,
-                    &self.undo_ring,
+                    &self.history,
                     shared.state(),
                     self.cont_catchup_speed.is_some(),
                 );
@@ -624,16 +706,25 @@ impl eframe::App for TasApp {
                             self.log_lines
                                 .push(format!("[{}] In-process F5 restart → {:?}", ts, c));
                         }
-                        transport::Action::AutoSave => {
-                            self.undo_ring.push(shared.state());
+                        transport::Action::AutoSave(label) => {
+                            let _ = self.history.push_snapshot(shared.state(), label);
                             self.log_lines
-                                .push(format!("[{}] Auto-saved to undo ring", ts));
+                                .push(format!("[{}] Snapshot: {}", ts, label));
                         }
                         transport::Action::Undo => {
-                            if let Some(snap) = self.undo_ring.pop() {
+                            if let Some(snap) = self.history.undo() {
                                 snap.restore_to(shared.state_mut());
                                 self.log_lines.push(format!(
                                     "[{}] Undo: restored previous recording",
+                                    ts
+                                ));
+                            }
+                        }
+                        transport::Action::Redo => {
+                            if let Some(snap) = self.history.redo() {
+                                snap.restore_to(shared.state_mut());
+                                self.log_lines.push(format!(
+                                    "[{}] Redo: restored next recording",
                                     ts
                                 ));
                             }
@@ -751,7 +842,7 @@ impl eframe::App for TasApp {
                     ui.separator();
                 }
 
-                // Two-column layout: timeline left, drift right
+                // Primary row: timeline left, analysis/drift right
                 let avail = ui.available_size();
                 ui.horizontal(|ui| {
                     // Input timeline (takes ~60% width)
@@ -769,23 +860,47 @@ impl eframe::App for TasApp {
 
                     ui.separator();
 
-                    // Right panel: drift monitor, trajectory viewer, rotation, or analysis
+                    // Right panel: analysis or drift monitor (trajectory/rotation are rendered below)
                     ui.vertical(|ui| {
                         if self.show_analysis {
                             ui.label(egui::RichText::new("Input Analysis").strong());
                             analysis::show(ui, state, &mut self.analysis_cache);
-                        } else if self.show_trajectory {
-                            ui.label(egui::RichText::new("Trajectory").strong());
-                            trajectory::show(ui, state, &mut self.trajectory_cache);
-                        } else if self.show_rotation {
-                            ui.label(egui::RichText::new("Rotation").strong());
-                            rotation::show(ui, state);
                         } else {
                             ui.label(egui::RichText::new("Drift Monitor").strong());
                             drift::show(ui, state, &mut self.drift_cache);
                         }
                     });
                 });
+
+                // Secondary row: merged trajectory + rotation widget
+                if self.show_trajectory || self.show_rotation {
+                    ui.add_space(4.0);
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.label(egui::RichText::new("Trajectory / Rotation").strong());
+                        ui.separator();
+
+                        if self.show_trajectory && self.show_rotation {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.set_min_width(220.0);
+                                    ui.label(egui::RichText::new("Rotation").small());
+                                    rotation::show(ui, state);
+                                });
+                                ui.separator();
+                                ui.vertical(|ui| {
+                                    ui.label(egui::RichText::new("Trajectory").small());
+                                    trajectory::show(ui, state, &mut self.trajectory_cache);
+                                });
+                            });
+                        } else if self.show_trajectory {
+                            ui.label(egui::RichText::new("Trajectory").small());
+                            trajectory::show(ui, state, &mut self.trajectory_cache);
+                        } else {
+                            ui.label(egui::RichText::new("Rotation").small());
+                            rotation::show(ui, state);
+                        }
+                    });
+                }
 
                 // Telemetry + Diagnostics footer
                 ui.separator();
@@ -881,7 +996,9 @@ impl eframe::App for TasApp {
                         segments::SegmentAction::DeleteFrom(idx) => {
                             if let Some(seg) = self.segment_tracker.segments.get(idx) {
                                 let truncate_to = seg.start_tick;
-                                self.undo_ring.push(shared.state());
+                                let _ = self
+                                    .history
+                                    .push_snapshot(shared.state(), "Before segment delete");
                                 shared.state_mut().recorded_count = truncate_to;
                                 for i in truncate_to as usize..tas_shared::TAS_MAX_TICKS {
                                     shared.state_mut().input_log[i] = 0;
@@ -910,7 +1027,9 @@ impl eframe::App for TasApp {
                             ));
                         }
                         segments::SegmentAction::RedoFrom(frame) => {
-                            self.undo_ring.push(shared.state());
+                            let _ = self
+                                .history
+                                .push_snapshot(shared.state(), "Before segment redo");
                             self.continue_from_frame = frame;
                             shared.state_mut().continue_from_frame = frame;
                             shared.send_command(TasCommand::ArmContinue);
@@ -1041,7 +1160,8 @@ fn main() -> eframe::Result {
             // Non-interactive widgets (labels, separators)
             visuals.widgets.noninteractive.bg_fill = dark_bg;
             visuals.widgets.noninteractive.weak_bg_fill = dark_bg;
-            visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(40));
+            visuals.widgets.noninteractive.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_gray(40));
 
             // Inactive widgets (buttons, combo boxes, collapsing headers)
             visuals.widgets.inactive.bg_fill = widget_bg;
@@ -1051,7 +1171,8 @@ fn main() -> eframe::Result {
             // Hovered widgets
             visuals.widgets.hovered.bg_fill = widget_hover;
             visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_gray(38);
-            visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(70));
+            visuals.widgets.hovered.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_gray(70));
 
             // Active (pressed) widgets
             visuals.widgets.active.bg_fill = widget_active;
@@ -1085,7 +1206,7 @@ mod tests {
             show_config: false,
             show_pico_panel: false,
             pico: PicoState::new(),
-            undo_ring: UndoRing::new(5),
+            history: RecordingHistory::new(64),
             log_lines: Vec::new(),
             timeline_zoom: 1.0,
             timeline_scroll: 0.0,
@@ -1097,6 +1218,7 @@ mod tests {
             show_rotation: false,
             show_macros: false,
             show_segments: false,
+            show_history: false,
             macro_state: macros::MacroState::new(),
             segment_tracker: recording::SegmentTracker::new(),
             last_mode: 0,
@@ -1161,7 +1283,7 @@ mod tests {
     fn action_has_auto_save(actions: &[transport::Action]) -> bool {
         actions
             .iter()
-            .any(|a| matches!(a, transport::Action::AutoSave))
+            .any(|a| matches!(a, transport::Action::AutoSave(_)))
     }
 
     // ===== App startup without DLL =====
@@ -1238,6 +1360,17 @@ mod tests {
             actions.len()
         );
         assert!(action_has_log(&actions, "Undo"), "Ctrl+Z must log Undo");
+    }
+
+    #[test]
+    fn shortcut_ctrl_y_redoes() {
+        let mut app = test_app();
+        let actions = press_key(&mut app, Key::Y, Modifiers::CTRL);
+        assert!(
+            actions.iter().any(|a| matches!(a, transport::Action::Redo)),
+            "Ctrl+Y must produce Redo action"
+        );
+        assert!(action_has_log(&actions, "Redo"), "Ctrl+Y must log Redo");
     }
 
     #[test]
@@ -1346,6 +1479,7 @@ mod tests {
         assert!(!app.show_analysis);
         assert!(!app.show_macros);
         assert!(!app.show_pico_panel);
+        assert!(!app.show_history);
     }
 
     #[test]
@@ -1354,9 +1488,11 @@ mod tests {
         app.show_trajectory = true;
         app.show_analysis = true;
         app.show_macros = true;
+        app.show_history = true;
         assert!(app.show_trajectory);
         assert!(app.show_analysis);
         assert!(app.show_macros);
+        assert!(app.show_history);
     }
 
     // ===== Segment tracker mode transitions =====
@@ -1414,8 +1550,9 @@ mod tests {
 
         // Heap-allocate: TasSharedState is ~1.5MB, too large for stack
         let mut state: Box<TasSharedState> = unsafe {
-            Box::from_raw(Box::into_raw(vec![0u8; std::mem::size_of::<TasSharedState>()]
-                .into_boxed_slice()) as *mut [u8] as *mut TasSharedState)
+            Box::from_raw(Box::into_raw(
+                vec![0u8; std::mem::size_of::<TasSharedState>()].into_boxed_slice(),
+            ) as *mut [u8] as *mut TasSharedState)
         };
         state.recorded_count = 100;
         state.playback_pos = 100;
@@ -1433,9 +1570,13 @@ mod tests {
         let count = (state.playback_pos as usize).min(state.recorded_count as usize);
         for i in app.last_drift_scan_count..count {
             let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
-            if d > app.cached_max_drift_x { app.cached_max_drift_x = d; }
+            if d > app.cached_max_drift_x {
+                app.cached_max_drift_x = d;
+            }
             let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
-            if d > app.cached_max_drift_z { app.cached_max_drift_z = d; }
+            if d > app.cached_max_drift_z {
+                app.cached_max_drift_z = d;
+            }
         }
         app.last_drift_scan_count = count;
 
@@ -1443,9 +1584,13 @@ mod tests {
         let (mut full_dx, mut full_dz) = (0.0f32, 0.0f32);
         for i in 0..count {
             let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
-            if d > full_dx { full_dx = d; }
+            if d > full_dx {
+                full_dx = d;
+            }
             let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
-            if d > full_dz { full_dz = d; }
+            if d > full_dz {
+                full_dz = d;
+            }
         }
 
         assert_eq!(app.cached_max_drift_x, full_dx);
@@ -1483,8 +1628,9 @@ mod tests {
         // First batch: frames 0..10 with small drift
         // Heap-allocate: TasSharedState is ~1.5MB, too large for stack
         let mut state: Box<TasSharedState> = unsafe {
-            Box::from_raw(Box::into_raw(vec![0u8; std::mem::size_of::<TasSharedState>()]
-                .into_boxed_slice()) as *mut [u8] as *mut TasSharedState)
+            Box::from_raw(Box::into_raw(
+                vec![0u8; std::mem::size_of::<TasSharedState>()].into_boxed_slice(),
+            ) as *mut [u8] as *mut TasSharedState)
         };
         state.recorded_count = 20;
         state.playback_pos = 10;
@@ -1499,9 +1645,13 @@ mod tests {
         let count1 = 10usize;
         for i in app.last_drift_scan_count..count1 {
             let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
-            if d > app.cached_max_drift_x { app.cached_max_drift_x = d; }
+            if d > app.cached_max_drift_x {
+                app.cached_max_drift_x = d;
+            }
             let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
-            if d > app.cached_max_drift_z { app.cached_max_drift_z = d; }
+            if d > app.cached_max_drift_z {
+                app.cached_max_drift_z = d;
+            }
         }
         app.last_drift_scan_count = count1;
 
@@ -1512,9 +1662,13 @@ mod tests {
         let count2 = 20usize;
         for i in app.last_drift_scan_count..count2 {
             let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
-            if d > app.cached_max_drift_x { app.cached_max_drift_x = d; }
+            if d > app.cached_max_drift_x {
+                app.cached_max_drift_x = d;
+            }
             let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
-            if d > app.cached_max_drift_z { app.cached_max_drift_z = d; }
+            if d > app.cached_max_drift_z {
+                app.cached_max_drift_z = d;
+            }
         }
         app.last_drift_scan_count = count2;
 

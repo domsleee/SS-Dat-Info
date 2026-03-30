@@ -179,8 +179,15 @@ pub fn wait_playback(client: &TasSharedMemoryClient, expected: u32) -> bool {
         thread::sleep(Duration::from_millis(50));
         if client.mode_volatile() != TasMode::Play as u32 {
             let pos = client.playback_pos_volatile();
-            println!("  Playback complete: {}/{}", pos, expected);
-            return true;
+            if pos >= expected {
+                println!("  Playback complete: {}/{}", pos, expected);
+                return true;
+            }
+            eprintln!(
+                "  Playback exited PLAY early at {}/{} (treating as failure)",
+                pos, expected
+            );
+            return false;
         }
         if start.elapsed() > Duration::from_secs(PLAYBACK_TIMEOUT_SECS) {
             let pos = client.playback_pos_volatile();
@@ -374,6 +381,63 @@ pub fn restart_play_and_match(
     }
     eprintln!(
         "  WARNING: Could not match position after {} retries",
+        max_retries
+    );
+    false
+}
+
+/// F5 restart + stabilize, force start position, then start PLAY and verify
+/// play_coords[0] matches the target. Uses position forcing instead of
+/// relying on F5 quantized positions (which may never match naturally).
+/// Returns true if playback is running with correct start position.
+pub fn restart_play_and_force(
+    client: &mut TasSharedMemoryClient,
+    target: [f32; 3],
+    max_retries: u32,
+) -> bool {
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            println!(
+                "  Retry {}/{}: play force position...",
+                attempt, max_retries
+            );
+        }
+        if !restart_and_stabilize(client) {
+            eprintln!("  ERROR: Game not alive after F5");
+            return false;
+        }
+
+        // Force position before arming PLAY
+        let player_ptr = client.state().player_ptr;
+        if player_ptr != 0 && (target[0] != 0.0 || target[1] != 0.0 || target[2] != 0.0) {
+            force_position_in_game(player_ptr, target);
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        arm_play(client);
+        // Wait for at least 1 frame of playback to capture play_coords[0]
+        thread::sleep(Duration::from_millis(100));
+        let s = client.state();
+        if s.playback_pos == 0 {
+            eprintln!("  WARNING: Playback didn't start");
+            stop(client);
+            continue;
+        }
+        let pc0 = s.play_coords[0];
+        let match_x = pc0[0].to_bits() == target[0].to_bits();
+        let match_y = pc0[1].to_bits() == target[1].to_bits();
+        let match_z = pc0[2].to_bits() == target[2].to_bits();
+        if match_x && match_y && match_z {
+            println!("  Position force-matched (attempt {})", attempt + 1);
+            return true;
+        }
+        let dx = (pc0[0] as f64 - target[0] as f64).abs();
+        let dz = (pc0[2] as f64 - target[2] as f64).abs();
+        println!("  play_coords[0] offset after force: dx={:.9} dz={:.9}", dx, dz);
+        stop(client);
+    }
+    eprintln!(
+        "  WARNING: Could not force-match position after {} retries",
         max_retries
     );
     false

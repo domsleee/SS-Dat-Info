@@ -1,13 +1,14 @@
 use eframe::egui;
 use tas_shared::{TasCommand, TasMode, TasSharedState};
 
-use crate::recording::UndoRing;
+use crate::recording::RecordingHistory;
 
 pub enum Action {
     Send(TasCommand),
     RestartThen(TasCommand),
-    AutoSave,
+    AutoSave(&'static str),
     Undo,
+    Redo,
     StepOne,
     SetContinueFrame(u32),
     Log(String),
@@ -22,7 +23,7 @@ pub fn show(
     playback_speed: &mut f32,
     cont_catchup_speed: &mut f32,
     _step_mode: &mut bool,
-    undo_ring: &UndoRing,
+    history: &RecordingHistory,
     _state: &TasSharedState,
     catchup_active: bool,
 ) -> Vec<Action> {
@@ -48,7 +49,7 @@ pub fn show(
             .clicked()
         {
             if recorded > 0 {
-                actions.push(Action::AutoSave);
+                actions.push(Action::AutoSave("Before REC"));
             }
             actions.push(Action::RestartThen(TasCommand::ArmRec));
         }
@@ -85,10 +86,13 @@ pub fn show(
         let cont_label = "\u{23ED} CONT  F12"; // Unicode next track symbol
         if ui
             .add_enabled(is_off && recorded > 0, egui::Button::new(cont_label))
-            .on_hover_text(format!("Continue recording from a specific frame (catch-up at {}x)", *cont_catchup_speed))
+            .on_hover_text(format!(
+                "Continue recording from a specific frame (catch-up at {}x)",
+                *cont_catchup_speed
+            ))
             .clicked()
         {
-            actions.push(Action::AutoSave);
+            actions.push(Action::AutoSave("Before CONT"));
             actions.push(Action::Log(format!(
                 "Continue recording from frame {} ({}x catch-up)",
                 *continue_from, *cont_catchup_speed
@@ -111,18 +115,29 @@ pub fn show(
                 .prefix("catch-up: ")
                 .suffix("x")
                 .speed(0.5),
-        ).on_hover_text("CONT catch-up speed (max effective ~12x at 60 FPS)");
+        )
+        .on_hover_text("CONT catch-up speed (max effective ~12x at 60 FPS)");
 
         ui.separator();
 
         // Undo
-        let undo_count = undo_ring.len();
+        let undo_count = history.undo_depth();
         if ui
             .add_enabled(undo_count > 0, egui::Button::new("\u{21A9} Undo"))
-            .on_hover_text(format!("{} saves in ring", undo_count))
+            .on_hover_text(format!("{} earlier restorable state(s)", undo_count))
             .clicked()
         {
             actions.push(Action::Undo);
+        }
+
+        // Redo
+        let redo_count = history.redo_depth();
+        if ui
+            .add_enabled(redo_count > 0, egui::Button::new("\u{21AA} Redo"))
+            .on_hover_text(format!("{} later restorable state(s)", redo_count))
+            .clicked()
+        {
+            actions.push(Action::Redo);
         }
 
         ui.separator();

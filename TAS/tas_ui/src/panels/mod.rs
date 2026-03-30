@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod config;
 pub mod drift;
+pub mod history;
 pub mod log_panel;
 pub mod rotation;
 pub mod segments;
