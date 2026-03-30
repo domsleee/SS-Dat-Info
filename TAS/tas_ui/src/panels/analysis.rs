@@ -58,7 +58,11 @@ impl AnalysisCache {
         self.histogram_bars = input_bits::ALL
             .iter()
             .enumerate()
-            .map(|(i, &(_, short, _))| Bar::new(i as f64, self.counts[i] as f64).name(short).width(0.6))
+            .map(|(i, &(_, short, _))| {
+                Bar::new(i as f64, self.counts[i] as f64)
+                    .name(short)
+                    .width(0.6)
+            })
             .collect();
 
         // Transition density
@@ -112,12 +116,26 @@ impl AnalysisCache {
             let r = mask & input_bits::RIGHT != 0;
             let u = mask & input_bits::UP != 0;
             let d = mask & input_bits::DOWN != 0;
-            if l { self.left_ticks += 1; }
-            if r { self.right_ticks += 1; }
-            if u { self.up_ticks += 1; }
-            if d { self.down_ticks += 1; }
+            if l {
+                self.left_ticks += 1;
+            }
+            if r {
+                self.right_ticks += 1;
+            }
+            if u {
+                self.up_ticks += 1;
+            }
+            if d {
+                self.down_ticks += 1;
+            }
 
-            let dir = if l && !r { Some('L') } else if r && !l { Some('R') } else { None };
+            let dir = if l && !r {
+                Some('L')
+            } else if r && !l {
+                Some('R')
+            } else {
+                None
+            };
             if dir == current_dir {
                 current_len += 1;
             } else {
@@ -137,11 +155,23 @@ impl AnalysisCache {
         }
 
         let lr_total = self.left_ticks + self.right_ticks;
-        let lr_ratio = if lr_total > 0 { self.left_ticks as f32 / lr_total as f32 } else { 0.5 };
+        let lr_ratio = if lr_total > 0 {
+            self.left_ticks as f32 / lr_total as f32
+        } else {
+            0.5
+        };
         self.lr_balance = (lr_ratio - 0.5).abs() * 200.0;
 
-        self.left_segs = segments.iter().filter(|s| s.0 == 'L').map(|s| s.1).collect();
-        self.right_segs = segments.iter().filter(|s| s.0 == 'R').map(|s| s.1).collect();
+        self.left_segs = segments
+            .iter()
+            .filter(|s| s.0 == 'L')
+            .map(|s| s.1)
+            .collect();
+        self.right_segs = segments
+            .iter()
+            .filter(|s| s.0 == 'R')
+            .map(|s| s.1)
+            .collect();
 
         // Trajectory stats
         let coords = &state.rec_coords[..count];
@@ -158,7 +188,11 @@ impl AnalysisCache {
         let end_x = coords[count - 1][0] as f64;
         let end_z = coords[count - 1][2] as f64;
         self.displacement = ((end_x - start_x).powi(2) + (end_z - start_z).powi(2)).sqrt();
-        self.straightness = if self.total_dist > 0.0 { self.displacement / self.total_dist } else { 0.0 };
+        self.straightness = if self.total_dist > 0.0 {
+            self.displacement / self.total_dist
+        } else {
+            0.0
+        };
 
         let sector_count = 4usize.min(count);
         let sector_size = count / sector_count;
@@ -166,7 +200,11 @@ impl AnalysisCache {
         if sector_size > 1 {
             for s in 0..sector_count {
                 let start = s * sector_size;
-                let end = if s == sector_count - 1 { count } else { (s + 1) * sector_size };
+                let end = if s == sector_count - 1 {
+                    count
+                } else {
+                    (s + 1) * sector_size
+                };
                 let mut sector_dist: f64 = 0.0;
                 for i in (start + 1)..end {
                     let dx = (coords[i][0] - coords[i - 1][0]) as f64;
@@ -216,8 +254,8 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut AnalysisCache
 }
 
 fn show_histogram(ui: &mut egui::Ui, cache: &AnalysisCache) {
-    let chart = BarChart::new(cache.histogram_bars.clone())
-        .color(egui::Color32::from_rgb(100, 160, 255));
+    let chart =
+        BarChart::new(cache.histogram_bars.clone()).color(egui::Color32::from_rgb(100, 160, 255));
 
     Plot::new("input_histogram")
         .height(120.0)
@@ -253,8 +291,8 @@ fn show_transition_density(ui: &mut egui::Ui, cache: &AnalysisCache) {
         return;
     }
 
-    let chart = BarChart::new(cache.density_bars.clone())
-        .color(egui::Color32::from_rgb(255, 180, 80));
+    let chart =
+        BarChart::new(cache.density_bars.clone()).color(egui::Color32::from_rgb(255, 180, 80));
 
     Plot::new("transition_density")
         .height(100.0)
@@ -301,7 +339,9 @@ fn show_symmetry(ui: &mut egui::Ui, cache: &AnalysisCache) {
         let ud_ratio = cache.up_ticks as f32 / ud_total as f32;
         ui.label(format!(
             "U/D balance: U={} D={} ({:.0}% U)",
-            cache.up_ticks, cache.down_ticks, ud_ratio * 100.0
+            cache.up_ticks,
+            cache.down_ticks,
+            ud_ratio * 100.0
         ));
     }
 
@@ -309,9 +349,17 @@ fn show_symmetry(ui: &mut egui::Ui, cache: &AnalysisCache) {
         ui.label(format!(
             "Segments: {} L (avg {:.1} ticks), {} R (avg {:.1} ticks)",
             cache.left_segs.len(),
-            if cache.left_segs.is_empty() { 0.0 } else { cache.left_segs.iter().sum::<u32>() as f64 / cache.left_segs.len() as f64 },
+            if cache.left_segs.is_empty() {
+                0.0
+            } else {
+                cache.left_segs.iter().sum::<u32>() as f64 / cache.left_segs.len() as f64
+            },
             cache.right_segs.len(),
-            if cache.right_segs.is_empty() { 0.0 } else { cache.right_segs.iter().sum::<u32>() as f64 / cache.right_segs.len() as f64 },
+            if cache.right_segs.is_empty() {
+                0.0
+            } else {
+                cache.right_segs.iter().sum::<u32>() as f64 / cache.right_segs.len() as f64
+            },
         ));
     }
 }
@@ -324,12 +372,21 @@ fn show_trajectory_stats(ui: &mut egui::Ui, cache: &AnalysisCache, count: usize)
 
     ui.label(format!("Path length: {:.1} units", cache.total_dist));
     ui.label(format!("Displacement: {:.1} units", cache.displacement));
-    ui.label(format!("Straightness: {:.3} (1.0 = straight line)", cache.straightness));
+    ui.label(format!(
+        "Straightness: {:.3} (1.0 = straight line)",
+        cache.straightness
+    ));
 
     if !cache.sectors.is_empty() {
         ui.label("Sector splits:");
         for (i, &(start, end, dist)) in cache.sectors.iter().enumerate() {
-            ui.label(format!("  S{}: ticks {}-{}, dist {:.1}", i + 1, start, end - 1, dist));
+            ui.label(format!(
+                "  S{}: ticks {}-{}, dist {:.1}",
+                i + 1,
+                start,
+                end - 1,
+                dist
+            ));
         }
     }
 }

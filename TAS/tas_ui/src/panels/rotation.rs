@@ -37,8 +37,8 @@ fn pitch_from_matrix(m: &[f32; 9]) -> f32 {
 
 fn yaw_from_matrix(m: &[f32; 9]) -> f32 {
     // Three.js XYZ: euler.y = asin(m13) = asin(m[2])
-    // NOT negated: positive yaw = turning left in-game shows as turning left
-    m[2].clamp(-1.0, 1.0).asin()
+    // Negate for display correction (reference negates euler.y)
+    -(m[2].clamp(-1.0, 1.0).asin())
 }
 
 fn roll_from_matrix(m: &[f32; 9]) -> f32 {
@@ -52,11 +52,7 @@ fn roll_from_matrix(m: &[f32; 9]) -> f32 {
 /// This applies M_display = S * M where S = diag(-1, -1, 1),
 /// matching the reference position transform: x=-x, y=-y, z=z.
 fn display_matrix(m: &[f32; 9]) -> [f32; 9] {
-    [
-        -m[0], -m[1], -m[2],
-        -m[3], -m[4], -m[5],
-         m[6],  m[7],  m[8],
-    ]
+    [-m[0], -m[1], -m[2], -m[3], -m[4], -m[5], m[6], m[7], m[8]]
 }
 
 /// Draw a 3D arrow (axis line with small arrowhead) and label.
@@ -74,24 +70,15 @@ fn draw_axis(
     let end = center + tip_2d;
 
     // Main axis line
-    painter.line_segment(
-        [center, end],
-        egui::Stroke::new(2.5, color),
-    );
+    painter.line_segment([center, end], egui::Stroke::new(2.5, color));
 
     // Arrowhead (two small lines)
     let dir = tip_2d.normalized();
     let perp = egui::Vec2::new(-dir.y, dir.x);
     let head_len = 6.0;
     let head_base = end - dir * head_len;
-    painter.line_segment(
-        [end, head_base + perp * 3.0],
-        egui::Stroke::new(2.0, color),
-    );
-    painter.line_segment(
-        [end, head_base - perp * 3.0],
-        egui::Stroke::new(2.0, color),
-    );
+    painter.line_segment([end, head_base + perp * 3.0], egui::Stroke::new(2.0, color));
+    painter.line_segment([end, head_base - perp * 3.0], egui::Stroke::new(2.0, color));
 
     // Label at tip
     let label_pos = end + tip_2d.normalized() * 10.0;
@@ -105,28 +92,39 @@ fn draw_axis(
 }
 
 /// Draw a wireframe box rotated by the matrix to give spatial context.
-fn draw_wireframe_body(
-    painter: &egui::Painter,
-    center: egui::Pos2,
-    scale: f32,
-    m: &[f32; 9],
-) {
+fn draw_wireframe_body(painter: &egui::Painter, center: egui::Pos2, scale: f32, m: &[f32; 9]) {
     // A flat elongated box representing the snowboard/rider orientation
     let hx = 0.15_f32; // narrow
-    let hy = 0.1;      // thin
-    let hz = 0.5;      // long (forward axis)
+    let hy = 0.1; // thin
+    let hz = 0.5; // long (forward axis)
 
     let verts: [[f32; 3]; 8] = [
-        [-hx, -hy, -hz], [ hx, -hy, -hz], [ hx,  hy, -hz], [-hx,  hy, -hz],
-        [-hx, -hy,  hz], [ hx, -hy,  hz], [ hx,  hy,  hz], [-hx,  hy,  hz],
+        [-hx, -hy, -hz],
+        [hx, -hy, -hz],
+        [hx, hy, -hz],
+        [-hx, hy, -hz],
+        [-hx, -hy, hz],
+        [hx, -hy, hz],
+        [hx, hy, hz],
+        [-hx, hy, hz],
     ];
     let edges: [(usize, usize); 12] = [
-        (0,1),(1,2),(2,3),(3,0), // back face
-        (4,5),(5,6),(6,7),(7,4), // front face
-        (0,4),(1,5),(2,6),(3,7), // connecting edges
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0), // back face
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4), // front face
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7), // connecting edges
     ];
 
-    let projected: Vec<egui::Pos2> = verts.iter()
+    let projected: Vec<egui::Pos2> = verts
+        .iter()
         .map(|v| {
             let r = rotate(m, *v);
             center + project(r) * scale
@@ -186,9 +184,33 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState) {
     draw_wireframe_body(&painter, center, scale, &dm);
 
     // Draw rotated coordinate axes: X=red, Y=green, Z=blue (display-corrected)
-    draw_axis(&painter, center, scale, &dm, [1.0, 0.0, 0.0], egui::Color32::from_rgb(220, 80, 80), "X");
-    draw_axis(&painter, center, scale, &dm, [0.0, 1.0, 0.0], egui::Color32::from_rgb(80, 200, 80), "Y");
-    draw_axis(&painter, center, scale, &dm, [0.0, 0.0, 1.0], egui::Color32::from_rgb(80, 130, 230), "Z");
+    draw_axis(
+        &painter,
+        center,
+        scale,
+        &dm,
+        [1.0, 0.0, 0.0],
+        egui::Color32::from_rgb(220, 80, 80),
+        "X",
+    );
+    draw_axis(
+        &painter,
+        center,
+        scale,
+        &dm,
+        [0.0, 1.0, 0.0],
+        egui::Color32::from_rgb(80, 200, 80),
+        "Y",
+    );
+    draw_axis(
+        &painter,
+        center,
+        scale,
+        &dm,
+        [0.0, 0.0, 1.0],
+        egui::Color32::from_rgb(80, 130, 230),
+        "Z",
+    );
 
     // Center dot
     painter.circle_filled(center, 2.5, egui::Color32::WHITE);
@@ -237,7 +259,11 @@ mod tests {
         let s = angle.sin();
         let m: [f32; 9] = [1.0, 0.0, 0.0, 0.0, c, s, 0.0, -s, c];
         let pitch = pitch_from_matrix(&m);
-        assert!((pitch - angle).abs() < 1e-5, "Expected ~30 deg pitch, got {}", pitch.to_degrees());
+        assert!(
+            (pitch - angle).abs() < 1e-5,
+            "Expected ~30 deg pitch, got {}",
+            pitch.to_degrees()
+        );
         assert!((yaw_from_matrix(&m)).abs() < 1e-5);
         assert!((roll_from_matrix(&m)).abs() < 1e-5);
     }
@@ -272,7 +298,7 @@ mod tests {
     ///   [sin45  0   cos45]
     ///
     /// XYZ extraction: euler.y = asin(-sin45) = -45 deg
-    /// Yaw is NOT negated: left-handed +45 maps to display -45.
+    /// Yaw is negated for display: left-handed +45 maps to display +45.
     #[test]
     fn pure_yaw_45_degrees() {
         let angle = std::f32::consts::FRAC_PI_4;
@@ -280,7 +306,11 @@ mod tests {
         let s = angle.sin();
         let m: [f32; 9] = [c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c];
         let yaw = yaw_from_matrix(&m);
-        assert!((yaw + angle).abs() < 1e-5, "Expected ~-45 deg yaw, got {}", yaw.to_degrees());
+        assert!(
+            (yaw - angle).abs() < 1e-5,
+            "Expected ~+45 deg yaw, got {}",
+            yaw.to_degrees()
+        );
         assert!((pitch_from_matrix(&m)).abs() < 1e-5);
         assert!((roll_from_matrix(&m)).abs() < 1e-5);
     }
@@ -302,7 +332,11 @@ mod tests {
         let m: [f32; 9] = [c, s, 0.0, -s, c, 0.0, 0.0, 0.0, 1.0];
         let roll = roll_from_matrix(&m);
         // In XYZ extraction, left-handed R_z(+20) maps to display roll = -20
-        assert!((roll + angle).abs() < 1e-5, "Expected ~-20 deg roll, got {}", roll.to_degrees());
+        assert!(
+            (roll + angle).abs() < 1e-5,
+            "Expected ~-20 deg roll, got {}",
+            roll.to_degrees()
+        );
         assert!((yaw_from_matrix(&m)).abs() < 1e-5);
         assert!((pitch_from_matrix(&m)).abs() < 1e-5);
     }
@@ -331,16 +365,22 @@ mod tests {
     #[test]
     fn matches_reference_frame_1500() {
         let m: [f32; 9] = [
-            0.9973129, 0.07208475, -0.013_067_5,
-            0.017486196, -0.40744606, -0.91306186,
-            -0.07114214, 0.9103799, -0.4076117,
+            0.9973129,
+            0.07208475,
+            -0.013_067_5,
+            0.017486196,
+            -0.40744606,
+            -0.91306186,
+            -0.07114214,
+            0.9103799,
+            -0.4076117,
         ];
         let pitch = pitch_from_matrix(&m).to_degrees();
         let yaw = yaw_from_matrix(&m).to_degrees();
         let roll = roll_from_matrix(&m).to_degrees();
-        // Reference: pitch=-114.06, yaw=-0.75 (inverted from ref), roll=-4.13
+        // Reference: pitch=-114.06, yaw=+0.75 (negated for display correction), roll=-4.13
         assert!((pitch - (-114.06)).abs() < 0.5, "pitch={}", pitch);
-        assert!((yaw - (-0.75)).abs() < 0.5, "yaw={}", yaw);
+        assert!((yaw - 0.75).abs() < 0.5, "yaw={}", yaw);
         assert!((roll - (-4.13)).abs() < 0.5, "roll={}", roll);
     }
 
@@ -349,16 +389,22 @@ mod tests {
     #[test]
     fn matches_reference_frame_3500() {
         let m: [f32; 9] = [
-            0.97618407, 0.12827694, -0.17495605,
-            0.035068795, 0.70254636, 0.71077335,
-            0.21409057, -0.69998115, 0.681_316_1,
+            0.97618407,
+            0.12827694,
+            -0.17495605,
+            0.035068795,
+            0.70254636,
+            0.71077335,
+            0.21409057,
+            -0.69998115,
+            0.681_316_1,
         ];
         let pitch = pitch_from_matrix(&m).to_degrees();
         let yaw = yaw_from_matrix(&m).to_degrees();
         let roll = roll_from_matrix(&m).to_degrees();
-        // Reference: pitch=46.21, yaw=-10.08 (inverted from ref), roll=-7.49
+        // Reference: pitch=46.21, yaw=+10.08 (negated for display correction), roll=-7.49
         assert!((pitch - 46.21).abs() < 0.5, "pitch={}", pitch);
-        assert!((yaw - (-10.08)).abs() < 0.5, "yaw={}", yaw);
+        assert!((yaw - 10.08).abs() < 0.5, "yaw={}", yaw);
         assert!((roll - (-7.49)).abs() < 0.5, "roll={}", roll);
     }
 }

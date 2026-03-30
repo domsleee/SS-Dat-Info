@@ -18,11 +18,17 @@ enum ActiveTickMode {
     Play,
 }
 
-pub fn show(ui: &mut egui::Ui, state: &TasSharedState, zoom: &mut f32, scroll: &mut f32) {
+pub fn show(
+    ui: &mut egui::Ui,
+    state: &TasSharedState,
+    zoom: &mut f32,
+    scroll: &mut f32,
+    continue_from: &mut u32,
+) -> bool {
     let total = state.recorded_count as usize;
     if total == 0 {
         ui.label("No recording data");
-        return;
+        return false;
     }
 
     // Zoom slider
@@ -64,8 +70,10 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, zoom: &mut f32, scroll: &
     let scroll_start = (*scroll as usize).min(max_scroll);
     let scroll_end = (scroll_start + ticks_visible).min(total);
 
-    let (response, painter) =
-        ui.allocate_painter(egui::vec2(width, total_height), egui::Sense::hover());
+    let (response, painter) = ui.allocate_painter(
+        egui::vec2(width, total_height),
+        egui::Sense::click_and_drag(),
+    );
     let rect = response.rect;
 
     // Background
@@ -172,8 +180,8 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, zoom: &mut f32, scroll: &
         // so held keys don't stretch annoyingly to the right during live recording.
         if in_run {
             let end_tick = scroll_end.min(total);
-            let end_px = bar_left
-                + ((end_tick - scroll_start) as f32 / ticks_visible as f32) * bar_width;
+            let end_px =
+                bar_left + ((end_tick - scroll_start) as f32 / ticks_visible as f32) * bar_width;
             let px_w = (end_px - run_start_px).max(1.0);
             painter.rect_filled(
                 egui::Rect::from_min_size(
@@ -224,6 +232,45 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, zoom: &mut f32, scroll: &
         "Showing ticks {}-{} of {} ({:.1}x zoom)",
         scroll_start, scroll_end, total, zoom
     ));
+
+    let mut continue_marker_changed = false;
+    if response.clicked() || response.dragged() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            if pos.x >= bar_left
+                && pos.x <= bar_left + bar_width
+                && pos.y >= rows_top
+                && pos.y <= rows_bottom
+            {
+                let rel = ((pos.x - bar_left) / bar_width).clamp(0.0, 1.0);
+                let tick = scroll_start + (rel * ticks_visible as f32) as usize;
+                let frame = tick.min(total.saturating_sub(1)) as u32;
+                if frame != *continue_from {
+                    *continue_from = frame;
+                    continue_marker_changed = true;
+                }
+            }
+        }
+    }
+
+    let continue_tick = (*continue_from as usize).min(total.saturating_sub(1));
+    if continue_tick >= scroll_start && continue_tick < scroll_end {
+        let px =
+            bar_left + ((continue_tick - scroll_start) as f32 / ticks_visible as f32) * bar_width;
+        let continue_color = egui::Color32::from_rgb(120, 200, 255);
+        painter.line_segment(
+            [egui::pos2(px, rows_top), egui::pos2(px, rows_bottom)],
+            egui::Stroke::new(1.5, continue_color),
+        );
+        painter.text(
+            egui::pos2(px + 3.0, rows_top + 1.0),
+            egui::Align2::LEFT_TOP,
+            "CONT",
+            egui::FontId::monospace(8.0),
+            continue_color,
+        );
+    }
+
+    continue_marker_changed
 }
 
 /// Compute new scroll position to keep `pos` visible.
