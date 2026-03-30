@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use tas_shared::{TasSharedState, TAS_MAX_TICKS};
 
 /// A segment boundary within a multi-segment recording.
@@ -144,8 +145,9 @@ impl RecordingFile {
     }
 }
 
-/// Snapshot of input log + coords for undo.
+/// Snapshot of input log + coords for history restore operations.
 /// Pre-allocates max-size buffers to avoid per-push heap allocation.
+#[derive(Clone)]
 pub struct RecordingSnapshot {
     pub recorded_count: u32,
     pub(crate) input_log: Box<[u8; TAS_MAX_TICKS]>,
@@ -157,7 +159,10 @@ impl RecordingSnapshot {
     fn new_empty() -> Self {
         Self {
             recorded_count: 0,
-            input_log: vec![0u8; TAS_MAX_TICKS].into_boxed_slice().try_into().unwrap(),
+            input_log: vec![0u8; TAS_MAX_TICKS]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
             rec_coords: vec![[0.0f32; 3]; TAS_MAX_TICKS]
                 .into_boxed_slice()
                 .try_into()
@@ -184,47 +189,213 @@ impl RecordingSnapshot {
     }
 }
 
-pub struct UndoRing {
-    /// Pre-allocated ring of snapshots. All slots are allocated at construction.
-    slots: Vec<RecordingSnapshot>,
-    /// Number of valid snapshots (stack top = used - 1).
-    used: usize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryEntryKind {
+    Snapshot,
+    SaveMarker,
+    LoadSnapshot,
 }
 
-impl UndoRing {
-    pub fn new(capacity: usize) -> Self {
-        let mut slots = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            slots.push(RecordingSnapshot::new_empty());
+pub struct HistoryEntry {
+    pub label: String,
+    pub timestamp: String,
+    pub kind: HistoryEntryKind,
+    snapshot: Option<RecordingSnapshot>,
+}
+
+impl HistoryEntry {
+    fn snapshot(label: String, kind: HistoryEntryKind, state: &TasSharedState) -> Self {
+        let mut snap = RecordingSnapshot::new_empty();
+        snap.capture_from(state);
+        Self {
+            label,
+            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+            kind,
+            snapshot: Some(snap),
         }
-        Self { slots, used: 0 }
     }
 
-    pub fn push(&mut self, state: &TasSharedState) {
+    fn marker(label: String, kind: HistoryEntryKind) -> Self {
+        Self {
+            label,
+            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+            kind,
+            snapshot: None,
+        }
+    }
+
+    pub fn can_restore(&self) -> bool {
+        self.snapshot.is_some()
+    }
+}
+
+pub struct RecordingHistory {
+    capacity: usize,
+    entries: Vec<HistoryEntry>,
+    current_index: Option<usize>,
+}
+
+impl RecordingHistory {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            entries: Vec::with_capacity(capacity.max(1)),
+            current_index: None,
+        }
+    }
+
+    pub fn push_snapshot(&mut self, state: &TasSharedState, label: impl Into<String>) -> bool {
         if state.recorded_count == 0 {
+            return false;
+        }
+
+        self.truncate_future();
+        self.entries.push(HistoryEntry::snapshot(
+            label.into(),
+            HistoryEntryKind::Snapshot,
+            state,
+        ));
+        self.current_index = Some(self.entries.len() - 1);
+        self.enforce_capacity();
+        true
+    }
+
+    pub fn push_loaded_snapshot(&mut self, state: &TasSharedState, path: &Path) -> bool {
+        if state.recorded_count == 0 {
+            return false;
+        }
+
+        self.truncate_future();
+        let label = format!("Load: {}", short_file_label(path));
+        self.entries.push(HistoryEntry::snapshot(
+            label,
+            HistoryEntryKind::LoadSnapshot,
+            state,
+        ));
+        self.current_index = Some(self.entries.len() - 1);
+        self.enforce_capacity();
+        true
+    }
+
+    /// Record a save marker without changing the current restored state.
+    pub fn push_save_marker(&mut self, state: &TasSharedState, path: &Path) {
+        if self.current_index.is_none() && state.recorded_count > 0 {
+            let _ = self.push_snapshot(state, "Current recording");
+        }
+        if self.entries.is_empty() {
             return;
         }
-        let cap = self.slots.len();
-        if self.used >= cap {
-            // Rotate oldest slot to the end, overwrite it
-            self.slots.rotate_left(1);
-            self.used = cap - 1;
+        let label = format!("Save: {}", short_file_label(path));
+        let marker = HistoryEntry::marker(label, HistoryEntryKind::SaveMarker);
+        if let Some(current) = self.current_index {
+            // Save belongs to the current visible state without changing selection.
+            let insert_at = (current + 1).min(self.entries.len());
+            self.entries.insert(insert_at, marker);
+            self.enforce_capacity();
+        } else {
+            self.entries.push(marker);
+            self.enforce_capacity();
         }
-        self.slots[self.used].capture_from(state);
-        self.used += 1;
     }
 
-    pub fn pop(&mut self) -> Option<&RecordingSnapshot> {
-        if self.used == 0 {
+    pub fn undo(&mut self) -> Option<&RecordingSnapshot> {
+        let current = self.current_index?;
+        let prev = (0..current)
+            .rev()
+            .find(|&i| self.entries[i].snapshot.is_some())?;
+        self.current_index = Some(prev);
+        self.entries[prev].snapshot.as_ref()
+    }
+
+    pub fn redo(&mut self) -> Option<&RecordingSnapshot> {
+        let current = self.current_index?;
+        let next =
+            ((current + 1)..self.entries.len()).find(|&i| self.entries[i].snapshot.is_some())?;
+        self.current_index = Some(next);
+        self.entries[next].snapshot.as_ref()
+    }
+
+    pub fn restore_index(&mut self, index: usize) -> Option<&RecordingSnapshot> {
+        if index >= self.entries.len() {
             return None;
         }
-        self.used -= 1;
-        Some(&self.slots[self.used])
+        if self.entries[index].snapshot.is_none() {
+            return None;
+        }
+        self.current_index = Some(index);
+        self.entries[index].snapshot.as_ref()
+    }
+
+    pub fn current_index(&self) -> Option<usize> {
+        self.current_index
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.undo_depth() > 0
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.redo_depth() > 0
+    }
+
+    pub fn undo_depth(&self) -> usize {
+        let Some(current) = self.current_index else {
+            return 0;
+        };
+        (0..current)
+            .filter(|&i| self.entries[i].snapshot.is_some())
+            .count()
+    }
+
+    pub fn redo_depth(&self) -> usize {
+        let Some(current) = self.current_index else {
+            return 0;
+        };
+        ((current + 1)..self.entries.len())
+            .filter(|&i| self.entries[i].snapshot.is_some())
+            .count()
     }
 
     pub fn len(&self) -> usize {
-        self.used
+        self.entries.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn entries(&self) -> &[HistoryEntry] {
+        &self.entries
+    }
+
+    fn truncate_future(&mut self) {
+        if let Some(current) = self.current_index {
+            self.entries.truncate(current + 1);
+        } else {
+            self.entries.clear();
+        }
+    }
+
+    fn enforce_capacity(&mut self) {
+        while self.entries.len() > self.capacity {
+            self.entries.remove(0);
+            self.current_index = self.current_index.and_then(|idx| idx.checked_sub(1));
+        }
+        if self.current_index.is_none() {
+            self.current_index = self
+                .entries
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(idx, entry)| entry.snapshot.as_ref().map(|_| idx));
+        }
+    }
+}
+
+fn short_file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// Tracks segment boundaries as the user records and continues.
@@ -279,15 +450,15 @@ impl SegmentTracker {
 }
 
 #[allow(dead_code)]
-pub fn save_dialog(state: &TasSharedState, log: &mut Vec<String>) {
-    save_dialog_with_segments(state, &[], log);
+pub fn save_dialog(state: &TasSharedState, log: &mut Vec<String>) -> Option<PathBuf> {
+    save_dialog_with_segments(state, &[], log)
 }
 
 pub fn save_dialog_with_segments(
     state: &TasSharedState,
     segments: &[Segment],
     log: &mut Vec<String>,
-) {
+) -> Option<PathBuf> {
     if let Some(path) = rfd::FileDialog::new()
         .set_title("Save TAS Recording")
         .add_filter("TAS Recording", &["tasrec"])
@@ -297,6 +468,7 @@ pub fn save_dialog_with_segments(
             Ok(()) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 log.push(format!("[{}] Saved recording to {}", ts, path.display()));
+                return Some(path);
             }
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -304,13 +476,14 @@ pub fn save_dialog_with_segments(
             }
         }
     }
+    None
 }
 
 pub fn load_dialog(
     state: &mut TasSharedState,
     tracker: &mut SegmentTracker,
     log: &mut Vec<String>,
-) {
+) -> Option<PathBuf> {
     if let Some(path) = rfd::FileDialog::new()
         .set_title("Load TAS Recording")
         .add_filter("TAS Recording", &["tasrec"])
@@ -323,9 +496,12 @@ pub fn load_dialog(
                 tracker.restore_from(segments);
                 log.push(format!(
                     "[{}] Loaded {} ticks, {} segments from {}",
-                    ts, count, seg_count,
+                    ts,
+                    count,
+                    seg_count,
                     path.display()
                 ));
+                return Some(path);
             }
             Err(e) => {
                 let ts = chrono::Local::now().format("%H:%M:%S");
@@ -333,6 +509,7 @@ pub fn load_dialog(
             }
         }
     }
+    None
 }
 
 pub fn dump_diagnostics(state: &TasSharedState, ui_drift: (f32, f32), log: &mut Vec<String>) {
@@ -370,7 +547,10 @@ pub fn dump_diagnostics(state: &TasSharedState, ui_drift: (f32, f32), log: &mut 
         out.push_str(&format!("Events: {}\n", state.event_count));
         out.push_str(&format!(
             "Config: inject_mode={} fft={} force_direct={} input_source={} speed={:.2}\n",
-            state.inject_mode, state.force_fixed_tick, state.force_direct, state.input_source,
+            state.inject_mode,
+            state.force_fixed_tick,
+            state.force_direct,
+            state.input_source,
             state.playback_speed
         ));
         out.push_str(&format!(
@@ -441,100 +621,129 @@ mod tests {
         std::env::temp_dir().join(format!("{}_{}_{}.{}", prefix, std::process::id(), id, ext))
     }
 
-    // ===== UndoRing =====
+    // ===== RecordingHistory =====
 
-    #[test]
-    fn undo_ring_new_is_empty() {
-        let ring = UndoRing::new(3);
-        assert_eq!(ring.len(), 0);
-    }
-
-    #[test]
-    fn undo_ring_push_and_pop() {
-        let ring = &mut UndoRing::new(5);
+    fn one_tick_state(mask: u8) -> Box<TasSharedState> {
         let mut state = zeroed_state();
-        state.recorded_count = 3;
-        state.input_log[0] = 0x04; // UP
-        state.input_log[1] = 0x04;
-        state.input_log[2] = 0x00;
-        state.rec_coords[0] = [1.0, 2.0, 3.0];
-
-        ring.push(&state);
-        assert_eq!(ring.len(), 1);
-
-        let snap = ring.pop().unwrap();
-        assert_eq!(snap.recorded_count, 3);
-        assert_eq!(snap.input_log[0], 0x04);
-        assert_eq!(snap.input_log[1], 0x04);
-        assert_eq!(snap.input_log[2], 0x00);
-        assert_eq!(snap.rec_coords[0], [1.0, 2.0, 3.0]);
-        assert_eq!(ring.len(), 0);
-    }
-
-    #[test]
-    fn undo_ring_pop_empty_returns_none() {
-        let mut ring = UndoRing::new(3);
-        assert!(ring.pop().is_none());
-    }
-
-    #[test]
-    fn undo_ring_skip_empty_recording() {
-        let mut ring = UndoRing::new(5);
-        let state = zeroed_state(); // recorded_count = 0
-        ring.push(&state);
-        assert_eq!(ring.len(), 0);
-    }
-
-    #[test]
-    fn undo_ring_overflow_drops_oldest() {
-        let mut ring = UndoRing::new(2);
-        let mut state = zeroed_state();
-
-        // Push snapshot A
         state.recorded_count = 1;
-        state.input_log[0] = 0x01; // LEFT
-        ring.push(&state);
+        state.input_log[0] = mask;
+        state.rec_coords[0] = [mask as f32, 0.0, mask as f32];
+        state
+    }
 
-        // Push snapshot B
-        state.input_log[0] = 0x02; // RIGHT
-        ring.push(&state);
+    #[test]
+    fn history_new_is_empty() {
+        let history = RecordingHistory::new(4);
+        assert_eq!(history.len(), 0);
+        assert!(!history.can_undo());
+        assert!(!history.can_redo());
+    }
 
-        assert_eq!(ring.len(), 2);
+    #[test]
+    fn history_push_undo_redo() {
+        let mut history = RecordingHistory::new(8);
+        let a = one_tick_state(0x01);
+        let b = one_tick_state(0x02);
+        let c = one_tick_state(0x04);
 
-        // Push snapshot C — should evict A
-        state.input_log[0] = 0x04; // UP
-        ring.push(&state);
+        assert!(history.push_snapshot(&a, "A"));
+        assert!(history.push_snapshot(&b, "B"));
+        assert!(history.push_snapshot(&c, "C"));
+        assert_eq!(history.current_index(), Some(2));
+        assert_eq!(history.undo_depth(), 2);
+        assert_eq!(history.redo_depth(), 0);
 
-        assert_eq!(ring.len(), 2);
-
-        // Pop should return C (LIFO)
-        let snap = ring.pop().unwrap();
-        assert_eq!(snap.input_log[0], 0x04);
-
-        // Next pop should return B (A was evicted)
-        let snap = ring.pop().unwrap();
+        let snap = history.undo().unwrap();
         assert_eq!(snap.input_log[0], 0x02);
+        assert_eq!(history.current_index(), Some(1));
+        assert_eq!(history.undo_depth(), 1);
+        assert_eq!(history.redo_depth(), 1);
 
-        assert!(ring.pop().is_none());
+        let snap = history.redo().unwrap();
+        assert_eq!(snap.input_log[0], 0x04);
+        assert_eq!(history.current_index(), Some(2));
     }
 
     #[test]
-    fn undo_ring_lifo_order() {
-        let mut ring = UndoRing::new(10);
-        let mut state = zeroed_state();
-        state.recorded_count = 1;
+    fn history_branch_truncates_after_new_edit() {
+        let mut history = RecordingHistory::new(8);
+        let a = one_tick_state(0x01);
+        let b = one_tick_state(0x02);
+        let c = one_tick_state(0x04);
+        let d = one_tick_state(0x08);
 
-        for i in 0..5u8 {
-            state.input_log[0] = i;
-            ring.push(&state);
-        }
-        assert_eq!(ring.len(), 5);
+        assert!(history.push_snapshot(&a, "A"));
+        assert!(history.push_snapshot(&b, "B"));
+        assert!(history.push_snapshot(&c, "C"));
+        let _ = history.undo(); // now on B
+        assert_eq!(history.current_index(), Some(1));
+        assert_eq!(history.redo_depth(), 1);
 
-        // Pop should return 4, 3, 2, 1, 0
-        for expected in (0..5u8).rev() {
-            let snap = ring.pop().unwrap();
-            assert_eq!(snap.input_log[0], expected);
-        }
+        assert!(history.push_snapshot(&d, "D"));
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.current_index(), Some(2));
+        assert_eq!(history.entries()[2].label, "D");
+        assert_eq!(history.redo_depth(), 0);
+    }
+
+    #[test]
+    fn history_save_marker_keeps_current_cursor() {
+        let mut history = RecordingHistory::new(8);
+        let a = one_tick_state(0x01);
+        let b = one_tick_state(0x02);
+        assert!(history.push_snapshot(&a, "A"));
+        assert!(history.push_snapshot(&b, "B"));
+        let before = history.current_index();
+
+        history.push_save_marker(&b, Path::new("C:\\temp\\run.tasrec"));
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.current_index(), before);
+        assert_eq!(history.entries()[2].kind, HistoryEntryKind::SaveMarker);
+        assert!(!history.entries()[2].can_restore());
+    }
+
+    #[test]
+    fn history_load_snapshot_becomes_current() {
+        let mut history = RecordingHistory::new(8);
+        let a = one_tick_state(0x01);
+        let loaded = one_tick_state(0x20);
+        assert!(history.push_snapshot(&a, "A"));
+        assert!(history.push_loaded_snapshot(&loaded, Path::new("C:\\temp\\loaded.tasrec")));
+        let current = history.current_index().unwrap();
+        assert_eq!(
+            history.entries()[current].kind,
+            HistoryEntryKind::LoadSnapshot
+        );
+        assert!(history.entries()[current].label.contains("loaded.tasrec"));
+        assert_eq!(history.undo_depth(), 1);
+    }
+
+    #[test]
+    fn history_restore_index_skips_non_restorable_entries() {
+        let mut history = RecordingHistory::new(8);
+        let a = one_tick_state(0x01);
+        let b = one_tick_state(0x02);
+        assert!(history.push_snapshot(&a, "A"));
+        assert!(history.push_snapshot(&b, "B"));
+        history.push_save_marker(&b, Path::new("run.tasrec"));
+
+        // Save marker cannot be restored directly.
+        assert!(history.restore_index(2).is_none());
+        let snap = history.restore_index(0).unwrap();
+        assert_eq!(snap.input_log[0], 0x01);
+        assert_eq!(history.current_index(), Some(0));
+    }
+
+    #[test]
+    fn history_capacity_eviction_preserves_recent_entries() {
+        let mut history = RecordingHistory::new(2);
+        assert!(history.push_snapshot(&one_tick_state(0x01), "A"));
+        assert!(history.push_snapshot(&one_tick_state(0x02), "B"));
+        assert!(history.push_snapshot(&one_tick_state(0x04), "C"));
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.entries()[0].label, "B");
+        assert_eq!(history.entries()[1].label, "C");
+        assert_eq!(history.current_index(), Some(1));
     }
 
     // ===== RecordingSnapshot =====

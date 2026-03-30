@@ -11,6 +11,7 @@ pub struct Settings {
     pub show_rotation: bool,
     pub show_analysis: bool,
     pub show_macros: bool,
+    pub show_history: bool,
     pub show_config: bool,
 
     // Playback
@@ -27,6 +28,7 @@ impl Default for Settings {
             show_rotation: false,
             show_analysis: false,
             show_macros: false,
+            show_history: false,
             show_config: false,
             playback_speed: 1.0,
             cont_catchup_speed: 12.0,
