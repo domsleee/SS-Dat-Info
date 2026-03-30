@@ -26,10 +26,7 @@ pub fn show(
     continue_from: &mut u32,
 ) -> bool {
     let total = state.recorded_count as usize;
-    if total == 0 {
-        ui.label("No recording data");
-        return false;
-    }
+    let has_data = total > 0;
 
     // Zoom slider
     ui.horizontal(|ui| {
@@ -232,6 +229,12 @@ pub fn show(
         "Showing ticks {}-{} of {} ({:.1}x zoom)",
         scroll_start, scroll_end, total, zoom
     ));
+    if !has_data {
+        ui.colored_label(
+            egui::Color32::from_rgb(150, 150, 150),
+            "No recording data yet. Press REC to populate timeline rows.",
+        );
+    }
 
     let mut continue_marker_changed = false;
     if response.clicked() || response.dragged() {
