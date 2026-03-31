@@ -12,13 +12,20 @@ pub enum RecordingSessionKind {
     Continue,
 }
 
-/// Format TAS tick durations as `<seconds>:<centiseconds>` at 100 Hz.
+/// Format TAS tick durations as clock time (`m:ss.cc` or `h:mm:ss.cc`) at 100 Hz.
 pub fn format_recording_duration(ticks: u32) -> String {
-    format!(
-        "{}:{:02}",
-        ticks / TAS_TICKS_PER_SECOND,
-        ticks % TAS_TICKS_PER_SECOND
-    )
+    let total_seconds = ticks / TAS_TICKS_PER_SECOND;
+    let centiseconds = ticks % TAS_TICKS_PER_SECOND;
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+
+    if minutes >= 60 {
+        let hours = minutes / 60;
+        let rem_minutes = minutes % 60;
+        format!("{}:{:02}:{:02}.{:02}", hours, rem_minutes, seconds, centiseconds)
+    } else {
+        format!("{}:{:02}.{:02}", minutes, seconds, centiseconds)
+    }
 }
 
 pub fn completed_session_label(
@@ -36,8 +43,8 @@ pub fn completed_session_label(
     let label = match kind {
         RecordingSessionKind::Rec => format!("Recorded {}", segment),
         RecordingSessionKind::Continue => format!(
-            "Continued {}, total {}",
-            segment,
+            "Continued from {}, total {}",
+            format_recording_duration(start_tick),
             format_recording_duration(end_tick)
         ),
     };
@@ -767,14 +774,6 @@ impl RecordingHistory {
         Ok(())
     }
 
-    fn truncate_future(&mut self) {
-        if let Some(current) = self.current_index {
-            self.entries.truncate(current + 1);
-        } else {
-            self.entries.clear();
-        }
-    }
-
     fn enforce_capacity(&mut self) {
         while self.entries.len() > self.capacity {
             self.entries.remove(0);
@@ -800,7 +799,6 @@ impl RecordingHistory {
             return false;
         }
 
-        self.truncate_future();
         self.entries
             .push(HistoryEntry::from_snapshot(label, kind, snapshot));
         self.current_index = Some(self.entries.len() - 1);
@@ -1047,21 +1045,23 @@ mod tests {
     }
 
     #[test]
-    fn format_recording_duration_uses_100hz() {
-        assert_eq!(format_recording_duration(0), "0:00");
-        assert_eq!(format_recording_duration(2303), "23:03");
-        assert_eq!(format_recording_duration(5303), "53:03");
+    fn format_recording_duration_uses_clock_format() {
+        assert_eq!(format_recording_duration(0), "0:00.00");
+        assert_eq!(format_recording_duration(2303), "0:23.03");
+        assert_eq!(format_recording_duration(5303), "0:53.03");
+        assert_eq!(format_recording_duration(65536), "10:55.36");
+        assert_eq!(format_recording_duration(372300), "1:02:03.00");
     }
 
     #[test]
     fn completed_session_label_formats_rec_and_continue() {
         assert_eq!(
             completed_session_label(RecordingSessionKind::Rec, 0, 2303).as_deref(),
-            Some("Recorded 23:03")
+            Some("Recorded 0:23.03")
         );
         assert_eq!(
             completed_session_label(RecordingSessionKind::Continue, 3000, 5303).as_deref(),
-            Some("Continued 23:03, total 53:03")
+            Some("Continued from 0:30.00, total 0:53.03")
         );
         assert!(
             completed_session_label(RecordingSessionKind::Rec, 100, 100).is_none(),
@@ -1113,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn history_branch_truncates_after_new_edit() {
+    fn history_branch_keeps_previous_states_append_only() {
         let mut history = RecordingHistory::new(8);
         let a = one_tick_state(0x01);
         let b = one_tick_state(0x02);
@@ -1128,9 +1128,10 @@ mod tests {
         assert_eq!(history.redo_depth(), 1);
 
         assert!(history.push_snapshot(&d, "D"));
-        assert_eq!(history.len(), 3);
-        assert_eq!(history.current_index(), Some(2));
-        assert_eq!(history.entries()[2].label, "D");
+        assert_eq!(history.len(), 4);
+        assert_eq!(history.current_index(), Some(3));
+        assert_eq!(history.entries()[2].label, "C");
+        assert_eq!(history.entries()[3].label, "D");
         assert_eq!(history.redo_depth(), 0);
     }
 
@@ -1410,7 +1411,7 @@ mod tests {
             .unwrap());
         let pending = store.load_pending().unwrap().expect("expected checkpoint");
         assert_eq!(pending.snapshot.recorded_count, 5);
-        assert_eq!(pending.session.label, "Recorded 0:05");
+        assert_eq!(pending.session.label, "Recorded 0:00.05");
         assert_eq!(pending.segments.len(), 1);
         assert_eq!(pending.segments[0].end_tick, 5);
 
@@ -1446,7 +1447,7 @@ mod tests {
 
         let pending = store.load_pending().unwrap().expect("expected checkpoint");
         assert_eq!(pending.snapshot.recorded_count, 4);
-        assert_eq!(pending.session.label, "Recorded 0:04");
+        assert_eq!(pending.session.label, "Recorded 0:00.04");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1610,5 +1611,341 @@ mod tests {
         assert_eq!(meta.segments[1].name, "Seg B");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ===== History E2E tests (SSB-283) =====
+
+    /// Helper: create state with N recorded ticks and distinct input per tick.
+    fn state_with_ticks(n: u32) -> Box<TasSharedState> {
+        let mut state = zeroed_state();
+        state.recorded_count = n;
+        for i in 0..(n as usize).min(TAS_MAX_TICKS) {
+            state.input_log[i] = ((i + 1) as u8) & 0xFF;
+            state.rec_coords[i] = [i as f32, 0.0, i as f32 * 0.5];
+        }
+        state
+    }
+
+    #[test]
+    fn history_append_only_after_undo_preserves_all_entries() {
+        // Board requirement: pressing from a previous state must NOT discard later entries.
+        let mut history = RecordingHistory::new(16);
+        let s1 = state_with_ticks(10);
+        let s2 = state_with_ticks(20);
+        let s3 = state_with_ticks(30);
+        let s4 = state_with_ticks(40);
+
+        assert!(history.push_snapshot(&s1, "Rec 10"));
+        assert!(history.push_snapshot(&s2, "Rec 20"));
+        assert!(history.push_snapshot(&s3, "Rec 30"));
+        assert_eq!(history.len(), 3);
+
+        // Undo to s2
+        let snap = history.undo().unwrap();
+        assert_eq!(snap.recorded_count, 20);
+        assert_eq!(history.current_index(), Some(1));
+
+        // Push new entry from this undo point — must NOT truncate s3
+        assert!(history.push_snapshot(&s4, "Rec 40"));
+        assert_eq!(history.len(), 4); // [s1, s2, s3, s4] — all preserved
+        assert_eq!(history.entries()[0].label, "Rec 10");
+        assert_eq!(history.entries()[1].label, "Rec 20");
+        assert_eq!(history.entries()[2].label, "Rec 30"); // NOT deleted
+        assert_eq!(history.entries()[3].label, "Rec 40");
+        assert_eq!(history.current_index(), Some(3));
+    }
+
+    #[test]
+    fn history_double_undo_then_push_preserves_all() {
+        let mut history = RecordingHistory::new(16);
+        let s1 = state_with_ticks(10);
+        let s2 = state_with_ticks(20);
+        let s3 = state_with_ticks(30);
+        let s4 = state_with_ticks(40);
+        let s5 = state_with_ticks(50);
+
+        for (s, label) in [(&s1, "A"), (&s2, "B"), (&s3, "C"), (&s4, "D")] {
+            assert!(history.push_snapshot(s, label));
+        }
+        assert_eq!(history.len(), 4);
+
+        // Undo twice: D -> C -> B
+        history.undo().unwrap();
+        history.undo().unwrap();
+        assert_eq!(history.current_index(), Some(1)); // on B
+
+        // Push E — all of [A, B, C, D, E] should exist
+        assert!(history.push_snapshot(&s5, "E"));
+        assert_eq!(history.len(), 5);
+        assert_eq!(history.entries()[2].label, "C"); // preserved
+        assert_eq!(history.entries()[3].label, "D"); // preserved
+        assert_eq!(history.entries()[4].label, "E"); // new
+    }
+
+    #[test]
+    fn history_undo_redo_full_cycle_restores_correct_data() {
+        let mut history = RecordingHistory::new(8);
+        let s1 = state_with_ticks(5);
+        let s2 = state_with_ticks(15);
+        let s3 = state_with_ticks(25);
+
+        assert!(history.push_snapshot(&s1, "5 ticks"));
+        assert!(history.push_snapshot(&s2, "15 ticks"));
+        assert!(history.push_snapshot(&s3, "25 ticks"));
+
+        // Undo to 15
+        let snap = history.undo().unwrap();
+        assert_eq!(snap.recorded_count, 15);
+
+        // Undo to 5
+        let snap = history.undo().unwrap();
+        assert_eq!(snap.recorded_count, 5);
+
+        // Can't undo further
+        assert!(history.undo().is_none());
+        assert!(!history.can_undo());
+
+        // Redo back to 15
+        let snap = history.redo().unwrap();
+        assert_eq!(snap.recorded_count, 15);
+
+        // Redo back to 25
+        let snap = history.redo().unwrap();
+        assert_eq!(snap.recorded_count, 25);
+
+        // Can't redo further
+        assert!(history.redo().is_none());
+        assert!(!history.can_redo());
+    }
+
+    #[test]
+    fn history_save_marker_after_undo_does_not_shift_selection() {
+        let mut history = RecordingHistory::new(16);
+        let s1 = state_with_ticks(10);
+        let s2 = state_with_ticks(20);
+        let s3 = state_with_ticks(30);
+
+        assert!(history.push_snapshot(&s1, "A"));
+        assert!(history.push_snapshot(&s2, "B"));
+        assert!(history.push_snapshot(&s3, "C"));
+
+        // Undo to B
+        history.undo().unwrap();
+        assert_eq!(history.current_index(), Some(1));
+
+        // Save marker should not change current_index
+        history.push_save_marker(&s2, Path::new("test.tasrec"));
+        assert_eq!(history.current_index(), Some(1)); // still on B
+        assert_eq!(history.len(), 4); // A, B, SaveMarker, C
+        assert_eq!(history.entries()[2].kind, HistoryEntryKind::SaveMarker);
+        assert!(!history.entries()[2].can_restore());
+    }
+
+    #[test]
+    fn history_capacity_eviction_under_undo_keeps_valid_cursor() {
+        let mut history = RecordingHistory::new(3);
+        let s1 = state_with_ticks(10);
+        let s2 = state_with_ticks(20);
+        let s3 = state_with_ticks(30);
+        let s4 = state_with_ticks(40);
+
+        assert!(history.push_snapshot(&s1, "A"));
+        assert!(history.push_snapshot(&s2, "B"));
+        assert!(history.push_snapshot(&s3, "C"));
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.current_index(), Some(2)); // on C
+
+        // Undo to B
+        history.undo().unwrap();
+        assert_eq!(history.current_index(), Some(1)); // on B
+
+        // Push D — eviction should happen (capacity=3, will have 4 before eviction)
+        assert!(history.push_snapshot(&s4, "D"));
+        assert_eq!(history.len(), 3); // A evicted
+        // current_index should be valid and point to D
+        let idx = history.current_index().unwrap();
+        assert_eq!(history.entries()[idx].label, "D");
+    }
+
+    #[test]
+    fn history_zero_recorded_count_is_rejected() {
+        let mut history = RecordingHistory::new(8);
+        let empty = zeroed_state(); // recorded_count = 0
+        assert!(!history.push_snapshot(&empty, "Empty"));
+        assert_eq!(history.len(), 0);
+    }
+
+    #[test]
+    fn history_persist_round_trip_after_undo_preserves_all() {
+        let mut history = RecordingHistory::new(16);
+        let s1 = state_with_ticks(10);
+        let s2 = state_with_ticks(20);
+        let s3 = state_with_ticks(30);
+
+        assert!(history.push_snapshot(&s1, "A"));
+        assert!(history.push_snapshot(&s2, "B"));
+        assert!(history.push_snapshot(&s3, "C"));
+        history.undo().unwrap(); // cursor on B
+
+        // Persist and restore
+        let persisted = history.to_persisted();
+        assert_eq!(persisted.entries.len(), 3); // all three persisted
+        assert_eq!(persisted.current_index, Some(1)); // cursor on B
+
+        let mut restored = RecordingHistory::new(16);
+        restored.apply_persisted(persisted).unwrap();
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored.current_index(), Some(1));
+        assert_eq!(restored.entries()[0].label, "A");
+        assert_eq!(restored.entries()[1].label, "B");
+        assert_eq!(restored.entries()[2].label, "C"); // C preserved through round-trip
+        assert!(restored.can_undo());
+        assert!(restored.can_redo());
+    }
+
+    #[test]
+    fn history_restore_index_validates_bounds() {
+        let mut history = RecordingHistory::new(4);
+        let s1 = state_with_ticks(10);
+        assert!(history.push_snapshot(&s1, "A"));
+
+        assert!(history.restore_index(99).is_none()); // out of bounds
+        assert_eq!(history.current_index(), Some(0)); // unchanged
+    }
+
+    #[test]
+    fn history_mixed_workflow_rec_save_undo_load_continue() {
+        // Simulates a real user workflow:
+        // 1. Record 10 ticks
+        // 2. Record 20 ticks
+        // 3. Save file
+        // 4. Undo to 10 ticks
+        // 5. Record 15 ticks (continue)
+        // 6. Load a file
+        // All entries should be preserved.
+        let mut history = RecordingHistory::new(32);
+        let s10 = state_with_ticks(10);
+        let s20 = state_with_ticks(20);
+        let s15 = state_with_ticks(15);
+        let s_loaded = state_with_ticks(50);
+
+        // Step 1-2: Two recording sessions
+        assert!(history.push_snapshot(&s10, "Recorded 0:00.10"));
+        assert!(history.push_snapshot(&s20, "Recorded 0:00.20"));
+
+        // Step 3: Save
+        history.push_save_marker(&s20, Path::new("run.tasrec"));
+
+        // Step 4: Undo to 10 ticks
+        let snap = history.undo().unwrap();
+        assert_eq!(snap.recorded_count, 10);
+
+        // Step 5: Continue from undo point — appends, doesn't truncate
+        assert!(history.push_snapshot(&s15, "Continued from 0:00.10, total 0:00.15"));
+
+        // Step 6: Load a file
+        assert!(history.push_loaded_snapshot(&s_loaded, Path::new("other.tasrec")));
+
+        // Trace: [s10, s20] → save marker at idx 2 → [s10, s20, SaveMarker]
+        // undo → current=0 → push s15 → [s10, s20, SaveMarker, s15] current=3
+        // push loaded → [s10, s20, SaveMarker, s15, loaded] current=4
+        assert_eq!(history.len(), 5);
+        assert_eq!(history.entries()[0].label, "Recorded 0:00.10");
+        assert_eq!(history.entries()[1].label, "Recorded 0:00.20");
+        assert_eq!(history.entries()[2].kind, HistoryEntryKind::SaveMarker);
+        assert_eq!(
+            history.entries()[3].label,
+            "Continued from 0:00.10, total 0:00.15"
+        );
+        assert!(history.entries()[4].label.contains("other.tasrec"));
+        assert_eq!(history.entries()[4].kind, HistoryEntryKind::LoadSnapshot);
+
+        // Can undo all the way back: s15(3), s20(1), s10(0) = 3 restorable before current(4)
+        assert_eq!(history.undo_depth(), 3);
+    }
+
+    #[test]
+    fn format_recording_duration_boundary_values() {
+        // 0 ticks
+        assert_eq!(format_recording_duration(0), "0:00.00");
+        // 1 tick = 0.01s
+        assert_eq!(format_recording_duration(1), "0:00.01");
+        // 99 ticks = 0.99s
+        assert_eq!(format_recording_duration(99), "0:00.99");
+        // 100 ticks = 1.00s
+        assert_eq!(format_recording_duration(100), "0:01.00");
+        // 5999 ticks = 59.99s (just under 1 minute)
+        assert_eq!(format_recording_duration(5999), "0:59.99");
+        // 6000 ticks = 1:00.00
+        assert_eq!(format_recording_duration(6000), "1:00.00");
+        // 359999 ticks = 59:59.99 (just under 1 hour)
+        assert_eq!(format_recording_duration(359999), "59:59.99");
+        // 360000 ticks = 1:00:00.00
+        assert_eq!(format_recording_duration(360000), "1:00:00.00");
+        // Large value: 65536 ticks (the original bug case)
+        assert_eq!(format_recording_duration(65536), "10:55.36");
+    }
+
+    #[test]
+    fn completed_session_label_zero_length_is_none() {
+        assert!(completed_session_label(RecordingSessionKind::Rec, 50, 50).is_none());
+        assert!(completed_session_label(RecordingSessionKind::Rec, 50, 49).is_none());
+        assert!(completed_session_label(RecordingSessionKind::Continue, 100, 100).is_none());
+    }
+
+    #[test]
+    fn completed_session_label_continue_shows_start_and_total() {
+        let label =
+            completed_session_label(RecordingSessionKind::Continue, 6000, 12000).unwrap();
+        assert_eq!(label, "Continued from 1:00.00, total 2:00.00");
+    }
+
+    #[test]
+    fn history_load_snapshot_is_undoable() {
+        let mut history = RecordingHistory::new(8);
+        let s1 = state_with_ticks(10);
+        let s_loaded = state_with_ticks(50);
+
+        assert!(history.push_snapshot(&s1, "Recording"));
+        assert!(history.push_loaded_snapshot(&s_loaded, Path::new("loaded.tasrec")));
+
+        // Should be able to undo back to the recording
+        assert!(history.can_undo());
+        let snap = history.undo().unwrap();
+        assert_eq!(snap.recorded_count, 10);
+
+        // And redo back to the loaded file
+        assert!(history.can_redo());
+        let snap = history.redo().unwrap();
+        assert_eq!(snap.recorded_count, 50);
+    }
+
+    #[test]
+    fn history_multiple_undo_push_cycles_never_lose_data() {
+        // Stress test: repeatedly undo and push, verify entry count only grows
+        let mut history = RecordingHistory::new(64);
+        let states: Vec<_> = (1..=10).map(|n| state_with_ticks(n * 5)).collect();
+
+        // Push 5 entries
+        for (i, s) in states[..5].iter().enumerate() {
+            assert!(history.push_snapshot(s, format!("S{}", i)));
+        }
+        assert_eq!(history.len(), 5);
+
+        // Undo 3 times, push new
+        history.undo().unwrap();
+        history.undo().unwrap();
+        history.undo().unwrap();
+        assert!(history.push_snapshot(&states[5], "S5"));
+        assert_eq!(history.len(), 6); // all 5 + new one
+
+        // Undo 2 times, push another
+        history.undo().unwrap();
+        history.undo().unwrap();
+        assert!(history.push_snapshot(&states[6], "S6"));
+        assert_eq!(history.len(), 7); // none lost
+
+        // Verify first entry is still intact
+        assert_eq!(history.entries()[0].label, "S0");
     }
 }
