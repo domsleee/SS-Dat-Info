@@ -1141,26 +1141,15 @@ impl eframe::App for TasApp {
                     }
                     _ => state.mode_str().to_string(),
                 };
-                let hooks_ok = all_core_hooks_ok(state);
-                let hooks_color = if hooks_ok {
-                    egui::Color32::from_rgb(80, 200, 80)
-                } else {
-                    egui::Color32::from_rgb(255, 120, 60)
-                };
                 let vx = state.velocity_x as f64;
                 let vy = state.velocity_y as f64;
                 let vz = state.velocity_z as f64;
                 let speed_kmh = (vx * vx + vy * vy + vz * vz).sqrt() * 360.0;
                 egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(
-                            mode_color,
-                            egui::RichText::new(headline.clone()).strong().size(16.0),
-                        );
-                        ui.separator();
-                        ui.colored_label(hooks_color, egui::RichText::new("●").size(15.0));
-                        ui.label("Hooks");
-                    });
+                    ui.colored_label(
+                        mode_color,
+                        egui::RichText::new(headline.clone()).strong().size(16.0),
+                    );
                     ui.label(format!(
                         "Pos: ({:.1}, {:.1}, {:.1})    Speed: {:.1} km/h",
                         state.player_x, state.player_y, state.player_z, speed_kmh
@@ -1485,13 +1474,6 @@ fn is_supreme_running() -> bool {
 #[cfg(not(windows))]
 fn is_supreme_running() -> bool {
     false
-}
-
-fn all_core_hooks_ok(state: &tas_shared::TasSharedState) -> bool {
-    state.cave2_hooked == 1
-        && state.cave1c_hooked == 1
-        && state.cave1d_hooked == 1
-        && state.cave5_hooked == 1
 }
 
 fn open_in_file_browser(path: &std::path::Path) -> Result<(), String> {
