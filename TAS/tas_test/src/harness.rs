@@ -43,6 +43,34 @@ pub fn focus_game() {
     thread::sleep(Duration::from_millis(200));
 }
 
+/// Ensure there is no competing shared-memory writer (`tas_ui`) while running
+/// deterministic `tas_test` runtime flows.
+///
+/// `tas_ui` and `tas_test` concurrently writing command fields can cause
+/// intermittent ARM_CONTINUE mode=0 failures unrelated to core replay logic.
+pub fn stop_competing_tas_ui_writer() {
+    let script = r#"
+        $p = Get-Process -Name tas_ui -ErrorAction SilentlyContinue
+        if ($p) {
+            $count = @($p).Count
+            $p | Stop-Process -Force
+            Write-Output ("killed:{0}" -f $count)
+        } else {
+            Write-Output "none"
+        }
+    "#;
+    if let Ok(output) = Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+    {
+        let out = String::from_utf8_lossy(&output.stdout);
+        let msg = out.trim();
+        if let Some(count) = msg.strip_prefix("killed:") {
+            println!("  Stopped competing tas_ui writer(s): {}", count.trim());
+        }
+    }
+}
+
 /// Find the Supreme window handle via PowerShell.
 fn find_supreme_hwnd() -> Option<isize> {
     let output = Command::new("powershell")
@@ -688,6 +716,7 @@ where
     F: FnMut(&mut TasSharedMemoryClient) -> bool,
 {
     for attempt in 0..=max_retries {
+        stop_competing_tas_ui_writer();
         if attempt > 0 {
             println!(
                 "  Retry {}/{}: position match for CONT",
