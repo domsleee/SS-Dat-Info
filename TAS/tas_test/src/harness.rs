@@ -22,6 +22,10 @@ const STABILIZE_FRAMES: u32 = 500;
 const RESTART_TIMEOUT_SECS: u64 = 15;
 /// Playback timeout (long enough for 65536 frames at ~50fps unfocused).
 const PLAYBACK_TIMEOUT_SECS: u64 = 120;
+/// Early CONT anchor frame used to reject countdown/start-phase mismatches.
+const CONT_ANCHOR_FRAME: u32 = 250;
+/// Timeout waiting to reach the early CONT anchor frame.
+const CONT_ANCHOR_TIMEOUT_SECS: u64 = 10;
 
 /// Focus the Supreme Snowboarding window.
 pub fn focus_game() {
@@ -606,6 +610,42 @@ pub fn wait_continue_splice(client: &TasSharedMemoryClient, splice_frame: u32) -
     }
 }
 
+/// Wait until CONT playback reaches an early anchor frame while still in PLAY mode.
+/// Returns false if mode exits to OFF/REC too early or timeout is hit.
+fn wait_continue_anchor(client: &TasSharedMemoryClient, anchor_frame: u32) -> bool {
+    let start = Instant::now();
+    loop {
+        thread::sleep(Duration::from_millis(20));
+        let s = client.state();
+        if s.mode == TasMode::Off as u32 {
+            eprintln!("  ERROR: Mode went to OFF before CONT anchor frame {}", anchor_frame);
+            return false;
+        }
+        if s.mode == TasMode::Rec as u32 {
+            // For short splices, mode may flip PLAY->REC before this poll observes
+            // playback_pos > anchor. Accept if we already crossed the anchor frame.
+            if s.playback_pos >= anchor_frame {
+                return true;
+            }
+            eprintln!(
+                "  ERROR: Entered REC too early before CONT anchor frame {}",
+                anchor_frame
+            );
+            return false;
+        }
+        if s.playback_pos > anchor_frame {
+            return true;
+        }
+        if start.elapsed() > Duration::from_secs(CONT_ANCHOR_TIMEOUT_SECS) {
+            eprintln!(
+                "  ERROR: CONT anchor timeout at playback_pos={}/{}",
+                s.playback_pos, anchor_frame
+            );
+            return false;
+        }
+    }
+}
+
 /// F5 restart + ARM_CONTINUE with position matching, then wait for splice.
 ///
 /// Same as restart_play_and_match but uses ARM_CONTINUE instead of ARM_PLAY.
@@ -658,6 +698,8 @@ where
             eprintln!("  ERROR: Game not alive after restart");
             return false;
         }
+        // Keep CONT retries on the same focus path as baseline REC capture.
+        focus_game();
 
         // ARM_CONTINUE: starts as PLAY from tick 0, will auto-switch to REC at splice_frame
         arm_continue(client, splice_frame);
@@ -681,7 +723,30 @@ where
             if attempt > 0 {
                 println!("  Position matched on attempt {}", attempt + 1);
             }
-            println!("  CONT position matched, waiting for splice...");
+            let anchor_frame = CONT_ANCHOR_FRAME.min(splice_frame.saturating_sub(1));
+            if anchor_frame > 0 {
+                if !wait_continue_anchor(client, anchor_frame) {
+                    stop(client);
+                    continue;
+                }
+                let s_anchor = client.state();
+                let idx = anchor_frame as usize;
+                let rc = s_anchor.rec_coords[idx];
+                let pc = s_anchor.play_coords[idx];
+                let anchor_match_x = pc[0].to_bits() == rc[0].to_bits();
+                let anchor_match_z = pc[2].to_bits() == rc[2].to_bits();
+                let anchor_dx = (pc[0] as f64 - rc[0] as f64).abs();
+                let anchor_dz = (pc[2] as f64 - rc[2] as f64).abs();
+                if !anchor_match_x || !anchor_match_z {
+                    println!(
+                        "  CONT anchor mismatch @{}: dx={:.9} dz={:.9} (restarting)",
+                        anchor_frame, anchor_dx, anchor_dz
+                    );
+                    stop(client);
+                    continue;
+                }
+            }
+            println!("  CONT position matched + anchor aligned, waiting for splice...");
             if wait_continue_splice(client, splice_frame) {
                 return true;
             }
