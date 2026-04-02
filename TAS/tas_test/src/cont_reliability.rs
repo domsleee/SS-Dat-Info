@@ -16,9 +16,13 @@ pub struct ContCycleResult {
     pub iteration: u32,
     pub spliced: bool,
     pub mode_rec_after_splice: bool,
+    pub replay_coverage_ok: bool,
+    pub playback_pos_at_splice: u32,
     pub splice_recorded_count: u32,
     pub max_drift_x: f64,
     pub max_drift_z: f64,
+    pub max_drift_frame_x: usize,
+    pub max_drift_frame_z: usize,
 }
 
 #[derive(Debug)]
@@ -33,7 +37,11 @@ pub struct ContReliabilityReport {
 impl ContReliabilityReport {
     pub fn all_pass(&self) -> bool {
         self.results.iter().all(|r| {
-            r.spliced && r.mode_rec_after_splice && r.max_drift_x == 0.0 && r.max_drift_z == 0.0
+            r.spliced
+                && r.mode_rec_after_splice
+                && r.replay_coverage_ok
+                && r.max_drift_x == 0.0
+                && r.max_drift_z == 0.0
         })
     }
 
@@ -46,13 +54,22 @@ impl ContReliabilityReport {
         println!("Baseline recording: {} ticks", self.baseline_ticks);
         println!();
         println!(
-            "{:>3} {:>6} {:>6} {:>8} {:>12} {:>12}",
-            "#", "splice", "mode", "rec_cnt", "max_drift_x", "max_drift_z"
+            "{:>3} {:>6} {:>6} {:>8} {:>8} {:>6} {:>8} {:>8} {:>12} {:>12}",
+            "#",
+            "splice",
+            "mode",
+            "rec_cnt",
+            "play_cnt",
+            "cover",
+            "frame_x",
+            "frame_z",
+            "max_drift_x",
+            "max_drift_z"
         );
-        println!("{}", "-".repeat(62));
+        println!("{}", "-".repeat(103));
         for r in &self.results {
             println!(
-                "{:>3} {:>6} {:>6} {:>8} {:>12.9} {:>12.9}",
+                "{:>3} {:>6} {:>6} {:>8} {:>8} {:>6} {:>8} {:>8} {:>12.9} {:>12.9}",
                 r.iteration,
                 if r.spliced { "ok" } else { "FAIL" },
                 if r.mode_rec_after_splice {
@@ -61,6 +78,10 @@ impl ContReliabilityReport {
                     "bad"
                 },
                 r.splice_recorded_count,
+                r.playback_pos_at_splice,
+                if r.replay_coverage_ok { "ok" } else { "short" },
+                r.max_drift_frame_x,
+                r.max_drift_frame_z,
                 r.max_drift_x,
                 r.max_drift_z,
             );
@@ -79,6 +100,7 @@ impl ContReliabilityReport {
                 .filter(|r| {
                     !(r.spliced
                         && r.mode_rec_after_splice
+                        && r.replay_coverage_ok
                         && r.max_drift_x == 0.0
                         && r.max_drift_z == 0.0)
                 })
@@ -177,21 +199,36 @@ pub fn run(iterations: u32, speed: f32, splice_frame: u32) -> ContReliabilityRep
             CONT_RESTART_RETRIES,
         );
         let mut mode_rec_after_splice = false;
+        let mut replay_coverage_ok = false;
+        let mut playback_pos_at_splice = 0;
         let mut splice_recorded_count = 0;
         let mut max_drift_x = f64::INFINITY;
         let mut max_drift_z = f64::INFINITY;
+        let mut max_drift_frame_x = usize::MAX;
+        let mut max_drift_frame_z = usize::MAX;
 
         if spliced {
             let state = client.state();
             mode_rec_after_splice = state.mode == TasMode::Rec as u32;
             splice_recorded_count = state.recorded_count;
-            let d = drift::compute_drift(state, splice_frame);
+            playback_pos_at_splice = state.playback_pos;
+            replay_coverage_ok = playback_pos_at_splice >= splice_frame;
+            let assessed_prefix = splice_frame.min(playback_pos_at_splice);
+            let d = drift::compute_drift(state, assessed_prefix);
             max_drift_x = d.max_drift_x;
             max_drift_z = d.max_drift_z;
+            max_drift_frame_x = d.max_drift_frame_x;
+            max_drift_frame_z = d.max_drift_frame_z;
             println!(
-                "  Drift over replayed prefix [0..{}): X={:.9} Z={:.9}",
-                splice_frame, max_drift_x, max_drift_z
+                "  Drift over replayed prefix [0..{}): X={:.9} (frame {}) Z={:.9} (frame {})",
+                assessed_prefix, max_drift_x, max_drift_frame_x, max_drift_z, max_drift_frame_z
             );
+            if !replay_coverage_ok {
+                println!(
+                    "  Coverage shortfall: playback_pos={} < splice_frame={} (FAIL)",
+                    playback_pos_at_splice, splice_frame
+                );
+            }
         } else {
             println!("  Splice failed before REC transition");
         }
@@ -200,9 +237,13 @@ pub fn run(iterations: u32, speed: f32, splice_frame: u32) -> ContReliabilityRep
             iteration: i,
             spliced,
             mode_rec_after_splice,
+            replay_coverage_ok,
+            playback_pos_at_splice,
             splice_recorded_count,
             max_drift_x,
             max_drift_z,
+            max_drift_frame_x,
+            max_drift_frame_z,
         });
 
         harness::stop(&mut client);
