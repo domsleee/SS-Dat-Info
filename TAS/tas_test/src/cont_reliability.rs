@@ -133,8 +133,8 @@ pub fn run(iterations: u32, speed: f32, splice_frame: u32) -> ContReliabilityRep
 
     println!("--- Baseline REC build (single pass) ---");
     client.state_mut().playback_speed = 1.0;
-    if !harness::restart_and_stabilize(&client) {
-        eprintln!("ERROR: Game not alive for baseline REC");
+    if !harness::restart_and_stabilize_inprocess(&mut client) {
+        eprintln!("ERROR: Game not alive for baseline REC (in-process restart)");
         std::process::exit(1);
     }
     harness::focus_game();
@@ -170,7 +170,7 @@ pub fn run(iterations: u32, speed: f32, splice_frame: u32) -> ContReliabilityRep
         println!("{}", "=".repeat(60));
 
         client.state_mut().playback_speed = speed;
-        let spliced = harness::restart_continue_and_splice(
+        let spliced = harness::restart_continue_and_splice_inprocess(
             &mut client,
             rec_start,
             splice_frame,
