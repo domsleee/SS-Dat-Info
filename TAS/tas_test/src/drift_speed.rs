@@ -90,7 +90,10 @@ fn rec_at_speed(client: &mut tas_shared::TasSharedMemoryClient, speed: f32) -> (
     );
 
     if rec_count < 100 {
-        eprintln!("ERROR: Too few ticks recorded ({}) at {}x", rec_count, speed);
+        eprintln!(
+            "ERROR: Too few ticks recorded ({}) at {}x",
+            rec_count, speed
+        );
         std::process::exit(1);
     }
 
@@ -212,13 +215,21 @@ pub fn run() -> DriftSpeedResult {
         "Case 1 (2x REC + 2x PLAY): drift X={:.9} Z={:.9} — {}",
         result.same_speed_drift.max_drift_x,
         result.same_speed_drift.max_drift_z,
-        if result.same_speed_pass { "PASS" } else { "FAIL" },
+        if result.same_speed_pass {
+            "PASS"
+        } else {
+            "FAIL"
+        },
     );
     println!(
         "Case 2 (1x REC + 2x PLAY): drift X={:.9} Z={:.9} — {}",
         result.cross_speed_drift.max_drift_x,
         result.cross_speed_drift.max_drift_z,
-        if result.cross_speed_pass { "PASS" } else { "FAIL" },
+        if result.cross_speed_pass {
+            "PASS"
+        } else {
+            "FAIL"
+        },
     );
 
     if result.all_pass() {

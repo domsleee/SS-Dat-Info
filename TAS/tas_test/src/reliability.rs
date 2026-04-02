@@ -99,7 +99,10 @@ impl ReliabilityReport {
 }
 
 pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
-    println!("=== Reliability Test: {}x REC+PLAY at {}x speed (SSB-247) ===\n", iterations, speed);
+    println!(
+        "=== Reliability Test: {}x REC+PLAY at {}x speed (SSB-247) ===\n",
+        iterations, speed
+    );
 
     let mut client = harness::connect();
     harness::print_status(&client);
@@ -116,9 +119,7 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
         assert_eq!(s.inject_mode, 6, "inject_mode must be 6");
         assert_eq!(s.force_direct, 2, "force_direct must be 2");
         assert_eq!(s.cave5_hooked, 1, "Cave 5 must be hooked for speed test");
-        println!(
-            "Config OK: fft=0, inject_mode=6, force_direct=2, cave5=hooked"
-        );
+        println!("Config OK: fft=0, inject_mode=6, force_direct=2, cave5=hooked");
     }
 
     let mut results = Vec::new();
@@ -155,7 +156,9 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
 
         println!(
             "  Driving Pico HID: {} + {}t tail ({} total ticks)",
-            PATTERN, TAIL_NEUTRAL_TICKS, patterns::total_ticks(&steps)
+            PATTERN,
+            TAIL_NEUTRAL_TICKS,
+            patterns::total_ticks(&steps)
         );
         harness::drive_pico_steps(&steps, None);
         thread::sleep(Duration::from_millis(200));
@@ -164,19 +167,22 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
         let rec_start = client.state().rec_coords[0];
         harness::stop(&mut client);
 
-        let transitions = drift::count_transitions(
-            &client.state().input_log,
-            rec_count as usize,
-        );
+        let transitions = drift::count_transitions(&client.state().input_log, rec_count as usize);
 
-        println!("  Recorded {} ticks, {} transitions", rec_count, transitions);
+        println!(
+            "  Recorded {} ticks, {} transitions",
+            rec_count, transitions
+        );
         println!(
             "  REC start: ({:.4}, {:.4}, {:.4})",
             rec_start[0], rec_start[1], rec_start[2]
         );
 
         if rec_count < 100 {
-            eprintln!("ERROR: Too few ticks recorded ({}) in cycle {}", rec_count, i);
+            eprintln!(
+                "ERROR: Too few ticks recorded ({}) in cycle {}",
+                rec_count, i
+            );
             std::process::exit(1);
         }
 
@@ -208,7 +214,11 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
         let gates_passed = assessment.gates.iter().filter(|g| g.passed).count();
         println!(
             "  Gates: {} ({}/4 pass)",
-            if assessment.all_pass() { "ALL PASS" } else { "FAIL" },
+            if assessment.all_pass() {
+                "ALL PASS"
+            } else {
+                "FAIL"
+            },
             gates_passed
         );
 
