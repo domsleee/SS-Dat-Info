@@ -2,6 +2,8 @@ use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints, Points};
 use tas_shared::TasSharedState;
 
+const FRAMES_PER_SECOND: f64 = 100.0;
+
 /// Cached trajectory plot data, invalidated when recorded_count or playback_pos changes.
 #[derive(Default)]
 pub struct TrajectoryCache {
@@ -27,7 +29,7 @@ impl TrajectoryCache {
         let rec = recorded as usize;
         let play = played as usize;
 
-        // REC trajectory (X/Z top-down) + altitude (frame vs Y)
+        // REC trajectory (X/Z top-down) + altitude (time vs Y)
         self.rec_points.clear();
         self.rec_altitude.clear();
         if rec > 0 {
@@ -36,11 +38,11 @@ impl TrajectoryCache {
                 self.rec_points
                     .push([state.rec_coords[i][0] as f64, state.rec_coords[i][2] as f64]);
                 self.rec_altitude
-                    .push([i as f64, -(state.rec_coords[i][1] as f64)]);
+                    .push([i as f64 / FRAMES_PER_SECOND, -(state.rec_coords[i][1] as f64)]);
             }
         }
 
-        // PLAY trajectory (X/Z top-down) + altitude (frame vs Y)
+        // PLAY trajectory (X/Z top-down) + altitude (time vs Y)
         self.play_points.clear();
         self.play_altitude.clear();
         if play > 0 {
@@ -51,7 +53,7 @@ impl TrajectoryCache {
                     state.play_coords[i][2] as f64,
                 ]);
                 self.play_altitude
-                    .push([i as f64, -(state.play_coords[i][1] as f64)]);
+                    .push([i as f64 / FRAMES_PER_SECOND, -(state.play_coords[i][1] as f64)]);
             }
         }
         true
@@ -113,7 +115,7 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
         .allow_zoom(true)
         .allow_drag(true)
         .show_axes(true)
-        .x_axis_label("Frame")
+        .x_axis_label("Time (s)")
         .y_axis_label("Y (altitude)")
         .legend(egui_plot::Legend::default())
         .show(ui, |plot_ui| {
@@ -134,10 +136,11 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
                 );
             }
             // Current altitude marker
-            let current_frame = state.playback_pos.max(state.recorded_count) as f64;
+            let current_time =
+                state.playback_pos.max(state.recorded_count) as f64 / FRAMES_PER_SECOND;
             let current_alt = -(state.player_y as f64);
             plot_ui.points(
-                Points::new(vec![[current_frame, current_alt]])
+                Points::new(vec![[current_time, current_alt]])
                     .name("Current alt")
                     .color(egui::Color32::from_rgb(255, 255, 100))
                     .radius(4.0),
@@ -167,6 +170,9 @@ mod tests {
         cache.refresh(&state);
 
         assert_eq!(cache.rec_altitude.len(), 3);
+        assert_eq!(cache.rec_altitude[0][0], 0.0);
+        assert_eq!(cache.rec_altitude[1][0], 0.01);
+        assert_eq!(cache.rec_altitude[2][0], 0.02);
         assert_eq!(cache.rec_altitude[0][1], -100.0);
         assert_eq!(cache.rec_altitude[1][1], -50.0);
         assert_eq!(cache.rec_altitude[2][1], 20.0);
@@ -186,6 +192,8 @@ mod tests {
         cache.refresh(&state);
 
         assert_eq!(cache.play_altitude.len(), 2);
+        assert_eq!(cache.play_altitude[0][0], 0.0);
+        assert_eq!(cache.play_altitude[1][0], 0.01);
         assert_eq!(cache.play_altitude[0][1], -200.0);
         assert_eq!(cache.play_altitude[1][1], 75.0);
     }

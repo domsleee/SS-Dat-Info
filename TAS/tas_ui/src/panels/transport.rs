@@ -13,6 +13,13 @@ pub enum Action {
     Log(String),
 }
 
+fn can_arm_continue(mode: TasMode, recorded: u32) -> bool {
+    if recorded == 0 {
+        return false;
+    }
+    matches!(mode, TasMode::Off | TasMode::Rec | TasMode::Play)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -33,6 +40,7 @@ pub fn show(
         let is_off = mode == TasMode::Off;
         let is_rec = mode == TasMode::Rec;
         let is_play = mode == TasMode::Play;
+        let can_continue = can_arm_continue(mode, recorded);
 
         // REC button (red when recording)
         let rec_label = "\u{23FA} REC  F9"; // Unicode record symbol
@@ -82,7 +90,7 @@ pub fn show(
         // Continue Record
         let cont_label = "\u{23ED} CONT  F12"; // Unicode next track symbol
         if ui
-            .add_enabled(is_off && recorded > 0, egui::Button::new(cont_label))
+            .add_enabled(can_continue, egui::Button::new(cont_label))
             .on_hover_text(format!(
                 "Continue recording from a specific frame (catch-up at {}x)",
                 *cont_catchup_speed
@@ -194,4 +202,24 @@ fn normalize_continue_frame_text(text: &mut String, continue_from: &mut u32, rec
         *continue_from = 0;
     }
     *text = continue_from.to_string();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::can_arm_continue;
+    use tas_shared::TasMode;
+
+    #[test]
+    fn continue_requires_recorded_ticks() {
+        assert!(!can_arm_continue(TasMode::Off, 0));
+        assert!(!can_arm_continue(TasMode::Rec, 0));
+        assert!(!can_arm_continue(TasMode::Play, 0));
+    }
+
+    #[test]
+    fn continue_allowed_in_off_rec_and_play_when_recorded() {
+        assert!(can_arm_continue(TasMode::Off, 1));
+        assert!(can_arm_continue(TasMode::Rec, 1));
+        assert!(can_arm_continue(TasMode::Play, 1));
+    }
 }

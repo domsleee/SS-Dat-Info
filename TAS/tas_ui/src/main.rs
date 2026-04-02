@@ -45,6 +45,26 @@ use panels::{
 use pico::PicoState;
 use recording::{RecordingHistory, RecordingSessionKind};
 
+const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
+const PLAYBACK_SPEED_PRESETS: [f32; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
+const TRAJECTORY_ROTATION_SPLIT_MIN_WIDTH: f32 = 900.0;
+
+fn normalize_playback_speed(speed: f32) -> f32 {
+    if !speed.is_finite() {
+        return DEFAULT_PLAYBACK_SPEED;
+    }
+    for preset in PLAYBACK_SPEED_PRESETS {
+        if (speed - preset).abs() < 0.01 {
+            return preset;
+        }
+    }
+    DEFAULT_PLAYBACK_SPEED
+}
+
+fn should_stack_trajectory_rotation(available_width: f32) -> bool {
+    available_width < TRAJECTORY_ROTATION_SPLIT_MIN_WIDTH
+}
+
 #[derive(Clone, Copy)]
 struct ActiveRecordingSession {
     kind: RecordingSessionKind,
@@ -82,6 +102,7 @@ struct TasApp {
     segment_tracker: recording::SegmentTracker,
     active_recording_session: Option<ActiveRecordingSession>,
     pending_session_kind: Option<RecordingSessionKind>,
+    pending_continue_start_tick: Option<u32>,
     last_mode: u32,
     cont_catchup_speed: Option<f32>, // saved speed to restore after CONT catch-up
     cont_catchup_multiplier: f32,    // configurable CONT catch-up speed (default 12x)
@@ -163,7 +184,7 @@ impl TasApp {
             timeline_scroll: 0.0,
             continue_from_frame: 0,
             continue_from_text: "0".to_string(),
-            playback_speed: settings.playback_speed,
+            playback_speed: normalize_playback_speed(settings.playback_speed),
             step_mode: false,
             show_trajectory: settings.show_trajectory,
             show_analysis: settings.show_analysis,
@@ -176,6 +197,7 @@ impl TasApp {
             segment_tracker: recording::SegmentTracker::new(),
             active_recording_session: None,
             pending_session_kind: None,
+            pending_continue_start_tick: None,
             last_mode: 0,
             cont_catchup_speed: None,
             cont_catchup_multiplier: settings.cont_catchup_speed,
@@ -234,6 +256,11 @@ impl TasApp {
         app
     }
 
+    fn playback_speed_for_settings(&self) -> f32 {
+        let base_speed = self.cont_catchup_speed.unwrap_or(self.playback_speed);
+        normalize_playback_speed(base_speed)
+    }
+
     fn try_reconnect(&mut self) {
         match TasSharedMemoryClient::open() {
             Ok(s) => {
@@ -272,6 +299,7 @@ impl TasApp {
         if command == TasCommand::Stop {
             self.clear_cont_catchup();
             self.pending_session_kind = None;
+            self.pending_continue_start_tick = None;
         }
     }
 
@@ -282,12 +310,22 @@ impl TasApp {
         } else {
             self.clear_cont_catchup();
         }
+        if command == TasCommand::ArmRec {
+            self.playback_speed = DEFAULT_PLAYBACK_SPEED;
+        }
         match command {
-            TasCommand::ArmRec => self.pending_session_kind = Some(RecordingSessionKind::Rec),
-            TasCommand::ArmContinue => {
-                self.pending_session_kind = Some(RecordingSessionKind::Continue)
+            TasCommand::ArmRec => {
+                self.pending_session_kind = Some(RecordingSessionKind::Rec);
+                self.pending_continue_start_tick = None;
             }
-            _ => self.pending_session_kind = None,
+            TasCommand::ArmContinue => {
+                self.pending_session_kind = Some(RecordingSessionKind::Continue);
+                self.pending_continue_start_tick = Some(self.continue_from_frame);
+            }
+            _ => {
+                self.pending_session_kind = None;
+                self.pending_continue_start_tick = None;
+            }
         }
     }
 
@@ -312,8 +350,19 @@ impl TasApp {
             }
         });
         let start_tick = match kind {
-            RecordingSessionKind::Rec => 0,
-            RecordingSessionKind::Continue => continue_from_frame,
+            RecordingSessionKind::Rec => {
+                self.pending_continue_start_tick = None;
+                0
+            }
+            RecordingSessionKind::Continue => {
+                self.pending_continue_start_tick
+                    .take()
+                    .unwrap_or(if continue_from_frame > 0 {
+                        continue_from_frame
+                    } else {
+                        recorded_count
+                    })
+            }
         };
 
         if kind == RecordingSessionKind::Rec && self.last_mode == 0 {
@@ -641,7 +690,7 @@ impl eframe::App for TasApp {
             show_macros: self.show_macros,
             show_history: self.show_history,
             show_config: self.show_config,
-            playback_speed: self.playback_speed,
+            playback_speed: self.playback_speed_for_settings(),
             cont_catchup_speed: self.cont_catchup_multiplier,
         };
         s.save();
@@ -958,6 +1007,7 @@ impl eframe::App for TasApp {
                                 self.playback_speed = saved;
                             }
                             self.pending_session_kind = None;
+                            self.pending_continue_start_tick = None;
                         }
                         shared.send_command(c);
                         self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
@@ -969,6 +1019,7 @@ impl eframe::App for TasApp {
                             }
                             self.playback_speed = self.cont_catchup_multiplier;
                             self.pending_session_kind = Some(RecordingSessionKind::Continue);
+                            self.pending_continue_start_tick = Some(self.continue_from_frame);
                         } else {
                             if let Some(saved) = self.cont_catchup_speed.take() {
                                 self.playback_speed = saved;
@@ -978,7 +1029,12 @@ impl eframe::App for TasApp {
                             } else {
                                 None
                             };
+                            self.pending_continue_start_tick = None;
                         }
+                        if c == TasCommand::ArmRec {
+                            self.playback_speed = DEFAULT_PLAYBACK_SPEED;
+                        }
+                        shared.state_mut().playback_speed = self.playback_speed;
                         shared.reset_restart_state();
                         shared.send_command(TasCommand::Restart);
                         self.pending_after_restart = Some(c);
@@ -1046,17 +1102,19 @@ impl eframe::App for TasApp {
                                     self.playback_speed = saved;
                                 }
                                 self.pending_session_kind = None;
+                                self.pending_continue_start_tick = None;
                             }
                             shared.send_command(c);
                             self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
                         }
-                        transport::Action::RestartThen(c) => {
-                            if c == TasCommand::ArmContinue {
-                                if self.cont_catchup_speed.is_none() {
-                                    self.cont_catchup_speed = Some(self.playback_speed);
-                                }
+                    transport::Action::RestartThen(c) => {
+                        if c == TasCommand::ArmContinue {
+                            if self.cont_catchup_speed.is_none() {
+                                self.cont_catchup_speed = Some(self.playback_speed);
+                            }
                                 self.playback_speed = self.cont_catchup_multiplier;
                                 self.pending_session_kind = Some(RecordingSessionKind::Continue);
+                                self.pending_continue_start_tick = Some(self.continue_from_frame);
                             } else {
                                 if let Some(saved) = self.cont_catchup_speed.take() {
                                     self.playback_speed = saved;
@@ -1065,13 +1123,18 @@ impl eframe::App for TasApp {
                                     Some(RecordingSessionKind::Rec)
                                 } else {
                                     None
-                                };
-                            }
-                            shared.reset_restart_state();
-                            shared.send_command(TasCommand::Restart);
-                            self.pending_after_restart = Some(c);
-                            self.log_lines
-                                .push(format!("[{}] In-process F5 restart → {:?}", ts, c));
+                            };
+                            self.pending_continue_start_tick = None;
+                        }
+                        if c == TasCommand::ArmRec {
+                            self.playback_speed = DEFAULT_PLAYBACK_SPEED;
+                        }
+                        shared.state_mut().playback_speed = self.playback_speed;
+                        shared.reset_restart_state();
+                        shared.send_command(TasCommand::Restart);
+                        self.pending_after_restart = Some(c);
+                        self.log_lines
+                            .push(format!("[{}] In-process F5 restart → {:?}", ts, c));
                         }
                         transport::Action::Undo => {
                             if let Some(snap) = self.history.undo() {
@@ -1265,18 +1328,26 @@ impl eframe::App for TasApp {
                         ui.separator();
 
                         if self.show_trajectory && self.show_rotation {
-                            ui.horizontal(|ui| {
-                                ui.vertical(|ui| {
-                                    ui.set_min_width(220.0);
-                                    ui.label(egui::RichText::new("Rotation").small());
-                                    rotation::show(ui, state);
-                                });
+                            if should_stack_trajectory_rotation(ui.available_width()) {
+                                ui.label(egui::RichText::new("Rotation").small());
+                                rotation::show(ui, state);
                                 ui.separator();
-                                ui.vertical(|ui| {
-                                    ui.label(egui::RichText::new("Trajectory").small());
-                                    trajectory::show(ui, state, &mut self.trajectory_cache);
+                                ui.label(egui::RichText::new("Trajectory").small());
+                                trajectory::show(ui, state, &mut self.trajectory_cache);
+                            } else {
+                                ui.columns(2, |columns| {
+                                    columns[0].set_min_width(260.0);
+                                    columns[0].label(egui::RichText::new("Rotation").small());
+                                    rotation::show(&mut columns[0], state);
+
+                                    columns[1].label(egui::RichText::new("Trajectory").small());
+                                    trajectory::show(
+                                        &mut columns[1],
+                                        state,
+                                        &mut self.trajectory_cache,
+                                    );
                                 });
-                            });
+                            }
                         } else if self.show_trajectory {
                             ui.label(egui::RichText::new("Trajectory").small());
                             trajectory::show(ui, state, &mut self.trajectory_cache);
@@ -1408,6 +1479,7 @@ impl eframe::App for TasApp {
                             self.continue_from_text = frame.to_string();
                             shared.state_mut().continue_from_frame = frame;
                             self.pending_session_kind = Some(RecordingSessionKind::Continue);
+                            self.pending_continue_start_tick = Some(frame);
                             shared.send_command(TasCommand::ArmContinue);
                             self.segment_tracker.segments.retain(|s| s.start_tick < frame);
                             self.log_lines.push(format!(
@@ -1629,6 +1701,7 @@ mod tests {
             segment_tracker: recording::SegmentTracker::new(),
             active_recording_session: None,
             pending_session_kind: None,
+            pending_continue_start_tick: None,
             last_mode: 0,
             cont_catchup_speed: None,
             cont_catchup_multiplier: 12.0,
@@ -1825,6 +1898,48 @@ mod tests {
     }
 
     #[test]
+    fn playback_speed_normalizer_rejects_catchup_values() {
+        assert!((normalize_playback_speed(12.0) - 1.0).abs() < 0.001);
+        assert!((normalize_playback_speed(f32::NAN) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn playback_speed_normalizer_keeps_valid_presets() {
+        assert!((normalize_playback_speed(0.25) - 0.25).abs() < 0.001);
+        assert!((normalize_playback_speed(2.0) - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn trajectory_rotation_stacks_in_narrow_layout() {
+        assert!(should_stack_trajectory_rotation(
+            TRAJECTORY_ROTATION_SPLIT_MIN_WIDTH - 1.0
+        ));
+    }
+
+    #[test]
+    fn trajectory_rotation_stays_side_by_side_in_wide_layout() {
+        assert!(!should_stack_trajectory_rotation(
+            TRAJECTORY_ROTATION_SPLIT_MIN_WIDTH
+        ));
+    }
+
+    #[test]
+    fn arm_rec_resets_speed_to_default() {
+        let mut app = test_app();
+        app.playback_speed = 4.0;
+        app.prepare_restart_action(TasCommand::ArmRec);
+        assert!((app.playback_speed - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn settings_speed_uses_pre_catchup_value() {
+        let mut app = test_app();
+        app.playback_speed = 12.0;
+        app.cont_catchup_speed = Some(2.0);
+        assert!((app.playback_speed_for_settings() - 2.0).abs() < 0.001);
+    }
+
+    #[test]
     fn playback_speed_can_be_set_to_extremes() {
         let mut app = test_app();
         app.playback_speed = 0.25;
@@ -1971,7 +2086,7 @@ mod tests {
         app.finalize_recording_session(&snapshot, 2303);
 
         assert_eq!(app.history.len(), 1);
-        assert_eq!(app.history.entries()[0].label, "Recorded 23:03");
+        assert_eq!(app.history.entries()[0].label, "Recorded 0:23.03");
     }
 
     #[test]
@@ -1990,8 +2105,21 @@ mod tests {
         assert_eq!(app.history.len(), 1);
         assert_eq!(
             app.history.entries()[0].label,
-            "Continued 23:03, total 53:03"
+            "Continued from 0:30.00, total 0:53.03"
         );
+    }
+
+    #[test]
+    fn continue_session_uses_pending_continue_start_when_shared_resets_to_zero() {
+        let mut app = test_app();
+        app.pending_session_kind = Some(RecordingSessionKind::Continue);
+        app.pending_continue_start_tick = Some(3415);
+        app.start_recording_session(0, 3415);
+
+        let session = app.active_recording_session.expect("session should start");
+        assert_eq!(session.kind, RecordingSessionKind::Continue);
+        assert_eq!(session.start_tick, 3415);
+        assert_eq!(session.max_recorded_count, 3415);
     }
 
     #[test]
