@@ -18,6 +18,8 @@ pub fn pico_port() -> String {
 const F5_SETTLE_MS: u64 = 4000;
 /// Frames to wait for physics stabilization after restart.
 const STABILIZE_FRAMES: u32 = 500;
+/// Timeout waiting for in-process restart state machine to finish.
+const RESTART_TIMEOUT_SECS: u64 = 15;
 /// Playback timeout (long enough for 65536 frames at ~50fps unfocused).
 const PLAYBACK_TIMEOUT_SECS: u64 = 120;
 
@@ -146,6 +148,42 @@ pub fn restart_and_stabilize(client: &TasSharedMemoryClient) -> bool {
     thread::sleep(Duration::from_millis(F5_SETTLE_MS));
     wait_frames(client, STABILIZE_FRAMES);
     println!("  Stabilized at frame {}", client.frame_count_volatile());
+    check_liveness(client)
+}
+
+/// In-process restart via CMD_RESTART + restart_state polling.
+///
+/// This matches the egui transport path (RestartThen) and avoids external
+/// focus/Pico timing variance from out-of-process F5 injection.
+pub fn restart_and_stabilize_inprocess(client: &mut TasSharedMemoryClient) -> bool {
+    // Ensure a clean command state before requesting restart.
+    client.send_command(TasCommand::Stop);
+    thread::sleep(Duration::from_millis(50));
+
+    client.reset_restart_state();
+    client.send_command(TasCommand::Restart);
+
+    let start = Instant::now();
+    loop {
+        let rs = client.restart_state();
+        if rs == 2 {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(RESTART_TIMEOUT_SECS) {
+            eprintln!(
+                "  ERROR: In-process restart timeout (restart_state={})",
+                client.restart_state()
+            );
+            return false;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    client.reset_restart_state();
+    println!(
+        "  In-process restart stabilized at frame {}",
+        client.frame_count_volatile()
+    );
     check_liveness(client)
 }
 
@@ -580,6 +618,35 @@ pub fn restart_continue_and_splice(
     splice_frame: u32,
     max_retries: u32,
 ) -> bool {
+    restart_continue_and_splice_with(client, target, splice_frame, max_retries, |c| {
+        restart_and_stabilize(c)
+    })
+}
+
+/// In-process restart variant of CONT splice retry logic.
+///
+/// Uses CMD_RESTART/restart_state, matching the egui transport path.
+pub fn restart_continue_and_splice_inprocess(
+    client: &mut TasSharedMemoryClient,
+    target: [f32; 3],
+    splice_frame: u32,
+    max_retries: u32,
+) -> bool {
+    restart_continue_and_splice_with(client, target, splice_frame, max_retries, |c| {
+        restart_and_stabilize_inprocess(c)
+    })
+}
+
+fn restart_continue_and_splice_with<F>(
+    client: &mut TasSharedMemoryClient,
+    target: [f32; 3],
+    splice_frame: u32,
+    max_retries: u32,
+    mut restart_fn: F,
+) -> bool
+where
+    F: FnMut(&mut TasSharedMemoryClient) -> bool,
+{
     for attempt in 0..=max_retries {
         if attempt > 0 {
             println!(
@@ -587,8 +654,8 @@ pub fn restart_continue_and_splice(
                 attempt, max_retries
             );
         }
-        if !restart_and_stabilize(client) {
-            eprintln!("  ERROR: Game not alive after F5");
+        if !restart_fn(client) {
+            eprintln!("  ERROR: Game not alive after restart");
             return false;
         }
 
@@ -607,6 +674,8 @@ pub fn restart_continue_and_splice(
         let match_x = pc0[0].to_bits() == target[0].to_bits();
         let match_y = pc0[1].to_bits() == target[1].to_bits();
         let match_z = pc0[2].to_bits() == target[2].to_bits();
+        let dx = (pc0[0] as f64 - target[0] as f64).abs();
+        let dz = (pc0[2] as f64 - target[2] as f64).abs();
 
         if match_x && match_y && match_z {
             if attempt > 0 {
@@ -620,9 +689,6 @@ pub fn restart_continue_and_splice(
             stop(client);
             continue;
         }
-
-        let dx = (pc0[0] as f64 - target[0] as f64).abs();
-        let dz = (pc0[2] as f64 - target[2] as f64).abs();
         println!("  play_coords[0] offset: dx={:.9} dz={:.9}", dx, dz);
         stop(client);
     }
