@@ -37,8 +37,10 @@ impl TrajectoryCache {
             for i in (0..rec).step_by(step) {
                 self.rec_points
                     .push([state.rec_coords[i][0] as f64, state.rec_coords[i][2] as f64]);
-                self.rec_altitude
-                    .push([i as f64 / FRAMES_PER_SECOND, -(state.rec_coords[i][1] as f64)]);
+                self.rec_altitude.push([
+                    i as f64 / FRAMES_PER_SECOND,
+                    -(state.rec_coords[i][1] as f64),
+                ]);
             }
         }
 
@@ -52,8 +54,10 @@ impl TrajectoryCache {
                     state.play_coords[i][0] as f64,
                     state.play_coords[i][2] as f64,
                 ]);
-                self.play_altitude
-                    .push([i as f64 / FRAMES_PER_SECOND, -(state.play_coords[i][1] as f64)]);
+                self.play_altitude.push([
+                    i as f64 / FRAMES_PER_SECOND,
+                    -(state.play_coords[i][1] as f64),
+                ]);
             }
         }
         true

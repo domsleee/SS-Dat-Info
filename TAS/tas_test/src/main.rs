@@ -11,16 +11,18 @@
 //!   speed-reset — Speed reset verification (2x stop restores normal)
 //!   drift-speed — Drift-at-speed verification (2x same-speed, 1x/2x cross-speed)
 //!   replay      — Load .tasrec file and replay N times, checking drift each time
+//!   cont-reliability — CONT splice reliability test at long frame offsets
 
 mod acceptance;
 mod cache;
 mod certificate;
+mod cont_reliability;
 mod drift;
+mod drift_speed;
 mod gates;
 mod harness;
 mod patterns;
 mod regression;
-mod drift_speed;
 mod reliability;
 mod replay;
 mod speed;
@@ -77,9 +79,7 @@ fn main() {
             while i < args.len() {
                 match args[i].as_str() {
                     "--iterations" | "-n" => {
-                        iterations = args.get(i + 1)
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(5);
+                        iterations = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(5);
                         i += 2;
                     }
                     "--verbose" | "-v" => {
@@ -90,11 +90,16 @@ fn main() {
                         no_match = true;
                         i += 1;
                     }
-                    _ => { i += 1; }
+                    _ => {
+                        i += 1;
+                    }
                 }
             }
             let report = replay::run(path, iterations, verbose, no_match);
-            let any_drift = report.results.iter().any(|r| r.max_drift_x > 0.0 || r.max_drift_z > 0.0);
+            let any_drift = report
+                .results
+                .iter()
+                .any(|r| r.max_drift_x > 0.0 || r.max_drift_z > 0.0);
             std::process::exit(if any_drift { 1 } else { 0 });
         }
         "reliability" => {
@@ -104,21 +109,46 @@ fn main() {
             while i < args.len() {
                 match args[i].as_str() {
                     "--iterations" | "-n" => {
-                        iterations = args.get(i + 1)
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(10);
+                        iterations = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(10);
                         i += 2;
                     }
                     "--speed" | "-s" => {
-                        speed = args.get(i + 1)
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(12.0);
+                        speed = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(12.0);
                         i += 2;
                     }
-                    _ => { i += 1; }
+                    _ => {
+                        i += 1;
+                    }
                 }
             }
             let report = reliability::run(iterations, speed);
+            std::process::exit(if report.all_pass() { 0 } else { 1 });
+        }
+        "cont-reliability" => {
+            let mut iterations = 10u32;
+            let mut speed = 12.0f32;
+            let mut splice = 2400u32;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--iterations" | "-n" => {
+                        iterations = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(10);
+                        i += 2;
+                    }
+                    "--speed" | "-s" => {
+                        speed = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(12.0);
+                        i += 2;
+                    }
+                    "--splice" => {
+                        splice = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(2400);
+                        i += 2;
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            let report = cont_reliability::run(iterations, speed, splice);
             std::process::exit(if report.all_pass() { 0 } else { 1 });
         }
         "mock" => {
@@ -144,7 +174,10 @@ fn main() {
             println!("  speed       Playback speed verification (0.25x, 1x, 2x)");
             println!("  speed-reset Speed reset verification (2x stop restores normal)");
             println!("  drift-speed Drift-at-speed verification (2x same, 1x/2x cross)");
-            println!("  reliability N consecutive REC+PLAY cycles at Nx speed (default 10x at 12x)");
+            println!(
+                "  reliability N consecutive REC+PLAY cycles at Nx speed (default 10x at 12x)"
+            );
+            println!("  cont-reliability CONT splice reliability (default 10x, splice 2400 @ 12x)");
             println!("  replay      Load .tasrec file and play back N times (drift check)");
             println!();
             println!("Options for replay:");

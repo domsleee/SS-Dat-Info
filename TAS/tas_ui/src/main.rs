@@ -48,6 +48,7 @@ use recording::{RecordingHistory, RecordingSessionKind};
 const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
 const PLAYBACK_SPEED_PRESETS: [f32; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
 const TRAJECTORY_ROTATION_SPLIT_MIN_WIDTH: f32 = 900.0;
+const CONT_START_MATCH_MAX_RETRIES: u32 = 30;
 
 fn normalize_playback_speed(speed: f32) -> f32 {
     if !speed.is_finite() {
@@ -70,6 +71,13 @@ struct ActiveRecordingSession {
     kind: RecordingSessionKind,
     start_tick: u32,
     max_recorded_count: u32,
+}
+
+#[derive(Clone, Copy)]
+struct ContinueStartGuard {
+    expected_start_bits: [u32; 3],
+    continue_from_frame: u32,
+    retries_remaining: u32,
 }
 
 struct TasApp {
@@ -121,6 +129,7 @@ struct TasApp {
 
     // In-process restart state: command to send once restart completes
     pending_after_restart: Option<TasCommand>,
+    continue_start_guard: Option<ContinueStartGuard>,
 
     // Crash recovery
     last_frame_count: u32,
@@ -210,6 +219,7 @@ impl TasApp {
             trajectory_cache: trajectory::TrajectoryCache::default(),
             analysis_cache: analysis::AnalysisCache::default(),
             pending_after_restart: None,
+            continue_start_guard: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
@@ -294,12 +304,160 @@ impl TasApp {
         }
     }
 
+    fn reset_continue_runtime_state(&mut self) {
+        self.pending_session_kind = None;
+        self.pending_continue_start_tick = None;
+        self.continue_start_guard = None;
+    }
+
+    fn set_continue_start_guard(&mut self) {
+        let expected = self.shared.as_ref().and_then(|shared| {
+            let state = shared.state();
+            if state.recorded_count == 0 {
+                return None;
+            }
+            let rec0 = state.rec_coords[0];
+            Some([rec0[0].to_bits(), rec0[1].to_bits(), rec0[2].to_bits()])
+        });
+        self.continue_start_guard = expected.map(|expected_start_bits| ContinueStartGuard {
+            expected_start_bits,
+            continue_from_frame: self.continue_from_frame,
+            retries_remaining: CONT_START_MATCH_MAX_RETRIES,
+        });
+    }
+
+    fn send_action_command(&mut self, command: TasCommand, ts: &str) {
+        if command == TasCommand::Stop {
+            self.clear_cont_catchup();
+            self.reset_continue_runtime_state();
+        }
+        if let Some(shared) = self.shared.as_mut() {
+            shared.send_command(command);
+        }
+        self.log_lines.push(format!("[{}] Sent: {:?}", ts, command));
+    }
+
+    fn queue_restart_then(&mut self, command: TasCommand, ts: &str) {
+        if command == TasCommand::ArmContinue {
+            if self.cont_catchup_speed.is_none() {
+                self.cont_catchup_speed = Some(self.playback_speed);
+            }
+            self.playback_speed = self.cont_catchup_multiplier;
+            self.pending_session_kind = Some(RecordingSessionKind::Continue);
+            self.pending_continue_start_tick = Some(self.continue_from_frame);
+            self.set_continue_start_guard();
+        } else {
+            self.clear_cont_catchup();
+            self.pending_session_kind = if command == TasCommand::ArmRec {
+                Some(RecordingSessionKind::Rec)
+            } else {
+                None
+            };
+            self.pending_continue_start_tick = None;
+            self.continue_start_guard = None;
+        }
+
+        if command == TasCommand::ArmRec {
+            self.playback_speed = DEFAULT_PLAYBACK_SPEED;
+        }
+
+        if let Some(shared) = self.shared.as_mut() {
+            shared.state_mut().playback_speed = self.playback_speed;
+            shared.reset_restart_state();
+            shared.send_command(TasCommand::Restart);
+        }
+        self.pending_after_restart = Some(command);
+        self.log_lines
+            .push(format!("[{}] In-process F5 restart → {:?}", ts, command));
+    }
+
+    fn poll_continue_start_guard(&mut self, ctx: &egui::Context) {
+        let Some(mut guard) = self.continue_start_guard else {
+            return;
+        };
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+
+        let mode = shared.mode_volatile();
+        if mode == TasMode::Rec as u32 {
+            self.continue_start_guard = None;
+            return;
+        }
+        if mode != TasMode::Play as u32 {
+            return;
+        }
+
+        let playback_pos = shared.playback_pos_volatile();
+        if playback_pos == 0 {
+            ctx.request_repaint();
+            return;
+        }
+
+        let play0 = shared.state().play_coords[0];
+        let play0_bits = [play0[0].to_bits(), play0[1].to_bits(), play0[2].to_bits()];
+        if play0_bits == guard.expected_start_bits {
+            if guard.retries_remaining < CONT_START_MATCH_MAX_RETRIES {
+                let used = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
+                self.push_log(&format!(
+                    "CONT start aligned after {} restart retr{}",
+                    used,
+                    if used == 1 { "y" } else { "ies" }
+                ));
+            }
+            self.continue_start_guard = None;
+            return;
+        }
+
+        let expected_x = f32::from_bits(guard.expected_start_bits[0]);
+        let expected_z = f32::from_bits(guard.expected_start_bits[2]);
+        let dx = (play0[0] as f64 - expected_x as f64).abs();
+        let dz = (play0[2] as f64 - expected_z as f64).abs();
+
+        if guard.retries_remaining == 0 {
+            if let Some(shared) = self.shared.as_mut() {
+                shared.send_command(TasCommand::Stop);
+            }
+            self.clear_cont_catchup();
+            self.pending_after_restart = None;
+            self.reset_continue_runtime_state();
+            self.push_log(&format!(
+                "CONT aborted: start mismatch after {} retries (dx={:.9}, dz={:.9})",
+                CONT_START_MATCH_MAX_RETRIES, dx, dz
+            ));
+            return;
+        }
+
+        let continue_from_frame = guard.continue_from_frame;
+        guard.retries_remaining -= 1;
+        let attempt = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
+        self.pending_session_kind = Some(RecordingSessionKind::Continue);
+        self.pending_continue_start_tick = Some(continue_from_frame);
+        self.playback_speed = self.cont_catchup_multiplier;
+        if self.cont_catchup_speed.is_none() {
+            self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
+        }
+        self.pending_after_restart = Some(TasCommand::ArmContinue);
+        if let Some(shared) = self.shared.as_mut() {
+            shared.send_command(TasCommand::Stop);
+            shared.state_mut().continue_from_frame = continue_from_frame;
+            shared.state_mut().playback_speed = self.playback_speed;
+            shared.reset_restart_state();
+            shared.send_command(TasCommand::Restart);
+        }
+        self.continue_start_guard = Some(guard);
+        self.push_log(&format!(
+            "CONT start mismatch (dx={:.9}, dz={:.9}) -> retry {}/{}",
+            dx, dz, attempt, CONT_START_MATCH_MAX_RETRIES
+        ));
+        ctx.request_repaint();
+    }
+
     #[cfg(test)]
     fn prepare_send_action(&mut self, command: TasCommand) {
         if command == TasCommand::Stop {
             self.clear_cont_catchup();
-            self.pending_session_kind = None;
-            self.pending_continue_start_tick = None;
+            self.reset_continue_runtime_state();
         }
     }
 
@@ -326,6 +484,9 @@ impl TasApp {
                 self.pending_session_kind = None;
                 self.pending_continue_start_tick = None;
             }
+        }
+        if command != TasCommand::ArmContinue {
+            self.continue_start_guard = None;
         }
     }
 
@@ -724,6 +885,7 @@ impl eframe::App for TasApp {
                 if current_mode == 1 {
                     self.start_recording_session(continue_from, recorded);
                     self.clear_cont_catchup();
+                    self.continue_start_guard = None;
                 }
                 // REC stopped (mode went from REC to OFF)
                 if self.last_mode == 1 && current_mode == 0 {
@@ -979,94 +1141,65 @@ impl eframe::App for TasApp {
         }
 
         // Poll in-process restart state machine
-        if let (Some(pending_cmd), Some(ref mut shared)) =
-            (self.pending_after_restart, self.shared.as_mut())
-        {
-            let rs = shared.restart_state();
-            if rs == 2 {
-                // Restart complete — send the pending command
-                shared.reset_restart_state();
-                shared.send_command(pending_cmd);
+        if let Some(pending_cmd) = self.pending_after_restart {
+            let mut restart_done = false;
+            if let Some(shared) = self.shared.as_mut() {
+                let rs = shared.restart_state();
+                if rs == 2 {
+                    // Restart complete — send the pending command
+                    shared.reset_restart_state();
+                    shared.send_command(pending_cmd);
+                    restart_done = true;
+                }
+                // Keep polling even with no user input.
+                ctx.request_repaint();
+            }
+            if restart_done {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 self.log_lines
                     .push(format!("[{}] Restart done, sent: {:?}", ts, pending_cmd));
                 self.pending_after_restart = None;
             }
-            // Request repaint to keep polling (egui won't repaint without user input)
-            ctx.request_repaint();
         }
+        self.poll_continue_start_guard(ctx);
 
         // Apply shortcut actions to shared state
-        if let Some(ref mut shared) = self.shared {
-            for cmd in shortcut_actions {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                match cmd {
-                    transport::Action::Send(c) => {
-                        if c == TasCommand::Stop {
-                            if let Some(saved) = self.cont_catchup_speed.take() {
-                                self.playback_speed = saved;
-                            }
-                            self.pending_session_kind = None;
-                            self.pending_continue_start_tick = None;
+        for cmd in shortcut_actions {
+            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+            match cmd {
+                transport::Action::Send(c) => self.send_action_command(c, &ts),
+                transport::Action::RestartThen(c) => self.queue_restart_then(c, &ts),
+                transport::Action::Undo => {
+                    if let Some(snap) = self.history.undo() {
+                        if let Some(shared) = self.shared.as_mut() {
+                            snap.restore_to(shared.state_mut());
                         }
-                        shared.send_command(c);
-                        self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
-                    }
-                    transport::Action::RestartThen(c) => {
-                        if c == TasCommand::ArmContinue {
-                            if self.cont_catchup_speed.is_none() {
-                                self.cont_catchup_speed = Some(self.playback_speed);
-                            }
-                            self.playback_speed = self.cont_catchup_multiplier;
-                            self.pending_session_kind = Some(RecordingSessionKind::Continue);
-                            self.pending_continue_start_tick = Some(self.continue_from_frame);
-                        } else {
-                            if let Some(saved) = self.cont_catchup_speed.take() {
-                                self.playback_speed = saved;
-                            }
-                            self.pending_session_kind = if c == TasCommand::ArmRec {
-                                Some(RecordingSessionKind::Rec)
-                            } else {
-                                None
-                            };
-                            self.pending_continue_start_tick = None;
-                        }
-                        if c == TasCommand::ArmRec {
-                            self.playback_speed = DEFAULT_PLAYBACK_SPEED;
-                        }
-                        shared.state_mut().playback_speed = self.playback_speed;
-                        shared.reset_restart_state();
-                        shared.send_command(TasCommand::Restart);
-                        self.pending_after_restart = Some(c);
                         self.log_lines
-                            .push(format!("[{}] In-process F5 restart → {:?}", ts, c));
+                            .push(format!("[{}] Undo: restored previous recording", ts));
                     }
-                    transport::Action::Undo => {
-                        if let Some(snap) = self.history.undo() {
+                }
+                transport::Action::Redo => {
+                    if let Some(snap) = self.history.redo() {
+                        if let Some(shared) = self.shared.as_mut() {
                             snap.restore_to(shared.state_mut());
-                            self.log_lines
-                                .push(format!("[{}] Undo: restored previous recording", ts));
                         }
+                        self.log_lines
+                            .push(format!("[{}] Redo: restored next recording", ts));
                     }
-                    transport::Action::Redo => {
-                        if let Some(snap) = self.history.redo() {
-                            snap.restore_to(shared.state_mut());
-                            self.log_lines
-                                .push(format!("[{}] Redo: restored next recording", ts));
-                        }
-                    }
-                    transport::Action::SetContinueFrame(frame) => {
-                        self.continue_from_frame = frame;
-                        self.continue_from_text = frame.to_string();
+                }
+                transport::Action::SetContinueFrame(frame) => {
+                    self.continue_from_frame = frame;
+                    self.continue_from_text = frame.to_string();
+                    if let Some(shared) = self.shared.as_mut() {
                         shared.state_mut().continue_from_frame = frame;
                     }
-                    transport::Action::StepOne => {
-                        self.log_lines
-                            .push(format!("[{}] Step one frame (requires DLL support)", ts));
-                    }
-                    transport::Action::Log(msg) => {
-                        self.log_lines.push(format!("[{}] {}", ts, msg));
-                    }
+                }
+                transport::Action::StepOne => {
+                    self.log_lines
+                        .push(format!("[{}] Step one frame (requires DLL support)", ts));
+                }
+                transport::Action::Log(msg) => {
+                    self.log_lines.push(format!("[{}] {}", ts, msg));
                 }
             }
         }
@@ -1103,18 +1236,34 @@ impl eframe::App for TasApp {
                                 }
                                 self.pending_session_kind = None;
                                 self.pending_continue_start_tick = None;
+                                self.continue_start_guard = None;
                             }
                             shared.send_command(c);
                             self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
                         }
-                    transport::Action::RestartThen(c) => {
-                        if c == TasCommand::ArmContinue {
-                            if self.cont_catchup_speed.is_none() {
-                                self.cont_catchup_speed = Some(self.playback_speed);
-                            }
+                        transport::Action::RestartThen(c) => {
+                            if c == TasCommand::ArmContinue {
+                                if self.cont_catchup_speed.is_none() {
+                                    self.cont_catchup_speed = Some(self.playback_speed);
+                                }
                                 self.playback_speed = self.cont_catchup_multiplier;
                                 self.pending_session_kind = Some(RecordingSessionKind::Continue);
                                 self.pending_continue_start_tick = Some(self.continue_from_frame);
+                                let state = shared.state();
+                                if state.recorded_count > 0 {
+                                    let rec0 = state.rec_coords[0];
+                                    self.continue_start_guard = Some(ContinueStartGuard {
+                                        expected_start_bits: [
+                                            rec0[0].to_bits(),
+                                            rec0[1].to_bits(),
+                                            rec0[2].to_bits(),
+                                        ],
+                                        continue_from_frame: self.continue_from_frame,
+                                        retries_remaining: CONT_START_MATCH_MAX_RETRIES,
+                                    });
+                                } else {
+                                    self.continue_start_guard = None;
+                                }
                             } else {
                                 if let Some(saved) = self.cont_catchup_speed.take() {
                                     self.playback_speed = saved;
@@ -1123,35 +1272,32 @@ impl eframe::App for TasApp {
                                     Some(RecordingSessionKind::Rec)
                                 } else {
                                     None
-                            };
-                            self.pending_continue_start_tick = None;
-                        }
-                        if c == TasCommand::ArmRec {
-                            self.playback_speed = DEFAULT_PLAYBACK_SPEED;
-                        }
-                        shared.state_mut().playback_speed = self.playback_speed;
-                        shared.reset_restart_state();
-                        shared.send_command(TasCommand::Restart);
-                        self.pending_after_restart = Some(c);
-                        self.log_lines
-                            .push(format!("[{}] In-process F5 restart → {:?}", ts, c));
+                                };
+                                self.pending_continue_start_tick = None;
+                                self.continue_start_guard = None;
+                            }
+                            if c == TasCommand::ArmRec {
+                                self.playback_speed = DEFAULT_PLAYBACK_SPEED;
+                            }
+                            shared.state_mut().playback_speed = self.playback_speed;
+                            shared.reset_restart_state();
+                            shared.send_command(TasCommand::Restart);
+                            self.pending_after_restart = Some(c);
+                            self.log_lines
+                                .push(format!("[{}] In-process F5 restart → {:?}", ts, c));
                         }
                         transport::Action::Undo => {
                             if let Some(snap) = self.history.undo() {
                                 snap.restore_to(shared.state_mut());
-                                self.log_lines.push(format!(
-                                    "[{}] Undo: restored previous recording",
-                                    ts
-                                ));
+                                self.log_lines
+                                    .push(format!("[{}] Undo: restored previous recording", ts));
                             }
                         }
                         transport::Action::Redo => {
                             if let Some(snap) = self.history.redo() {
                                 snap.restore_to(shared.state_mut());
-                                self.log_lines.push(format!(
-                                    "[{}] Redo: restored next recording",
-                                    ts
-                                ));
+                                self.log_lines
+                                    .push(format!("[{}] Redo: restored next recording", ts));
                             }
                         }
                         transport::Action::SetContinueFrame(frame) => {
@@ -1714,6 +1860,7 @@ mod tests {
             trajectory_cache: trajectory::TrajectoryCache::default(),
             analysis_cache: analysis::AnalysisCache::default(),
             pending_after_restart: None,
+            continue_start_guard: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),

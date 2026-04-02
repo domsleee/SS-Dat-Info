@@ -22,7 +22,10 @@ pub fn format_recording_duration(ticks: u32) -> String {
     if minutes >= 60 {
         let hours = minutes / 60;
         let rem_minutes = minutes % 60;
-        format!("{}:{:02}:{:02}.{:02}", hours, rem_minutes, seconds, centiseconds)
+        format!(
+            "{}:{:02}:{:02}.{:02}",
+            hours, rem_minutes, seconds, centiseconds
+        )
     } else {
         format!("{}:{:02}.{:02}", minutes, seconds, centiseconds)
     }
@@ -1762,7 +1765,7 @@ mod tests {
         // Push D — eviction should happen (capacity=3, will have 4 before eviction)
         assert!(history.push_snapshot(&s4, "D"));
         assert_eq!(history.len(), 3); // A evicted
-        // current_index should be valid and point to D
+                                      // current_index should be valid and point to D
         let idx = history.current_index().unwrap();
         assert_eq!(history.entries()[idx].label, "D");
     }
@@ -1895,8 +1898,7 @@ mod tests {
 
     #[test]
     fn completed_session_label_continue_shows_start_and_total() {
-        let label =
-            completed_session_label(RecordingSessionKind::Continue, 6000, 12000).unwrap();
+        let label = completed_session_label(RecordingSessionKind::Continue, 6000, 12000).unwrap();
         assert_eq!(label, "Continued from 1:00.00, total 2:00.00");
     }
 

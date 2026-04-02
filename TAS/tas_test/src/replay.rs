@@ -154,7 +154,10 @@ impl ReplayReport {
 
         println!();
         if drift_count == 0 {
-            println!("Result: ZERO DRIFT in all {} iterations", self.results.len());
+            println!(
+                "Result: ZERO DRIFT in all {} iterations",
+                self.results.len()
+            );
         } else {
             println!(
                 "Result: DRIFT in {}/{} iterations",

@@ -71,8 +71,7 @@ public class W {{ [DllImport("user32.dll")] public static extern bool PostMessag
             Start-Sleep -Milliseconds 50
             [W]::PostMessage([IntPtr]::new({}), {}, [IntPtr]::new({}), [IntPtr]::Zero) | Out-Null
             "#,
-            hwnd, WM_KEYDOWN, VK_F5,
-            hwnd, WM_KEYUP, VK_F5,
+            hwnd, WM_KEYDOWN, VK_F5, hwnd, WM_KEYUP, VK_F5,
         );
         let _ = Command::new("powershell")
             .args(["-NoProfile", "-Command", &script])
@@ -347,10 +346,7 @@ pub fn restart_play_and_match(
 ) -> bool {
     for attempt in 0..=max_retries {
         if attempt > 0 {
-            println!(
-                "  Retry {}/{}: restarting...",
-                attempt, max_retries
-            );
+            println!("  Retry {}/{}: restarting...", attempt, max_retries);
         }
         if !restart_and_stabilize(client) {
             eprintln!("  ERROR: Game not alive after F5");
@@ -433,7 +429,10 @@ pub fn restart_play_and_force(
         }
         let dx = (pc0[0] as f64 - target[0] as f64).abs();
         let dz = (pc0[2] as f64 - target[2] as f64).abs();
-        println!("  play_coords[0] offset after force: dx={:.9} dz={:.9}", dx, dz);
+        println!(
+            "  play_coords[0] offset after force: dx={:.9} dz={:.9}",
+            dx, dz
+        );
         stop(client);
     }
     eprintln!(
