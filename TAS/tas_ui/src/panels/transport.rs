@@ -59,10 +59,10 @@ pub fn show(
             actions.push(Action::RestartThen(TasCommand::ArmRec));
         }
 
-        // PLAY button (green when playing)
+        // PLAY button (green when playing, but not during CONT catch-up)
         let play_label = "\u{25B6} PLAY  F10"; // Unicode play triangle
         let play_text = egui::RichText::new(play_label);
-        let play_text = if is_play {
+        let play_text = if is_play && !catchup_active {
             play_text
                 .color(egui::Color32::from_rgb(60, 200, 60))
                 .strong()
@@ -87,10 +87,18 @@ pub fn show(
 
         ui.separator();
 
-        // Continue Record
+        // Continue Record (green when CONT catch-up is active)
         let cont_label = "\u{23ED} CONT  F12"; // Unicode next track symbol
+        let cont_text = egui::RichText::new(cont_label);
+        let cont_text = if catchup_active {
+            cont_text
+                .color(egui::Color32::from_rgb(60, 200, 60))
+                .strong()
+        } else {
+            cont_text
+        };
         if ui
-            .add_enabled(can_continue, egui::Button::new(cont_label))
+            .add_enabled(can_continue, egui::Button::new(cont_text))
             .on_hover_text(format!(
                 "Continue recording from a specific frame (catch-up at {}x)",
                 *cont_catchup_speed
