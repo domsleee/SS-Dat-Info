@@ -361,8 +361,17 @@ impl TasApp {
             self.playback_speed = DEFAULT_PLAYBACK_SPEED;
         }
 
+        // PLAY always starts from tick 0 — reset continue_from_frame
+        if command == TasCommand::ArmPlay {
+            self.continue_from_frame = 0;
+            self.continue_from_text = "0".to_string();
+        }
+
         if let Some(shared) = self.shared.as_mut() {
             shared.state_mut().playback_speed = self.playback_speed;
+            if command == TasCommand::ArmPlay {
+                shared.state_mut().continue_from_frame = 0;
+            }
             shared.reset_restart_state();
             shared.send_command(TasCommand::Restart);
         }
