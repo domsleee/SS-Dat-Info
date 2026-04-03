@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 5;  // Bumped for rotation telemetry
+constexpr uint32_t TAS_SHARED_VERSION = 6;  // Bumped for hook performance counters
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
@@ -60,6 +60,13 @@ struct TasLogEntry {
     char      text[TAS_LOG_ENTRY_SIZE];      // NUL-terminated message
 };
 
+// Hook performance counters (cycles measured with __rdtsc).
+struct TasHookPerfCounter {
+    uint64_t calls;          // Number of callback invocations
+    uint64_t cycles_total;   // Sum of elapsed cycles across all calls
+    uint64_t cycles_max;     // Worst single-call elapsed cycles
+};
+
 // All fields are naturally aligned (uint32_t/float = 4 bytes).
 // No packing needed; must match Rust repr(C) layout.
 struct TasSharedState {
@@ -91,6 +98,14 @@ struct TasSharedState {
     uint32_t frame_count;           // Cave 2: total frames processed
     uint32_t event_count;           // General event counter
     uint32_t bb3b10_block_count;    // Cave 1D: BB3B10 blocks during REC mode 6
+
+    // -- Hook performance counters (DLL writes, UI/tests read) --
+    TasHookPerfCounter perf_cave2;
+    TasHookPerfCounter perf_cave5;
+    TasHookPerfCounter perf_cave1c_down;
+    TasHookPerfCounter perf_cave1c_up;
+    TasHookPerfCounter perf_cave1d;
+    TasHookPerfCounter perf_replay_capture;
 
     // -- Hook status (DLL writes, UI reads) --
     uint32_t cave2_hooked;          // 1 if Supreme::Cycle hook installed
@@ -160,6 +175,24 @@ inline void LogRing(TasSharedState* s, TasLogSeverity severity, const char* text
     entry->text[i] = '\0';
     // Write sequence last (acts as release fence for reader)
     entry->sequence = seq + 1;  // +1 so 0 means "unused"
+}
+
+inline void PerfSample(TasHookPerfCounter& c, uint64_t elapsedCycles) {
+    c.calls++;
+    c.cycles_total += elapsedCycles;
+    if (elapsedCycles > c.cycles_max) {
+        c.cycles_max = elapsedCycles;
+    }
+}
+
+inline void ResetHookPerfCounters(TasSharedState* s) {
+    if (!s) return;
+    memset(&s->perf_cave2, 0, sizeof(TasHookPerfCounter));
+    memset(&s->perf_cave5, 0, sizeof(TasHookPerfCounter));
+    memset(&s->perf_cave1c_down, 0, sizeof(TasHookPerfCounter));
+    memset(&s->perf_cave1c_up, 0, sizeof(TasHookPerfCounter));
+    memset(&s->perf_cave1d, 0, sizeof(TasHookPerfCounter));
+    memset(&s->perf_replay_capture, 0, sizeof(TasHookPerfCounter));
 }
 
 // Shared memory management (DLL side - creates the mapping)

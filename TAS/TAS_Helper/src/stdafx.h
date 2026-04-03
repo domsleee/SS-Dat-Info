@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <windows.h>
+#include <intrin.h>
 #include <fstream>
 #include <iostream>
 #include <inttypes.h>

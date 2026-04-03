@@ -38,6 +38,7 @@ static constexpr float TICK_ADVANCE_BASE = 0.01f;
 
 // Cave 5 callback with FPU preservation
 static void Cave5_MidCallback(SafetyHookContext& ctx) {
+    uint64_t t0 = __rdtsc();
     uint8_t fpu_buf[108];
     __asm { fsave [fpu_buf] }
 
@@ -68,6 +69,10 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
     }
 
     __asm { frstor [fpu_buf] }
+    auto* s2 = g_cave5State;
+    if (s2) {
+        PerfSample(s2->perf_cave5, __rdtsc() - t0);
+    }
 }
 
 bool InstallCave5(GameAddresses& addr, TasSharedState* state) {

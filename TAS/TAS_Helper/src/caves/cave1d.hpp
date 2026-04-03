@@ -26,6 +26,7 @@ static SafetyHookInline cave1dInline{};
 
 void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
                                      uint32_t pressed, uint32_t unk, uint32_t arg4) {
+    uint64_t t0 = __rdtsc();
     auto* s = g_cave1dState;
     if (s) {
         s->bb3b10_call_count++;
@@ -33,6 +34,7 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
         // Allow through if Cave 2 is actively injecting
         if (s->cave2_injecting) {
             cave1dInline.thiscall<void>(ecx, keyIndex, pressed, unk, arg4);
+            PerfSample(s->perf_cave1d, __rdtsc() - t0);
             return;
         }
 
@@ -40,12 +42,16 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
         // transitions for symmetric timing between REC and PLAY.
         if (s->mode == MODE_REC && s->inject_mode == 6) {
             s->bb3b10_block_count++;
+            PerfSample(s->perf_cave1d, __rdtsc() - t0);
             return;
         }
     }
 
     // Pass through in all other cases (IDLE, PLAY, non-mode-6)
     cave1dInline.thiscall<void>(ecx, keyIndex, pressed, unk, arg4);
+    if (s) {
+        PerfSample(s->perf_cave1d, __rdtsc() - t0);
+    }
 }
 
 bool InstallCave1D(GameAddresses& addr, TasSharedState* state) {
