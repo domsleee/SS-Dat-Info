@@ -106,6 +106,7 @@ struct TasApp {
     show_macros: bool,
     show_segments: bool,
     show_history: bool,
+    show_log: bool,
     macro_state: macros::MacroState,
     segment_tracker: recording::SegmentTracker,
     active_recording_session: Option<ActiveRecordingSession>,
@@ -202,6 +203,7 @@ impl TasApp {
             show_macros: settings.show_macros,
             show_segments: settings.show_segments,
             show_history: settings.show_history,
+            show_log: settings.show_log,
             macro_state: macros::MacroState::new(),
             segment_tracker: recording::SegmentTracker::new(),
             active_recording_session: None,
@@ -865,6 +867,7 @@ impl eframe::App for TasApp {
             show_macros: self.show_macros,
             show_history: self.show_history,
             show_config: self.show_config,
+            show_log: self.show_log,
             playback_speed: self.playback_speed_for_settings(),
             cont_catchup_speed: self.cont_catchup_multiplier,
         };
@@ -988,6 +991,7 @@ impl eframe::App for TasApp {
                     ui.checkbox(&mut self.show_debug_drift, "Debug drift");
                     ui.checkbox(&mut self.show_macros, "Macro Panel");
                     ui.checkbox(&mut self.show_history, "History Panel");
+                    ui.checkbox(&mut self.show_log, "Log Panel");
                     ui.separator();
                     ui.checkbox(&mut self.show_config, "Debug Config");
                 });
@@ -1003,13 +1007,15 @@ impl eframe::App for TasApp {
             discard_pending_recovery = false;
         }
 
-        // Bottom log panel
-        egui::TopBottomPanel::bottom("log_panel")
-            .resizable(true)
-            .default_height(100.0)
-            .show(ctx, |ui| {
-                log_panel::show(ui, &mut self.log_lines);
-            });
+        // Bottom log panel (hidden by default, toggle via View menu)
+        if self.show_log {
+            egui::TopBottomPanel::bottom("log_panel")
+                .resizable(true)
+                .default_height(100.0)
+                .show(ctx, |ui| {
+                    log_panel::show(ui, &mut self.log_lines);
+                });
+        }
 
         // Connection error state
         if self.connect_error.is_some() {
@@ -1863,6 +1869,7 @@ mod tests {
             show_macros: false,
             show_segments: false,
             show_history: false,
+            show_log: false,
             macro_state: macros::MacroState::new(),
             segment_tracker: recording::SegmentTracker::new(),
             active_recording_session: None,
