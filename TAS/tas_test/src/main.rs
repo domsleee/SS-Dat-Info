@@ -128,6 +128,7 @@ fn main() {
             let mut iterations = 10u32;
             let mut speed = 12.0f32;
             let mut splice = 2400u32;
+            let mut file: Option<String> = None;
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
@@ -143,12 +144,16 @@ fn main() {
                         splice = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(2400);
                         i += 2;
                     }
+                    "--file" => {
+                        file = args.get(i + 1).cloned();
+                        i += 2;
+                    }
                     _ => {
                         i += 1;
                     }
                 }
             }
-            let report = cont_reliability::run(iterations, speed, splice);
+            let report = cont_reliability::run(iterations, speed, splice, file.as_deref());
             std::process::exit(if report.all_pass() { 0 } else { 1 });
         }
         "mock" => {
@@ -177,7 +182,9 @@ fn main() {
             println!(
                 "  reliability N consecutive REC+PLAY cycles at Nx speed (default 10x at 12x)"
             );
-            println!("  cont-reliability CONT splice reliability (default 10x, splice 2400 @ 12x)");
+            println!(
+                "  cont-reliability CONT splice reliability (default 10x, splice 2400 @ 12x; optional --file)"
+            );
             println!("  replay      Load .tasrec file and play back N times (drift check)");
             println!();
             println!("Options for replay:");
