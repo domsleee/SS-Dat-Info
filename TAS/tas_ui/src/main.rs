@@ -827,6 +827,11 @@ impl TasApp {
                     &mut self.log_lines,
                 ) {
                     let _ = self.history.push_loaded_snapshot(shared.state(), &path);
+                    // Auto-play after loading a recording
+                    if shared.state().recorded_count > 0 {
+                        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                        self.queue_restart_then(TasCommand::ArmPlay, &ts);
+                    }
                 }
             }
         }
@@ -929,6 +934,12 @@ impl eframe::App for TasApp {
                                 &mut self.log_lines,
                             ) {
                                 let _ = self.history.push_loaded_snapshot(shared.state(), &path);
+                                // Auto-play after loading a recording
+                                if shared.state().recorded_count > 0 {
+                                    let ts =
+                                        chrono::Local::now().format("%H:%M:%S").to_string();
+                                    self.queue_restart_then(TasCommand::ArmPlay, &ts);
+                                }
                             }
                         }
                     }
