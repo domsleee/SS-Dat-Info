@@ -14,6 +14,7 @@
 //!   cont-reliability — CONT splice reliability test at long frame offsets
 
 mod acceptance;
+mod benchmark;
 mod cache;
 mod certificate;
 mod cont_reliability;
@@ -66,6 +67,33 @@ fn main() {
         "drift-speed" => {
             let result = drift_speed::run();
             std::process::exit(if result.all_pass() { 0 } else { 1 });
+        }
+        "benchmark" => {
+            let mut config = benchmark::BenchmarkConfig::default();
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--repeats" | "-n" => {
+                        config.repeats = args
+                            .get(i + 1)
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(config.repeats);
+                        i += 2;
+                    }
+                    "--frames" | "-f" => {
+                        config.measure_frames = args
+                            .get(i + 1)
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(config.measure_frames);
+                        i += 2;
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            let result = benchmark::run(config);
+            std::process::exit(if result.is_ok() { 0 } else { 1 });
         }
         "replay" => {
             let path = args.get(2).unwrap_or_else(|| {
@@ -179,6 +207,7 @@ fn main() {
             println!("  speed       Playback speed verification (0.25x, 1x, 2x)");
             println!("  speed-reset Speed reset verification (2x stop restores normal)");
             println!("  drift-speed Drift-at-speed verification (2x same, 1x/2x cross)");
+            println!("  benchmark   Cave hook perf benchmark (frame-window repeats)");
             println!(
                 "  reliability N consecutive REC+PLAY cycles at Nx speed (default 10x at 12x)"
             );
@@ -190,6 +219,10 @@ fn main() {
             println!("Options for replay:");
             println!("  --iterations N  Number of playback iterations (default: 5)");
             println!("  --verbose       Show drift details for every iteration");
+            println!();
+            println!("Options for benchmark:");
+            println!("  --repeats N     Number of benchmark repeats (default: 3)");
+            println!("  --frames N      Frames per scenario window (default: 600)");
             println!();
             println!("Exit code: 0 = all pass, 1 = some failed");
         }

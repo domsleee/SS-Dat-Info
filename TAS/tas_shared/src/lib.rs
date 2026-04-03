@@ -1,5 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 5; // Phase 5: rotation telemetry
+pub const TAS_SHARED_VERSION: u32 = 6; // Phase 6: hook performance counters
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
@@ -39,6 +39,15 @@ pub struct TasLogEntry {
     pub sequence: u32,
     pub severity: u32,
     pub text: [u8; TAS_LOG_ENTRY_SIZE],
+}
+
+/// Hook performance counters (cycles measured with __rdtsc).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TasHookPerfCounter {
+    pub calls: u64,
+    pub cycles_total: u64,
+    pub cycles_max: u64,
 }
 
 impl TasLogEntry {
@@ -123,6 +132,14 @@ pub struct TasSharedState {
     pub frame_count: u32,
     pub event_count: u32,
     pub bb3b10_block_count: u32,
+
+    // Hook performance counters (DLL writes, UI/tests read)
+    pub perf_cave2: TasHookPerfCounter,
+    pub perf_cave5: TasHookPerfCounter,
+    pub perf_cave1c_down: TasHookPerfCounter,
+    pub perf_cave1c_up: TasHookPerfCounter,
+    pub perf_cave1d: TasHookPerfCounter,
+    pub perf_replay_capture: TasHookPerfCounter,
 
     // Hook status
     pub cave2_hooked: u32,
@@ -219,6 +236,15 @@ impl TasSharedState {
             }
         }
         (entries, write_seq)
+    }
+
+    pub fn reset_hook_perf_counters(&mut self) {
+        self.perf_cave2 = TasHookPerfCounter::default();
+        self.perf_cave5 = TasHookPerfCounter::default();
+        self.perf_cave1c_down = TasHookPerfCounter::default();
+        self.perf_cave1c_up = TasHookPerfCounter::default();
+        self.perf_cave1d = TasHookPerfCounter::default();
+        self.perf_replay_capture = TasHookPerfCounter::default();
     }
 }
 
@@ -357,6 +383,10 @@ mod platform {
                 std::ptr::write_volatile(ptr, 0);
             }
         }
+
+        pub fn reset_hook_perf_counters(&mut self) {
+            self.state_mut().reset_hook_perf_counters();
+        }
     }
 
     impl Drop for TasSharedMemoryClient {
@@ -421,6 +451,10 @@ mod platform {
         }
 
         pub fn reset_restart_state(&mut self) {}
+
+        pub fn reset_hook_perf_counters(&mut self) {
+            self.state.reset_hook_perf_counters();
+        }
     }
 }
 
@@ -446,19 +480,19 @@ mod tests {
     #[test]
     fn size_of_tas_shared_state_pinned() {
         // Pin the total struct size so C++ and Rust sides stay in sync.
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_084);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_232);
     }
 
     #[test]
     fn offset_of_input_log_pinned() {
-        assert_eq!(mem::offset_of!(TasSharedState, input_log), 488);
+        assert_eq!(mem::offset_of!(TasSharedState, input_log), 632);
     }
 
     #[test]
     fn offset_of_rec_coords() {
         assert_eq!(
             mem::offset_of!(TasSharedState, rec_coords),
-            488 + TAS_MAX_TICKS // 66024
+            632 + TAS_MAX_TICKS // 66168
         );
     }
 
@@ -466,7 +500,7 @@ mod tests {
     fn offset_of_play_coords() {
         assert_eq!(
             mem::offset_of!(TasSharedState, play_coords),
-            488 + TAS_MAX_TICKS + TAS_MAX_TICKS * 12 // 852456
+            632 + TAS_MAX_TICKS + TAS_MAX_TICKS * 12 // 852600
         );
     }
 
@@ -474,7 +508,7 @@ mod tests {
     fn offset_of_log_write_seq() {
         assert_eq!(
             mem::offset_of!(TasSharedState, log_write_seq),
-            488 + TAS_MAX_TICKS + TAS_MAX_TICKS * 12 * 2 // 1638888
+            632 + TAS_MAX_TICKS + TAS_MAX_TICKS * 12 * 2 // 1639032
         );
     }
 

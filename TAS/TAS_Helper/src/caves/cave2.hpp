@@ -509,10 +509,15 @@ static void __declspec(noinline) Cave2_Logic() {
 // FSAVE saves all 8 ST registers + control/status (108 bytes) and reinits FPU.
 // FRSTOR restores everything before returning to game code.
 static void Cave2_MidCallback(SafetyHookContext& ctx) {
+    uint64_t t0 = __rdtsc();
     uint8_t fpu_buf[108];
     __asm { fsave [fpu_buf] }
     Cave2_Logic();
     __asm { frstor [fpu_buf] }
+    auto* s = g_cave2State;
+    if (s) {
+        PerfSample(s->perf_cave2, __rdtsc() - t0);
+    }
 }
 
 bool InstallCave2(GameAddresses& addr, TasSharedState* state) {

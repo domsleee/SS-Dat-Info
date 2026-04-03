@@ -26,6 +26,7 @@ static SafetyHookInline cave1cUpInline{};
 // Handler signature emulated via __fastcall:
 //   ecx = this, edx = unused, stack: arg1, arg2, arg3
 void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
+    uint64_t t0 = __rdtsc();
     auto* s = g_cave1cState;
     // Block external handler during REC and PLAY (symmetric).
     // Cave 2 writes the buffer and calls BB3B10 directly in both modes.
@@ -33,18 +34,27 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
     // or when mode is IDLE.
     if (s && s->mode != MODE_OFF && !s->cave2_injecting) {
         s->handler_block_count++;
+        PerfSample(s->perf_cave1c_down, __rdtsc() - t0);
         return;
     }
     cave1cDownInline.thiscall<void>(ecx, a1, a2, a3);
+    if (s) {
+        PerfSample(s->perf_cave1c_down, __rdtsc() - t0);
+    }
 }
 
 void __fastcall Cave1C_UpDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
+    uint64_t t0 = __rdtsc();
     auto* s = g_cave1cState;
     if (s && s->mode != MODE_OFF && !s->cave2_injecting) {
         s->handler_block_count++;
+        PerfSample(s->perf_cave1c_up, __rdtsc() - t0);
         return;
     }
     cave1cUpInline.thiscall<void>(ecx, a1, a2, a3);
+    if (s) {
+        PerfSample(s->perf_cave1c_up, __rdtsc() - t0);
+    }
 }
 
 bool InstallCave1C(GameAddresses& addr, TasSharedState* state) {

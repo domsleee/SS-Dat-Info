@@ -1623,7 +1623,7 @@ mod tests {
         let mut state = zeroed_state();
         state.recorded_count = n;
         for i in 0..(n as usize).min(TAS_MAX_TICKS) {
-            state.input_log[i] = ((i + 1) as u8) & 0xFF;
+            state.input_log[i] = (((i + 1) as u8));
             state.rec_coords[i] = [i as f32, 0.0, i as f32 * 0.5];
         }
         state
