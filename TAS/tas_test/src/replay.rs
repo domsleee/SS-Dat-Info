@@ -9,28 +9,28 @@ use crate::drift;
 use crate::harness;
 
 #[derive(Deserialize)]
-struct RecordingMetadata {
-    recorded_count: u32,
+pub struct RecordingMetadata {
+    pub recorded_count: u32,
     #[allow(dead_code)]
-    inject_mode: u32,
+    pub inject_mode: u32,
     #[allow(dead_code)]
-    force_fixed_tick: u32,
+    pub force_fixed_tick: u32,
     #[allow(dead_code)]
-    force_direct: u32,
+    pub force_direct: u32,
     #[allow(dead_code)]
-    input_source: u32,
+    pub input_source: u32,
     #[serde(default)]
-    notes: String,
+    pub notes: String,
 }
 
-struct LoadedRecording {
-    count: u32,
-    input_log: Vec<u8>,
-    rec_coords: Vec<[f32; 3]>,
-    meta: RecordingMetadata,
+pub struct LoadedRecording {
+    pub count: u32,
+    pub input_log: Vec<u8>,
+    pub rec_coords: Vec<[f32; 3]>,
+    pub meta: RecordingMetadata,
 }
 
-fn load_tasrec(path: &std::path::Path) -> Result<LoadedRecording, String> {
+pub fn load_tasrec(path: &std::path::Path) -> Result<LoadedRecording, String> {
     let data = std::fs::read(path).map_err(|e| format!("read: {}", e))?;
     if data.len() < 4 {
         return Err("File too small".into());
@@ -87,7 +87,7 @@ fn load_tasrec(path: &std::path::Path) -> Result<LoadedRecording, String> {
 }
 
 /// Write loaded recording into shared memory state.
-fn write_to_shared(client: &mut TasSharedMemoryClient, rec: &LoadedRecording) {
+pub fn write_to_shared(client: &mut TasSharedMemoryClient, rec: &LoadedRecording) {
     let state = client.state_mut();
     let count = rec.count as usize;
 

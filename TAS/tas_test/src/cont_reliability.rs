@@ -3,10 +3,10 @@
 //! Validates that `ARM_CONTINUE` reliably reaches REC splice at large frame
 //! offsets (default 2400) without introducing drift in the replayed prefix.
 
-use crate::{drift, harness, patterns};
+use crate::{drift, harness, patterns, replay};
 use std::thread;
 use std::time::Duration;
-use tas_shared::{input_bits, TasMode};
+use tas_shared::{input_bits, TasMode, TasSharedMemoryClient, TAS_MAX_TICKS};
 
 const BASELINE_TAIL_TICKS: u32 = 120;
 const CONT_RESTART_RETRIES: u32 = 40;
@@ -123,12 +123,53 @@ fn build_baseline_steps(splice_frame: u32) -> Vec<patterns::PatternStep> {
     ])
 }
 
-pub fn run(iterations: u32, speed: f32, splice_frame: u32) -> ContReliabilityReport {
+fn snapshot_baseline(
+    client: &TasSharedMemoryClient,
+    baseline_ticks: u32,
+) -> (Vec<u8>, Vec<[f32; 3]>) {
+    let count = baseline_ticks as usize;
+    let state = client.state();
+    (
+        state.input_log[..count].to_vec(),
+        state.rec_coords[..count].to_vec(),
+    )
+}
+
+fn restore_baseline(
+    client: &mut TasSharedMemoryClient,
+    baseline_ticks: u32,
+    baseline_input: &[u8],
+    baseline_rec_coords: &[[f32; 3]],
+) {
+    let count = baseline_ticks as usize;
+    let state = client.state_mut();
+    state.input_log[..count].copy_from_slice(baseline_input);
+    for i in count..TAS_MAX_TICKS {
+        state.input_log[i] = 0;
+        state.rec_coords[i] = [0.0, 0.0, 0.0];
+    }
+    for (i, coord) in baseline_rec_coords.iter().enumerate() {
+        state.rec_coords[i] = *coord;
+    }
+    state.recorded_count = baseline_ticks;
+    // Keep proven config explicit when restoring baseline data.
+    state.force_fixed_tick = 0;
+}
+
+pub fn run(
+    iterations: u32,
+    speed: f32,
+    splice_frame: u32,
+    source_tasrec: Option<&str>,
+) -> ContReliabilityReport {
     let splice_frame = splice_frame.max(1);
     println!(
         "=== CONT Reliability Test: {}x splice at frame {} ({}x catch-up) ===\n",
         iterations, splice_frame, speed
     );
+    if let Some(path) = source_tasrec {
+        println!("Source baseline: {}", path);
+    }
 
     let mut client = harness::connect();
     harness::print_status(&client);
@@ -153,29 +194,62 @@ pub fn run(iterations: u32, speed: f32, splice_frame: u32) -> ContReliabilityRep
         );
     }
 
-    println!("--- Baseline REC build (single pass) ---");
-    client.state_mut().playback_speed = 1.0;
-    if !harness::restart_and_stabilize_inprocess(&mut client) {
-        eprintln!("ERROR: Game not alive for baseline REC (in-process restart)");
-        std::process::exit(1);
-    }
-    harness::focus_game();
-    harness::arm_rec(&mut client);
-    let baseline_steps = build_baseline_steps(splice_frame);
-    println!(
-        "  Driving baseline pattern for {} ticks (LEFT/RIGHT + tail)",
-        patterns::total_ticks(&baseline_steps)
-    );
-    harness::drive_pico_steps(&baseline_steps, None);
-    thread::sleep(Duration::from_millis(200));
-    let baseline_ticks = client.state().recorded_count;
-    let rec_start = client.state().rec_coords[0];
-    harness::stop(&mut client);
-    println!("  Baseline recorded: {} ticks", baseline_ticks);
-    println!(
-        "  REC start: ({:.6}, {:.6}, {:.6})",
-        rec_start[0], rec_start[1], rec_start[2]
-    );
+    let (baseline_ticks, rec_start) = if let Some(path) = source_tasrec {
+        println!("--- Baseline load from .tasrec ---");
+        let loaded = match replay::load_tasrec(std::path::Path::new(path)) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("ERROR: Failed to load {}: {}", path, e);
+                std::process::exit(1);
+            }
+        };
+        if loaded.count == 0 || loaded.rec_coords.is_empty() {
+            eprintln!("ERROR: Baseline recording is empty");
+            std::process::exit(1);
+        }
+        replay::write_to_shared(&mut client, &loaded);
+        println!(
+            "  Loaded: {} ticks, inject_mode={}, fft={}, force_direct={}",
+            loaded.count,
+            loaded.meta.inject_mode,
+            loaded.meta.force_fixed_tick,
+            loaded.meta.force_direct
+        );
+        if !loaded.meta.notes.is_empty() {
+            println!("  Notes: {}", loaded.meta.notes);
+        }
+        let rec_start = loaded.rec_coords[0];
+        println!(
+            "  REC start: ({:.6}, {:.6}, {:.6})",
+            rec_start[0], rec_start[1], rec_start[2]
+        );
+        (loaded.count, rec_start)
+    } else {
+        println!("--- Baseline REC build (single pass) ---");
+        client.state_mut().playback_speed = 1.0;
+        if !harness::restart_and_stabilize_inprocess(&mut client) {
+            eprintln!("ERROR: Game not alive for baseline REC (in-process restart)");
+            std::process::exit(1);
+        }
+        harness::focus_game();
+        harness::arm_rec(&mut client);
+        let baseline_steps = build_baseline_steps(splice_frame);
+        println!(
+            "  Driving baseline pattern for {} ticks (LEFT/RIGHT + tail)",
+            patterns::total_ticks(&baseline_steps)
+        );
+        harness::drive_pico_steps(&baseline_steps, None);
+        thread::sleep(Duration::from_millis(200));
+        let baseline_ticks = client.state().recorded_count;
+        let rec_start = client.state().rec_coords[0];
+        harness::stop(&mut client);
+        println!("  Baseline recorded: {} ticks", baseline_ticks);
+        println!(
+            "  REC start: ({:.6}, {:.6}, {:.6})",
+            rec_start[0], rec_start[1], rec_start[2]
+        );
+        (baseline_ticks, rec_start)
+    };
 
     if baseline_ticks <= splice_frame {
         eprintln!(
@@ -185,12 +259,19 @@ pub fn run(iterations: u32, speed: f32, splice_frame: u32) -> ContReliabilityRep
         std::process::exit(1);
     }
 
+    let (baseline_input, baseline_rec_coords) = snapshot_baseline(&client, baseline_ticks);
     let mut results = Vec::new();
     for i in 1..=iterations {
         println!("\n{}", "=".repeat(60));
         println!("  CONT cycle {}/{}", i, iterations);
         println!("{}", "=".repeat(60));
 
+        restore_baseline(
+            &mut client,
+            baseline_ticks,
+            &baseline_input,
+            &baseline_rec_coords,
+        );
         client.state_mut().playback_speed = speed;
         let spliced = harness::restart_continue_and_splice_inprocess(
             &mut client,
