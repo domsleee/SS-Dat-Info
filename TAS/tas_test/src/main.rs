@@ -157,6 +157,8 @@ fn main() {
             let mut speed = 12.0f32;
             let mut splice = 2400u32;
             let mut file: Option<String> = None;
+            let mut profile = cont_reliability::BaselineInputProfile::Taps;
+            let mut tap_ticks: Option<u32> = None;
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
@@ -176,12 +178,38 @@ fn main() {
                         file = args.get(i + 1).cloned();
                         i += 2;
                     }
+                    "--profile" => {
+                        let raw = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
+                        profile = match cont_reliability::BaselineInputProfile::parse(raw) {
+                            Some(p) => p,
+                            None => {
+                                eprintln!(
+                                    "ERROR: invalid --profile '{}'; expected 'taps' or 'sweep'",
+                                    raw
+                                );
+                                std::process::exit(1);
+                            }
+                        };
+                        i += 2;
+                    }
+                    "--tap-ticks" => {
+                        let parsed = args.get(i + 1).and_then(|s| s.parse::<u32>().ok());
+                        tap_ticks = Some(parsed.unwrap_or(8).max(1));
+                        i += 2;
+                    }
                     _ => {
                         i += 1;
                     }
                 }
             }
-            let report = cont_reliability::run(iterations, speed, splice, file.as_deref());
+            let report = cont_reliability::run(
+                iterations,
+                speed,
+                splice,
+                file.as_deref(),
+                profile,
+                tap_ticks,
+            );
             std::process::exit(if report.all_pass() { 0 } else { 1 });
         }
         "mock" => {
@@ -212,13 +240,18 @@ fn main() {
                 "  reliability N consecutive REC+PLAY cycles at Nx speed (default 10x at 12x)"
             );
             println!(
-                "  cont-reliability CONT splice reliability (default 10x, splice 2400 @ 12x; optional --file)"
+                "  cont-reliability CONT splice reliability (default 10x, splice 2400 @ 12x; profile=taps)"
             );
             println!("  replay      Load .tasrec file and play back N times (drift check)");
             println!();
             println!("Options for replay:");
             println!("  --iterations N  Number of playback iterations (default: 5)");
             println!("  --verbose       Show drift details for every iteration");
+            println!();
+            println!("Options for cont-reliability:");
+            println!("  --file PATH     Load baseline from .tasrec instead of fresh REC");
+            println!("  --profile NAME  Synthetic baseline profile: taps (default) or sweep");
+            println!("  --tap-ticks N   Tick hold per tap for profile=taps (default: 8)");
             println!();
             println!("Options for benchmark:");
             println!("  --repeats N     Number of benchmark repeats (default: 3)");

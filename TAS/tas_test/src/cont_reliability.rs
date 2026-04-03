@@ -10,6 +10,32 @@ use tas_shared::{input_bits, TasMode, TasSharedMemoryClient, TAS_MAX_TICKS};
 
 const BASELINE_TAIL_TICKS: u32 = 120;
 const CONT_RESTART_RETRIES: u32 = 40;
+const DEFAULT_TAP_TICKS: u32 = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaselineInputProfile {
+    /// High-transition pattern: alternating LEFT/RIGHT taps until splice frame.
+    Taps,
+    /// Legacy behavior: one long LEFT hold followed by one long RIGHT hold.
+    Sweep,
+}
+
+impl BaselineInputProfile {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "taps" => Some(Self::Taps),
+            "sweep" => Some(Self::Sweep),
+            _ => None,
+        }
+    }
+
+    pub fn label(self, tap_ticks: u32) -> String {
+        match self {
+            Self::Taps => format!("taps ({} ticks per tap)", tap_ticks.max(1)),
+            Self::Sweep => "sweep (legacy left/right hold)".to_string(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct ContCycleResult {
@@ -31,6 +57,8 @@ pub struct ContReliabilityReport {
     pub speed: f32,
     pub splice_frame: u32,
     pub baseline_ticks: u32,
+    pub baseline_profile: String,
+    pub baseline_transitions: u32,
     pub results: Vec<ContCycleResult>,
 }
 
@@ -51,7 +79,10 @@ impl ContReliabilityReport {
             "Splice frame: {} | Catch-up speed: {}x | Iterations: {}",
             self.splice_frame, self.speed, self.iterations
         );
-        println!("Baseline recording: {} ticks", self.baseline_ticks);
+        println!(
+            "Baseline recording: {} ticks | profile: {} | transitions: {}",
+            self.baseline_ticks, self.baseline_profile, self.baseline_transitions
+        );
         println!();
         println!(
             "{:>3} {:>6} {:>6} {:>8} {:>8} {:>6} {:>8} {:>8} {:>12} {:>12}",
@@ -113,14 +144,56 @@ impl ContReliabilityReport {
     }
 }
 
-fn build_baseline_steps(splice_frame: u32) -> Vec<patterns::PatternStep> {
-    let left_ticks = (splice_frame / 2).max(1);
-    let right_ticks = splice_frame.saturating_sub(left_ticks).max(1);
-    patterns::build_from_explicit(&[
-        ("LEFT", input_bits::LEFT, left_ticks),
-        ("RIGHT", input_bits::RIGHT, right_ticks),
-        ("TAIL", 0x00, BASELINE_TAIL_TICKS),
-    ])
+fn build_baseline_steps(
+    splice_frame: u32,
+    profile: BaselineInputProfile,
+    tap_ticks: u32,
+) -> Vec<patterns::PatternStep> {
+    match profile {
+        BaselineInputProfile::Sweep => {
+            let left_ticks = (splice_frame / 2).max(1);
+            let right_ticks = splice_frame.saturating_sub(left_ticks).max(1);
+            patterns::build_from_explicit(&[
+                ("LEFT", input_bits::LEFT, left_ticks),
+                ("RIGHT", input_bits::RIGHT, right_ticks),
+                ("TAIL", 0x00, BASELINE_TAIL_TICKS),
+            ])
+        }
+        BaselineInputProfile::Taps => {
+            let mut steps = Vec::new();
+            let mut stop_tick = 0u32;
+            let mut remaining = splice_frame.max(1);
+            let mut tap_index = 1u32;
+            let mut left = true;
+            let tap_ticks = tap_ticks.max(1);
+
+            while remaining > 0 {
+                let hold = remaining.min(tap_ticks);
+                stop_tick += hold;
+                let (name, mask) = if left {
+                    (format!("LEFT{}", tap_index), input_bits::LEFT)
+                } else {
+                    (format!("RIGHT{}", tap_index), input_bits::RIGHT)
+                };
+                steps.push(patterns::PatternStep {
+                    name,
+                    mask,
+                    stop_tick,
+                });
+                remaining -= hold;
+                tap_index += 1;
+                left = !left;
+            }
+
+            stop_tick += BASELINE_TAIL_TICKS;
+            steps.push(patterns::PatternStep {
+                name: "TAIL".to_string(),
+                mask: 0x00,
+                stop_tick,
+            });
+            steps
+        }
+    }
 }
 
 fn snapshot_baseline(
@@ -161,14 +234,22 @@ pub fn run(
     speed: f32,
     splice_frame: u32,
     source_tasrec: Option<&str>,
+    baseline_profile: BaselineInputProfile,
+    tap_ticks: Option<u32>,
 ) -> ContReliabilityReport {
     let splice_frame = splice_frame.max(1);
+    let tap_ticks = tap_ticks.unwrap_or(DEFAULT_TAP_TICKS).max(1);
     println!(
         "=== CONT Reliability Test: {}x splice at frame {} ({}x catch-up) ===\n",
         iterations, splice_frame, speed
     );
     if let Some(path) = source_tasrec {
         println!("Source baseline: {}", path);
+    } else {
+        println!(
+            "Synthetic baseline profile: {}",
+            baseline_profile.label(tap_ticks)
+        );
     }
 
     let mut client = harness::connect();
@@ -194,62 +275,80 @@ pub fn run(
         );
     }
 
-    let (baseline_ticks, rec_start) = if let Some(path) = source_tasrec {
-        println!("--- Baseline load from .tasrec ---");
-        let loaded = match replay::load_tasrec(std::path::Path::new(path)) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("ERROR: Failed to load {}: {}", path, e);
+    let (baseline_ticks, rec_start, baseline_profile_label, baseline_transitions) =
+        if let Some(path) = source_tasrec {
+            println!("--- Baseline load from .tasrec ---");
+            let loaded = match replay::load_tasrec(std::path::Path::new(path)) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("ERROR: Failed to load {}: {}", path, e);
+                    std::process::exit(1);
+                }
+            };
+            if loaded.count == 0 || loaded.rec_coords.is_empty() {
+                eprintln!("ERROR: Baseline recording is empty");
                 std::process::exit(1);
             }
+            replay::write_to_shared(&mut client, &loaded);
+            println!(
+                "  Loaded: {} ticks, inject_mode={}, fft={}, force_direct={}",
+                loaded.count,
+                loaded.meta.inject_mode,
+                loaded.meta.force_fixed_tick,
+                loaded.meta.force_direct
+            );
+            if !loaded.meta.notes.is_empty() {
+                println!("  Notes: {}", loaded.meta.notes);
+            }
+            let rec_start = loaded.rec_coords[0];
+            println!(
+                "  REC start: ({:.6}, {:.6}, {:.6})",
+                rec_start[0], rec_start[1], rec_start[2]
+            );
+            let baseline_transitions =
+                drift::count_transitions(&loaded.input_log, loaded.count as usize);
+            println!("  Input transitions: {}", baseline_transitions);
+            (
+                loaded.count,
+                rec_start,
+                "file (.tasrec)".to_string(),
+                baseline_transitions,
+            )
+        } else {
+            println!("--- Baseline REC build (single pass) ---");
+            client.state_mut().playback_speed = 1.0;
+            if !harness::restart_and_stabilize_inprocess(&mut client) {
+                eprintln!("ERROR: Game not alive for baseline REC (in-process restart)");
+                std::process::exit(1);
+            }
+            harness::focus_game();
+            harness::arm_rec(&mut client);
+            let baseline_steps = build_baseline_steps(splice_frame, baseline_profile, tap_ticks);
+            println!(
+                "  Driving baseline pattern for {} ticks ({})",
+                patterns::total_ticks(&baseline_steps),
+                baseline_profile.label(tap_ticks)
+            );
+            harness::drive_pico_steps(&baseline_steps, None);
+            thread::sleep(Duration::from_millis(200));
+            let baseline_ticks = client.state().recorded_count;
+            let rec_start = client.state().rec_coords[0];
+            let baseline_transitions =
+                drift::count_transitions(&client.state().input_log, baseline_ticks as usize);
+            harness::stop(&mut client);
+            println!("  Baseline recorded: {} ticks", baseline_ticks);
+            println!("  Input transitions: {}", baseline_transitions);
+            println!(
+                "  REC start: ({:.6}, {:.6}, {:.6})",
+                rec_start[0], rec_start[1], rec_start[2]
+            );
+            (
+                baseline_ticks,
+                rec_start,
+                baseline_profile.label(tap_ticks),
+                baseline_transitions,
+            )
         };
-        if loaded.count == 0 || loaded.rec_coords.is_empty() {
-            eprintln!("ERROR: Baseline recording is empty");
-            std::process::exit(1);
-        }
-        replay::write_to_shared(&mut client, &loaded);
-        println!(
-            "  Loaded: {} ticks, inject_mode={}, fft={}, force_direct={}",
-            loaded.count,
-            loaded.meta.inject_mode,
-            loaded.meta.force_fixed_tick,
-            loaded.meta.force_direct
-        );
-        if !loaded.meta.notes.is_empty() {
-            println!("  Notes: {}", loaded.meta.notes);
-        }
-        let rec_start = loaded.rec_coords[0];
-        println!(
-            "  REC start: ({:.6}, {:.6}, {:.6})",
-            rec_start[0], rec_start[1], rec_start[2]
-        );
-        (loaded.count, rec_start)
-    } else {
-        println!("--- Baseline REC build (single pass) ---");
-        client.state_mut().playback_speed = 1.0;
-        if !harness::restart_and_stabilize_inprocess(&mut client) {
-            eprintln!("ERROR: Game not alive for baseline REC (in-process restart)");
-            std::process::exit(1);
-        }
-        harness::focus_game();
-        harness::arm_rec(&mut client);
-        let baseline_steps = build_baseline_steps(splice_frame);
-        println!(
-            "  Driving baseline pattern for {} ticks (LEFT/RIGHT + tail)",
-            patterns::total_ticks(&baseline_steps)
-        );
-        harness::drive_pico_steps(&baseline_steps, None);
-        thread::sleep(Duration::from_millis(200));
-        let baseline_ticks = client.state().recorded_count;
-        let rec_start = client.state().rec_coords[0];
-        harness::stop(&mut client);
-        println!("  Baseline recorded: {} ticks", baseline_ticks);
-        println!(
-            "  REC start: ({:.6}, {:.6}, {:.6})",
-            rec_start[0], rec_start[1], rec_start[2]
-        );
-        (baseline_ticks, rec_start)
-    };
 
     if baseline_ticks <= splice_frame {
         eprintln!(
@@ -339,6 +438,8 @@ pub fn run(
         speed,
         splice_frame,
         baseline_ticks,
+        baseline_profile: baseline_profile_label,
+        baseline_transitions,
         results,
     };
     report.print_summary();
