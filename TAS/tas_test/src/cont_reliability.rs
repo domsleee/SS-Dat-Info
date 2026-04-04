@@ -360,6 +360,27 @@ pub fn run(
         std::process::exit(1);
     }
 
+    // Quiesce stale runtime state before baseline capture/load so CONT compares
+    // against deterministic test-owned data only.
+    let stopped_writers = harness::stop_competing_tas_ui_writer();
+    harness::stop(&mut client);
+    thread::sleep(Duration::from_millis(100));
+    if stopped_writers > 0 {
+        println!(
+            "  Runtime warmup after tas_ui stop ({} writer(s) killed)",
+            stopped_writers
+        );
+        println!(
+            "  NOTE: If CONT anchor mismatch persists after this, rerun from a clean revive with tas_ui closed."
+        );
+        if !harness::restart_and_stabilize_inprocess(&mut client) {
+            eprintln!("ERROR: Game not alive during pre-baseline warmup restart");
+            std::process::exit(1);
+        }
+        harness::stop(&mut client);
+        thread::sleep(Duration::from_millis(100));
+    }
+
     {
         let s = client.state();
         assert_eq!(s.force_fixed_tick, 0, "fft must be 0");
