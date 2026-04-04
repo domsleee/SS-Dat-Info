@@ -618,9 +618,20 @@ pub fn wait_continue_splice(client: &TasSharedMemoryClient, splice_frame: u32) -
         thread::sleep(Duration::from_millis(20));
         let s = client.state();
         if s.mode == TasMode::Rec as u32 {
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let baseline_ms = splice_frame as f64 * 10.0;
+            let effective_speed = if elapsed_ms > 0.0 {
+                baseline_ms / elapsed_ms
+            } else {
+                f64::INFINITY
+            };
             println!(
                 "  CONT splice complete: mode=REC at pos={}, segment_count={}",
                 s.recorded_count, s.segment_count
+            );
+            println!(
+                "  CONT catch-up wall-clock: {:.1} ms (effective {:.2}x vs 1x baseline {:.1} ms)",
+                elapsed_ms, effective_speed, baseline_ms
             );
             return true;
         }
