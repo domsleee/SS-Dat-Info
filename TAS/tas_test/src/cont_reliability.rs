@@ -11,6 +11,7 @@ use tas_shared::{input_bits, TasMode, TasSharedMemoryClient, TAS_MAX_TICKS};
 const BASELINE_TAIL_TICKS: u32 = 120;
 const CONT_RESTART_RETRIES: u32 = 40;
 const DEFAULT_TAP_TICKS: u32 = 8;
+const FORWARD_EPS_Z: f32 = 1e-4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaselineInputProfile {
@@ -49,6 +50,14 @@ pub struct ContCycleResult {
     pub max_drift_z: f64,
     pub max_drift_frame_x: usize,
     pub max_drift_frame_z: usize,
+    pub forward_only_ok: bool,
+    pub prefix_net_z: f64,
+    pub prefix_forward_steps: u32,
+    pub prefix_backward_steps: u32,
+    pub prefix_min_x: f32,
+    pub prefix_max_x: f32,
+    pub prefix_min_z: f32,
+    pub prefix_max_z: f32,
 }
 
 #[derive(Debug)]
@@ -68,6 +77,7 @@ impl ContReliabilityReport {
             r.spliced
                 && r.mode_rec_after_splice
                 && r.replay_coverage_ok
+                && r.forward_only_ok
                 && r.max_drift_x == 0.0
                 && r.max_drift_z == 0.0
         })
@@ -85,22 +95,24 @@ impl ContReliabilityReport {
         );
         println!();
         println!(
-            "{:>3} {:>6} {:>6} {:>8} {:>8} {:>6} {:>8} {:>8} {:>12} {:>12}",
+            "{:>3} {:>6} {:>6} {:>8} {:>8} {:>6} {:>5} {:>8} {:>8} {:>10} {:>12} {:>12}",
             "#",
             "splice",
             "mode",
             "rec_cnt",
             "play_cnt",
             "cover",
+            "fwd",
             "frame_x",
             "frame_z",
+            "net_z",
             "max_drift_x",
             "max_drift_z"
         );
-        println!("{}", "-".repeat(103));
+        println!("{}", "-".repeat(122));
         for r in &self.results {
             println!(
-                "{:>3} {:>6} {:>6} {:>8} {:>8} {:>6} {:>8} {:>8} {:>12.9} {:>12.9}",
+                "{:>3} {:>6} {:>6} {:>8} {:>8} {:>6} {:>5} {:>8} {:>8} {:>10.3} {:>12.9} {:>12.9}",
                 r.iteration,
                 if r.spliced { "ok" } else { "FAIL" },
                 if r.mode_rec_after_splice {
@@ -111,8 +123,10 @@ impl ContReliabilityReport {
                 r.splice_recorded_count,
                 r.playback_pos_at_splice,
                 if r.replay_coverage_ok { "ok" } else { "short" },
+                if r.forward_only_ok { "ok" } else { "rev" },
                 r.max_drift_frame_x,
                 r.max_drift_frame_z,
+                r.prefix_net_z,
                 r.max_drift_x,
                 r.max_drift_z,
             );
@@ -132,6 +146,7 @@ impl ContReliabilityReport {
                     !(r.spliced
                         && r.mode_rec_after_splice
                         && r.replay_coverage_ok
+                        && r.forward_only_ok
                         && r.max_drift_x == 0.0
                         && r.max_drift_z == 0.0)
                 })
@@ -193,6 +208,91 @@ fn build_baseline_steps(
             });
             steps
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PrefixCoordStats {
+    min_x: f32,
+    max_x: f32,
+    min_z: f32,
+    max_z: f32,
+    net_z: f64,
+    z_range: f64,
+    forward_steps: u32,
+    backward_steps: u32,
+    flat_steps: u32,
+    forward_only_ok: bool,
+}
+
+fn analyze_prefix_coords(coords: &[[f32; 3]], frame_count: u32) -> PrefixCoordStats {
+    if frame_count == 0 {
+        return PrefixCoordStats {
+            min_x: 0.0,
+            max_x: 0.0,
+            min_z: 0.0,
+            max_z: 0.0,
+            net_z: 0.0,
+            z_range: 0.0,
+            forward_steps: 0,
+            backward_steps: 0,
+            flat_steps: 0,
+            forward_only_ok: false,
+        };
+    }
+
+    let n = frame_count as usize;
+    let mut min_x = coords[0][0];
+    let mut max_x = coords[0][0];
+    let mut min_z = coords[0][2];
+    let mut max_z = coords[0][2];
+    let mut forward_steps = 0u32;
+    let mut backward_steps = 0u32;
+    let mut flat_steps = 0u32;
+
+    for i in 0..n {
+        let x = coords[i][0];
+        let z = coords[i][2];
+        if x < min_x {
+            min_x = x;
+        }
+        if x > max_x {
+            max_x = x;
+        }
+        if z < min_z {
+            min_z = z;
+        }
+        if z > max_z {
+            max_z = z;
+        }
+        if i > 0 {
+            let dz = z - coords[i - 1][2];
+            if dz > FORWARD_EPS_Z {
+                forward_steps += 1;
+            } else if dz < -FORWARD_EPS_Z {
+                backward_steps += 1;
+            } else {
+                flat_steps += 1;
+            }
+        }
+    }
+
+    let net_z = (coords[n - 1][2] - coords[0][2]) as f64;
+    let z_range = (max_z - min_z) as f64;
+    // Carving can cause local backward deltas. Gate on meaningful net forward travel instead.
+    let forward_only_ok = net_z > 0.0 && z_range > 1.0 && forward_steps > 0;
+
+    PrefixCoordStats {
+        min_x,
+        max_x,
+        min_z,
+        max_z,
+        net_z,
+        z_range,
+        forward_steps,
+        backward_steps,
+        flat_steps,
+        forward_only_ok,
     }
 }
 
@@ -386,6 +486,14 @@ pub fn run(
         let mut max_drift_z = f64::INFINITY;
         let mut max_drift_frame_x = usize::MAX;
         let mut max_drift_frame_z = usize::MAX;
+        let mut forward_only_ok = false;
+        let mut prefix_net_z = 0.0;
+        let mut prefix_forward_steps = 0;
+        let mut prefix_backward_steps = 0;
+        let mut prefix_min_x = 0.0;
+        let mut prefix_max_x = 0.0;
+        let mut prefix_min_z = 0.0;
+        let mut prefix_max_z = 0.0;
 
         if spliced {
             let state = client.state();
@@ -399,10 +507,36 @@ pub fn run(
             max_drift_z = d.max_drift_z;
             max_drift_frame_x = d.max_drift_frame_x;
             max_drift_frame_z = d.max_drift_frame_z;
+            let prefix_stats = analyze_prefix_coords(&state.play_coords, assessed_prefix);
+            forward_only_ok = prefix_stats.forward_only_ok;
+            prefix_net_z = prefix_stats.net_z;
+            prefix_forward_steps = prefix_stats.forward_steps;
+            prefix_backward_steps = prefix_stats.backward_steps;
+            prefix_min_x = prefix_stats.min_x;
+            prefix_max_x = prefix_stats.max_x;
+            prefix_min_z = prefix_stats.min_z;
+            prefix_max_z = prefix_stats.max_z;
             println!(
                 "  Drift over replayed prefix [0..{}): X={:.9} (frame {}) Z={:.9} (frame {})",
                 assessed_prefix, max_drift_x, max_drift_frame_x, max_drift_z, max_drift_frame_z
             );
+            println!(
+                "  Prefix range PLAY: X[{:.3}..{:.3}] Z[{:.3}..{:.3}] net_z={:.3} steps(+/-/0)={}/{}/{}",
+                prefix_stats.min_x,
+                prefix_stats.max_x,
+                prefix_stats.min_z,
+                prefix_stats.max_z,
+                prefix_stats.net_z,
+                prefix_stats.forward_steps,
+                prefix_stats.backward_steps,
+                prefix_stats.flat_steps
+            );
+            if !forward_only_ok {
+                println!(
+                    "  Forward-progress check FAIL: net_z={:.6}, z_range={:.6}, forward_steps={}",
+                    prefix_net_z, prefix_stats.z_range, prefix_forward_steps
+                );
+            }
             if !replay_coverage_ok {
                 println!(
                     "  Coverage shortfall: playback_pos={} < splice_frame={} (FAIL)",
@@ -424,6 +558,14 @@ pub fn run(
             max_drift_z,
             max_drift_frame_x,
             max_drift_frame_z,
+            forward_only_ok,
+            prefix_net_z,
+            prefix_forward_steps,
+            prefix_backward_steps,
+            prefix_min_x,
+            prefix_max_x,
+            prefix_min_z,
+            prefix_max_z,
         });
 
         harness::stop(&mut client);
