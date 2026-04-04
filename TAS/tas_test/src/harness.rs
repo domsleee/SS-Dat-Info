@@ -48,7 +48,7 @@ pub fn focus_game() {
 ///
 /// `tas_ui` and `tas_test` concurrently writing command fields can cause
 /// intermittent ARM_CONTINUE mode=0 failures unrelated to core replay logic.
-pub fn stop_competing_tas_ui_writer() {
+pub fn stop_competing_tas_ui_writer() -> u32 {
     let script = r#"
         $p = Get-Process -Name tas_ui -ErrorAction SilentlyContinue
         if ($p) {
@@ -67,8 +67,10 @@ pub fn stop_competing_tas_ui_writer() {
         let msg = out.trim();
         if let Some(count) = msg.strip_prefix("killed:") {
             println!("  Stopped competing tas_ui writer(s): {}", count.trim());
+            return count.trim().parse::<u32>().unwrap_or(1);
         }
     }
+    0
 }
 
 /// Find the Supreme window handle via PowerShell.
