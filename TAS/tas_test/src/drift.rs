@@ -23,14 +23,45 @@ impl DriftResult {
     }
 }
 
-/// Compute drift between rec_coords and play_coords over `count` ticks.
-pub fn compute_drift(state: &TasSharedState, count: u32) -> DriftResult {
+fn compute_drift_between(
+    rec_coords: &[[f32; 3]],
+    play_coords: &[[f32; 3]],
+    start: usize,
+    end: usize,
+    normalize_to_start: bool,
+) -> DriftResult {
     let mut result = DriftResult::default();
-    let n = count as usize;
+    if start >= end {
+        return result;
+    }
 
-    for i in 0..n {
-        let dx = (state.rec_coords[i][0] as f64 - state.play_coords[i][0] as f64).abs();
-        let dz = (state.rec_coords[i][2] as f64 - state.play_coords[i][2] as f64).abs();
+    let rec_origin = rec_coords[start];
+    let play_origin = play_coords[start];
+
+    for i in start..end {
+        let rec_x = if normalize_to_start {
+            rec_coords[i][0] - rec_origin[0]
+        } else {
+            rec_coords[i][0]
+        };
+        let rec_z = if normalize_to_start {
+            rec_coords[i][2] - rec_origin[2]
+        } else {
+            rec_coords[i][2]
+        };
+        let play_x = if normalize_to_start {
+            play_coords[i][0] - play_origin[0]
+        } else {
+            play_coords[i][0]
+        };
+        let play_z = if normalize_to_start {
+            play_coords[i][2] - play_origin[2]
+        } else {
+            play_coords[i][2]
+        };
+
+        let dx = (rec_x as f64 - play_x as f64).abs();
+        let dz = (rec_z as f64 - play_z as f64).abs();
 
         if dx > result.max_drift_x {
             result.max_drift_x = dx;
@@ -41,7 +72,38 @@ pub fn compute_drift(state: &TasSharedState, count: u32) -> DriftResult {
             result.max_drift_frame_z = i;
         }
     }
+
     result
+}
+
+/// Compute drift between rec_coords and play_coords over `count` ticks.
+pub fn compute_drift(state: &TasSharedState, count: u32) -> DriftResult {
+    compute_drift_between(
+        &state.rec_coords,
+        &state.play_coords,
+        0,
+        count as usize,
+        false,
+    )
+}
+
+/// Compute drift between rec_coords and play_coords over the window `[start, count)`.
+pub fn compute_drift_window(state: &TasSharedState, start: u32, count: u32) -> DriftResult {
+    let end = count as usize;
+    let start = (start as usize).min(end);
+    compute_drift_between(&state.rec_coords, &state.play_coords, start, end, false)
+}
+
+/// Compute drift between rec_coords and play_coords over the window `[start, count)`,
+/// after normalizing both traces to the coordinate at `start`.
+pub fn compute_normalized_drift_window(
+    state: &TasSharedState,
+    start: u32,
+    count: u32,
+) -> DriftResult {
+    let end = count as usize;
+    let start = (start as usize).min(end);
+    compute_drift_between(&state.rec_coords, &state.play_coords, start, end, true)
 }
 
 /// Compute max coordinate delta (movement) for a single coord log.
@@ -161,6 +223,57 @@ mod tests {
         };
         assert!(d.is_within(0.01));
         assert!(!d.is_within(0.001));
+    }
+
+    #[test]
+    fn drift_window_skips_prefix_before_start() {
+        let mut state = zeroed_state();
+        state.rec_coords[0] = [10.0, 0.0, 20.0];
+        state.play_coords[0] = [999.0, 0.0, 999.0];
+        for i in 1..5 {
+            state.rec_coords[i] = [i as f32, 0.0, (i * 10) as f32];
+            state.play_coords[i] = state.rec_coords[i];
+        }
+
+        let d = compute_drift_window(&state, 1, 5);
+        assert!(d.is_zero());
+    }
+
+    #[test]
+    fn normalized_drift_window_cancels_constant_offset_after_start() {
+        let mut state = zeroed_state();
+        for i in 0..6 {
+            state.rec_coords[i] = [100.0 + i as f32, 0.0, 200.0 + (i * 2) as f32];
+            state.play_coords[i] = [0.0, 0.0, 0.0];
+        }
+        for i in 2..6 {
+            state.play_coords[i] = [
+                state.rec_coords[i][0] + 5.0,
+                0.0,
+                state.rec_coords[i][2] - 7.0,
+            ];
+        }
+
+        let raw = compute_drift_window(&state, 2, 6);
+        let normalized = compute_normalized_drift_window(&state, 2, 6);
+        assert_eq!(raw.max_drift_x, 5.0);
+        assert_eq!(raw.max_drift_z, 7.0);
+        assert!(normalized.is_zero());
+    }
+
+    #[test]
+    fn normalized_drift_window_keeps_shape_mismatch() {
+        let mut state = zeroed_state();
+        for i in 0..5 {
+            state.rec_coords[i] = [i as f32, 0.0, (i * 10) as f32];
+            state.play_coords[i] = state.rec_coords[i];
+        }
+        state.play_coords[4][0] += 3.0;
+        state.play_coords[4][2] -= 4.0;
+
+        let d = compute_normalized_drift_window(&state, 1, 5);
+        assert_eq!(d.max_drift_x, 3.0);
+        assert_eq!(d.max_drift_z, 4.0);
     }
 
     // ========== compute_movement ==========

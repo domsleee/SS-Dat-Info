@@ -13,6 +13,17 @@ Canonical gate matrix for preventing TAS regressions in `TAS/tas_test`.
 - `recordings/FE-decent.tasrec` is a compatibility/diagnostic artifact, not a shared hard baseline for both `replay` and file-backed `cont-reliability`.
 - File-backed FE-decent commands should record evidence and warnings, but they must not decide pass/fail for automation or release gates until separate replay-vs-CONT baseline semantics are defined.
 
+## Mock Regression Baseline Rule
+
+- `tas_test -- mock` is currently a diagnostic gate, not a hard release/CI gate.
+- The active blocker is start-match stability, not drift semantics: on runs that position-match successfully, full-window replay drift and normalized active-input-window drift both collapse to zero.
+- Baseline source order is:
+  1. sibling `regression_cache/*.tas` produced by a validated `tas_test -- regression` run
+  2. checked-in fallback fixtures under `TAS/tas_test/fixtures/regression_cache/*.tas`
+- Baseline filenames use the stable canonical ordinals `01_...` through `15_...`. Focused reruns via `TAS_TEST_CASE_FILTER` must keep those ordinals so filtered mock runs still load the same authoritative baselines.
+- Promotion criteria: only restore `mock` to required after it demonstrates stable `=== Regression Summary: 15/15 passed ===` behavior on a clean runtime, with the recorded per-case start-offset / active-window artifacts staying at zero on matched runs.
+- Mock artifacts should record `first_input_tick`, frame-0 offsets, active-input-window length, and normalized active-window drift for triage.
+
 ## Global Runtime Rules
 
 - Runtime commands run from `C:\Users\user\git\SS-Dat-Info\TAS`.
@@ -25,7 +36,7 @@ Canonical gate matrix for preventing TAS regressions in `TAS/tas_test`.
 | Mode | Command | Lane | Pass Signature(s) | Required Artifacts |
 |---|---|---|---|---|
 | Rust unit tests | `just test` | Fast lane | `test result: ok.` for all crates | Console log |
-| `mock` | `cargo run --release --bin tas_test -- mock` | CI-on-push | `=== Regression Summary: 15/15 passed ===` | `mock_results.csv`, `mock_certificate.json` |
+| `mock` | `cargo run --release --bin tas_test -- mock` | CI-on-push (diagnostic only) | `=== Regression Summary: 15/15 passed ===` | `mock_results.csv`, `mock_certificate.json` |
 | `replay` (FE-decent compatibility) | `cargo run --release --bin tas_test -- replay recordings/FE-decent.tasrec --iterations 1 --verbose` | CI-on-push (diagnostic only) | `Result: ZERO DRIFT in all 1 iterations` | Console log |
 | `speed` | `cargo run --release --bin tas_test -- speed` | CI-on-push | `*** SPEED TEST PASSED ***` | Console log |
 | `speed-reset` | `cargo run --release --bin tas_test -- speed-reset` | CI-on-push | `*** SPEED RESET TEST PASSED ***` | Console log |
@@ -61,7 +72,7 @@ cargo run --release --bin tas_test -- replay recordings/FE-decent.tasrec --itera
 cargo run --release --bin tas_test -- speed-reset
 ```
 
-`mock` and `speed-reset` are hard gates. `replay recordings/FE-decent.tasrec` still runs in this lane, but it is diagnostic-only and may warn without failing the run.
+`speed-reset` is the only runtime hard gate in this lane today. `mock` and `replay recordings/FE-decent.tasrec` still run in this lane, but they are diagnostic-only and may warn without failing the run while start-match stability remains unresolved.
 
 ### 3) Manual Live-Runtime Lane (release/handoff gate)
 
@@ -92,13 +103,13 @@ Balanced for high signal with bounded runtime cost:
 
 1. `just test` on every commit (fast, deterministic).
 2. On every push (runtime automation worker), run:
-   - `tas_test -- mock`
+   - `tas_test -- mock` as a diagnostic artifact
    - `tas_test -- speed-reset`
    - collect `tas_test -- replay recordings/FE-decent.tasrec --iterations 1 --verbose` as a diagnostic artifact
 
 Rationale:
 
-- `mock` catches regression-pattern drift and gate breakage quickly.
+- `mock` still catches regression-pattern drift and gate breakage quickly, but current start-match instability makes it unsuitable as a hard gate.
 - `speed-reset` protects the historically high-impact Cave 5 OFF-mode regression.
 - `replay` against FE-decent remains useful compatibility evidence, but it is not a shared hard baseline for both replay and CONT flows.
 - Full live-runtime suite stays in manual lane to control cost and hardware contention.
