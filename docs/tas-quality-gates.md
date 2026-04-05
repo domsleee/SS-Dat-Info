@@ -87,3 +87,9 @@ Rationale:
 - `replay` catches deterministic playback drift against known-good data.
 - `speed-reset` protects the historically high-impact Cave 5 OFF-mode regression.
 - Full live-runtime suite stays in manual lane to control cost and hardware contention.
+
+## Recurring Manual Live-Runtime Cadence
+
+For schedule, preconditions, evidence requirements, and escalation policy for hardware-backed E2E runs, use:
+
+- [`docs/live-runtime-validation-cadence.md`](live-runtime-validation-cadence.md)

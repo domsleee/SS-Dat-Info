@@ -2,6 +2,8 @@
 
 This guide shows how to run the live `tas_test` E2E checks used for CONT reliability.
 
+For recurring schedule/ownership/escalation policy, see `docs/live-runtime-validation-cadence.md`.
+
 ## Scope
 
 Main E2E command:
@@ -132,4 +134,3 @@ print("prefix_2400", stats(2400))
 - Ensure config is at proven settings printed by test (`fft=0`, `inject_mode=6`, `force_direct=2`).
 - `fwd = rev` in summary
 - Prefix did not satisfy forward-progress quality gate (net forward/range/forward-step requirements).
-
