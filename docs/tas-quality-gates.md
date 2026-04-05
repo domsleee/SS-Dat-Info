@@ -8,6 +8,11 @@ Canonical gate matrix for preventing TAS regressions in `TAS/tas_test`.
 - `CI-on-push lane`: automated runtime checks (game + DLL/hooks), no human interaction.
 - `Manual live-runtime lane`: hardware/game-process dependent validation requiring operator control (Pico HID and/or revive cadence).
 
+## FE-decent Compatibility Rule
+
+- `recordings/FE-decent.tasrec` is a compatibility/diagnostic artifact, not a shared hard baseline for both `replay` and file-backed `cont-reliability`.
+- File-backed FE-decent commands should record evidence and warnings, but they must not decide pass/fail for automation or release gates until separate replay-vs-CONT baseline semantics are defined.
+
 ## Global Runtime Rules
 
 - Runtime commands run from `C:\Users\user\git\SS-Dat-Info\TAS`.
@@ -21,7 +26,7 @@ Canonical gate matrix for preventing TAS regressions in `TAS/tas_test`.
 |---|---|---|---|---|
 | Rust unit tests | `just test` | Fast lane | `test result: ok.` for all crates | Console log |
 | `mock` | `cargo run --release --bin tas_test -- mock` | CI-on-push | `=== Regression Summary: 15/15 passed ===` | `mock_results.csv`, `mock_certificate.json` |
-| `replay` | `cargo run --release --bin tas_test -- replay recordings/FE-decent.tasrec --iterations 1 --verbose` | CI-on-push | `Result: ZERO DRIFT in all 1 iterations` | Console log |
+| `replay` (FE-decent compatibility) | `cargo run --release --bin tas_test -- replay recordings/FE-decent.tasrec --iterations 1 --verbose` | CI-on-push (diagnostic only) | `Result: ZERO DRIFT in all 1 iterations` | Console log |
 | `speed` | `cargo run --release --bin tas_test -- speed` | CI-on-push | `*** SPEED TEST PASSED ***` | Console log |
 | `speed-reset` | `cargo run --release --bin tas_test -- speed-reset` | CI-on-push | `*** SPEED RESET TEST PASSED ***` | Console log |
 | `smoke` | `cargo run --release --bin tas_test -- smoke` | CI-on-push | No explicit PASS banner; gate is exit code `0` with no `ERROR:` lines | Console log |
@@ -32,8 +37,8 @@ Canonical gate matrix for preventing TAS regressions in `TAS/tas_test`.
 | `drift-speed` | `cargo run --release --bin tas_test -- drift-speed` | Manual live-runtime | `*** DRIFT-AT-SPEED TEST PASSED ***` | Console log |
 | `reliability` | `cargo run --release --bin tas_test -- reliability --iterations 10 --speed 12` | Manual live-runtime | `*** RELIABILITY TEST PASSED: 10/10 zero drift at 12x ***` | Console log |
 | `segment` | `cargo run --release --bin tas_test -- segment` | Manual live-runtime | `*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***` | Console log |
-| `cont-reliability` (file baseline) | `cargo run --release --bin tas_test -- cont-reliability --file recordings/FE-decent.tasrec --splice 2400 --iterations 10 --speed 12` | CI-on-push | `*** CONT RELIABILITY PASSED: 10/10 splice cycles clean ***` | Console log |
-| `cont-reliability` (synthetic baseline, stress) | `cargo run --release --bin tas_test -- cont-reliability --iterations 10 --splice 2400 --speed 32 --profile taps --tap-ticks 8` | Manual live-runtime | `*** CONT RELIABILITY PASSED: 10/10 splice cycles clean ***` and summary row columns `cover=ok`, `fwd=ok` | Console log |
+| `cont-reliability` (FE-decent file compatibility) | `cargo run --release --bin tas_test -- cont-reliability --file recordings/FE-decent.tasrec --splice 2400 --iterations 10 --speed 12` | Manual live-runtime (diagnostic only) | `*** CONT RELIABILITY PASSED: 10/10 splice cycles clean ***` | Console log |
+| `cont-reliability` (synthetic baseline, stress) | `cargo run --release --bin tas_test -- cont-reliability --iterations 10 --splice 2400 --speed 32 --profile taps --tap-ticks 8` | Manual live-runtime (hard gate) | `*** CONT RELIABILITY PASSED: 10/10 splice cycles clean ***` and summary row columns `cover=ok`, `fwd=ok` | Console log |
 
 ## Mandatory Gate Packs
 
@@ -56,7 +61,7 @@ cargo run --release --bin tas_test -- replay recordings/FE-decent.tasrec --itera
 cargo run --release --bin tas_test -- speed-reset
 ```
 
-All three commands must pass.
+`mock` and `speed-reset` are hard gates. `replay recordings/FE-decent.tasrec` still runs in this lane, but it is diagnostic-only and may warn without failing the run.
 
 ### 3) Manual Live-Runtime Lane (release/handoff gate)
 
@@ -71,6 +76,16 @@ cargo run --release --bin tas_test -- cont-reliability --iterations 10 --splice 
 
 For extreme-speed certification, repeat the final command at `--speed 64` and `--speed 100`.
 
+### 4) FE-decent Compatibility Diagnostics (non-blocking)
+
+Use these commands to preserve evidence about FE-decent behavior while replay-vs-CONT baseline semantics remain intentionally split:
+
+```powershell
+Set-Location C:\Users\user\git\SS-Dat-Info\TAS
+cargo run --release --bin tas_test -- replay recordings/FE-decent.tasrec --iterations 1 --verbose
+cargo run --release --bin tas_test -- cont-reliability --file recordings/FE-decent.tasrec --splice 2400 --iterations 1 --speed 12
+```
+
 ## Recommended Minimum Always-Run Set
 
 Balanced for high signal with bounded runtime cost:
@@ -78,14 +93,14 @@ Balanced for high signal with bounded runtime cost:
 1. `just test` on every commit (fast, deterministic).
 2. On every push (runtime automation worker), run:
    - `tas_test -- mock`
-   - `tas_test -- replay recordings/FE-decent.tasrec --iterations 1 --verbose`
    - `tas_test -- speed-reset`
+   - collect `tas_test -- replay recordings/FE-decent.tasrec --iterations 1 --verbose` as a diagnostic artifact
 
 Rationale:
 
 - `mock` catches regression-pattern drift and gate breakage quickly.
-- `replay` catches deterministic playback drift against known-good data.
 - `speed-reset` protects the historically high-impact Cave 5 OFF-mode regression.
+- `replay` against FE-decent remains useful compatibility evidence, but it is not a shared hard baseline for both replay and CONT flows.
 - Full live-runtime suite stays in manual lane to control cost and hardware contention.
 
 ## Automation Entry Points (SSB-300)
@@ -115,13 +130,14 @@ Expected outputs per run:
 - Console `START/END` lines for each gate with status + duration.
 - Gate logs in `TAS/artifacts/fast-lane/latest/logs/`.
 - `tas_test` artifacts in `TAS/artifacts/fast-lane/latest/tas_test_output/` (notably `mock_results.csv` and `mock_certificate.json`).
-- Summary markdown at `TAS/artifacts/fast-lane/latest/summary.md` listing gate status, command, duration, and log path.
+- Summary markdown at `TAS/artifacts/fast-lane/latest/summary.md` listing gate kind, status, command, duration, and log path.
 - Workflow artifact upload of the full `TAS/artifacts/fast-lane/latest` directory for triage.
 
 Fail behavior (hard gate):
 
-- Any non-zero gate exit code fails the run.
-- Missing expected pass signatures in gate logs also fail the run.
+- Any non-zero required gate exit code fails the run.
+- Missing expected pass signatures in required gate logs also fail the run.
+- Diagnostic FE-decent failures are reported as warnings and kept in artifacts, but they do not fail the run.
 
 ## Recurring Manual Live-Runtime Cadence
 
