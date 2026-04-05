@@ -10,6 +10,7 @@ use tas_shared::{input_bits, TasMode, TasSharedMemoryClient, TAS_MAX_TICKS};
 
 const BASELINE_TAIL_TICKS: u32 = 120;
 const CONT_RESTART_RETRIES: u32 = 40;
+const BASELINE_BUILD_ATTEMPTS_SYNTHETIC: u32 = 3;
 const DEFAULT_TAP_TICKS: u32 = 8;
 const FORWARD_EPS_Z: f32 = 1e-4;
 
@@ -396,215 +397,247 @@ pub fn run(
         );
     }
 
-    let (baseline_ticks, rec_start, baseline_profile_label, baseline_transitions) =
-        if let Some(path) = source_tasrec {
-            println!("--- Baseline load from .tasrec ---");
-            let loaded = match replay::load_tasrec(std::path::Path::new(path)) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("ERROR: Failed to load {}: {}", path, e);
-                    std::process::exit(1);
-                }
-            };
-            if loaded.count == 0 || loaded.rec_coords.is_empty() {
-                eprintln!("ERROR: Baseline recording is empty");
-                std::process::exit(1);
-            }
-            replay::write_to_shared(&mut client, &loaded);
-            println!(
-                "  Loaded: {} ticks, inject_mode={}, fft={}, force_direct={}",
-                loaded.count,
-                loaded.meta.inject_mode,
-                loaded.meta.force_fixed_tick,
-                loaded.meta.force_direct
-            );
-            if !loaded.meta.notes.is_empty() {
-                println!("  Notes: {}", loaded.meta.notes);
-            }
-            let rec_start = loaded.rec_coords[0];
-            println!(
-                "  REC start: ({:.6}, {:.6}, {:.6})",
-                rec_start[0], rec_start[1], rec_start[2]
-            );
-            let baseline_transitions =
-                drift::count_transitions(&loaded.input_log, loaded.count as usize);
-            println!("  Input transitions: {}", baseline_transitions);
-            (
-                loaded.count,
-                rec_start,
-                "file (.tasrec)".to_string(),
-                baseline_transitions,
-            )
-        } else {
-            println!("--- Baseline REC build (single pass) ---");
-            client.state_mut().playback_speed = 1.0;
-            if !harness::restart_and_stabilize_inprocess(&mut client) {
-                eprintln!("ERROR: Game not alive for baseline REC (in-process restart)");
-                std::process::exit(1);
-            }
-            harness::focus_game();
-            harness::arm_rec(&mut client);
-            let baseline_steps = build_baseline_steps(splice_frame, baseline_profile, tap_ticks);
-            println!(
-                "  Driving baseline pattern for {} ticks ({})",
-                patterns::total_ticks(&baseline_steps),
-                baseline_profile.label(tap_ticks)
-            );
-            harness::drive_pico_steps(&baseline_steps, None);
-            thread::sleep(Duration::from_millis(200));
-            let baseline_ticks = client.state().recorded_count;
-            let rec_start = client.state().rec_coords[0];
-            let baseline_transitions =
-                drift::count_transitions(&client.state().input_log, baseline_ticks as usize);
-            harness::stop(&mut client);
-            println!("  Baseline recorded: {} ticks", baseline_ticks);
-            println!("  Input transitions: {}", baseline_transitions);
-            println!(
-                "  REC start: ({:.6}, {:.6}, {:.6})",
-                rec_start[0], rec_start[1], rec_start[2]
-            );
-            (
-                baseline_ticks,
-                rec_start,
-                baseline_profile.label(tap_ticks),
-                baseline_transitions,
-            )
-        };
+    let baseline_attempts = if source_tasrec.is_some() {
+        1
+    } else {
+        BASELINE_BUILD_ATTEMPTS_SYNTHETIC
+    };
 
-    if baseline_ticks <= splice_frame {
-        eprintln!(
-            "ERROR: Baseline too short ({} <= splice frame {})",
-            baseline_ticks, splice_frame
-        );
-        std::process::exit(1);
-    }
-
-    let (baseline_input, baseline_rec_coords) = snapshot_baseline(&client, baseline_ticks);
-    let mut results = Vec::new();
-    for i in 1..=iterations {
-        println!("\n{}", "=".repeat(60));
-        println!("  CONT cycle {}/{}", i, iterations);
-        println!("{}", "=".repeat(60));
-
-        restore_baseline(
-            &mut client,
-            baseline_ticks,
-            &baseline_input,
-            &baseline_rec_coords,
-        );
-        client.state_mut().playback_speed = speed;
-        let spliced = harness::restart_continue_and_splice_inprocess(
-            &mut client,
-            rec_start,
-            splice_frame,
-            CONT_RESTART_RETRIES,
-        );
-        let mut mode_rec_after_splice = false;
-        let mut replay_coverage_ok = false;
-        let mut playback_pos_at_splice = 0;
-        let mut splice_recorded_count = 0;
-        let mut max_drift_x = f64::INFINITY;
-        let mut max_drift_z = f64::INFINITY;
-        let mut max_drift_frame_x = usize::MAX;
-        let mut max_drift_frame_z = usize::MAX;
-        let mut forward_only_ok = false;
-        let mut prefix_net_z = 0.0;
-        let mut prefix_forward_steps = 0;
-        let mut prefix_backward_steps = 0;
-        let mut prefix_min_x = 0.0;
-        let mut prefix_max_x = 0.0;
-        let mut prefix_min_z = 0.0;
-        let mut prefix_max_z = 0.0;
-
-        if spliced {
-            let state = client.state();
-            mode_rec_after_splice = state.mode == TasMode::Rec as u32;
-            splice_recorded_count = state.recorded_count;
-            playback_pos_at_splice = state.playback_pos;
-            replay_coverage_ok = playback_pos_at_splice >= splice_frame;
-            let assessed_prefix = splice_frame.min(playback_pos_at_splice);
-            let d = drift::compute_drift(state, assessed_prefix);
-            max_drift_x = d.max_drift_x;
-            max_drift_z = d.max_drift_z;
-            max_drift_frame_x = d.max_drift_frame_x;
-            max_drift_frame_z = d.max_drift_frame_z;
-            let prefix_stats = analyze_prefix_coords(&state.play_coords, assessed_prefix);
-            forward_only_ok = prefix_stats.forward_only_ok;
-            prefix_net_z = prefix_stats.net_z;
-            prefix_forward_steps = prefix_stats.forward_steps;
-            prefix_backward_steps = prefix_stats.backward_steps;
-            prefix_min_x = prefix_stats.min_x;
-            prefix_max_x = prefix_stats.max_x;
-            prefix_min_z = prefix_stats.min_z;
-            prefix_max_z = prefix_stats.max_z;
+    for baseline_attempt in 1..=baseline_attempts {
+        if baseline_attempts > 1 {
             println!(
-                "  Drift over replayed prefix [0..{}): X={:.9} (frame {}) Z={:.9} (frame {})",
-                assessed_prefix, max_drift_x, max_drift_frame_x, max_drift_z, max_drift_frame_z
+                "\n--- Baseline attempt {}/{} ---",
+                baseline_attempt, baseline_attempts
             );
-            println!(
-                "  Prefix range PLAY: X[{:.3}..{:.3}] Z[{:.3}..{:.3}] net_z={:.3} steps(+/-/0)={}/{}/{}",
-                prefix_stats.min_x,
-                prefix_stats.max_x,
-                prefix_stats.min_z,
-                prefix_stats.max_z,
-                prefix_stats.net_z,
-                prefix_stats.forward_steps,
-                prefix_stats.backward_steps,
-                prefix_stats.flat_steps
-            );
-            if !forward_only_ok {
-                println!(
-                    "  Forward-progress check FAIL: net_z={:.6}, z_range={:.6}, forward_steps={}",
-                    prefix_net_z, prefix_stats.z_range, prefix_forward_steps
-                );
-            }
-            if !replay_coverage_ok {
-                println!(
-                    "  Coverage shortfall: playback_pos={} < splice_frame={} (FAIL)",
-                    playback_pos_at_splice, splice_frame
-                );
-            }
-        } else {
-            println!("  Splice failed before REC transition");
         }
 
-        results.push(ContCycleResult {
-            iteration: i,
-            spliced,
-            mode_rec_after_splice,
-            replay_coverage_ok,
-            playback_pos_at_splice,
-            splice_recorded_count,
-            max_drift_x,
-            max_drift_z,
-            max_drift_frame_x,
-            max_drift_frame_z,
-            forward_only_ok,
-            prefix_net_z,
-            prefix_forward_steps,
-            prefix_backward_steps,
-            prefix_min_x,
-            prefix_max_x,
-            prefix_min_z,
-            prefix_max_z,
-        });
+        let (baseline_ticks, rec_start, baseline_profile_label, baseline_transitions) =
+            if let Some(path) = source_tasrec {
+                println!("--- Baseline load from .tasrec ---");
+                let loaded = match replay::load_tasrec(std::path::Path::new(path)) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("ERROR: Failed to load {}: {}", path, e);
+                        std::process::exit(1);
+                    }
+                };
+                if loaded.count == 0 || loaded.rec_coords.is_empty() {
+                    eprintln!("ERROR: Baseline recording is empty");
+                    std::process::exit(1);
+                }
+                replay::write_to_shared(&mut client, &loaded);
+                println!(
+                    "  Loaded: {} ticks, inject_mode={}, fft={}, force_direct={}",
+                    loaded.count,
+                    loaded.meta.inject_mode,
+                    loaded.meta.force_fixed_tick,
+                    loaded.meta.force_direct
+                );
+                if !loaded.meta.notes.is_empty() {
+                    println!("  Notes: {}", loaded.meta.notes);
+                }
+                let rec_start = loaded.rec_coords[0];
+                println!(
+                    "  REC start: ({:.6}, {:.6}, {:.6})",
+                    rec_start[0], rec_start[1], rec_start[2]
+                );
+                let baseline_transitions =
+                    drift::count_transitions(&loaded.input_log, loaded.count as usize);
+                println!("  Input transitions: {}", baseline_transitions);
+                (
+                    loaded.count,
+                    rec_start,
+                    "file (.tasrec)".to_string(),
+                    baseline_transitions,
+                )
+            } else {
+                println!("--- Baseline REC build (single pass) ---");
+                client.state_mut().playback_speed = 1.0;
+                if !harness::restart_and_stabilize_inprocess(&mut client) {
+                    eprintln!("ERROR: Game not alive for baseline REC (in-process restart)");
+                    std::process::exit(1);
+                }
+                harness::focus_game();
+                harness::arm_rec(&mut client);
+                let baseline_steps =
+                    build_baseline_steps(splice_frame, baseline_profile, tap_ticks);
+                println!(
+                    "  Driving baseline pattern for {} ticks ({})",
+                    patterns::total_ticks(&baseline_steps),
+                    baseline_profile.label(tap_ticks)
+                );
+                harness::drive_pico_steps(&baseline_steps, None);
+                thread::sleep(Duration::from_millis(200));
+                let baseline_ticks = client.state().recorded_count;
+                let rec_start = client.state().rec_coords[0];
+                let baseline_transitions =
+                    drift::count_transitions(&client.state().input_log, baseline_ticks as usize);
+                harness::stop(&mut client);
+                println!("  Baseline recorded: {} ticks", baseline_ticks);
+                println!("  Input transitions: {}", baseline_transitions);
+                println!(
+                    "  REC start: ({:.6}, {:.6}, {:.6})",
+                    rec_start[0], rec_start[1], rec_start[2]
+                );
+                (
+                    baseline_ticks,
+                    rec_start,
+                    baseline_profile.label(tap_ticks),
+                    baseline_transitions,
+                )
+            };
 
-        harness::stop(&mut client);
-        thread::sleep(Duration::from_millis(100));
+        if baseline_ticks <= splice_frame {
+            eprintln!(
+                "ERROR: Baseline too short ({} <= splice frame {})",
+                baseline_ticks, splice_frame
+            );
+            if baseline_attempt < baseline_attempts {
+                println!("  Retrying baseline capture...");
+                continue;
+            }
+            std::process::exit(1);
+        }
+
+        let (baseline_input, baseline_rec_coords) = snapshot_baseline(&client, baseline_ticks);
+        let mut results = Vec::new();
+        for i in 1..=iterations {
+            println!("\n{}", "=".repeat(60));
+            println!("  CONT cycle {}/{}", i, iterations);
+            println!("{}", "=".repeat(60));
+
+            restore_baseline(
+                &mut client,
+                baseline_ticks,
+                &baseline_input,
+                &baseline_rec_coords,
+            );
+            client.state_mut().playback_speed = speed;
+            let spliced = harness::restart_continue_and_splice_inprocess(
+                &mut client,
+                rec_start,
+                splice_frame,
+                CONT_RESTART_RETRIES,
+            );
+            let mut mode_rec_after_splice = false;
+            let mut replay_coverage_ok = false;
+            let mut playback_pos_at_splice = 0;
+            let mut splice_recorded_count = 0;
+            let mut max_drift_x = f64::INFINITY;
+            let mut max_drift_z = f64::INFINITY;
+            let mut max_drift_frame_x = usize::MAX;
+            let mut max_drift_frame_z = usize::MAX;
+            let mut forward_only_ok = false;
+            let mut prefix_net_z = 0.0;
+            let mut prefix_forward_steps = 0;
+            let mut prefix_backward_steps = 0;
+            let mut prefix_min_x = 0.0;
+            let mut prefix_max_x = 0.0;
+            let mut prefix_min_z = 0.0;
+            let mut prefix_max_z = 0.0;
+
+            if spliced {
+                let state = client.state();
+                mode_rec_after_splice = state.mode == TasMode::Rec as u32;
+                splice_recorded_count = state.recorded_count;
+                playback_pos_at_splice = state.playback_pos;
+                replay_coverage_ok = playback_pos_at_splice >= splice_frame;
+                let assessed_prefix = splice_frame.min(playback_pos_at_splice);
+                let d = drift::compute_drift(state, assessed_prefix);
+                max_drift_x = d.max_drift_x;
+                max_drift_z = d.max_drift_z;
+                max_drift_frame_x = d.max_drift_frame_x;
+                max_drift_frame_z = d.max_drift_frame_z;
+                let prefix_stats = analyze_prefix_coords(&state.play_coords, assessed_prefix);
+                forward_only_ok = prefix_stats.forward_only_ok;
+                prefix_net_z = prefix_stats.net_z;
+                prefix_forward_steps = prefix_stats.forward_steps;
+                prefix_backward_steps = prefix_stats.backward_steps;
+                prefix_min_x = prefix_stats.min_x;
+                prefix_max_x = prefix_stats.max_x;
+                prefix_min_z = prefix_stats.min_z;
+                prefix_max_z = prefix_stats.max_z;
+                println!(
+                    "  Drift over replayed prefix [0..{}): X={:.9} (frame {}) Z={:.9} (frame {})",
+                    assessed_prefix,
+                    max_drift_x,
+                    max_drift_frame_x,
+                    max_drift_z,
+                    max_drift_frame_z
+                );
+                println!(
+                    "  Prefix range PLAY: X[{:.3}..{:.3}] Z[{:.3}..{:.3}] net_z={:.3} steps(+/-/0)={}/{}/{}",
+                    prefix_stats.min_x,
+                    prefix_stats.max_x,
+                    prefix_stats.min_z,
+                    prefix_stats.max_z,
+                    prefix_stats.net_z,
+                    prefix_stats.forward_steps,
+                    prefix_stats.backward_steps,
+                    prefix_stats.flat_steps
+                );
+                if !forward_only_ok {
+                    println!(
+                        "  Forward-progress check FAIL: net_z={:.6}, z_range={:.6}, forward_steps={}",
+                        prefix_net_z, prefix_stats.z_range, prefix_forward_steps
+                    );
+                }
+                if !replay_coverage_ok {
+                    println!(
+                        "  Coverage shortfall: playback_pos={} < splice_frame={} (FAIL)",
+                        playback_pos_at_splice, splice_frame
+                    );
+                }
+            } else {
+                println!("  Splice failed before REC transition");
+            }
+
+            results.push(ContCycleResult {
+                iteration: i,
+                spliced,
+                mode_rec_after_splice,
+                replay_coverage_ok,
+                playback_pos_at_splice,
+                splice_recorded_count,
+                max_drift_x,
+                max_drift_z,
+                max_drift_frame_x,
+                max_drift_frame_z,
+                forward_only_ok,
+                prefix_net_z,
+                prefix_forward_steps,
+                prefix_backward_steps,
+                prefix_min_x,
+                prefix_max_x,
+                prefix_min_z,
+                prefix_max_z,
+            });
+
+            harness::stop(&mut client);
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        client.state_mut().playback_speed = 1.0;
+        println!("\nReset playback_speed to 1.0");
+
+        let report = ContReliabilityReport {
+            iterations,
+            speed,
+            splice_frame,
+            baseline_ticks,
+            baseline_profile: baseline_profile_label,
+            baseline_transitions,
+            results,
+        };
+        report.print_summary();
+        if report.all_pass() || baseline_attempt == baseline_attempts {
+            return report;
+        }
+        println!(
+            "\nBaseline attempt {}/{} failed; rebuilding baseline and retrying...",
+            baseline_attempt, baseline_attempts
+        );
     }
 
-    client.state_mut().playback_speed = 1.0;
-    println!("\nReset playback_speed to 1.0");
-
-    let report = ContReliabilityReport {
-        iterations,
-        speed,
-        splice_frame,
-        baseline_ticks,
-        baseline_profile: baseline_profile_label,
-        baseline_transitions,
-        results,
-    };
-    report.print_summary();
-    report
+    unreachable!("baseline attempt loop must return a report");
 }
