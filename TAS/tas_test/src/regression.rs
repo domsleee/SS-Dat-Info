@@ -2,6 +2,7 @@
 //!
 //! Each case: scripted steering pattern -> REC -> PLAY -> drift check -> CSV output.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -100,13 +101,44 @@ fn case_explicit(name: &str, defs: &[(&str, u8, u32)]) -> RegressionCase {
     }
 }
 
+fn parse_case_filter(raw: Option<&str>) -> Option<HashSet<String>> {
+    let raw = raw?;
+    let filters: HashSet<String> = raw
+        .split(',')
+        .map(|part| part.trim().to_ascii_lowercase())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if filters.is_empty() {
+        None
+    } else {
+        Some(filters)
+    }
+}
+
+fn filter_cases(cases: Vec<RegressionCase>) -> Vec<RegressionCase> {
+    let requested = std::env::var("TAS_TEST_CASE_FILTER").ok();
+    let Some(filters) = parse_case_filter(requested.as_deref()) else {
+        return cases;
+    };
+
+    cases
+        .into_iter()
+        .filter(|case| filters.contains(&case.name.to_ascii_lowercase()))
+        .collect()
+}
+
 /// Run the full regression suite.
 ///
 /// If `mock` is true, uses mock input mode (writes input directly to shared memory).
 /// If `mock` is false, uses Pico HID for real input during REC.
 pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
-    let cases = build_cases();
+    let cases = filter_cases(build_cases());
     let mut results = Vec::new();
+
+    if cases.is_empty() {
+        eprintln!("ERROR: Regression case filter matched no cases.");
+        std::process::exit(1);
+    }
 
     // CSV header
     write_csv_header(csv_path);
@@ -234,11 +266,10 @@ fn run_single_case(
     println!("  Live transitions: {}", live_transitions);
 
     // Phase 2: Playback
-    if !harness::restart_and_stabilize(client) {
-        return error_result(case, "Game not alive after restart (PLAY phase)");
+    let rec_start = client.state().rec_coords[0];
+    if !harness::restart_play_and_match(client, rec_start, 20) {
+        return error_result(case, "Could not position-match playback start");
     }
-
-    harness::arm_play(client);
     let play_ok = harness::wait_playback(client, rec_count);
 
     if !play_ok {
@@ -298,14 +329,13 @@ fn run_mock_case(
     }
 
     let target = baseline.recording.rec_coords[0];
-    if !harness::restart_and_stabilize(client) {
-        return error_result(case, "Game not alive after restart (mock PLAY)");
-    }
     println!(
         "  Mock start target: ({:.6}, {:.6}, {:.6})",
         target[0], target[1], target[2]
     );
-    harness::arm_play(client);
+    if !harness::restart_play_and_match(client, target, 20) {
+        return error_result(case, "Could not position-match mock playback start");
+    }
 
     let play_ok = harness::wait_playback(client, baseline_count);
 
@@ -614,5 +644,29 @@ mod tests {
         assert_eq!(state.rec_coords[2], [102.0, -50.0, 201.0]);
         assert_eq!(state.rec_coords[3], [0.0, 0.0, 0.0]);
         assert_eq!(state.play_coords[3], [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn parse_case_filter_handles_empty_and_spacing() {
+        assert_eq!(parse_case_filter(None), None);
+        assert_eq!(parse_case_filter(Some(" , ")), None);
+
+        let filters = parse_case_filter(Some(" R , shift_left_right ")).expect("filters");
+        assert!(filters.contains("r"));
+        assert!(filters.contains("shift_left_right"));
+        assert_eq!(filters.len(), 2);
+    }
+
+    #[test]
+    fn filter_cases_keeps_only_requested_names() {
+        let filters = parse_case_filter(Some("jump_tap,shift_right")).expect("filters");
+        let filtered: Vec<_> = build_cases()
+            .into_iter()
+            .filter(|case| filters.contains(&case.name.to_ascii_lowercase()))
+            .collect();
+
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].name, "jump_tap");
+        assert_eq!(filtered[1].name, "shift_right");
     }
 }

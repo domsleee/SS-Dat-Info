@@ -59,21 +59,34 @@ const REFERENCE_FRAMES: [usize; 18] = [
     50, 100, 150, 200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900,
 ];
 
+fn gate0_reference_frames(count: usize) -> Vec<usize> {
+    let mut frames: Vec<usize> = REFERENCE_FRAMES
+        .iter()
+        .copied()
+        .filter(|&frame| frame < count)
+        .collect();
+
+    if frames.is_empty() && count > 0 {
+        // Short recordings never reach the fixed 50..900 frame window.
+        // Fall back to the last captured frame so Gate 0 still verifies that
+        // REC coordinates were populated instead of failing as 0/0 by design.
+        frames.push(count - 1);
+    }
+
+    frames
+}
+
 /// Run all 4 gates on the current shared state after a REC->PLAY cycle.
 pub fn run_gates(state: &TasSharedState, rec_count: u32) -> GateAssessment {
     let n = rec_count as usize;
 
     // Gate 0: Z-coordinate reference — check that REC coords are captured (non-zero at reference frames)
-    let mut ref_ok = 0;
-    let mut ref_total = 0;
-    for &frame in &REFERENCE_FRAMES {
-        if frame < n {
-            ref_total += 1;
-            if state.rec_coords[frame][2] != 0.0 {
-                ref_ok += 1;
-            }
-        }
-    }
+    let reference_frames = gate0_reference_frames(n);
+    let ref_total = reference_frames.len();
+    let ref_ok = reference_frames
+        .iter()
+        .filter(|&&frame| state.rec_coords[frame][2] != 0.0)
+        .count();
     let gate0_pass = ref_total > 0 && ref_ok == ref_total;
     let gate0 = GateResult {
         gate: 0,
@@ -136,16 +149,12 @@ pub fn run_gates(state: &TasSharedState, rec_count: u32) -> GateAssessment {
 pub fn run_gates_straight(state: &TasSharedState, rec_count: u32) -> GateAssessment {
     let n = rec_count as usize;
 
-    let mut ref_ok = 0;
-    let mut ref_total = 0;
-    for &frame in &REFERENCE_FRAMES {
-        if frame < n {
-            ref_total += 1;
-            if state.rec_coords[frame][2] != 0.0 {
-                ref_ok += 1;
-            }
-        }
-    }
+    let reference_frames = gate0_reference_frames(n);
+    let ref_total = reference_frames.len();
+    let ref_ok = reference_frames
+        .iter()
+        .filter(|&&frame| state.rec_coords[frame][2] != 0.0)
+        .count();
     let gate0 = GateResult {
         gate: 0,
         name: "Z-coord reference",
@@ -232,10 +241,20 @@ mod tests {
     }
 
     #[test]
-    fn gate0_short_recording_fails() {
+    fn gate0_short_recording_uses_last_frame_fallback() {
         let state = zeroed_state();
         let assessment = run_gates(&state, 30);
         assert!(!assessment.gates[0].passed);
+        assert_eq!(assessment.gates[0].detail, "0/1 reference frames have non-zero Z");
+    }
+
+    #[test]
+    fn gate0_short_recording_passes_with_nonzero_last_frame() {
+        let mut state = zeroed_state();
+        state.rec_coords[24] = [0.0, 0.0, 123.0];
+        let assessment = run_gates(&state, 25);
+        assert!(assessment.gates[0].passed);
+        assert_eq!(assessment.gates[0].detail, "1/1 reference frames have non-zero Z");
     }
 
     #[test]
