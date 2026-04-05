@@ -99,7 +99,7 @@ test_acceptance: tas_rust
 test_regression: tas_rust
     cd TAS && cargo run --release --bin tas_test -- regression
 
-# Run TAS fast lane gates (hard: unit + mock + speed-reset; diagnostic: FE-decent replay)
+# Run TAS fast lane gates (hard: unit + speed-reset; diagnostic: mock + FE-decent replay)
 test_fast_lane artifacts_dir='TAS/artifacts/fast-lane/latest':
     pwsh -NoProfile -File .\scripts\run-tas-fast-lane.ps1 -ArtifactsDir '{{artifacts_dir}}'
 

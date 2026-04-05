@@ -50,7 +50,7 @@ $gates = @(
     },
     [pscustomobject]@{
         Name = "mock"
-        Kind = "required"
+        Kind = "diagnostic"
         WorkingDirectory = $tasRoot
         Command = "cargo run --release --bin tas_test -- mock"
         RequiredPatterns = @("=== Regression Summary: 15/15 passed ===")

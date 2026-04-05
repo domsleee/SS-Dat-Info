@@ -19,9 +19,23 @@ use crate::patterns::{self, PatternStep};
 /// A single regression test case definition.
 #[derive(Debug, Clone)]
 pub struct RegressionCase {
+    pub ordinal: usize,
     pub name: String,
     pub steps: Vec<PatternStep>,
     pub pattern_str: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WindowMetrics {
+    pub transitions: u32,
+    pub first_input_tick: i32,
+    pub frame0_dx: f64,
+    pub frame0_dz: f64,
+    pub active_start_dx: f64,
+    pub active_start_dz: f64,
+    pub active_window_ticks: u32,
+    pub active_norm_drift_x: f64,
+    pub active_norm_drift_z: f64,
 }
 
 /// Result of running one regression case.
@@ -30,6 +44,15 @@ pub struct CaseResult {
     pub name: String,
     pub pattern: String,
     pub rec_count: u32,
+    pub transitions: u32,
+    pub first_input_tick: i32,
+    pub frame0_dx: f64,
+    pub frame0_dz: f64,
+    pub active_start_dx: f64,
+    pub active_start_dz: f64,
+    pub active_window_ticks: u32,
+    pub active_norm_drift_x: f64,
+    pub active_norm_drift_z: f64,
     pub live_drift_x: f64,
     pub live_drift_z: f64,
     pub live_zero: bool,
@@ -45,7 +68,7 @@ pub fn build_cases() -> Vec<RegressionCase> {
     let hold = patterns::DEFAULT_HOLD_TICKS;
     let gap = patterns::DEFAULT_GAP_TICKS;
 
-    vec![
+    let mut cases = vec![
         // 1-4: Single directions and simple alternations
         case_pattern("L", "L", hold, gap),
         case_pattern("R", "R", hold, gap),
@@ -82,11 +105,18 @@ pub fn build_cases() -> Vec<RegressionCase> {
                 ("SHIFT_RIGHT", input_bits::SHIFT | input_bits::RIGHT, 56),
             ],
         ),
-    ]
+    ];
+
+    for (ordinal, case) in cases.iter_mut().enumerate() {
+        case.ordinal = ordinal + 1;
+    }
+
+    cases
 }
 
 fn case_pattern(name: &str, pattern: &str, hold: u32, gap: u32) -> RegressionCase {
     RegressionCase {
+        ordinal: 0,
         name: name.to_string(),
         steps: patterns::build_from_pattern(pattern, hold, gap),
         pattern_str: pattern.to_string(),
@@ -95,6 +125,7 @@ fn case_pattern(name: &str, pattern: &str, hold: u32, gap: u32) -> RegressionCas
 
 fn case_explicit(name: &str, defs: &[(&str, u8, u32)]) -> RegressionCase {
     RegressionCase {
+        ordinal: 0,
         name: name.to_string(),
         steps: patterns::build_from_explicit(defs),
         pattern_str: format!("explicit:{}", name),
@@ -144,6 +175,10 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
     write_csv_header(csv_path);
 
     let mut client = harness::connect();
+    harness::ensure_exclusive_runtime_ownership(
+        &mut client,
+        "regression/mock determinism failures",
+    );
     harness::print_status(&client);
 
     if !harness::check_liveness(&client) {
@@ -183,7 +218,7 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
             case.pattern_str
         );
 
-        let result = run_single_case(&mut client, case, i, mock, cache_dir);
+        let result = run_single_case(&mut client, case, mock, cache_dir);
         append_csv(csv_path, &result);
 
         println!(
@@ -224,13 +259,12 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
 fn run_single_case(
     client: &mut tas_shared::TasSharedMemoryClient,
     case: &RegressionCase,
-    index: usize,
     mock: bool,
     cache_dir: &Path,
 ) -> CaseResult {
     let input_log = patterns::generate_input_log(&case.steps);
     let total_ticks = patterns::total_ticks(&case.steps);
-    let cache_path = cache_dir.join(format!("{:02}_{}.tas", index + 1, slug(&case.name)));
+    let cache_path = cache_dir.join(format!("{:02}_{}.tas", case.ordinal, slug(&case.name)));
 
     if mock {
         return run_mock_case(client, case, &input_log, total_ticks, &cache_path);
@@ -279,11 +313,22 @@ fn run_single_case(
     // Assess
     let assessment = gates::run_gates(client.state(), rec_count);
     assessment.print_summary();
+    let metrics = collect_window_metrics(client.state(), rec_count);
+    print_window_metrics(&metrics);
 
     CaseResult {
         name: case.name.clone(),
         pattern: case.pattern_str.clone(),
         rec_count,
+        transitions: metrics.transitions,
+        first_input_tick: metrics.first_input_tick,
+        frame0_dx: metrics.frame0_dx,
+        frame0_dz: metrics.frame0_dz,
+        active_start_dx: metrics.active_start_dx,
+        active_start_dz: metrics.active_start_dz,
+        active_window_ticks: metrics.active_window_ticks,
+        active_norm_drift_x: metrics.active_norm_drift_x,
+        active_norm_drift_z: metrics.active_norm_drift_z,
         live_drift_x: 0.0, // REC vs itself
         live_drift_z: 0.0,
         live_zero: true,
@@ -346,11 +391,22 @@ fn run_mock_case(
     // For mock mode, Gate 1 (REC movement) is skipped since we didn't do a real REC
     let state = client.state();
     let drift_result = drift::compute_drift(state, input_log.len() as u32);
+    let metrics = collect_window_metrics(state, baseline_count);
+    print_window_metrics(&metrics);
 
     CaseResult {
         name: case.name.clone(),
         pattern: case.pattern_str.clone(),
         rec_count: baseline_count,
+        transitions: metrics.transitions,
+        first_input_tick: metrics.first_input_tick,
+        frame0_dx: metrics.frame0_dx,
+        frame0_dz: metrics.frame0_dz,
+        active_start_dx: metrics.active_start_dx,
+        active_start_dz: metrics.active_start_dz,
+        active_window_ticks: metrics.active_window_ticks,
+        active_norm_drift_x: metrics.active_norm_drift_x,
+        active_norm_drift_z: metrics.active_norm_drift_z,
         live_drift_x: 0.0,
         live_drift_z: 0.0,
         live_zero: true,
@@ -372,6 +428,15 @@ fn error_result(case: &RegressionCase, msg: &str) -> CaseResult {
         name: case.name.clone(),
         pattern: case.pattern_str.clone(),
         rec_count: 0,
+        transitions: 0,
+        first_input_tick: -1,
+        frame0_dx: 999.0,
+        frame0_dz: 999.0,
+        active_start_dx: 999.0,
+        active_start_dz: 999.0,
+        active_window_ticks: 0,
+        active_norm_drift_x: 999.0,
+        active_norm_drift_z: 999.0,
         live_drift_x: 999.0,
         live_drift_z: 999.0,
         live_zero: false,
@@ -399,7 +464,7 @@ fn write_csv_header(path: &Path) {
     if let Ok(mut f) = fs::File::create(path) {
         let _ = writeln!(
             f,
-            "case_name,pattern,rec_count,live_drift_x,live_drift_z,live_zero,replay_drift_x,replay_drift_z,replay_zero,all_gates_pass,error"
+            "case_name,pattern,rec_count,transitions,first_input_tick,frame0_dx,frame0_dz,active_start_dx,active_start_dz,active_window_ticks,active_norm_drift_x,active_norm_drift_z,live_drift_x,live_drift_z,live_zero,replay_drift_x,replay_drift_z,replay_zero,all_gates_pass,error"
         );
     }
 }
@@ -408,10 +473,19 @@ fn append_csv(path: &Path, r: &CaseResult) {
     if let Ok(mut f) = fs::OpenOptions::new().append(true).open(path) {
         let _ = writeln!(
             f,
-            "\"{}\",\"{}\",{},{:.9},{:.9},{},{:.9},{:.9},{},{},\"{}\"",
+            "\"{}\",\"{}\",{},{},{},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{},{},\"{}\"",
             r.name,
             r.pattern,
             r.rec_count,
+            r.transitions,
+            r.first_input_tick,
+            r.frame0_dx,
+            r.frame0_dz,
+            r.active_start_dx,
+            r.active_start_dz,
+            r.active_window_ticks,
+            r.active_norm_drift_x,
+            r.active_norm_drift_z,
             r.live_drift_x,
             r.live_drift_z,
             r.live_zero,
@@ -422,6 +496,58 @@ fn append_csv(path: &Path, r: &CaseResult) {
             r.error.as_deref().unwrap_or("")
         );
     }
+}
+
+fn collect_window_metrics(state: &tas_shared::TasSharedState, count: u32) -> WindowMetrics {
+    let n = count as usize;
+    let transitions = drift::count_transitions(&state.input_log, n);
+    let first_input_tick = drift::first_input_tick(&state.input_log, n);
+    let (frame0_dx, frame0_dz) = coord_offset(state, 0, n > 0);
+
+    let mut metrics = WindowMetrics {
+        transitions,
+        first_input_tick,
+        frame0_dx,
+        frame0_dz,
+        ..WindowMetrics::default()
+    };
+
+    if first_input_tick >= 0 {
+        let idx = first_input_tick as usize;
+        let (active_start_dx, active_start_dz) = coord_offset(state, idx, idx < n);
+        let active_norm = drift::compute_normalized_drift_window(state, idx as u32, count);
+        metrics.active_start_dx = active_start_dx;
+        metrics.active_start_dz = active_start_dz;
+        metrics.active_window_ticks = count.saturating_sub(idx as u32);
+        metrics.active_norm_drift_x = active_norm.max_drift_x;
+        metrics.active_norm_drift_z = active_norm.max_drift_z;
+    }
+
+    metrics
+}
+
+fn coord_offset(state: &tas_shared::TasSharedState, idx: usize, present: bool) -> (f64, f64) {
+    if !present {
+        return (0.0, 0.0);
+    }
+    let dx = (state.rec_coords[idx][0] as f64 - state.play_coords[idx][0] as f64).abs();
+    let dz = (state.rec_coords[idx][2] as f64 - state.play_coords[idx][2] as f64).abs();
+    (dx, dz)
+}
+
+fn print_window_metrics(metrics: &WindowMetrics) {
+    println!(
+        "  Window metrics: transitions={} firstInput={} frame0Offset=({:.6}, {:.6}) activeStartOffset=({:.6}, {:.6}) activeTicks={} activeNormDrift=({:.9}, {:.9})",
+        metrics.transitions,
+        metrics.first_input_tick,
+        metrics.frame0_dx,
+        metrics.frame0_dz,
+        metrics.active_start_dx,
+        metrics.active_start_dz,
+        metrics.active_window_ticks,
+        metrics.active_norm_drift_x,
+        metrics.active_norm_drift_z,
+    );
 }
 
 #[derive(Debug)]
@@ -668,5 +794,15 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].name, "jump_tap");
         assert_eq!(filtered[1].name, "shift_right");
+    }
+
+    #[test]
+    fn build_cases_assigns_stable_ordinals() {
+        let cases = build_cases();
+        assert_eq!(cases[0].ordinal, 1);
+        assert_eq!(cases[13].ordinal, 14);
+        assert_eq!(cases[14].ordinal, 15);
+        assert_eq!(cases[13].name, "shift_right");
+        assert_eq!(cases[14].name, "shift_left_right");
     }
 }
