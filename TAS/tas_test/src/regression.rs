@@ -16,6 +16,10 @@ use crate::gates;
 use crate::harness;
 use crate::patterns::{self, PatternStep};
 
+// Empirically, 20 retries was not enough to reliably hit the replayable F5 bucket
+// for short patterns like jump_tap. 60 cleared repeated live/mock stress reruns.
+const START_MATCH_RETRIES: u32 = 60;
+
 /// A single regression test case definition.
 #[derive(Debug, Clone)]
 pub struct RegressionCase {
@@ -31,6 +35,8 @@ pub struct WindowMetrics {
     pub first_input_tick: i32,
     pub frame0_dx: f64,
     pub frame0_dz: f64,
+    pub full_norm_drift_x: f64,
+    pub full_norm_drift_z: f64,
     pub active_start_dx: f64,
     pub active_start_dz: f64,
     pub active_window_ticks: u32,
@@ -43,11 +49,14 @@ pub struct WindowMetrics {
 pub struct CaseResult {
     pub name: String,
     pub pattern: String,
+    pub start_matched: bool,
     pub rec_count: u32,
     pub transitions: u32,
     pub first_input_tick: i32,
     pub frame0_dx: f64,
     pub frame0_dz: f64,
+    pub full_norm_drift_x: f64,
+    pub full_norm_drift_z: f64,
     pub active_start_dx: f64,
     pub active_start_dz: f64,
     pub active_window_ticks: u32,
@@ -222,9 +231,12 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
         append_csv(csv_path, &result);
 
         println!(
-            "  Result: drift_x={:.9} drift_z={:.9} zero={} gates={}",
+            "  Result: startMatched={} rawDrift=({:.9}, {:.9}) fullNorm=({:.9}, {:.9}) rawZero={} gates={}",
+            result.start_matched,
             result.replay_drift_x,
             result.replay_drift_z,
+            result.full_norm_drift_x,
+            result.full_norm_drift_z,
             result.replay_zero,
             if result.all_gates_pass {
                 "PASS"
@@ -245,11 +257,14 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
     );
     for r in &results {
         println!(
-            "  {} {} — drift({:.9}, {:.9})",
+            "  {} {} — raw({:.9}, {:.9}) fullNorm({:.9}, {:.9}) startMatched={}",
             if r.all_gates_pass { "PASS" } else { "FAIL" },
             r.name,
             r.replay_drift_x,
             r.replay_drift_z,
+            r.full_norm_drift_x,
+            r.full_norm_drift_z,
+            r.start_matched,
         );
     }
 
@@ -301,9 +316,10 @@ fn run_single_case(
 
     // Phase 2: Playback
     let rec_start = client.state().rec_coords[0];
-    if !harness::restart_play_and_match(client, rec_start, 20) {
-        return error_result(case, "Could not position-match playback start");
-    }
+    let start_matched = match start_playback_with_fallback(client, rec_start, "playback") {
+        Ok(matched) => matched,
+        Err(err) => return error_result(case, &err),
+    };
     let play_ok = harness::wait_playback(client, rec_count);
 
     if !play_ok {
@@ -315,15 +331,21 @@ fn run_single_case(
     assessment.print_summary();
     let metrics = collect_window_metrics(client.state(), rec_count);
     print_window_metrics(&metrics);
+    print_translation_verdict(start_matched, &metrics);
+    let start_match_error =
+        (!start_matched).then(|| "Could not position-match playback start".to_string());
 
     CaseResult {
         name: case.name.clone(),
         pattern: case.pattern_str.clone(),
+        start_matched,
         rec_count,
         transitions: metrics.transitions,
         first_input_tick: metrics.first_input_tick,
         frame0_dx: metrics.frame0_dx,
         frame0_dz: metrics.frame0_dz,
+        full_norm_drift_x: metrics.full_norm_drift_x,
+        full_norm_drift_z: metrics.full_norm_drift_z,
         active_start_dx: metrics.active_start_dx,
         active_start_dz: metrics.active_start_dz,
         active_window_ticks: metrics.active_window_ticks,
@@ -335,8 +357,8 @@ fn run_single_case(
         replay_drift_x: assessment.drift.max_drift_x,
         replay_drift_z: assessment.drift.max_drift_z,
         replay_zero: assessment.drift.is_zero(),
-        all_gates_pass: assessment.all_pass(),
-        error: None,
+        all_gates_pass: start_matched && assessment.all_pass(),
+        error: start_match_error,
     }
 }
 
@@ -378,9 +400,10 @@ fn run_mock_case(
         "  Mock start target: ({:.6}, {:.6}, {:.6})",
         target[0], target[1], target[2]
     );
-    if !harness::restart_play_and_match(client, target, 20) {
-        return error_result(case, "Could not position-match mock playback start");
-    }
+    let start_matched = match start_playback_with_fallback(client, target, "mock playback") {
+        Ok(matched) => matched,
+        Err(err) => return error_result(case, &err),
+    };
 
     let play_ok = harness::wait_playback(client, baseline_count);
 
@@ -393,15 +416,21 @@ fn run_mock_case(
     let drift_result = drift::compute_drift(state, input_log.len() as u32);
     let metrics = collect_window_metrics(state, baseline_count);
     print_window_metrics(&metrics);
+    print_translation_verdict(start_matched, &metrics);
+    let start_match_error =
+        (!start_matched).then(|| "Could not position-match mock playback start".to_string());
 
     CaseResult {
         name: case.name.clone(),
         pattern: case.pattern_str.clone(),
+        start_matched,
         rec_count: baseline_count,
         transitions: metrics.transitions,
         first_input_tick: metrics.first_input_tick,
         frame0_dx: metrics.frame0_dx,
         frame0_dz: metrics.frame0_dz,
+        full_norm_drift_x: metrics.full_norm_drift_x,
+        full_norm_drift_z: metrics.full_norm_drift_z,
         active_start_dx: metrics.active_start_dx,
         active_start_dz: metrics.active_start_dz,
         active_window_ticks: metrics.active_window_ticks,
@@ -413,9 +442,32 @@ fn run_mock_case(
         replay_drift_x: drift_result.max_drift_x,
         replay_drift_z: drift_result.max_drift_z,
         replay_zero: drift_result.is_zero(),
-        all_gates_pass: drift_result.is_zero(), // simplified for mock
-        error: None,
+        all_gates_pass: start_matched && drift_result.is_zero(),
+        error: start_match_error,
     }
+}
+
+fn start_playback_with_fallback(
+    client: &mut tas_shared::TasSharedMemoryClient,
+    target: [f32; 3],
+    label: &str,
+) -> Result<bool, String> {
+    if harness::restart_play_and_match(client, target, START_MATCH_RETRIES) {
+        return Ok(true);
+    }
+
+    println!(
+        "  WARNING: Could not exact-match {} start after retries; retrying once without exact matching",
+        label
+    );
+    if !harness::restart_and_stabilize(client) {
+        return Err(format!(
+            "Game not alive after restart ({} fallback phase)",
+            label
+        ));
+    }
+    harness::arm_play(client);
+    Ok(false)
 }
 
 /// Drive Pico HID according to the pattern step schedule (delegates to harness).
@@ -427,11 +479,14 @@ fn error_result(case: &RegressionCase, msg: &str) -> CaseResult {
     CaseResult {
         name: case.name.clone(),
         pattern: case.pattern_str.clone(),
+        start_matched: false,
         rec_count: 0,
         transitions: 0,
         first_input_tick: -1,
         frame0_dx: 999.0,
         frame0_dz: 999.0,
+        full_norm_drift_x: 999.0,
+        full_norm_drift_z: 999.0,
         active_start_dx: 999.0,
         active_start_dz: 999.0,
         active_window_ticks: 0,
@@ -464,7 +519,7 @@ fn write_csv_header(path: &Path) {
     if let Ok(mut f) = fs::File::create(path) {
         let _ = writeln!(
             f,
-            "case_name,pattern,rec_count,transitions,first_input_tick,frame0_dx,frame0_dz,active_start_dx,active_start_dz,active_window_ticks,active_norm_drift_x,active_norm_drift_z,live_drift_x,live_drift_z,live_zero,replay_drift_x,replay_drift_z,replay_zero,all_gates_pass,error"
+            "case_name,pattern,start_matched,rec_count,transitions,first_input_tick,frame0_dx,frame0_dz,full_norm_drift_x,full_norm_drift_z,active_start_dx,active_start_dz,active_window_ticks,active_norm_drift_x,active_norm_drift_z,live_drift_x,live_drift_z,live_zero,replay_drift_x,replay_drift_z,replay_zero,all_gates_pass,error"
         );
     }
 }
@@ -473,14 +528,17 @@ fn append_csv(path: &Path, r: &CaseResult) {
     if let Ok(mut f) = fs::OpenOptions::new().append(true).open(path) {
         let _ = writeln!(
             f,
-            "\"{}\",\"{}\",{},{},{},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{},{},\"{}\"",
+            "\"{}\",\"{}\",{},{},{},{},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{},{},\"{}\"",
             r.name,
             r.pattern,
+            r.start_matched,
             r.rec_count,
             r.transitions,
             r.first_input_tick,
             r.frame0_dx,
             r.frame0_dz,
+            r.full_norm_drift_x,
+            r.full_norm_drift_z,
             r.active_start_dx,
             r.active_start_dz,
             r.active_window_ticks,
@@ -503,12 +561,15 @@ fn collect_window_metrics(state: &tas_shared::TasSharedState, count: u32) -> Win
     let transitions = drift::count_transitions(&state.input_log, n);
     let first_input_tick = drift::first_input_tick(&state.input_log, n);
     let (frame0_dx, frame0_dz) = coord_offset(state, 0, n > 0);
+    let full_norm = drift::compute_normalized_drift_window(state, 0, count);
 
     let mut metrics = WindowMetrics {
         transitions,
         first_input_tick,
         frame0_dx,
         frame0_dz,
+        full_norm_drift_x: full_norm.max_drift_x,
+        full_norm_drift_z: full_norm.max_drift_z,
         ..WindowMetrics::default()
     };
 
@@ -537,16 +598,28 @@ fn coord_offset(state: &tas_shared::TasSharedState, idx: usize, present: bool) -
 
 fn print_window_metrics(metrics: &WindowMetrics) {
     println!(
-        "  Window metrics: transitions={} firstInput={} frame0Offset=({:.6}, {:.6}) activeStartOffset=({:.6}, {:.6}) activeTicks={} activeNormDrift=({:.9}, {:.9})",
+        "  Window metrics: transitions={} firstInput={} frame0Offset=({:.6}, {:.6}) fullNormDrift=({:.9}, {:.9}) activeStartOffset=({:.6}, {:.6}) activeTicks={} activeNormDrift=({:.9}, {:.9})",
         metrics.transitions,
         metrics.first_input_tick,
         metrics.frame0_dx,
         metrics.frame0_dz,
+        metrics.full_norm_drift_x,
+        metrics.full_norm_drift_z,
         metrics.active_start_dx,
         metrics.active_start_dz,
         metrics.active_window_ticks,
         metrics.active_norm_drift_x,
         metrics.active_norm_drift_z,
+    );
+}
+
+fn print_translation_verdict(start_matched: bool, metrics: &WindowMetrics) {
+    println!(
+        "  Translation diagnostic: startMatched={} fullNormZero={} fullNorm=({:.9}, {:.9})",
+        start_matched,
+        metrics.full_norm_drift_x == 0.0 && metrics.full_norm_drift_z == 0.0,
+        metrics.full_norm_drift_x,
+        metrics.full_norm_drift_z,
     );
 }
 

@@ -18,9 +18,11 @@ struct RegressionCertificate<'a> {
     total_cases: usize,
     passed: usize,
     failed: usize,
-    max_drift_x: f64,
-    max_drift_z: f64,
-    all_zero_drift: bool,
+    max_raw_drift_x: f64,
+    max_raw_drift_z: f64,
+    max_full_norm_drift_x: f64,
+    max_full_norm_drift_z: f64,
+    all_zero_full_norm_drift: bool,
     csv_path: String,
     verdict: &'static str,
     cases: Vec<RegressionCase<'a>>,
@@ -30,11 +32,14 @@ struct RegressionCertificate<'a> {
 struct RegressionCase<'a> {
     name: &'a str,
     pattern: &'a str,
+    start_matched: bool,
     rec_count: u32,
     transitions: u32,
     first_input_tick: i32,
     frame0_dx: f64,
     frame0_dz: f64,
+    full_norm_drift_x: f64,
+    full_norm_drift_z: f64,
     active_start_dx: f64,
     active_start_dz: f64,
     active_window_ticks: u32,
@@ -72,8 +77,16 @@ pub fn write_regression_certificate(
 ) {
     let total = results.len();
     let passed = results.iter().filter(|r| r.all_gates_pass).count();
-    let max_drift_x: f64 = results.iter().map(|r| r.replay_drift_x).fold(0.0, f64::max);
-    let max_drift_z: f64 = results.iter().map(|r| r.replay_drift_z).fold(0.0, f64::max);
+    let max_raw_drift_x: f64 = results.iter().map(|r| r.replay_drift_x).fold(0.0, f64::max);
+    let max_raw_drift_z: f64 = results.iter().map(|r| r.replay_drift_z).fold(0.0, f64::max);
+    let max_full_norm_drift_x: f64 = results
+        .iter()
+        .map(|r| r.full_norm_drift_x)
+        .fold(0.0, f64::max);
+    let max_full_norm_drift_z: f64 = results
+        .iter()
+        .map(|r| r.full_norm_drift_z)
+        .fold(0.0, f64::max);
 
     let cert = RegressionCertificate {
         r#type: "regression",
@@ -82,9 +95,13 @@ pub fn write_regression_certificate(
         total_cases: total,
         passed,
         failed: total - passed,
-        max_drift_x,
-        max_drift_z,
-        all_zero_drift: passed == total && max_drift_x == 0.0 && max_drift_z == 0.0,
+        max_raw_drift_x,
+        max_raw_drift_z,
+        max_full_norm_drift_x,
+        max_full_norm_drift_z,
+        all_zero_full_norm_drift: passed == total
+            && max_full_norm_drift_x == 0.0
+            && max_full_norm_drift_z == 0.0,
         csv_path: csv_path.display().to_string().replace('\\', "/"),
         verdict: if passed == total { "PASS" } else { "FAIL" },
         cases: results
@@ -92,11 +109,14 @@ pub fn write_regression_certificate(
             .map(|r| RegressionCase {
                 name: &r.name,
                 pattern: &r.pattern,
+                start_matched: r.start_matched,
                 rec_count: r.rec_count,
                 transitions: r.transitions,
                 first_input_tick: r.first_input_tick,
                 frame0_dx: r.frame0_dx,
                 frame0_dz: r.frame0_dz,
+                full_norm_drift_x: r.full_norm_drift_x,
+                full_norm_drift_z: r.full_norm_drift_z,
                 active_start_dx: r.active_start_dx,
                 active_start_dz: r.active_start_dz,
                 active_window_ticks: r.active_window_ticks,
@@ -182,11 +202,14 @@ mod tests {
             CaseResult {
                 name: "L".to_string(),
                 pattern: "L".to_string(),
+                start_matched: true,
                 rec_count: 56,
                 transitions: 1,
                 first_input_tick: 0,
                 frame0_dx: 0.0,
                 frame0_dz: 0.0,
+                full_norm_drift_x: 0.0,
+                full_norm_drift_z: 0.0,
                 active_start_dx: 0.0,
                 active_start_dz: 0.0,
                 active_window_ticks: 56,
@@ -204,11 +227,14 @@ mod tests {
             CaseResult {
                 name: "LR".to_string(),
                 pattern: "LR".to_string(),
+                start_matched: false,
                 rec_count: 112,
                 transitions: 2,
                 first_input_tick: 0,
                 frame0_dx: 0.25,
                 frame0_dz: 0.5,
+                full_norm_drift_x: 0.0,
+                full_norm_drift_z: 0.0,
                 active_start_dx: 0.25,
                 active_start_dz: 0.5,
                 active_window_ticks: 112,
@@ -221,7 +247,7 @@ mod tests {
                 replay_drift_z: 0.0,
                 replay_zero: false,
                 all_gates_pass: false,
-                error: Some("drift detected".to_string()),
+                error: Some("Could not position-match playback start".to_string()),
             },
         ]
     }
@@ -243,10 +269,18 @@ mod tests {
         assert_eq!(val["failed"], 1);
         assert_eq!(val["verdict"], "FAIL");
         assert_eq!(val["mock"], false);
+        assert_eq!(val["max_raw_drift_x"], 0.5);
+        assert_eq!(val["max_full_norm_drift_x"], 0.0);
         assert_eq!(val["cases"][0]["name"], "L");
         assert_eq!(val["cases"][1]["name"], "LR");
-        assert_eq!(val["cases"][1]["error"], "drift detected");
+        assert_eq!(val["cases"][1]["start_matched"], false);
+        assert_eq!(val["cases"][1]["full_norm_drift_x"], 0.0);
+        assert_eq!(val["cases"][1]["full_norm_drift_z"], 0.0);
         assert!(val["cases"][0]["error"].is_null());
+        assert_eq!(
+            val["cases"][1]["error"],
+            "Could not position-match playback start"
+        );
 
         let _ = std::fs::remove_file(&cert_path);
     }
@@ -261,7 +295,7 @@ mod tests {
         let content = std::fs::read_to_string(&cert_path).expect("read cert");
         let val: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
         assert_eq!(val["verdict"], "PASS");
-        assert_eq!(val["all_zero_drift"], true);
+        assert_eq!(val["all_zero_full_norm_drift"], true);
         assert_eq!(val["mock"], true);
 
         let _ = std::fs::remove_file(&cert_path);
