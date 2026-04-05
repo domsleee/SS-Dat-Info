@@ -79,6 +79,8 @@ pub fn run() -> SpeedResetResult {
         std::process::exit(1);
     }
 
+    harness::ensure_exclusive_runtime_ownership(&mut client, "speed reset validation failures");
+
     // Verify Cave 5 is hooked
     {
         let s = client.state();
