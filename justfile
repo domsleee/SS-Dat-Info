@@ -99,6 +99,10 @@ test_acceptance: tas_rust
 test_regression: tas_rust
     cd TAS && cargo run --release --bin tas_test -- regression
 
+# Run mandatory TAS fast lane gates (unit + mock + replay + speed-reset)
+test_fast_lane artifacts_dir='TAS/artifacts/fast-lane/latest':
+    pwsh -NoProfile -File .\scripts\run-tas-fast-lane.ps1 -ArtifactsDir '{{artifacts_dir}}'
+
 # Replay a .tasrec file N times checking for drift (requires running game)
 test_replay file iterations="5":
     cd TAS && cargo run --release --bin tas_test -- replay {{file}} --iterations {{iterations}} --verbose

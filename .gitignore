@@ -6,3 +6,6 @@ replays/**/*Alex*.dat
 replays/**/*Clark*.dat
 
 .DS_Store
+
+# TAS automation artifacts and logs
+TAS/artifacts/

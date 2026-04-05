@@ -88,6 +88,41 @@ Rationale:
 - `speed-reset` protects the historically high-impact Cave 5 OFF-mode regression.
 - Full live-runtime suite stays in manual lane to control cost and hardware contention.
 
+## Automation Entry Points (SSB-300)
+
+Single-command local/agent invocation:
+
+```powershell
+Set-Location C:\Users\user\git\SS-Dat-Info
+just test_fast_lane
+```
+
+Direct script invocation (equivalent):
+
+```powershell
+Set-Location C:\Users\user\git\SS-Dat-Info
+pwsh -NoProfile -File .\scripts\run-tas-fast-lane.ps1 -ArtifactsDir TAS/artifacts/fast-lane/latest
+```
+
+CI workflow target:
+
+- `.github/workflows/tas-fast-lane.yaml`
+- Trigger: every pull request + pushes to `main` and `tas`
+- Runner: self-hosted Windows x64 runtime worker
+
+Expected outputs per run:
+
+- Console `START/END` lines for each gate with status + duration.
+- Gate logs in `TAS/artifacts/fast-lane/latest/logs/`.
+- `tas_test` artifacts in `TAS/artifacts/fast-lane/latest/tas_test_output/` (notably `mock_results.csv` and `mock_certificate.json`).
+- Summary markdown at `TAS/artifacts/fast-lane/latest/summary.md` listing gate status, command, duration, and log path.
+- Workflow artifact upload of the full `TAS/artifacts/fast-lane/latest` directory for triage.
+
+Fail behavior (hard gate):
+
+- Any non-zero gate exit code fails the run.
+- Missing expected pass signatures in gate logs also fail the run.
+
 ## Recurring Manual Live-Runtime Cadence
 
 For schedule, preconditions, evidence requirements, and escalation policy for hardware-backed E2E runs, use:
