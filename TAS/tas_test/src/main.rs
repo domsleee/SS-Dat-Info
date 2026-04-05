@@ -25,6 +25,7 @@ mod harness;
 mod patterns;
 mod regression;
 mod reliability;
+mod refresh_recording;
 mod replay;
 mod speed;
 mod speed_reset;
@@ -129,6 +130,23 @@ fn main() {
                 .iter()
                 .any(|r| r.max_drift_x > 0.0 || r.max_drift_z > 0.0);
             std::process::exit(if any_drift { 1 } else { 0 });
+        }
+        "refresh-tasrec" => {
+            let source = args.get(2).unwrap_or_else(|| {
+                eprintln!("Usage: tas_test refresh-tasrec <source.tasrec> <out.tasrec>");
+                std::process::exit(1);
+            });
+            let out = args.get(3).unwrap_or_else(|| {
+                eprintln!("Usage: tas_test refresh-tasrec <source.tasrec> <out.tasrec>");
+                std::process::exit(1);
+            });
+            match refresh_recording::run(source, out) {
+                Ok(()) => std::process::exit(0),
+                Err(err) => {
+                    eprintln!("ERROR: {}", err);
+                    std::process::exit(1);
+                }
+            }
         }
         "reliability" => {
             let mut iterations = 10u32;
@@ -243,10 +261,14 @@ fn main() {
                 "  cont-reliability CONT splice reliability (default 10x, splice 2400 @ 12x; profile=taps)"
             );
             println!("  replay      Load .tasrec file and play back N times (drift check)");
+            println!("  refresh-tasrec Re-record a .tasrec baseline from live runtime");
             println!();
             println!("Options for replay:");
             println!("  --iterations N  Number of playback iterations (default: 5)");
             println!("  --verbose       Show drift details for every iteration");
+            println!();
+            println!("Usage for refresh-tasrec:");
+            println!("  refresh-tasrec <source.tasrec> <out.tasrec>");
             println!();
             println!("Options for cont-reliability:");
             println!("  --file PATH     Load baseline from .tasrec instead of fresh REC");
