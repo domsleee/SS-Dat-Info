@@ -442,12 +442,38 @@ pub fn restart_play_and_match(
     target: [f32; 3],
     max_retries: u32,
 ) -> bool {
+    restart_play_and_match_with(client, target, max_retries, |c| restart_and_stabilize(c))
+}
+
+/// In-process restart variant of PLAY start matching.
+///
+/// Use this for file-backed replay flows so the restart semantics match the
+/// current egui transport path and file-backed CONT validation.
+pub fn restart_play_and_match_inprocess(
+    client: &mut TasSharedMemoryClient,
+    target: [f32; 3],
+    max_retries: u32,
+) -> bool {
+    restart_play_and_match_with(client, target, max_retries, |c| {
+        restart_and_stabilize_inprocess(c)
+    })
+}
+
+fn restart_play_and_match_with<F>(
+    client: &mut TasSharedMemoryClient,
+    target: [f32; 3],
+    max_retries: u32,
+    mut restart_fn: F,
+) -> bool
+where
+    F: FnMut(&mut TasSharedMemoryClient) -> bool,
+{
     for attempt in 0..=max_retries {
         if attempt > 0 {
             println!("  Retry {}/{}: restarting...", attempt, max_retries);
         }
-        if !restart_and_stabilize(client) {
-            eprintln!("  ERROR: Game not alive after F5");
+        if !restart_fn(client) {
+            eprintln!("  ERROR: Game not alive after restart");
             return false;
         }
 

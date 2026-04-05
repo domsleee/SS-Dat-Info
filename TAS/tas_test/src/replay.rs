@@ -3,6 +3,7 @@
 //! Usage: tas_test replay <path.tasrec> [--iterations N] [--verbose]
 
 use serde::Deserialize;
+use serde_json::Value;
 use tas_shared::{TasSharedMemoryClient, TAS_MAX_TICKS};
 
 use crate::drift;
@@ -28,6 +29,7 @@ pub struct LoadedRecording {
     pub input_log: Vec<u8>,
     pub rec_coords: Vec<[f32; 3]>,
     pub meta: RecordingMetadata,
+    pub raw_meta: Value,
 }
 
 pub fn load_tasrec(path: &std::path::Path) -> Result<LoadedRecording, String> {
@@ -42,7 +44,9 @@ pub fn load_tasrec(path: &std::path::Path) -> Result<LoadedRecording, String> {
     }
 
     let meta_json = std::str::from_utf8(&data[4..4 + meta_len]).map_err(|e| format!("{}", e))?;
-    let meta: RecordingMetadata = serde_json::from_str(meta_json).map_err(|e| format!("{}", e))?;
+    let raw_meta: Value = serde_json::from_str(meta_json).map_err(|e| format!("{}", e))?;
+    let meta: RecordingMetadata =
+        serde_json::from_value(raw_meta.clone()).map_err(|e| format!("{}", e))?;
 
     let count = meta.recorded_count as usize;
     if count > TAS_MAX_TICKS {
@@ -83,7 +87,39 @@ pub fn load_tasrec(path: &std::path::Path) -> Result<LoadedRecording, String> {
         input_log,
         rec_coords,
         meta,
+        raw_meta,
     })
+}
+
+pub fn save_tasrec(
+    path: &std::path::Path,
+    meta: &Value,
+    input_log: &[u8],
+    rec_coords: &[[f32; 3]],
+) -> Result<(), String> {
+    if input_log.len() != rec_coords.len() {
+        return Err(format!(
+            "input/coord length mismatch: {} inputs vs {} coords",
+            input_log.len(),
+            rec_coords.len()
+        ));
+    }
+
+    let meta_json = serde_json::to_string_pretty(meta).map_err(|e| format!("{}", e))?;
+    let meta_bytes = meta_json.as_bytes();
+    let meta_len = meta_bytes.len() as u32;
+
+    let mut data = Vec::with_capacity(4 + meta_bytes.len() + input_log.len() + rec_coords.len() * 12);
+    data.extend_from_slice(&meta_len.to_le_bytes());
+    data.extend_from_slice(meta_bytes);
+    data.extend_from_slice(input_log);
+    for coord in rec_coords {
+        for value in coord {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    std::fs::write(path, data).map_err(|e| format!("{}", e))
 }
 
 /// Write loaded recording into shared memory state.
@@ -225,7 +261,7 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
             println!("  Position matching skipped (--no-match)");
             false
         } else {
-            let m = harness::restart_play_and_match(&mut client, target, 20);
+            let m = harness::restart_play_and_match_inprocess(&mut client, target, 20);
             if !m {
                 println!("  WARNING: Position match failed");
             }
