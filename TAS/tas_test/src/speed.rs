@@ -75,6 +75,8 @@ pub fn run() -> SpeedResult {
         std::process::exit(1);
     }
 
+    harness::ensure_exclusive_runtime_ownership(&mut client, "REC speed scaling failures");
+
     // Verify Cave 5 is hooked (required for speed scaling)
     {
         let s = client.state();

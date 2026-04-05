@@ -73,6 +73,32 @@ pub fn stop_competing_tas_ui_writer() -> u32 {
     0
 }
 
+/// Ensure `tas_test` owns the shared-memory command surface before running
+/// speed-sensitive runtime checks.
+pub fn ensure_exclusive_runtime_ownership(client: &mut TasSharedMemoryClient, failure_hint: &str) {
+    let stopped_writers = stop_competing_tas_ui_writer();
+    stop(client);
+    thread::sleep(Duration::from_millis(100));
+    if stopped_writers == 0 {
+        return;
+    }
+
+    println!(
+        "  Runtime warmup after tas_ui stop ({} writer(s) killed)",
+        stopped_writers
+    );
+    println!(
+        "  NOTE: If {} persists after this, rerun from a clean revive with tas_ui closed.",
+        failure_hint
+    );
+    if !restart_and_stabilize_inprocess(client) {
+        eprintln!("ERROR: Game not alive during pre-test warmup restart");
+        std::process::exit(1);
+    }
+    stop(client);
+    thread::sleep(Duration::from_millis(100));
+}
+
 /// Find the Supreme window handle via PowerShell.
 fn find_supreme_hwnd() -> Option<isize> {
     let output = Command::new("powershell")
@@ -659,7 +685,10 @@ fn wait_continue_anchor(client: &TasSharedMemoryClient, anchor_frame: u32) -> bo
         thread::sleep(Duration::from_millis(20));
         let s = client.state();
         if s.mode == TasMode::Off as u32 {
-            eprintln!("  ERROR: Mode went to OFF before CONT anchor frame {}", anchor_frame);
+            eprintln!(
+                "  ERROR: Mode went to OFF before CONT anchor frame {}",
+                anchor_frame
+            );
             return false;
         }
         if s.mode == TasMode::Rec as u32 {
