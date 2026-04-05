@@ -67,14 +67,18 @@ Expected pass result per tier:
 - `cover = ok` in summary table
 - `fwd = ok` in summary table
 
-## 3) File-Backed Run (FE-decent baseline)
+## 3) File-Backed CONT Diagnostic (FE-decent compatibility baseline)
+
+This command is compatibility evidence only. Do not treat it as a required release or CI gate while replay-vs-CONT baseline semantics remain split.
 
 ```powershell
 Set-Location C:\Users\user\git\SS-Dat-Info\TAS
 cargo run --release --bin tas_test -- cont-reliability --file recordings/FE-decent.tasrec --splice 2400 --iterations 1 --speed 12
 ```
 
-## 4) Replay-Only Drift Check for a Recording
+## 4) Replay-Only Compatibility Diagnostic
+
+This command is also diagnostic-only for FE-decent. Capture the output for comparison, but do not fail a heartbeat solely on this result unless the active issue is specifically about FE-decent compatibility.
 
 ```powershell
 Set-Location C:\Users\user\git\SS-Dat-Info\TAS
