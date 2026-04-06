@@ -109,7 +109,8 @@ pub fn save_tasrec(
     let meta_bytes = meta_json.as_bytes();
     let meta_len = meta_bytes.len() as u32;
 
-    let mut data = Vec::with_capacity(4 + meta_bytes.len() + input_log.len() + rec_coords.len() * 12);
+    let mut data =
+        Vec::with_capacity(4 + meta_bytes.len() + input_log.len() + rec_coords.len() * 12);
     data.extend_from_slice(&meta_len.to_le_bytes());
     data.extend_from_slice(meta_bytes);
     data.extend_from_slice(input_log);

@@ -245,7 +245,10 @@ mod tests {
         let state = zeroed_state();
         let assessment = run_gates(&state, 30);
         assert!(!assessment.gates[0].passed);
-        assert_eq!(assessment.gates[0].detail, "0/1 reference frames have non-zero Z");
+        assert_eq!(
+            assessment.gates[0].detail,
+            "0/1 reference frames have non-zero Z"
+        );
     }
 
     #[test]
@@ -254,7 +257,10 @@ mod tests {
         state.rec_coords[24] = [0.0, 0.0, 123.0];
         let assessment = run_gates(&state, 25);
         assert!(assessment.gates[0].passed);
-        assert_eq!(assessment.gates[0].detail, "1/1 reference frames have non-zero Z");
+        assert_eq!(
+            assessment.gates[0].detail,
+            "1/1 reference frames have non-zero Z"
+        );
     }
 
     #[test]
