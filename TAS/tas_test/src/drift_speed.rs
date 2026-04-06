@@ -111,7 +111,7 @@ fn play_at_speed(
     client.state_mut().playback_speed = speed;
     println!("  Set playback_speed = {} for PLAY", speed);
 
-    if !harness::restart_play_and_match(client, rec_start, 20) {
+    if !harness::restart_play_and_match(client, rec_start, 20).matched() {
         eprintln!("WARNING: Could not match position for PLAY at {}x", speed);
         return false;
     }

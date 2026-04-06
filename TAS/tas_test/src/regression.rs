@@ -50,6 +50,8 @@ pub struct CaseResult {
     pub name: String,
     pub pattern: String,
     pub start_matched: bool,
+    /// "exact", "trajectory", or "none"
+    pub start_match_tier: String,
     pub rec_count: u32,
     pub transitions: u32,
     pub first_input_tick: i32,
@@ -231,8 +233,8 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
         append_csv(csv_path, &result);
 
         println!(
-            "  Result: startMatched={} rawDrift=({:.9}, {:.9}) fullNorm=({:.9}, {:.9}) rawZero={} gates={}",
-            result.start_matched,
+            "  Result: startMatch={} rawDrift=({:.9}, {:.9}) fullNorm=({:.9}, {:.9}) rawZero={} gates={}",
+            result.start_match_tier,
             result.replay_drift_x,
             result.replay_drift_z,
             result.full_norm_drift_x,
@@ -257,14 +259,14 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
     );
     for r in &results {
         println!(
-            "  {} {} — raw({:.9}, {:.9}) fullNorm({:.9}, {:.9}) startMatched={}",
+            "  {} {} — raw({:.9}, {:.9}) fullNorm({:.9}, {:.9}) startMatch={}",
             if r.all_gates_pass { "PASS" } else { "FAIL" },
             r.name,
             r.replay_drift_x,
             r.replay_drift_z,
             r.full_norm_drift_x,
             r.full_norm_drift_z,
-            r.start_matched,
+            r.start_match_tier,
         );
     }
 
@@ -316,9 +318,15 @@ fn run_single_case(
 
     // Phase 2: Playback
     let rec_start = client.state().rec_coords[0];
-    let start_matched = match start_playback_with_fallback(client, rec_start, "playback") {
-        Ok(matched) => matched,
+    let match_result = match start_playback_with_fallback(client, rec_start, "playback") {
+        Ok(r) => r,
         Err(err) => return error_result(case, &err),
+    };
+    let start_matched = match_result.matched();
+    let start_match_tier = match match_result {
+        harness::StartMatchResult::Exact => "exact",
+        harness::StartMatchResult::Trajectory(_) => "trajectory",
+        harness::StartMatchResult::NoMatch => "none",
     };
     let play_ok = harness::wait_playback(client, rec_count);
 
@@ -339,6 +347,7 @@ fn run_single_case(
         name: case.name.clone(),
         pattern: case.pattern_str.clone(),
         start_matched,
+        start_match_tier: start_match_tier.to_string(),
         rec_count,
         transitions: metrics.transitions,
         first_input_tick: metrics.first_input_tick,
@@ -400,9 +409,15 @@ fn run_mock_case(
         "  Mock start target: ({:.6}, {:.6}, {:.6})",
         target[0], target[1], target[2]
     );
-    let start_matched = match start_playback_with_fallback(client, target, "mock playback") {
-        Ok(matched) => matched,
+    let match_result = match start_playback_with_fallback(client, target, "mock playback") {
+        Ok(r) => r,
         Err(err) => return error_result(case, &err),
+    };
+    let start_matched = match_result.matched();
+    let start_match_tier = match match_result {
+        harness::StartMatchResult::Exact => "exact",
+        harness::StartMatchResult::Trajectory(_) => "trajectory",
+        harness::StartMatchResult::NoMatch => "none",
     };
 
     let play_ok = harness::wait_playback(client, baseline_count);
@@ -424,6 +439,7 @@ fn run_mock_case(
         name: case.name.clone(),
         pattern: case.pattern_str.clone(),
         start_matched,
+        start_match_tier: start_match_tier.to_string(),
         rec_count: baseline_count,
         transitions: metrics.transitions,
         first_input_tick: metrics.first_input_tick,
@@ -451,13 +467,14 @@ fn start_playback_with_fallback(
     client: &mut tas_shared::TasSharedMemoryClient,
     target: [f32; 3],
     label: &str,
-) -> Result<bool, String> {
-    if harness::restart_play_and_match(client, target, START_MATCH_RETRIES) {
-        return Ok(true);
+) -> Result<harness::StartMatchResult, String> {
+    let result = harness::restart_play_and_match(client, target, START_MATCH_RETRIES);
+    if result.matched() {
+        return Ok(result);
     }
 
     println!(
-        "  WARNING: Could not exact-match {} start after retries; retrying once without exact matching",
+        "  WARNING: Could not match {} start after retries; retrying once without matching",
         label
     );
     if !harness::restart_and_stabilize(client) {
@@ -467,7 +484,7 @@ fn start_playback_with_fallback(
         ));
     }
     harness::arm_play(client);
-    Ok(false)
+    Ok(harness::StartMatchResult::NoMatch)
 }
 
 /// Drive Pico HID according to the pattern step schedule (delegates to harness).
@@ -480,6 +497,7 @@ fn error_result(case: &RegressionCase, msg: &str) -> CaseResult {
         name: case.name.clone(),
         pattern: case.pattern_str.clone(),
         start_matched: false,
+        start_match_tier: "none".to_string(),
         rec_count: 0,
         transitions: 0,
         first_input_tick: -1,
@@ -519,7 +537,7 @@ fn write_csv_header(path: &Path) {
     if let Ok(mut f) = fs::File::create(path) {
         let _ = writeln!(
             f,
-            "case_name,pattern,start_matched,rec_count,transitions,first_input_tick,frame0_dx,frame0_dz,full_norm_drift_x,full_norm_drift_z,active_start_dx,active_start_dz,active_window_ticks,active_norm_drift_x,active_norm_drift_z,live_drift_x,live_drift_z,live_zero,replay_drift_x,replay_drift_z,replay_zero,all_gates_pass,error"
+            "case_name,pattern,start_matched,start_match_tier,rec_count,transitions,first_input_tick,frame0_dx,frame0_dz,full_norm_drift_x,full_norm_drift_z,active_start_dx,active_start_dz,active_window_ticks,active_norm_drift_x,active_norm_drift_z,live_drift_x,live_drift_z,live_zero,replay_drift_x,replay_drift_z,replay_zero,all_gates_pass,error"
         );
     }
 }
@@ -528,10 +546,11 @@ fn append_csv(path: &Path, r: &CaseResult) {
     if let Ok(mut f) = fs::OpenOptions::new().append(true).open(path) {
         let _ = writeln!(
             f,
-            "\"{}\",\"{}\",{},{},{},{},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{},{},\"{}\"",
+            "\"{}\",\"{}\",{},{},{},{},{},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{},{},\"{}\"",
             r.name,
             r.pattern,
             r.start_matched,
+            r.start_match_tier,
             r.rec_count,
             r.transitions,
             r.first_input_tick,

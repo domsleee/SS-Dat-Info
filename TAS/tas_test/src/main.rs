@@ -420,7 +420,7 @@ fn run_segment_test() {
         total_count
     );
 
-    if !harness::restart_play_and_match(&mut client, rec_start, 20) {
+    if !harness::restart_play_and_match(&mut client, rec_start, 20).matched() {
         eprintln!("WARNING: Could not match position for PLAY (continuing anyway)");
     }
     let play_ok = harness::wait_playback(&client, total_count);
@@ -555,7 +555,7 @@ fn run_f5_aligned_test() {
 
     // Phase 2: F5 + PLAY (match REC starting position via play_coords[0])
     println!("\n--- Phase 2: F5 + PLAY ---");
-    if !harness::restart_play_and_match(&mut client, rec_start, 20) {
+    if !harness::restart_play_and_match(&mut client, rec_start, 20).matched() {
         eprintln!("WARNING: Could not match REC position for PLAY (continuing anyway)");
     }
     // Playback is already running from restart_play_and_match

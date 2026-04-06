@@ -56,6 +56,65 @@ pub fn dump_settle_trace(entries: &[TasSettleTraceEntry], label: &str, attempt: 
 const F5_SETTLE_MS: u64 = 4000;
 /// Frames to wait for physics stabilization after restart.
 const STABILIZE_FRAMES: u32 = 500;
+
+/// Known post-restart drift rate per frame (from SSB-313 telemetry).
+/// Player slides continuously at this rate during idle after restart.
+const DRIFT_RATE_X: f64 = -0.02083;
+const DRIFT_RATE_Z: f64 = 0.11635;
+
+/// Tolerance for trajectory alignment check (in drift-rate units).
+/// If the offset from target divided by drift rate gives a consistent
+/// frame count within this tolerance, it's on-trajectory.
+const TRAJECTORY_FRAME_TOLERANCE: f64 = 0.5;
+
+/// Result of a position-match attempt.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StartMatchResult {
+    /// Exact bit-for-bit match with target position.
+    Exact,
+    /// Position lies on the known post-restart drift trajectory.
+    /// The f64 is the estimated frame offset from the target.
+    Trajectory(f64),
+    /// No match — position is not on the expected trajectory.
+    NoMatch,
+}
+
+impl StartMatchResult {
+    pub fn matched(&self) -> bool {
+        !matches!(self, StartMatchResult::NoMatch)
+    }
+
+    pub fn is_exact(&self) -> bool {
+        matches!(self, StartMatchResult::Exact)
+    }
+}
+
+/// Check if a play position lies on the known drift trajectory relative to target.
+fn check_trajectory_match(play: [f32; 3], target: [f32; 3]) -> StartMatchResult {
+    // Exact match first
+    if play[0].to_bits() == target[0].to_bits()
+        && play[1].to_bits() == target[1].to_bits()
+        && play[2].to_bits() == target[2].to_bits()
+    {
+        return StartMatchResult::Exact;
+    }
+
+    let dx = play[0] as f64 - target[0] as f64;
+    let dz = play[2] as f64 - target[2] as f64;
+
+    // Estimate frame offset from each axis
+    let frames_from_x = dx / DRIFT_RATE_X;
+    let frames_from_z = dz / DRIFT_RATE_Z;
+
+    // Both axes should give the same frame offset if on-trajectory
+    let frame_diff = (frames_from_x - frames_from_z).abs();
+    if frame_diff < TRAJECTORY_FRAME_TOLERANCE {
+        let avg_frames = (frames_from_x + frames_from_z) / 2.0;
+        StartMatchResult::Trajectory(avg_frames)
+    } else {
+        StartMatchResult::NoMatch
+    }
+}
 /// Timeout waiting for in-process restart state machine to finish.
 const RESTART_TIMEOUT_SECS: u64 = 15;
 /// Playback timeout (long enough for 65536 frames at ~50fps unfocused).
@@ -473,13 +532,12 @@ Write-Output "OK"
 
 /// F5 restart + stabilize, then start PLAY and check if play_coords[0] matches target.
 /// No position forcing — relies on F5 producing deterministic restart positions.
-/// F5 produces ~3 quantized positions; retries until one matches naturally.
-/// Returns true if playback is running with correct start position.
+/// Returns `StartMatchResult` indicating exact, trajectory-aligned, or no match.
 pub fn restart_play_and_match(
     client: &mut TasSharedMemoryClient,
     target: [f32; 3],
     max_retries: u32,
-) -> bool {
+) -> StartMatchResult {
     restart_play_and_match_with(client, target, max_retries, |c| restart_and_stabilize(c))
 }
 
@@ -491,7 +549,7 @@ pub fn restart_play_and_match_inprocess(
     client: &mut TasSharedMemoryClient,
     target: [f32; 3],
     max_retries: u32,
-) -> bool {
+) -> StartMatchResult {
     restart_play_and_match_with(client, target, max_retries, |c| {
         restart_and_stabilize_inprocess(c)
     })
@@ -502,7 +560,7 @@ fn restart_play_and_match_with<F>(
     target: [f32; 3],
     max_retries: u32,
     mut restart_fn: F,
-) -> bool
+) -> StartMatchResult
 where
     F: FnMut(&mut TasSharedMemoryClient) -> bool,
 {
@@ -513,7 +571,7 @@ where
         }
         if !restart_fn(client) {
             eprintln!("  ERROR: Game not alive after restart");
-            return false;
+            return StartMatchResult::NoMatch;
         }
         // Enable settle trace AFTER restart stabilizes so we capture post-restart position
         if trace_enabled {
@@ -545,23 +603,36 @@ where
             continue;
         }
         let pc0 = s.play_coords[0];
-        let match_x = pc0[0].to_bits() == target[0].to_bits();
-        let match_y = pc0[1].to_bits() == target[1].to_bits();
-        let match_z = pc0[2].to_bits() == target[2].to_bits();
-        if match_x && match_y && match_z {
-            println!("  Position matched (attempt {})", attempt + 1);
-            return true;
+        let result = check_trajectory_match(pc0, target);
+
+        match result {
+            StartMatchResult::Exact => {
+                println!("  Position matched exactly (attempt {})", attempt + 1);
+                return result;
+            }
+            StartMatchResult::Trajectory(frames) => {
+                println!(
+                    "  Trajectory-aligned: {:.1} frames offset (attempt {})",
+                    frames,
+                    attempt + 1
+                );
+                // Accept trajectory match on first occurrence — don't keep retrying
+                // for exact when we already have a valid on-trajectory start
+                return result;
+            }
+            StartMatchResult::NoMatch => {
+                let dx = (pc0[0] as f64 - target[0] as f64).abs();
+                let dz = (pc0[2] as f64 - target[2] as f64).abs();
+                println!("  play_coords[0] offset: dx={:.9} dz={:.9}", dx, dz);
+                stop(client);
+            }
         }
-        let dx = (pc0[0] as f64 - target[0] as f64).abs();
-        let dz = (pc0[2] as f64 - target[2] as f64).abs();
-        println!("  play_coords[0] offset: dx={:.9} dz={:.9}", dx, dz);
-        stop(client);
     }
     eprintln!(
         "  WARNING: Could not match position after {} retries",
         max_retries
     );
-    false
+    StartMatchResult::NoMatch
 }
 
 /// F5 restart + stabilize, force start position, then start PLAY and verify
