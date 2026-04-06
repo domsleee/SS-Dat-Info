@@ -7,7 +7,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
+use tas_shared::{TasCommand, TasMode, TasSettleTraceEntry, TasSharedMemoryClient};
 
 /// Pico HID COM port. Override with `TAS_PICO_PORT` env var (default: COM7).
 pub fn pico_port() -> String {
@@ -20,6 +20,36 @@ fn extra_restart_settle_frames() -> u32 {
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(0)
+}
+
+/// Whether settle trace telemetry is enabled (TAS_TEST_SETTLE_TRACE=1).
+fn settle_trace_enabled() -> bool {
+    std::env::var("TAS_TEST_SETTLE_TRACE")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Dump settle trace entries to a CSV file in the output directory.
+pub fn dump_settle_trace(entries: &[TasSettleTraceEntry], label: &str, attempt: u32) {
+    let output_dir = match std::env::var("TAS_TEST_OUTPUT") {
+        Ok(d) => std::path::PathBuf::from(d),
+        Err(_) => return, // No output dir, skip dump
+    };
+    let _ = std::fs::create_dir_all(&output_dir);
+    let path = output_dir.join(format!("settle_trace_{}_{}.csv", label, attempt));
+    let mut f = match std::fs::File::create(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("  WARNING: Cannot create settle trace file {:?}: {}", path, e);
+            return;
+        }
+    };
+    let _ = writeln!(f, "frame,x,y,z");
+    for e in entries {
+        let _ = writeln!(f, "{},{:.9},{:.9},{:.9}", e.frame, e.x, e.y, e.z);
+    }
+    println!("  Settle trace: {} entries -> {:?}", entries.len(), path);
 }
 
 /// How long to wait after F5 for the game to restart loading.
@@ -476,9 +506,14 @@ fn restart_play_and_match_with<F>(
 where
     F: FnMut(&mut TasSharedMemoryClient) -> bool,
 {
+    let trace_enabled = settle_trace_enabled();
     for attempt in 0..=max_retries {
         if attempt > 0 {
             println!("  Retry {}/{}: restarting...", attempt, max_retries);
+        }
+        // Enable settle trace capture before restart
+        if trace_enabled {
+            client.set_settle_trace_enabled(true);
         }
         if !restart_fn(client) {
             eprintln!("  ERROR: Game not alive after restart");
@@ -491,6 +526,13 @@ where
                 extra_settle_frames
             );
             wait_frames(client, extra_settle_frames);
+        }
+
+        // Dump settle trace before arming playback
+        if trace_enabled {
+            client.set_settle_trace_enabled(false);
+            let trace = client.read_settle_trace();
+            dump_settle_trace(&trace, "match", attempt);
         }
 
         arm_play(client);

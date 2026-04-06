@@ -321,6 +321,7 @@ static void ProcessCommand(TasSharedState* s) {
             // Begin in-process F5 restart sequence
             s->restart_state = 1;
             s->restart_frames_held = 0;
+            s->settle_trace_count = 0;  // Reset trace for new restart cycle
             g_cave2_pendingLog = 7;  // "restart initiated"
             break;
     }
@@ -396,6 +397,18 @@ static void __declspec(noinline) Cave2_Logic() {
                 memcpy(s->rotation_matrix, (uint8_t*)physics + GameAddresses::PHYSICS_ROT, 36);
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    // Settle trace: capture position every frame during post-restart settle
+    if (s->settle_trace_enabled && s->restart_state == 2 && s->mode == MODE_OFF) {
+        uint32_t idx = s->settle_trace_count;
+        if (idx < TAS_SETTLE_TRACE_SIZE) {
+            s->settle_trace[idx].x = s->player_x;
+            s->settle_trace[idx].y = s->player_y;
+            s->settle_trace[idx].z = s->player_z;
+            s->settle_trace[idx].frame = s->frame_count;
+            s->settle_trace_count = idx + 1;
+        }
     }
 
     ProcessCommand(s);

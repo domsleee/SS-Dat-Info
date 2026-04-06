@@ -6,11 +6,12 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 6;  // Bumped for hook performance counters
+constexpr uint32_t TAS_SHARED_VERSION = 7;  // Bumped for settle trace telemetry
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
 constexpr uint32_t TAS_LOG_ENTRY_SIZE = 120;   // Max text bytes per entry (incl NUL)
+constexpr uint32_t TAS_SETTLE_TRACE_SIZE = 1024; // Max settle trace entries
 
 // Commands (UI -> DLL)
 enum TasCommand : uint32_t {
@@ -45,6 +46,12 @@ enum TasLogSeverity : uint32_t {
     LOG_INFO  = 1,
     LOG_WARN  = 2,
     LOG_ERROR = 3,
+};
+
+// A settle trace entry: position at one frame during post-restart settle (16 bytes)
+struct TasSettleTraceEntry {
+    float x, y, z;
+    uint32_t frame;           // frame_count at capture time
 };
 
 // A segment boundary record (8 bytes)
@@ -155,6 +162,11 @@ struct TasSharedState {
     // -- Log ring buffer (DLL writes, UI reads) --
     volatile uint32_t log_write_seq;              // Next sequence number to write (monotonic)
     TasLogEntry       log_ring[TAS_LOG_RING_SIZE]; // Circular buffer of log entries
+
+    // -- Settle trace (DLL writes during MODE_OFF after restart, tests read) --
+    uint32_t settle_trace_enabled;                // 0=disabled, 1=capture during settle
+    uint32_t settle_trace_count;                  // Number of valid entries
+    TasSettleTraceEntry settle_trace[TAS_SETTLE_TRACE_SIZE];
 };
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks

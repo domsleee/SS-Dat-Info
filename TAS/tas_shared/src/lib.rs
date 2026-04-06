@@ -1,9 +1,10 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 6; // Phase 6: hook performance counters
+pub const TAS_SHARED_VERSION: u32 = 7; // Phase 7: settle trace telemetry
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
 pub const TAS_LOG_ENTRY_SIZE: usize = 120;
+pub const TAS_SETTLE_TRACE_SIZE: usize = 1024;
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -96,6 +97,16 @@ pub mod input_bits {
         (JUMP, "J", "Jump"),
         (SHIFT, "S", "Shift"),
     ];
+}
+
+/// A settle trace entry: position at one frame during post-restart settle (16 bytes)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TasSettleTraceEntry {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub frame: u32,
 }
 
 /// Must match the C++ TasSharedState layout exactly.
@@ -191,6 +202,11 @@ pub struct TasSharedState {
     // Log ring buffer (DLL writes, UI reads)
     pub log_write_seq: u32,
     pub log_ring: [TasLogEntry; TAS_LOG_RING_SIZE],
+
+    // Settle trace (DLL writes during MODE_OFF after restart, tests read)
+    pub settle_trace_enabled: u32,
+    pub settle_trace_count: u32,
+    pub settle_trace: [TasSettleTraceEntry; TAS_SETTLE_TRACE_SIZE],
 }
 
 impl TasSharedState {
@@ -387,6 +403,30 @@ mod platform {
         pub fn reset_hook_perf_counters(&mut self) {
             self.state_mut().reset_hook_perf_counters();
         }
+
+        /// Enable or disable settle trace capture in the DLL.
+        pub fn set_settle_trace_enabled(&mut self, enabled: bool) {
+            unsafe {
+                let ptr = std::ptr::addr_of_mut!((*self.ptr).settle_trace_enabled);
+                std::ptr::write_volatile(ptr, if enabled { 1 } else { 0 });
+            }
+        }
+
+        /// Read the current settle trace count.
+        pub fn settle_trace_count(&self) -> u32 {
+            unsafe {
+                let ptr = std::ptr::addr_of!((*self.ptr).settle_trace_count);
+                std::ptr::read_volatile(ptr)
+            }
+        }
+
+        /// Read settle trace entries (up to count).
+        pub fn read_settle_trace(&self) -> Vec<TasSettleTraceEntry> {
+            let count = self.settle_trace_count() as usize;
+            let count = count.min(TAS_SETTLE_TRACE_SIZE);
+            let s = self.state();
+            s.settle_trace[..count].to_vec()
+        }
     }
 
     impl Drop for TasSharedMemoryClient {
@@ -480,7 +520,7 @@ mod tests {
     #[test]
     fn size_of_tas_shared_state_pinned() {
         // Pin the total struct size so C++ and Rust sides stay in sync.
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_232);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_624);
     }
 
     #[test]
@@ -516,6 +556,11 @@ mod tests {
     fn size_of_tas_log_entry() {
         // 4 (sequence) + 4 (severity) + 120 (text) = 128
         assert_eq!(mem::size_of::<TasLogEntry>(), 128);
+    }
+
+    #[test]
+    fn size_of_tas_settle_trace_entry() {
+        assert_eq!(mem::size_of::<TasSettleTraceEntry>(), 16);
     }
 
     #[test]
