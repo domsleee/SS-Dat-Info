@@ -14,6 +14,14 @@ pub fn pico_port() -> String {
     std::env::var("TAS_PICO_PORT").unwrap_or_else(|_| "COM7".into())
 }
 
+/// Optional extra settle delay after restart before arming playback.
+fn extra_restart_settle_frames() -> u32 {
+    std::env::var("TAS_TEST_EXTRA_RESTART_SETTLE_FRAMES")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
 /// How long to wait after F5 for the game to restart loading.
 const F5_SETTLE_MS: u64 = 4000;
 /// Frames to wait for physics stabilization after restart.
@@ -476,6 +484,14 @@ where
             eprintln!("  ERROR: Game not alive after restart");
             return false;
         }
+        let extra_settle_frames = extra_restart_settle_frames();
+        if extra_settle_frames > 0 {
+            println!(
+                "  Extra restart settle: waiting {} frames before ARM_PLAY",
+                extra_settle_frames
+            );
+            wait_frames(client, extra_settle_frames);
+        }
 
         arm_play(client);
         // Wait for at least 1 frame of playback to capture play_coords[0]
@@ -525,6 +541,14 @@ pub fn restart_play_and_force(
         if !restart_and_stabilize(client) {
             eprintln!("  ERROR: Game not alive after F5");
             return false;
+        }
+        let extra_settle_frames = extra_restart_settle_frames();
+        if extra_settle_frames > 0 {
+            println!(
+                "  Extra restart settle: waiting {} frames before position force",
+                extra_settle_frames
+            );
+            wait_frames(client, extra_settle_frames);
         }
 
         // Force position before arming PLAY
