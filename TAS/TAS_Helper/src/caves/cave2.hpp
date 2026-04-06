@@ -399,8 +399,8 @@ static void __declspec(noinline) Cave2_Logic() {
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    // Settle trace: capture position every frame during post-restart settle
-    if (s->settle_trace_enabled && s->restart_state == 2 && s->mode == MODE_OFF) {
+    // Settle trace: capture position every frame while enabled (Rust controls window)
+    if (s->settle_trace_enabled && s->mode == MODE_OFF) {
         uint32_t idx = s->settle_trace_count;
         if (idx < TAS_SETTLE_TRACE_SIZE) {
             s->settle_trace[idx].x = s->player_x;

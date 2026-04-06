@@ -405,8 +405,13 @@ mod platform {
         }
 
         /// Enable or disable settle trace capture in the DLL.
+        /// When enabling, resets the trace count so capture starts fresh.
         pub fn set_settle_trace_enabled(&mut self, enabled: bool) {
             unsafe {
+                if enabled {
+                    let count_ptr = std::ptr::addr_of_mut!((*self.ptr).settle_trace_count);
+                    std::ptr::write_volatile(count_ptr, 0);
+                }
                 let ptr = std::ptr::addr_of_mut!((*self.ptr).settle_trace_enabled);
                 std::ptr::write_volatile(ptr, if enabled { 1 } else { 0 });
             }

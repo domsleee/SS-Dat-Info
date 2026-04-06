@@ -511,13 +511,13 @@ where
         if attempt > 0 {
             println!("  Retry {}/{}: restarting...", attempt, max_retries);
         }
-        // Enable settle trace capture before restart
-        if trace_enabled {
-            client.set_settle_trace_enabled(true);
-        }
         if !restart_fn(client) {
             eprintln!("  ERROR: Game not alive after restart");
             return false;
+        }
+        // Enable settle trace AFTER restart stabilizes so we capture post-restart position
+        if trace_enabled {
+            client.set_settle_trace_enabled(true);
         }
         let extra_settle_frames = extra_restart_settle_frames();
         if extra_settle_frames > 0 {
