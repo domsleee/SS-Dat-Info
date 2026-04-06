@@ -559,11 +559,7 @@ pub fn run(
                 prefix_max_z = prefix_stats.max_z;
                 println!(
                     "  Drift over replayed prefix [0..{}): X={:.9} (frame {}) Z={:.9} (frame {})",
-                    assessed_prefix,
-                    max_drift_x,
-                    max_drift_frame_x,
-                    max_drift_z,
-                    max_drift_frame_z
+                    assessed_prefix, max_drift_x, max_drift_frame_x, max_drift_z, max_drift_frame_z
                 );
                 println!(
                     "  Prefix range PLAY: X[{:.3}..{:.3}] Z[{:.3}..{:.3}] net_z={:.3} steps(+/-/0)={}/{}/{}",

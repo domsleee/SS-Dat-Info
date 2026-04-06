@@ -194,7 +194,10 @@ fn wait_for_frame_delta(client: &TasSharedMemoryClient, delta: u32) -> Result<u3
     }
 }
 
-fn sample_window(client: &mut TasSharedMemoryClient, frames: u32) -> Result<ScenarioSample, String> {
+fn sample_window(
+    client: &mut TasSharedMemoryClient,
+    frames: u32,
+) -> Result<ScenarioSample, String> {
     client.reset_hook_perf_counters();
     let t0 = Instant::now();
     let advanced = wait_for_frame_delta(client, frames)?;
@@ -224,7 +227,10 @@ fn run_idle_off(client: &mut TasSharedMemoryClient, frames: u32) -> Result<Scena
     sample_window(client, frames)
 }
 
-fn run_rec_neutral(client: &mut TasSharedMemoryClient, frames: u32) -> Result<ScenarioSample, String> {
+fn run_rec_neutral(
+    client: &mut TasSharedMemoryClient,
+    frames: u32,
+) -> Result<ScenarioSample, String> {
     harness::stop(client);
     thread::sleep(Duration::from_millis(100));
     harness::arm_rec(client);

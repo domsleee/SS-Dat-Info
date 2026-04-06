@@ -28,7 +28,10 @@ pub fn run(source: &str, out: &str) -> Result<(), String> {
 
     println!(
         "Loaded: {} ticks, inject_mode={}, fft={}, force_direct={}",
-        loaded.count, loaded.meta.inject_mode, loaded.meta.force_fixed_tick, loaded.meta.force_direct
+        loaded.count,
+        loaded.meta.inject_mode,
+        loaded.meta.force_fixed_tick,
+        loaded.meta.force_direct
     );
 
     let mut client = harness::connect();
