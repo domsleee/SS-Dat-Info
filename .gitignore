@@ -9,7 +9,3 @@ replays/**/*Clark*.dat
 
 # TAS automation artifacts and logs
 TAS/artifacts/
-
-.codex
-openspec
-tasks
