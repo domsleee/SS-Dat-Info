@@ -26,13 +26,12 @@ display_config:
 [parallel]
 tas: tas_dll tas_rust
 
-# Build TAS_Helper.dll + Injector.exe (C++ / MSBuild)
+# Build TAS_Helper.dll (C++ / MSBuild) — Injector.exe is built by Display_Config
 tas_dll:
     $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath; \
     Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"; \
     Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation; \
-    msbuild .\TAS\TAS_Helper\TAS_Helper.vcxproj /v:minimal /p:Configuration=Release /m; \
-    msbuild .\TAS\Injector\Injector.vcxproj /v:minimal /p:Configuration=Release /m
+    msbuild .\TAS\TAS_Helper\TAS_Helper.vcxproj /v:minimal /p:Configuration=Release /m
 
 # Build TAS Rust workspace (tas_ui + tas_test + tas_shared)
 tas_rust:
@@ -40,7 +39,7 @@ tas_rust:
 
 # ── Deploy ────────────────────────────────────────────────────────
 
-# Deploy TAS to the game folder (creates TAS_Helper/ next to Supreme.exe)
+# Deploy TAS to the game folder (creates Display_Config_Resources/TAS/ next to Supreme.exe)
 deploy: tas
     $ErrorActionPreference = 'Stop'; \
     $running = @(Get-Process -Name Supreme,Supreme_v1.035,Display_Config,'display-config',tas_ui,tas_test -ErrorAction SilentlyContinue | Sort-Object Id -Unique); \
@@ -50,10 +49,9 @@ deploy: tas
         Start-Sleep -Milliseconds 500; \
         Write-Host "Stopped running processes for deploy: $names"; \
     }; \
-    $dest = '{{supreme_folder}}\TAS_Helper'; \
+    $dest = '{{supreme_folder}}\Display_Config_Resources\TAS'; \
     if (!(Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }; \
     Copy-Item .\TAS\TAS_Helper\Release\TAS_Helper.dll $dest\ -Force; \
-    Copy-Item .\TAS\Injector\Release\Injector.exe $dest\ -Force; \
     Copy-Item .\TAS\target\release\tas_ui.exe $dest\ -Force; \
     Copy-Item .\TAS\target\release\tas_test.exe $dest\ -Force; \
     Write-Host "Deployed TAS to $dest"

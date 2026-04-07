@@ -38,7 +38,9 @@ pub async fn run_inject(trainer_settings: TrainerSettings) -> Result<String, Str
     serde_json::to_writer_pretty(writer, &trainer_settings).unwrap();
 
     let injector_path = display_config_resources.join("Injector.exe");
+    let dll_path = display_config_resources.join("Display_Config_Helper.dll");
     let status = Command::new(injector_path)
+        .arg(&dll_path)
         .creation_flags(0x08000000) // CREATE_NO_WINDOW (https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags)
         .current_dir(&display_config_resources)
         .status()
@@ -61,18 +63,20 @@ pub fn get_display_config_resources_path() -> PathBuf {
 }
 
 /// Inject TAS_Helper.dll into the running Supreme.exe process.
-/// Looks for TAS_Helper/Injector.exe and TAS_Helper.dll next to Display_Config_Resources.
+/// Uses the shared Injector.exe in Display_Config_Resources, with TAS payload
+/// files located under Display_Config_Resources/TAS/.
 #[tauri::command]
 #[specta::specta]
 pub async fn run_tas_inject() -> Result<String, String> {
     let supreme_folder = get_supreme_folder();
-    let tas_folder = supreme_folder.join("TAS_Helper");
-    let injector_path = tas_folder.join("Injector.exe");
+    let display_config_resources = supreme_folder.join("Display_Config_Resources");
+    let tas_folder = display_config_resources.join("TAS");
+    let injector_path = display_config_resources.join("Injector.exe");
     let dll_path = tas_folder.join("TAS_Helper.dll");
 
     if !injector_path.exists() {
         return Err(format!(
-            "TAS Injector not found at {}",
+            "Injector not found at {}",
             injector_path.display()
         ));
     }
@@ -84,13 +88,14 @@ pub async fn run_tas_inject() -> Result<String, String> {
     }
 
     let status = Command::new(&injector_path)
+        .arg(&dll_path)
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .current_dir(&tas_folder)
         .status()
-        .map_err(|err| format!("Failed to spawn TAS Injector: {err}"))?;
+        .map_err(|err| format!("Failed to spawn Injector: {err}"))?;
 
     if !status.success() {
-        return Err("TAS Injector.exe failed.\nIs Supreme.exe running?".to_string());
+        return Err("Injector.exe failed.\nIs Supreme.exe running?".to_string());
     }
 
     // Launch tas_ui.exe (SSB Inspect) as a detached process
