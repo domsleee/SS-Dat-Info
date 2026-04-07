@@ -28,24 +28,42 @@ DWORD FindProcess(const wchar_t* name) {
 
 void Inject(DWORD pid, std::string dll) {
     HANDLE hProc = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD, 0, pid);
+    if (!hProc) {
+        std::cout << "Failed to open process " << pid << " (error " << GetLastError() << ")\n";
+        return;
+    }
     LPVOID mem = VirtualAllocEx(hProc, 0, MAX_PATH, MEM_COMMIT, PAGE_READWRITE);
     WriteProcessMemory(hProc, mem, dll.c_str(), dll.length() + 1, 0);
-    CreateRemoteThread(hProc, 0, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, mem, 0, 0);
+    HANDLE hThread = CreateRemoteThread(hProc, 0, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, mem, 0, 0);
+    if (hThread) {
+        WaitForSingleObject(hThread, 5000);
+        CloseHandle(hThread);
+    }
+    VirtualFreeEx(hProc, mem, 0, MEM_RELEASE);
+    CloseHandle(hProc);
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::cout << "Usage: Injector.exe <dll-path>\n";
+        return 1;
+    }
+
     DWORD pid = FindProcess(L"Supreme_v1.035.exe");
     if (!pid) pid = FindProcess(L"Supreme.exe");
 
-    auto dllPath = std::filesystem::current_path() / "Display_Config_Helper.dll";
-    // "C:\\Games\\Supreme\\Display_Config_Resources\\Display_Config_Helper.dll"
+    std::filesystem::path dllPath(argv[1]);
+    if (dllPath.is_relative()) {
+        dllPath = std::filesystem::current_path() / dllPath;
+    }
+
     std::cout << "Injecting " << dllPath.string() << " into process " << pid << "\n";
-    if (pid) Inject(pid, dllPath.string());
-    //if (pid) //Inject(pid, "C:\\Games\\Supreme\\Display_Config_Resources\\Display_Config_Helper.dll");
-    else {
-        std::cout << "Process not found\n";
+    if (pid) {
+        Inject(pid, dllPath.string());
+        std::cout << "Injection successful\n";
+    } else {
+        std::cout << "Supreme.exe process not found\n";
         return 1;
     }
-    std::cout << "Injection successful\n";
     return 0;
 }
