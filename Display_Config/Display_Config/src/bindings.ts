@@ -14,7 +14,8 @@ export const commands = {
   },
   /**
  * Inject TAS_Helper.dll into the running Supreme.exe process.
- * Looks for TAS_Helper/Injector.exe and TAS_Helper.dll next to Display_Config_Resources.
+ * Uses the shared Injector.exe in Display_Config_Resources, with TAS payload
+ * files located under Display_Config_Resources/TAS/.
  */
   async runTasInject() : Promise<string> {
     return await TAURI_INVOKE("run_tas_inject");

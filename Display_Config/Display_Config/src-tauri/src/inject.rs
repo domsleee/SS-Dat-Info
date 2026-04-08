@@ -75,10 +75,7 @@ pub async fn run_tas_inject() -> Result<String, String> {
     let dll_path = tas_folder.join("TAS_Helper.dll");
 
     if !injector_path.exists() {
-        return Err(format!(
-            "Injector not found at {}",
-            injector_path.display()
-        ));
+        return Err(format!("Injector not found at {}", injector_path.display()));
     }
     if !dll_path.exists() {
         return Err(format!(
