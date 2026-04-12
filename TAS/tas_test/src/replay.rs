@@ -230,13 +230,8 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
     let transitions = drift::count_transitions(&rec.input_log, rec.count as usize);
     println!("Input transitions: {}", transitions);
 
-    let mut client = harness::connect();
+    let mut client = harness::ensure_game_running();
     harness::print_status(&client);
-
-    if !harness::check_liveness(&client) {
-        eprintln!("ERROR: Cave 2 not firing");
-        std::process::exit(1);
-    }
 
     // Write recording data into shared memory
     write_to_shared(&mut client, &rec);

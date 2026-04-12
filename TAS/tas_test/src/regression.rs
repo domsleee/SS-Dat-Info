@@ -183,17 +183,12 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
     // CSV header
     write_csv_header(csv_path);
 
-    let mut client = harness::connect();
+    let mut client = harness::ensure_game_running();
     harness::ensure_exclusive_runtime_ownership(
         &mut client,
         "regression/mock determinism failures",
     );
     harness::print_status(&client);
-
-    if !harness::check_liveness(&client) {
-        eprintln!("ERROR: Game not alive. Aborting regression suite.");
-        std::process::exit(1);
-    }
 
     // Config preconditions: assert proven zero-drift config before running.
     {

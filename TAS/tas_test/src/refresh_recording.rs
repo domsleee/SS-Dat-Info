@@ -34,11 +34,8 @@ pub fn run(source: &str, out: &str) -> Result<(), String> {
         loaded.meta.force_direct
     );
 
-    let mut client = harness::connect();
+    let mut client = harness::ensure_game_running();
     harness::print_status(&client);
-    if !harness::check_liveness(&client) {
-        return Err("Cave 2 not firing".into());
-    }
 
     harness::ensure_exclusive_runtime_ownership(&mut client, "baseline refresh");
     replay::write_to_shared(&mut client, &loaded);

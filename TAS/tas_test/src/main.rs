@@ -307,13 +307,8 @@ fn output_dir() -> PathBuf {
 /// Phase 3: PLAY full recording, verify zero drift at segment boundary
 fn run_segment_test() {
     println!("=== Multi-Segment E2E Zero-Drift Test (SSB-131) ===\n");
-    let mut client = harness::connect();
+    let mut client = harness::ensure_game_running();
     harness::print_status(&client);
-
-    if !harness::check_liveness(&client) {
-        eprintln!("ERROR: Cave 2 not firing");
-        std::process::exit(1);
-    }
 
     // ---- Phase 1: REC segment 0 with LEFT steering ----
     println!("\n--- Phase 1: REC segment 0 (LEFT steering) ---");
@@ -486,13 +481,8 @@ fn drive_pico_steps(steps: &[patterns::PatternStep]) {
 
 fn run_smoke_test() {
     println!("=== Smoke Test ===");
-    let mut client = harness::connect();
+    let mut client = harness::ensure_game_running();
     harness::print_status(&client);
-
-    if !harness::check_liveness(&client) {
-        eprintln!("ERROR: Cave 2 not firing");
-        std::process::exit(1);
-    }
 
     // REC 3s
     println!("\n--- REC 3s ---");
@@ -511,13 +501,8 @@ fn run_smoke_test() {
 
 fn run_f5_aligned_test() {
     println!("=== F5-Aligned Zero-Drift Test ===");
-    let mut client = harness::connect();
+    let mut client = harness::ensure_game_running();
     harness::print_status(&client);
-
-    if !harness::check_liveness(&client) {
-        eprintln!("ERROR: Cave 2 not firing");
-        std::process::exit(1);
-    }
 
     // Phase 1: F5 + REC (straight line)
     println!("\n--- Phase 1: F5 + REC ---");

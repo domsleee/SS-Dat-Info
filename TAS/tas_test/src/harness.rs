@@ -294,6 +294,187 @@ pub fn wait_playback(client: &TasSharedMemoryClient, expected: u32) -> bool {
     }
 }
 
+/// Path to the `revive-supreme.nu` script used by [`ensure_game_running`].
+/// Override with the `REVIVE_SUPREME_SCRIPT` env var.
+fn revive_script_path() -> String {
+    std::env::var("REVIVE_SUPREME_SCRIPT").unwrap_or_else(|_| {
+        r"C:\Users\user\git\cheatengine-mcp-bridge\skills\revive-supreme\scripts\revive-supreme.nu"
+            .into()
+    })
+}
+
+/// Launch Supreme Snowboarding via `revive-supreme.nu` with `NO_CE=1`.
+/// Returns true if the script exited successfully.
+///
+/// Sets `TAS_TEST_PID` so the revive script can skip killing us.
+fn run_revive() -> bool {
+    let script = revive_script_path();
+    println!("Launching game via revive-supreme (NO_CE=1)...");
+    println!("  Script: {}", script);
+    match Command::new("nu")
+        .arg(&script)
+        .env("NO_CE", "1")
+        .env("TAS_TEST_PID", std::process::id().to_string())
+        .status()
+    {
+        Ok(s) if s.success() => {
+            println!("  revive-supreme finished successfully");
+            true
+        }
+        Ok(s) => {
+            eprintln!("  revive-supreme exited with {}", s);
+            false
+        }
+        Err(e) => {
+            eprintln!("  Failed to run revive-supreme: {}", e);
+            eprintln!("  Is `nu` on PATH? Script at: {}", script);
+            false
+        }
+    }
+}
+
+/// Kill all running instances of Supreme Snowboarding and related processes.
+/// Excludes the current process so we don't kill ourselves.
+fn kill_game() {
+    let my_pid = std::process::id();
+    let script = format!(
+        r#"
+        $names = @('Supreme','Supreme_v1.035','display-config','Display_Config','tas_ui','tas_test')
+        $myPid = {}
+        foreach ($n in $names) {{
+            Get-Process -Name $n -ErrorAction SilentlyContinue |
+                Where-Object {{ $_.Id -ne $myPid }} |
+                Stop-Process -Force
+        }}
+        "#,
+        my_pid
+    );
+    let _ = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output();
+    thread::sleep(Duration::from_millis(500));
+}
+
+/// Default game folder. Override with `SUPREME_FOLDER` env var.
+fn supreme_folder() -> String {
+    std::env::var("SUPREME_FOLDER").unwrap_or_else(|_| r"T:\Games\SupremeORIG".into())
+}
+
+/// Inject a DLL into the running Supreme.exe process via Injector.exe.
+fn inject_dll(label: &str, dll_path: &str) -> bool {
+    let base = supreme_folder();
+    let injector = format!(r"{}\Display_Config_Resources\Injector.exe", base);
+
+    println!("Injecting {}...", label);
+    println!("  DLL: {}", dll_path);
+
+    match Command::new(&injector)
+        .arg(dll_path)
+        .status()
+    {
+        Ok(s) if s.success() => {
+            println!("  {} injected", label);
+            true
+        }
+        Ok(s) => {
+            eprintln!("  Injector.exe exited with {} for {}", s, label);
+            false
+        }
+        Err(e) => {
+            eprintln!("  Failed to run Injector.exe: {}", e);
+            false
+        }
+    }
+}
+
+/// Inject Display_Config_Helper.dll then TAS_Helper.dll into the running game.
+fn inject_all_dlls() -> bool {
+    let base = supreme_folder();
+    let dc_res = format!(r"{}\Display_Config_Resources", base);
+    let dc_helper = format!(r"{}\Display_Config_Helper.dll", dc_res);
+    let tas_helper = format!(r"{}\TAS\TAS_Helper.dll", dc_res);
+
+    if !inject_dll("Display_Config_Helper.dll", &dc_helper) {
+        return false;
+    }
+    // Give Display_Config_Helper time to initialize rendering hooks.
+    thread::sleep(Duration::from_secs(2));
+
+    inject_dll("TAS_Helper.dll", &tas_helper)
+}
+
+/// Check whether revive is suppressed via `NO_REVIVE=1` env var.
+fn no_revive() -> bool {
+    std::env::var("NO_REVIVE").map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+/// Ensure the game is running with hooks active.
+///
+/// Default behaviour: if the game is already live, reuse it. If not, kill
+/// stale instances and run `revive-supreme.nu` to get a clean session.
+///
+/// Set `NO_REVIVE=1` to skip the automatic launch — `ensure_game_running`
+/// will then behave like the old `connect()` and exit if the game isn't up.
+pub fn ensure_game_running() -> TasSharedMemoryClient {
+    // Fast path: game already up and hooks firing.
+    if let Ok(c) = TasSharedMemoryClient::open() {
+        if check_liveness(&c) {
+            let s = c.state();
+            println!(
+                "Game already live (version {}). Hooks: cave2={} cave1c={} cave1d={} cave5={}",
+                s.version, s.cave2_hooked, s.cave1c_hooked, s.cave1d_hooked, s.cave5_hooked
+            );
+            return c;
+        }
+    }
+
+    if no_revive() {
+        eprintln!("ERROR: Game not running and NO_REVIVE=1 is set");
+        std::process::exit(1);
+    }
+
+    println!("Game not live — launching fresh via revive-supreme...");
+    kill_game();
+
+    if !run_revive() {
+        eprintln!("ERROR: revive-supreme failed");
+        std::process::exit(1);
+    }
+
+    // revive-supreme launches Supreme.exe via Display_Config flow which injects
+    // Display_Config_Helper.dll automatically. We still need to inject TAS_Helper.dll.
+    thread::sleep(Duration::from_secs(2));
+
+    let base = supreme_folder();
+    let tas_helper = format!(r"{}\Display_Config_Resources\TAS\TAS_Helper.dll", base);
+    if !inject_dll("TAS_Helper.dll", &tas_helper) {
+        eprintln!("ERROR: TAS_Helper.dll injection failed");
+        std::process::exit(1);
+    }
+
+    // Wait for TAS hooks to stabilize.
+    thread::sleep(Duration::from_secs(3));
+
+    match TasSharedMemoryClient::open() {
+        Ok(c) if check_liveness(&c) => {
+            let s = c.state();
+            println!(
+                "Connected after revive (version {}). Hooks: cave2={} cave1c={} cave1d={} cave5={}",
+                s.version, s.cave2_hooked, s.cave1c_hooked, s.cave1d_hooked, s.cave5_hooked
+            );
+            c
+        }
+        Ok(_) => {
+            eprintln!("ERROR: Game not live after revive-supreme");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("ERROR: No shared memory after revive-supreme: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Connect to shared memory, exit on failure.
 pub fn connect() -> TasSharedMemoryClient {
     match TasSharedMemoryClient::open() {

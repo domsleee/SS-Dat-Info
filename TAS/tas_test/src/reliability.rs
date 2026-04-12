@@ -104,13 +104,8 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
         iterations, speed
     );
 
-    let mut client = harness::connect();
+    let mut client = harness::ensure_game_running();
     harness::print_status(&client);
-
-    if !harness::check_liveness(&client) {
-        eprintln!("ERROR: Cave 2 not firing");
-        std::process::exit(1);
-    }
 
     // Config preconditions
     {

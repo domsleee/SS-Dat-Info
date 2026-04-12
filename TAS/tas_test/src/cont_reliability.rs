@@ -353,13 +353,8 @@ pub fn run(
         );
     }
 
-    let mut client = harness::connect();
+    let mut client = harness::ensure_game_running();
     harness::print_status(&client);
-
-    if !harness::check_liveness(&client) {
-        eprintln!("ERROR: Cave 2 not firing");
-        std::process::exit(1);
-    }
 
     // Quiesce stale runtime state before baseline capture/load so CONT compares
     // against deterministic test-owned data only.
