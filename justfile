@@ -15,9 +15,7 @@ tas: tas_dll tas_rust
 
 tas_dll:
     $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath; \
-    Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"; \
-    Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation; \
-    msbuild .\TAS\TAS_Helper\TAS_Helper.vcxproj /v:minimal /p:Configuration=Release /m
+    & "$vsPath\MSBuild\Current\Bin\MSBuild.exe" .\TAS\TAS_Helper\TAS_Helper.vcxproj /v:minimal /p:Configuration=Release /m
 
 tas_rust:
     cd TAS && cargo build --release
