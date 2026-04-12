@@ -61,13 +61,8 @@ const STEER_HOLD_TICKS: u32 = 56;
 
 /// Run the full 3-phase acceptance test.
 pub fn run(mock: bool) -> AcceptanceResult {
-    let mut client = harness::connect();
+    let mut client = harness::ensure_game_running();
     harness::print_status(&client);
-
-    if !harness::check_liveness(&client) {
-        eprintln!("ERROR: Game not alive. Cannot run acceptance test.");
-        std::process::exit(1);
-    }
 
     // Config preconditions: assert proven zero-drift config before running.
     {

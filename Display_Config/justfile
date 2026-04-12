@@ -1,13 +1,15 @@
 set shell := ["pwsh.exe", "-NoProfile", "-c"]
 
+dc_profile := 'release'
+
 all:
     just clean; \
     task build
 
 display_config:
-    cd Display_Config && bun tauri build;
+    cd Display_Config && bun tauri build {{ if dc_profile == "debug" { "--debug" } else { "" } }};
     if (!(Test-Path ./output)) { mkdir output > $null }; \
-    cp Display_Config\src-tauri\target\release\display-config.exe ./output/Display_Config.exe
+    cp Display_Config\src-tauri\target\{{dc_profile}}\display-config.exe ./output/Display_Config.exe
 
 display_config_helper:
     $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath; \

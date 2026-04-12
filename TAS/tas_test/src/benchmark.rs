@@ -285,11 +285,8 @@ pub fn run(config: BenchmarkConfig) -> Result<BenchmarkReport, String> {
         config.repeats, config.measure_frames
     );
 
-    let mut client = harness::connect();
+    let mut client = harness::ensure_game_running();
     harness::print_status(&client);
-    if !harness::check_liveness(&client) {
-        return Err("Cave 2 not firing".into());
-    }
 
     let mut idle_samples = Vec::new();
     let mut rec_samples = Vec::new();

@@ -67,13 +67,8 @@ fn measure_ticks_at_speed(client: &mut tas_shared::TasSharedMemoryClient, speed:
 pub fn run() -> SpeedResult {
     println!("=== Playback Speed Verification Test (SSB-162) ===\n");
 
-    let mut client = harness::connect();
+    let mut client = harness::ensure_game_running();
     harness::print_status(&client);
-
-    if !harness::check_liveness(&client) {
-        eprintln!("ERROR: Cave 2 not firing. Cannot run speed test.");
-        std::process::exit(1);
-    }
 
     harness::ensure_exclusive_runtime_ownership(&mut client, "REC speed scaling failures");
 

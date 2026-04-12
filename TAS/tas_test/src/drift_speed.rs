@@ -123,13 +123,8 @@ fn play_at_speed(
 pub fn run() -> DriftSpeedResult {
     println!("=== Drift-at-Speed Verification Test (SSB-186) ===\n");
 
-    let mut client = harness::connect();
+    let mut client = harness::ensure_game_running();
     harness::print_status(&client);
-
-    if !harness::check_liveness(&client) {
-        eprintln!("ERROR: Cave 2 not firing");
-        std::process::exit(1);
-    }
 
     // Verify Cave 5 is hooked and fft=0
     {

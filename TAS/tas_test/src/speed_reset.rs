@@ -71,13 +71,8 @@ fn measure_tick_rate(client: &tas_shared::TasSharedMemoryClient) -> u32 {
 pub fn run() -> SpeedResetResult {
     println!("=== Speed Reset Verification Test (SSB-185) ===\n");
 
-    let mut client = harness::connect();
+    let mut client = harness::ensure_game_running();
     harness::print_status(&client);
-
-    if !harness::check_liveness(&client) {
-        eprintln!("ERROR: Cave 2 not firing. Cannot run speed reset test.");
-        std::process::exit(1);
-    }
 
     harness::ensure_exclusive_runtime_ownership(&mut client, "speed reset validation failures");
 
