@@ -121,3 +121,10 @@ jobs:
       - uses: arduino/setup-task@v3
       - run: cd Display_Config/Display_Config && bun install --frozen-lockfile
       - run: cd Display_Config/Display_Config && just
+  tasTest:
+    name: tas:test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cd TAS && cargo test --release
