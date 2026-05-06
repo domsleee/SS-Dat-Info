@@ -26,6 +26,10 @@ const PLAYBACK_TIMEOUT_SECS: u64 = 120;
 const CONT_ANCHOR_FRAME: u32 = 250;
 /// Timeout waiting to reach the early CONT anchor frame.
 const CONT_ANCHOR_TIMEOUT_SECS: u64 = 10;
+/// Default retry budget for finding a matching F5 starting bucket. Acceptance
+/// observed up to 13 retries in 15 trials; 60 covers the observed tail with
+/// margin and is the standard regression suite budget.
+pub const START_MATCH_RETRIES: u32 = 60;
 
 /// Focus the Supreme Snowboarding window.
 pub fn focus_game() {

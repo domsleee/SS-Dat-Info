@@ -257,7 +257,11 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
             println!("  Position matching skipped (--no-match)");
             false
         } else {
-            let m = harness::restart_play_and_match_inprocess(&mut client, target, 20);
+            let m = harness::restart_play_and_match_inprocess(
+                &mut client,
+                target,
+                harness::START_MATCH_RETRIES,
+            );
             if !m {
                 println!("  WARNING: Position match failed");
             }
