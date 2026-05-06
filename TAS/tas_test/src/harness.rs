@@ -249,6 +249,11 @@ pub fn restart_and_stabilize(client: &TasSharedMemoryClient) -> bool {
 /// This matches the egui transport path (RestartThen) and avoids external
 /// focus/Pico timing variance from out-of-process F5 injection.
 pub fn restart_and_stabilize_inprocess(client: &mut TasSharedMemoryClient) -> bool {
+    // Dismiss any post-run "Save attempt" dialog before requesting restart.
+    // The in-process restart eventually invokes the game's F5 handler internally,
+    // which can also be intercepted by the dialog if it's up.
+    dismiss_save_dialog();
+
     // Ensure a clean command state before requesting restart.
     client.send_command(TasCommand::Stop);
     thread::sleep(Duration::from_millis(50));
