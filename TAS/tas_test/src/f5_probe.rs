@@ -19,6 +19,7 @@ struct Sample {
     frame: u32,
     pos: [f32; 3],
     rot: [f32; 9],
+    vel: [f32; 3],
 }
 
 pub fn run(iterations: u32) {
@@ -38,15 +39,17 @@ pub fn run(iterations: u32) {
         let s = client.state();
         let pos = [s.player_x, s.player_y, s.player_z];
         let rot = s.rotation_matrix;
+        let vel = [s.velocity_x, s.velocity_y, s.velocity_z];
         println!(
-            "  Sample: frame={} pos=({:.6}, {:.6}, {:.6}) rot[0..3]=({:.4},{:.4},{:.4})",
-            frame, pos[0], pos[1], pos[2], rot[0], rot[1], rot[2]
+            "  Sample: frame={} pos=({:.6}, {:.6}, {:.6}) rot[0..3]=({:.4},{:.4},{:.4}) vel=({:.6},{:.6},{:.6})",
+            frame, pos[0], pos[1], pos[2], rot[0], rot[1], rot[2], vel[0], vel[1], vel[2]
         );
         samples.push(Sample {
             cycle,
             frame,
             pos,
             rot,
+            vel,
         });
     }
 
@@ -69,6 +72,17 @@ fn full_key(s: &Sample) -> (u32, u32, u32, [u32; 9]) {
     (s.pos[0].to_bits(), s.pos[1].to_bits(), s.pos[2].to_bits(), rot_bits)
 }
 
+fn pos_vel_key(s: &Sample) -> (u32, u32, u32, u32, u32, u32) {
+    (
+        s.pos[0].to_bits(),
+        s.pos[1].to_bits(),
+        s.pos[2].to_bits(),
+        s.vel[0].to_bits(),
+        s.vel[1].to_bits(),
+        s.vel[2].to_bits(),
+    )
+}
+
 fn summarize(samples: &[Sample]) {
     println!("\n========== Probe Summary ==========");
     println!("Total cycles: {}", samples.len());
@@ -86,13 +100,26 @@ fn summarize(samples: &[Sample]) {
         full_buckets.entry(full_key(s)).or_default().push(s.cycle);
     }
 
-    println!("Distinct position-only buckets: {}", pos_buckets.len());
-    println!("Distinct (pos+rotation) buckets: {}", full_buckets.len());
+    // Combined position+velocity buckets (the cont-reliability hypothesis).
+    let mut pos_vel_buckets: BTreeMap<(u32, u32, u32, u32, u32, u32), Vec<u32>> = BTreeMap::new();
+    for s in samples {
+        pos_vel_buckets.entry(pos_vel_key(s)).or_default().push(s.cycle);
+    }
+
+    println!("Distinct position-only buckets:    {}", pos_buckets.len());
+    println!("Distinct (pos+rotation) buckets:   {}", full_buckets.len());
+    println!("Distinct (pos+velocity) buckets:   {}", pos_vel_buckets.len());
 
     if full_buckets.len() > pos_buckets.len() {
         println!(
-            "\n>>> Multiple rotation states per position bucket <<<\n\
-             >>> This is the cont-reliability anchor-mismatch root cause. <<<"
+            "\n>>> Multiple rotation states per position bucket. <<<\n\
+             >>> This means cont-reliability's bit-identical position match isn't enough. <<<"
+        );
+    }
+    if pos_vel_buckets.len() > pos_buckets.len() {
+        println!(
+            "\n>>> Multiple velocity states per position bucket. <<<\n\
+             >>> Adding velocity match to start-match would filter these out. <<<"
         );
     }
 
