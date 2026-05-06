@@ -143,8 +143,8 @@ pub fn run() -> AcceptanceResult {
     // ---- Phase 3: PLAYBACK ----
     println!("\n--- Phase 3: PLAYBACK ---");
     // Match Phase 2 start position via play_coords[0] for zero drift
-    if !harness::restart_play_and_match(&mut client, rec_start, 20) {
-        eprintln!("WARNING: Could not match REC position for Phase 3 (continuing anyway)");
+    if !harness::restart_play_and_match(&mut client, rec_start, 60) {
+        eprintln!("ERROR: Could not match REC position for Phase 3 after 60 F5 retries");
     }
     // Playback is already running from restart_play_and_match
     let play_ok = harness::wait_playback(&client, rec_count);

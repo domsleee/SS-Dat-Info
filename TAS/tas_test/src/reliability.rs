@@ -185,9 +185,9 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
         // Keep speed at the same value for PLAY. Position matching uses
         // natural F5 retries (no forcing needed since both phases run at
         // the same speed and stabilization time).
-        println!("\n--- PLAY at {}x (same-speed, forced position) ---", speed);
+        println!("\n--- PLAY at {}x (same-speed) ---", speed);
 
-        let matched = harness::restart_play_and_force(&mut client, rec_start, 20);
+        let matched = harness::restart_play_and_match(&mut client, rec_start, 20);
         if !matched {
             println!("  WARNING: Position match failed for cycle {}", i);
         }

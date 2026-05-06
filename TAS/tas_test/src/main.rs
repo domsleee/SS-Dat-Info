@@ -52,9 +52,30 @@ fn main() {
         "acceptance" => {
             let out = output_dir();
             let cert_path = out.join("acceptance_certificate.json");
-            let result = acceptance::run();
-            certificate::write_acceptance_certificate(&result, &cert_path);
-            std::process::exit(if result.all_pass() { 0 } else { 1 });
+            const ITERATIONS: u32 = 5;
+            let mut last_result = None;
+            let mut passed = 0u32;
+            for i in 1..=ITERATIONS {
+                println!("\n========== Acceptance run {}/{} ==========", i, ITERATIONS);
+                let result = acceptance::run();
+                if result.all_pass() {
+                    passed += 1;
+                    println!("Acceptance run {}/{} PASSED", i, ITERATIONS);
+                } else {
+                    println!("Acceptance run {}/{} FAILED — aborting", i, ITERATIONS);
+                    last_result = Some(result);
+                    break;
+                }
+                last_result = Some(result);
+            }
+            if let Some(result) = last_result.as_ref() {
+                certificate::write_acceptance_certificate(result, &cert_path);
+            }
+            println!(
+                "\n=== Acceptance: {}/{} runs passed ===",
+                passed, ITERATIONS
+            );
+            std::process::exit(if passed == ITERATIONS { 0 } else { 1 });
         }
         "speed" => {
             let result = speed::run();
