@@ -187,7 +187,8 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
         // the same speed and stabilization time).
         println!("\n--- PLAY at {}x (same-speed) ---", speed);
 
-        let matched = harness::restart_play_and_match(&mut client, rec_start, 20);
+        let matched =
+            harness::restart_play_and_match(&mut client, rec_start, harness::START_MATCH_RETRIES);
         if !matched {
             println!("  WARNING: Position match failed for cycle {}", i);
         }
