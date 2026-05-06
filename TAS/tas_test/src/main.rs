@@ -19,6 +19,7 @@ mod certificate;
 mod cont_reliability;
 mod drift;
 mod drift_speed;
+mod f5_probe;
 mod gates;
 mod harness;
 mod patterns;
@@ -88,6 +89,22 @@ fn main() {
         "drift-speed" => {
             let result = drift_speed::run();
             std::process::exit(if result.all_pass() { 0 } else { 1 });
+        }
+        "f5-probe" => {
+            let mut iterations = 50u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n")
+                    && i + 1 < args.len()
+                {
+                    iterations = args[i + 1].parse().unwrap_or(50);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            f5_probe::run(iterations);
+            std::process::exit(0);
         }
         "benchmark" => {
             let mut config = benchmark::BenchmarkConfig::default();
@@ -262,6 +279,7 @@ fn main() {
             println!("  speed       Playback speed verification (0.25x, 1x, 2x)");
             println!("  speed-reset Speed reset verification (2x stop restores normal)");
             println!("  drift-speed Drift-at-speed verification (2x same, 1x/2x cross)");
+            println!("  f5-probe    F5 bucket characterization (records starting positions)");
             println!("  benchmark   Cave hook perf benchmark (frame-window repeats)");
             println!(
                 "  reliability N consecutive REC+PLAY cycles at Nx speed (default 10x at 12x)"
