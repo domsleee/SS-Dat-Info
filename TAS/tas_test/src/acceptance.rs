@@ -60,7 +60,7 @@ const STEER_PATTERN: &str = "LRLRL";
 const STEER_HOLD_TICKS: u32 = 56;
 
 /// Run the full 3-phase acceptance test.
-pub fn run(mock: bool) -> AcceptanceResult {
+pub fn run() -> AcceptanceResult {
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
 
@@ -116,20 +116,9 @@ pub fn run(mock: bool) -> AcceptanceResult {
 
     harness::arm_rec(&mut client);
 
-    if mock {
-        // Mock: write input pattern directly
-        let steps = patterns::build_from_pattern(STEER_PATTERN, STEER_HOLD_TICKS, 0);
-        let input_log = patterns::generate_input_log(&steps);
-        harness::write_mock_input(&mut client, &input_log);
-        println!("  Mock: wrote {} ticks of steering input", input_log.len());
-        // Wait for game to process those ticks
-        std::thread::sleep(std::time::Duration::from_secs(REC_DURATION_SECS));
-    } else {
-        // Real Pico HID steering
-        println!("  Steering via Pico HID for {}s...", REC_DURATION_SECS);
-        let steps = patterns::build_from_pattern(STEER_PATTERN, STEER_HOLD_TICKS, 0);
-        drive_pico_acceptance(&steps);
-    }
+    println!("  Steering via Pico HID for {}s...", REC_DURATION_SECS);
+    let steps = patterns::build_from_pattern(STEER_PATTERN, STEER_HOLD_TICKS, 0);
+    drive_pico_acceptance(&steps);
 
     let rec_count = client.state().recorded_count;
     harness::stop(&mut client);

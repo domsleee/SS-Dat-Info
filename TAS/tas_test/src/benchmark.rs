@@ -266,7 +266,7 @@ fn run_play_high_transitions(
             input_bits::RIGHT
         };
     }
-    harness::write_mock_input(client, &synthetic);
+    harness::write_synthetic_input(client, &synthetic);
     client.state_mut().continue_from_frame = 0;
     run_play_current_recording(client, frames)
 }

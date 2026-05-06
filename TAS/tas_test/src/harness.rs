@@ -405,7 +405,7 @@ fn inject_all_dlls() -> bool {
 
 /// Check whether revive is suppressed via `NO_REVIVE=1` env var.
 fn no_revive() -> bool {
-    std::env::var("NO_REVIVE").map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"))
+    std::env::var("NO_REVIVE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 /// Ensure the game is running with hooks active.
@@ -823,9 +823,11 @@ pub fn print_results(client: &TasSharedMemoryClient) {
     println!("BB3B10 blocks (Cave 1D): {}", s.bb3b10_block_count);
 }
 
-/// Write input masks into shared memory for mock input mode.
-/// This writes directly to the input_log, simulating what the DLL would capture from DI.
-pub fn write_mock_input(client: &mut TasSharedMemoryClient, input_log: &[u8]) {
+/// Write a synthetic input log directly into shared memory.
+///
+/// Used by the benchmark mode to drive a deterministic input pattern without a Pico,
+/// since perf timing doesn't require a real-input oracle.
+pub fn write_synthetic_input(client: &mut TasSharedMemoryClient, input_log: &[u8]) {
     let state = client.state_mut();
     let len = input_log.len().min(state.input_log.len());
     state.input_log[..len].copy_from_slice(&input_log[..len]);

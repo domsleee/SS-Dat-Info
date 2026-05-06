@@ -96,3 +96,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: cd Display_Config/Display_Config && bun install
       - run: cd Display_Config/Display_Config && bun run test
+  tasTest:
+    name: tas:test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cd TAS && cargo test --release

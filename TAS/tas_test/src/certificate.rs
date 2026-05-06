@@ -14,7 +14,6 @@ use crate::regression::CaseResult;
 struct RegressionCertificate<'a> {
     r#type: &'static str,
     timestamp: String,
-    mock: bool,
     total_cases: usize,
     passed: usize,
     failed: usize,
@@ -71,7 +70,6 @@ struct AcceptanceCertificate {
 /// Certificate for a regression suite run.
 pub fn write_regression_certificate(
     results: &[CaseResult],
-    mock: bool,
     csv_path: &Path,
     cert_path: &Path,
 ) {
@@ -91,7 +89,6 @@ pub fn write_regression_certificate(
     let cert = RegressionCertificate {
         r#type: "regression",
         timestamp: format_timestamp(),
-        mock,
         total_cases: total,
         passed,
         failed: total - passed,
@@ -258,7 +255,7 @@ mod tests {
         let csv_path = PathBuf::from("test.csv");
         let cert_path = temp_path("regression.json");
 
-        write_regression_certificate(&results, false, &csv_path, &cert_path);
+        write_regression_certificate(&results, &csv_path, &cert_path);
 
         let content = std::fs::read_to_string(&cert_path).expect("read cert");
         // Verify it parses as valid JSON
@@ -268,7 +265,6 @@ mod tests {
         assert_eq!(val["passed"], 1);
         assert_eq!(val["failed"], 1);
         assert_eq!(val["verdict"], "FAIL");
-        assert_eq!(val["mock"], false);
         assert_eq!(val["max_raw_drift_x"], 0.5);
         assert_eq!(val["max_full_norm_drift_x"], 0.0);
         assert_eq!(val["cases"][0]["name"], "L");
@@ -290,13 +286,12 @@ mod tests {
         let results = vec![sample_case_results().remove(0)];
         let cert_path = temp_path("regression_pass.json");
 
-        write_regression_certificate(&results, true, &PathBuf::from("x.csv"), &cert_path);
+        write_regression_certificate(&results, &PathBuf::from("x.csv"), &cert_path);
 
         let content = std::fs::read_to_string(&cert_path).expect("read cert");
         let val: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
         assert_eq!(val["verdict"], "PASS");
         assert_eq!(val["all_zero_full_norm_drift"], true);
-        assert_eq!(val["mock"], true);
 
         let _ = std::fs::remove_file(&cert_path);
     }

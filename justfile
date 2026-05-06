@@ -66,9 +66,6 @@ deploy_all_fast: deploy
 test: tas_rust
     cd TAS && cargo test --release
 
-test_mock: tas_rust
-    cd TAS && cargo run --release --bin tas_test -- mock
-
 test_smoke: tas_rust
     cd TAS && cargo run --release --bin tas_test -- smoke
 
@@ -77,9 +74,6 @@ test_acceptance: tas_rust
 
 test_regression: tas_rust
     cd TAS && cargo run --release --bin tas_test -- regression
-
-test_fast_lane artifacts_dir='TAS/artifacts/fast-lane/latest':
-    pwsh -NoProfile -File .\scripts\run-tas-fast-lane.ps1 -ArtifactsDir '{{artifacts_dir}}'
 
 test_replay file iterations="5":
     cd TAS && cargo run --release --bin tas_test -- replay {{file}} --iterations {{iterations}} --verbose

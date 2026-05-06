@@ -6,7 +6,6 @@
 //!   f5          — F5-aligned straight-line REC/PLAY (zero-drift baseline)
 //!   regression  — 15-case regression suite with CSV output
 //!   acceptance  — 3-phase acceptance test (baseline, steered REC, PLAY)
-//!   mock        — Regression suite with mock input (no Pico hardware)
 //!   speed       — Playback speed verification (0.25x, 1x, 2x)
 //!   speed-reset — Speed reset verification (2x stop restores normal)
 //!   drift-speed — Drift-at-speed verification (2x same-speed, 1x/2x cross-speed)
@@ -45,15 +44,15 @@ fn main() {
             let cache_dir = out.join("regression_cache");
             let csv_path = out.join("regression_results.csv");
             let cert_path = out.join("regression_certificate.json");
-            let results = regression::run(false, &cache_dir, &csv_path);
-            certificate::write_regression_certificate(&results, false, &csv_path, &cert_path);
+            let results = regression::run(&cache_dir, &csv_path);
+            certificate::write_regression_certificate(&results, &csv_path, &cert_path);
             let passed = results.iter().filter(|r| r.all_gates_pass).count();
             std::process::exit(if passed == results.len() { 0 } else { 1 });
         }
         "acceptance" => {
             let out = output_dir();
             let cert_path = out.join("acceptance_certificate.json");
-            let result = acceptance::run(false);
+            let result = acceptance::run();
             certificate::write_acceptance_certificate(&result, &cert_path);
             std::process::exit(if result.all_pass() { 0 } else { 1 });
         }
@@ -230,16 +229,6 @@ fn main() {
             );
             std::process::exit(if report.all_pass() { 0 } else { 1 });
         }
-        "mock" => {
-            let out = output_dir();
-            let cache_dir = out.join("mock_cache");
-            let csv_path = out.join("mock_results.csv");
-            let cert_path = out.join("mock_certificate.json");
-            let results = regression::run(true, &cache_dir, &csv_path);
-            certificate::write_regression_certificate(&results, true, &csv_path, &cert_path);
-            let passed = results.iter().filter(|r| r.all_gates_pass).count();
-            std::process::exit(if passed == results.len() { 0 } else { 1 });
-        }
         _ => {
             println!("Usage: tas_test <mode>");
             println!();
@@ -249,7 +238,6 @@ fn main() {
             println!("  segment     Multi-segment CONT zero-drift test (requires Pico HID)");
             println!("  regression  15-case regression suite (requires Pico HID)");
             println!("  acceptance  3-phase acceptance test (requires Pico HID)");
-            println!("  mock        Regression suite with mock input (no hardware)");
             println!("  speed       Playback speed verification (0.25x, 1x, 2x)");
             println!("  speed-reset Speed reset verification (2x stop restores normal)");
             println!("  drift-speed Drift-at-speed verification (2x same, 1x/2x cross)");

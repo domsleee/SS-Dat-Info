@@ -5,19 +5,18 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tas_shared::input_bits;
-use tas_shared::TAS_MAX_TICKS;
 
-use crate::cache::{self, Recording};
+use crate::cache;
 use crate::drift;
 use crate::gates;
 use crate::harness;
 use crate::patterns::{self, PatternStep};
 
 // Empirically, 20 retries was not enough to reliably hit the replayable F5 bucket
-// for short patterns like jump_tap. 60 cleared repeated live/mock stress reruns.
+// for short patterns like jump_tap. 60 cleared repeated live stress reruns.
 const START_MATCH_RETRIES: u32 = 60;
 
 /// A single regression test case definition.
@@ -167,11 +166,8 @@ fn filter_cases(cases: Vec<RegressionCase>) -> Vec<RegressionCase> {
         .collect()
 }
 
-/// Run the full regression suite.
-///
-/// If `mock` is true, uses mock input mode (writes input directly to shared memory).
-/// If `mock` is false, uses Pico HID for real input during REC.
-pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
+/// Run the full regression suite. Drives input via Pico HID for real REC.
+pub fn run(cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
     let cases = filter_cases(build_cases());
     let mut results = Vec::new();
 
@@ -184,10 +180,7 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
     write_csv_header(csv_path);
 
     let mut client = harness::ensure_game_running();
-    harness::ensure_exclusive_runtime_ownership(
-        &mut client,
-        "regression/mock determinism failures",
-    );
+    harness::ensure_exclusive_runtime_ownership(&mut client, "regression determinism failures");
     harness::print_status(&client);
 
     // Config preconditions: assert proven zero-drift config before running.
@@ -207,11 +200,7 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
         );
     }
 
-    println!(
-        "\n=== Regression Suite: {} cases, mock={} ===\n",
-        cases.len(),
-        mock
-    );
+    println!("\n=== Regression Suite: {} cases ===\n", cases.len());
 
     for (i, case) in cases.iter().enumerate() {
         println!(
@@ -222,7 +211,7 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
             case.pattern_str
         );
 
-        let result = run_single_case(&mut client, case, mock, cache_dir);
+        let result = run_single_case(&mut client, case, cache_dir);
         append_csv(csv_path, &result);
 
         println!(
@@ -269,18 +258,10 @@ pub fn run(mock: bool, cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
 fn run_single_case(
     client: &mut tas_shared::TasSharedMemoryClient,
     case: &RegressionCase,
-    mock: bool,
     cache_dir: &Path,
 ) -> CaseResult {
-    let input_log = patterns::generate_input_log(&case.steps);
-    let total_ticks = patterns::total_ticks(&case.steps);
     let cache_path = cache_dir.join(format!("{:02}_{}.tas", case.ordinal, slug(&case.name)));
 
-    if mock {
-        return run_mock_case(client, case, &input_log, total_ticks, &cache_path);
-    }
-
-    // --- Live mode: F5 + REC with Pico HID steering ---
     // Phase 1: Record
     if !harness::restart_and_stabilize(client) {
         return error_result(case, "Game not alive after restart (REC phase)");
@@ -353,91 +334,6 @@ fn run_single_case(
         replay_drift_z: assessment.drift.max_drift_z,
         replay_zero: assessment.drift.is_zero(),
         all_gates_pass: start_matched && assessment.all_pass(),
-        error: start_match_error,
-    }
-}
-
-fn run_mock_case(
-    client: &mut tas_shared::TasSharedMemoryClient,
-    case: &RegressionCase,
-    input_log: &[u8],
-    _total_ticks: u32,
-    cache_path: &Path,
-) -> CaseResult {
-    let baseline = match load_mock_baseline(cache_path) {
-        Ok(baseline) => baseline,
-        Err(err) => return error_result(case, &err),
-    };
-
-    let baseline_count = baseline.recording.header.tick_count;
-    if baseline.recording.input_log != input_log {
-        println!(
-            "  Mock baseline uses cached live input ({} ticks) instead of generated pattern ({} ticks)",
-            baseline_count,
-            input_log.len()
-        );
-    }
-    println!(
-        "  Mock baseline: {} ({} ticks)",
-        baseline.path.display(),
-        baseline_count
-    );
-
-    if let Err(err) = baseline.recording.save(cache_path) {
-        eprintln!("  WARNING: Failed to write mock cache: {}", err);
-    }
-    if let Err(err) = write_recording_to_state(client.state_mut(), &baseline.recording) {
-        return error_result(case, &format!("Failed to stage mock baseline: {}", err));
-    }
-
-    let target = baseline.recording.rec_coords[0];
-    println!(
-        "  Mock start target: ({:.6}, {:.6}, {:.6})",
-        target[0], target[1], target[2]
-    );
-    let start_matched = match start_playback_with_fallback(client, target, "mock playback") {
-        Ok(matched) => matched,
-        Err(err) => return error_result(case, &err),
-    };
-
-    let play_ok = harness::wait_playback(client, baseline_count);
-
-    if !play_ok {
-        return error_result(case, "Mock playback timeout");
-    }
-
-    // For mock mode, Gate 1 (REC movement) is skipped since we didn't do a real REC
-    let state = client.state();
-    let drift_result = drift::compute_drift(state, input_log.len() as u32);
-    let metrics = collect_window_metrics(state, baseline_count);
-    print_window_metrics(&metrics);
-    print_translation_verdict(start_matched, &metrics);
-    let start_match_error =
-        (!start_matched).then(|| "Could not position-match mock playback start".to_string());
-
-    CaseResult {
-        name: case.name.clone(),
-        pattern: case.pattern_str.clone(),
-        start_matched,
-        rec_count: baseline_count,
-        transitions: metrics.transitions,
-        first_input_tick: metrics.first_input_tick,
-        frame0_dx: metrics.frame0_dx,
-        frame0_dz: metrics.frame0_dz,
-        full_norm_drift_x: metrics.full_norm_drift_x,
-        full_norm_drift_z: metrics.full_norm_drift_z,
-        active_start_dx: metrics.active_start_dx,
-        active_start_dz: metrics.active_start_dz,
-        active_window_ticks: metrics.active_window_ticks,
-        active_norm_drift_x: metrics.active_norm_drift_x,
-        active_norm_drift_z: metrics.active_norm_drift_z,
-        live_drift_x: 0.0,
-        live_drift_z: 0.0,
-        live_zero: true,
-        replay_drift_x: drift_result.max_drift_x,
-        replay_drift_z: drift_result.max_drift_z,
-        replay_zero: drift_result.is_zero(),
-        all_gates_pass: start_matched && drift_result.is_zero(),
         error: start_match_error,
     }
 }
@@ -618,227 +514,9 @@ fn print_translation_verdict(start_matched: bool, metrics: &WindowMetrics) {
     );
 }
 
-#[derive(Debug)]
-struct MockBaseline {
-    path: PathBuf,
-    recording: Recording,
-}
-
-fn load_mock_baseline(cache_path: &Path) -> Result<MockBaseline, String> {
-    let mut problems = Vec::new();
-
-    for candidate in mock_baseline_candidates(cache_path) {
-        if !candidate.exists() {
-            problems.push(format!("{} (missing)", candidate.display()));
-            continue;
-        }
-
-        match Recording::load(&candidate) {
-            Ok(recording) => match validate_mock_baseline(&recording) {
-                Ok(()) => {
-                    return Ok(MockBaseline {
-                        path: candidate,
-                        recording,
-                    });
-                }
-                Err(reason) => {
-                    problems.push(format!("{} ({})", candidate.display(), reason));
-                }
-            },
-            Err(err) => {
-                problems.push(format!("{} (load failed: {})", candidate.display(), err));
-            }
-        }
-    }
-
-    Err(format!(
-        "No valid mock baseline found. Checked:\n  - {}",
-        problems.join("\n  - ")
-    ))
-}
-
-fn mock_baseline_candidates(cache_path: &Path) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-
-    if let Some(file_name) = cache_path.file_name() {
-        if let Some(mock_dir) = cache_path.parent() {
-            if let Some(output_dir) = mock_dir.parent() {
-                push_unique_path(
-                    &mut candidates,
-                    output_dir.join("regression_cache").join(file_name),
-                );
-            }
-        }
-
-        push_unique_path(&mut candidates, mock_fixture_dir().join(file_name));
-    }
-
-    push_unique_path(&mut candidates, cache_path.to_path_buf());
-
-    candidates
-}
-
-fn push_unique_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
-    if !paths.iter().any(|existing| existing == &candidate) {
-        paths.push(candidate);
-    }
-}
-
-fn mock_fixture_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures")
-        .join("regression_cache")
-}
-
-fn validate_mock_baseline(recording: &Recording) -> Result<(), String> {
-    let count = recording.header.tick_count as usize;
-    if count == 0 {
-        return Err("recording is empty".into());
-    }
-    if count > TAS_MAX_TICKS {
-        return Err(format!("tick_count {} exceeds TAS_MAX_TICKS", count));
-    }
-    if recording.input_log.len() < count {
-        return Err(format!(
-            "input log too short: expected {}, got {}",
-            count,
-            recording.input_log.len()
-        ));
-    }
-    if recording.rec_coords.len() < count {
-        return Err(format!(
-            "rec_coords too short: expected {}, got {}",
-            count,
-            recording.rec_coords.len()
-        ));
-    }
-    if !recording.rec_coords[..count]
-        .iter()
-        .any(|coord| coord[0] != 0.0 || coord[1] != 0.0 || coord[2] != 0.0)
-    {
-        return Err("rec_coords are all zero".into());
-    }
-    Ok(())
-}
-
-fn write_recording_to_state(
-    state: &mut tas_shared::TasSharedState,
-    recording: &Recording,
-) -> Result<(), String> {
-    let count = recording.header.tick_count as usize;
-    validate_mock_baseline(recording)?;
-
-    state.recorded_count = recording.header.tick_count;
-    state.inject_mode = recording.header.inject_mode;
-    state.force_fixed_tick = recording.header.force_fixed_tick;
-    state.force_direct = recording.header.force_direct;
-    state.input_log[..count].copy_from_slice(&recording.input_log[..count]);
-    state.rec_coords[..count].copy_from_slice(&recording.rec_coords[..count]);
-    state.input_log[count..].fill(0);
-    state.rec_coords[count..].fill([0.0; 3]);
-    state.play_coords[count..].fill([0.0; 3]);
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    fn unique_temp_dir(prefix: &str) -> PathBuf {
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), id));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        dir
-    }
-
-    fn make_recording(label: &str, count: u32, zero_coords: bool) -> Recording {
-        let n = count as usize;
-        let input_log = vec![input_bits::LEFT; n];
-        let rec_coords = if zero_coords {
-            vec![[0.0; 3]; n]
-        } else {
-            (0..n)
-                .map(|i| [100.0 + i as f32, -50.0, 200.0 + i as f32 * 0.5])
-                .collect()
-        };
-
-        Recording {
-            header: cache::RecordingHeader {
-                version: 4,
-                tick_count: count,
-                inject_mode: 6,
-                force_fixed_tick: 0,
-                force_direct: 2,
-                label: label.to_string(),
-            },
-            input_log,
-            rec_coords,
-        }
-    }
-
-    #[test]
-    fn load_mock_baseline_prefers_valid_regression_cache() {
-        let root = unique_temp_dir("mock_baseline_prefers_regression");
-        let mock_dir = root.join("mock_cache");
-        let regression_dir = root.join("regression_cache");
-        std::fs::create_dir_all(&mock_dir).expect("create mock dir");
-        std::fs::create_dir_all(&regression_dir).expect("create regression dir");
-
-        let mock_path = mock_dir.join("01_case.tas");
-        let regression_path = regression_dir.join("01_case.tas");
-        make_recording("bad", 10, true)
-            .save(&mock_path)
-            .expect("save invalid mock baseline");
-        make_recording("good", 12, false)
-            .save(&regression_path)
-            .expect("save valid regression baseline");
-
-        let baseline = load_mock_baseline(&mock_path).expect("load baseline");
-        assert_eq!(baseline.path, regression_path);
-        assert_eq!(baseline.recording.header.tick_count, 12);
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn load_mock_baseline_rejects_zero_coord_recordings() {
-        let root = unique_temp_dir("mock_baseline_rejects_zero");
-        let mock_dir = root.join("mock_cache");
-        std::fs::create_dir_all(&mock_dir).expect("create mock dir");
-
-        let mock_path = mock_dir.join("missing_fixture_case.tas");
-        make_recording("bad", 8, true)
-            .save(&mock_path)
-            .expect("save invalid mock baseline");
-
-        let err = load_mock_baseline(&mock_path).unwrap_err();
-        assert!(err.contains("rec_coords are all zero"));
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn write_recording_to_state_copies_and_clears_tail() {
-        let recording = make_recording("state", 3, false);
-        let mut state = tas_shared::zeroed_boxed();
-        state.input_log[5] = 0xFF;
-        state.rec_coords[5] = [1.0, 2.0, 3.0];
-        state.play_coords[5] = [4.0, 5.0, 6.0];
-
-        write_recording_to_state(&mut state, &recording).expect("write recording");
-
-        assert_eq!(state.recorded_count, 3);
-        assert_eq!(state.input_log[0], input_bits::LEFT);
-        assert_eq!(state.input_log[2], input_bits::LEFT);
-        assert_eq!(state.input_log[3], 0);
-        assert_eq!(state.rec_coords[0], [100.0, -50.0, 200.0]);
-        assert_eq!(state.rec_coords[2], [102.0, -50.0, 201.0]);
-        assert_eq!(state.rec_coords[3], [0.0, 0.0, 0.0]);
-        assert_eq!(state.play_coords[3], [0.0, 0.0, 0.0]);
-    }
 
     #[test]
     fn parse_case_filter_handles_empty_and_spacing() {
