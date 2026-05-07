@@ -53,22 +53,39 @@ pub fn focus_game() {
 /// when it isn't up. Without dismissing it, the next F5 lands on the dialog
 /// and gets eaten instead of triggering a real restart, which shifts the F5
 /// match buckets by one cycle and breaks playback start matching.
+///
+/// Uses PostMessage to the game's main HWND rather than SendKeys, since
+/// SendKeys depends on focus restoration via WScript.Shell.AppActivate which
+/// silently fails when the game has a child modal dialog up (the very state
+/// we're trying to dismiss). PostMessage delivers the keystroke directly to
+/// the target window regardless of focus.
 fn dismiss_save_dialog() {
-    let _ = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
+    if let Some(hwnd) = find_supreme_hwnd() {
+        #[allow(non_snake_case)]
+        let WM_KEYDOWN: u32 = 0x0100;
+        #[allow(non_snake_case)]
+        let WM_KEYUP: u32 = 0x0101;
+        #[allow(non_snake_case)]
+        let VK_RETURN: usize = 0x0D;
+        let script = format!(
             r#"
-            $wshell = New-Object -ComObject wscript.shell
-            $procs = Get-Process Supreme* -ErrorAction SilentlyContinue
-            if ($procs) {
-                $wshell.AppActivate($procs[0].Id) | Out-Null
-                Start-Sleep -Milliseconds 100
-                $wshell.SendKeys("{ENTER}") | Out-Null
-            }
-            "#,
-        ])
-        .output();
+Add-Type @'
+using System; using System.Runtime.InteropServices;
+public class W {{ [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l); }}
+'@
+[W]::PostMessage([IntPtr]::new({h}), {kd}, [IntPtr]::new({vk}), [IntPtr]::Zero) | Out-Null
+Start-Sleep -Milliseconds 30
+[W]::PostMessage([IntPtr]::new({h}), {ku}, [IntPtr]::new({vk}), [IntPtr]::Zero) | Out-Null
+"#,
+            h = hwnd,
+            kd = WM_KEYDOWN,
+            ku = WM_KEYUP,
+            vk = VK_RETURN,
+        );
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output();
+    }
     thread::sleep(Duration::from_millis(150));
 }
 
