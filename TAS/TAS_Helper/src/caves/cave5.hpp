@@ -33,8 +33,17 @@ static SafetyHookMid cave5Hook{};
 // VirtualProtect'd to PAGE_READWRITE during init so we can write it.
 static float* g_tickAdvancePtr = nullptr;
 
-// Default per-tick time advance (1/100 second per tick at normal speed)
-static constexpr float TICK_ADVANCE_BASE = 0.01f;
+// Documented default per-tick time advance — used only as a fallback if we
+// somehow can't read the live value during init.
+static constexpr float TICK_ADVANCE_DEFAULT = 0.01f;
+
+// Native value of the time advance constant, captured during InstallCave5
+// before we ever modify it. At 1x speed (or in OFF mode) we restore this
+// rather than overwriting with a hardcoded guess; if the game's actual
+// per-tick advance differs from 0.01 then forcing 0.01 silently changes
+// the game's effective speed and (critically) leaves a stale value when
+// the game pauses, producing a fast-forward on resume.
+static float g_nativeTickAdvance = TICK_ADVANCE_DEFAULT;
 
 // Cave 5 callback with FPU preservation
 static void Cave5_MidCallback(SafetyHookContext& ctx) {
@@ -56,14 +65,16 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             ctx.esi = (uintptr_t)realTick;
         }
 
-        // Variable speed: only scale time advance constant during active REC/PLAY.
-        // In OFF mode, always restore the base constant so the game runs at
-        // normal speed (fixes buttons/menus broken after 2x playback).
+        // Variable speed: only scale the time advance constant during active
+        // REC/PLAY at a non-1x speed. At 1x, in OFF mode, or with invalid
+        // speed, write the captured native value so the game runs at its
+        // own natural speed. Writing the native value (vs not writing at
+        // all) restores correct state when transitioning down from 2x→1x.
         if (g_tickAdvancePtr) {
-            if (s->mode != MODE_OFF && s->playback_speed > 0.0f) {
-                *g_tickAdvancePtr = TICK_ADVANCE_BASE / s->playback_speed;
+            if (s->mode != MODE_OFF && s->playback_speed > 0.0f && s->playback_speed != 1.0f) {
+                *g_tickAdvancePtr = g_nativeTickAdvance / s->playback_speed;
             } else {
-                *g_tickAdvancePtr = TICK_ADVANCE_BASE;
+                *g_tickAdvancePtr = g_nativeTickAdvance;
             }
         }
     }
@@ -84,10 +95,16 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     g_cave5State = state;
 
     // Resolve and unprotect the per-tick time advance constant at EXE+0x46DB08.
-    // This float (normally 0.01) controls how much game-time each physics tick
-    // consumes from the accumulator. We modify it for variable speed playback.
+    // This float controls how much game-time each physics tick consumes from
+    // the accumulator. We modify it for variable speed playback.
     auto* exeBase = (uint8_t*)addr.exe;
     g_tickAdvancePtr = (float*)(exeBase + 0x6DB08);
+
+    // Capture the native value before we ever modify the constant. The page
+    // is readable even before VirtualProtect (it's part of the loaded image),
+    // so this read is safe regardless of whether VirtualProtect succeeds.
+    g_nativeTickAdvance = *g_tickAdvancePtr;
+    Log(std::format("Cave 5: native tick advance constant = {}", g_nativeTickAdvance));
 
     DWORD oldProtect = 0;
     if (!VirtualProtect(g_tickAdvancePtr, sizeof(float), PAGE_READWRITE, &oldProtect)) {
