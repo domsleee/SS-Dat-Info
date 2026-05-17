@@ -137,7 +137,13 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
             std::process::exit(1);
         }
 
-        harness::focus_game();
+        // No explicit focus_game here: send_f5_pico (called inside
+        // restart_and_stabilize) already focuses the game window, and an
+        // extra focus_game adds ~400ms of slide before rec_coords[0] is
+        // captured — which is then NOT matched by PLAY's faster sampling
+        // (~150ms after stabilize). The resulting consistent ~1-unit X and
+        // ~5-unit Z offset breaks restart_play_and_match position matching
+        // and the test fails 10/10 cycles despite zero post-match drift.
         harness::arm_rec(&mut client);
 
         // Build steering pattern + neutral tail
