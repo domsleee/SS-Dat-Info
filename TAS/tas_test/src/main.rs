@@ -27,6 +27,7 @@ mod refresh_recording;
 mod regression;
 mod reliability;
 mod replay;
+mod save_reload;
 mod speed;
 mod speed_reset;
 
@@ -89,6 +90,13 @@ fn main() {
         "drift-speed" => {
             let result = drift_speed::run();
             std::process::exit(if result.all_pass() { 0 } else { 1 });
+        }
+        "save-reload" => {
+            // End-to-end test: record → save to disk → kill game → revive →
+            // reload from disk → replay → verify zero drift. The one workflow
+            // tas_ui actually exercises that no other test mode covers.
+            let ok = save_reload::run();
+            std::process::exit(if ok { 0 } else { 1 });
         }
         "f5-probe" => {
             let mut iterations = 50u32;

@@ -595,6 +595,23 @@ pub fn restart_play_and_match_inprocess(
     })
 }
 
+/// Number of leading PLAY frames whose positions must match the recording's
+/// rec_coords for a position match to be accepted.
+///
+/// Why >1: for mid-run recordings (where rec_coords[0] is NOT an F5 spawn
+/// bucket position), the recorded position alone doesn't uniquely determine
+/// the snowboarder's rotation/velocity state. Multiple F5+slide trajectories
+/// can pass through the same recorded position with different rotations,
+/// causing playback to diverge from tick 1 onwards. Verifying the first few
+/// frames after ARM_PLAY catches this rotation mismatch immediately: if
+/// rotation differs, the recorded inputs steer the player onto a different
+/// trajectory and frame 1 (or 2) already diverges from rec_coords[1..].
+///
+/// For F5-spawn recordings (acceptance/regression/reliability), position-0
+/// already uniquely determines rotation per the f5-probe data, so this
+/// check is a no-op — the additional frames also match trivially.
+const MATCH_VERIFY_FRAMES: u32 = 5;
+
 fn restart_play_and_match_with<F>(
     client: &mut TasSharedMemoryClient,
     target: [f32; 3],
@@ -614,8 +631,9 @@ where
         }
 
         arm_play(client);
-        // Wait for at least 1 frame of playback to capture play_coords[0]
-        thread::sleep(Duration::from_millis(100));
+        // Wait long enough for MATCH_VERIFY_FRAMES of playback to be captured
+        // (at 1x speed: ~10ms/tick; allow margin for cave2 thread scheduling).
+        thread::sleep(Duration::from_millis(150));
         let s = client.state();
         if s.playback_pos == 0 {
             eprintln!("  WARNING: Playback didn't start");
@@ -626,17 +644,55 @@ where
         let match_x = pc0[0].to_bits() == target[0].to_bits();
         let match_y = pc0[1].to_bits() == target[1].to_bits();
         let match_z = pc0[2].to_bits() == target[2].to_bits();
-        if match_x && match_y && match_z {
-            println!("  Position matched (attempt {})", attempt + 1);
+        if !(match_x && match_y && match_z) {
+            let dx = (pc0[0] as f64 - target[0] as f64).abs();
+            let dz = (pc0[2] as f64 - target[2] as f64).abs();
+            println!("  play_coords[0] offset: dx={:.9} dz={:.9}", dx, dz);
+            stop(client);
+            continue;
+        }
+
+        // Frame-0 position matched. Verify the next few frames also match the
+        // recording — if rotation/velocity at the match moment is wrong, the
+        // recorded inputs produce a divergent trajectory immediately.
+        let frames_available = s
+            .playback_pos
+            .min(s.recorded_count)
+            .min(MATCH_VERIFY_FRAMES);
+        let mut traj_ok = true;
+        let mut diverge_frame = 0u32;
+        let mut diverge_dx = 0.0f64;
+        let mut diverge_dz = 0.0f64;
+        for i in 1..frames_available as usize {
+            let p = s.play_coords[i];
+            let r = s.rec_coords[i];
+            if p[0].to_bits() != r[0].to_bits()
+                || p[1].to_bits() != r[1].to_bits()
+                || p[2].to_bits() != r[2].to_bits()
+            {
+                traj_ok = false;
+                diverge_frame = i as u32;
+                diverge_dx = (p[0] as f64 - r[0] as f64).abs();
+                diverge_dz = (p[2] as f64 - r[2] as f64).abs();
+                break;
+            }
+        }
+        if traj_ok {
+            println!(
+                "  Position + trajectory matched ({} frames verified, attempt {})",
+                frames_available,
+                attempt + 1
+            );
             return true;
         }
-        let dx = (pc0[0] as f64 - target[0] as f64).abs();
-        let dz = (pc0[2] as f64 - target[2] as f64).abs();
-        println!("  play_coords[0] offset: dx={:.9} dz={:.9}", dx, dz);
+        println!(
+            "  Trajectory diverges at frame {}: dx={:.9} dz={:.9} (likely rotation/velocity mismatch — retrying for different F5 bucket)",
+            diverge_frame, diverge_dx, diverge_dz
+        );
         stop(client);
     }
     eprintln!(
-        "  WARNING: Could not match position after {} retries",
+        "  WARNING: Could not match position+trajectory after {} retries",
         max_retries
     );
     false

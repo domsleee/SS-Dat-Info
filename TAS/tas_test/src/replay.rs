@@ -288,6 +288,31 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
                 "  Drift: X={:.9} (frame {}), Z={:.9} (frame {})",
                 d.max_drift_x, d.max_drift_frame_x, d.max_drift_z, d.max_drift_frame_z
             );
+            // Find first frame where any axis diverges (bit-level mismatch).
+            // Reveals whether drift is sudden (rotation mismatch at start) or
+            // gradual (some per-frame state slowly diverging).
+            let played = rec.count.min(state.playback_pos) as usize;
+            let mut first_div: Option<(usize, [f32; 3], [f32; 3])> = None;
+            for i in 0..played {
+                let p = state.play_coords[i];
+                let r = state.rec_coords[i];
+                if p[0].to_bits() != r[0].to_bits()
+                    || p[1].to_bits() != r[1].to_bits()
+                    || p[2].to_bits() != r[2].to_bits()
+                {
+                    first_div = Some((i, p, r));
+                    break;
+                }
+            }
+            if let Some((i, p, r)) = first_div {
+                let dx = (p[0] as f64 - r[0] as f64).abs();
+                let dy = (p[1] as f64 - r[1] as f64).abs();
+                let dz = (p[2] as f64 - r[2] as f64).abs();
+                println!(
+                    "  First divergence at frame {}: rec=({:.6},{:.6},{:.6}) play=({:.6},{:.6},{:.6}) Δ=({:.6},{:.6},{:.6})",
+                    i, r[0], r[1], r[2], p[0], p[1], p[2], dx, dy, dz
+                );
+            }
         } else {
             println!("  Zero drift");
         }
