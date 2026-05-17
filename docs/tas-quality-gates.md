@@ -37,6 +37,7 @@ session you already have running).
 | `drift-speed` | yes | `*** DRIFT-AT-SPEED TEST PASSED ***` | Drift across speeds |
 | `reliability` | yes | `*** RELIABILITY TEST PASSED ***` | Repeated REC/PLAY cycles |
 | `cont-reliability` | yes | `*** CONT RELIABILITY PASSED ***` | Splice stability |
+| `save-reload` | yes | `*** SAVE/RELOAD/REPLAY PASSED ***` | Cross-session record → save to disk → kill game → revive → reload → replay → zero drift. Exercises the same persistence path tas_ui uses; catches any state lost across game restart. |
 | `segment` | yes | `*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***` | Two-segment CONT |
 
 All gates require exit code `0` in addition to the pass signature.

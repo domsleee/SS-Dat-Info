@@ -44,11 +44,13 @@ pub fn run() -> bool {
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
 
-    // Use INPROCESS restart for REC to match tas_ui's REC button flow (which
-    // sends CMD_RESTART, not Pico F5). PLAY uses inprocess too — both phases
-    // see the same ~1.5s of slide between F5 and rec_coords[0] / play_coords[0],
-    // so positions align.
-    if !harness::restart_and_stabilize_inprocess(&mut client) {
+    // Use Pico F5 restart for REC. Both REC and PLAY then use the same
+    // restart_and_stabilize timing (~16s), so the snowboarder slides the
+    // same amount before rec_coords[0] / play_coords[0] is captured.
+    // Position match alone is sufficient because at this slide endpoint
+    // the rotation is determined by the F5 bucket (same as f5-probe shows
+    // at F5 spawn — buckets are session-stable).
+    if !harness::restart_and_stabilize(&client) {
         eprintln!("ERROR: Game not alive for REC");
         return false;
     }
@@ -162,8 +164,9 @@ pub fn run() -> bool {
 
     // ---- Phase 5: Replay against reloaded recording ----
     println!("\n--- Phase 5: Replay reloaded recording ---");
+    // PLAY uses the same Pico F5 path as REC so slide timing matches.
     let matched =
-        harness::restart_play_and_match_inprocess(&mut client, target, harness::START_MATCH_RETRIES);
+        harness::restart_play_and_match(&mut client, target, harness::START_MATCH_RETRIES);
     if !matched {
         eprintln!("ERROR: Position match failed after {} retries", harness::START_MATCH_RETRIES);
         return false;
