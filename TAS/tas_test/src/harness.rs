@@ -596,21 +596,21 @@ pub fn restart_play_and_match_inprocess(
 }
 
 /// Number of leading PLAY frames whose positions must match the recording's
-/// rec_coords for a position match to be accepted.
+/// rec_coords for a start match to be accepted.
 ///
-/// Why >1: for mid-run recordings (where rec_coords[0] is NOT an F5 spawn
-/// bucket position), the recorded position alone doesn't uniquely determine
-/// the snowboarder's rotation/velocity state. Multiple F5+slide trajectories
-/// can pass through the same recorded position with different rotations,
-/// causing playback to diverge from tick 1 onwards. Verifying the first few
-/// frames after ARM_PLAY catches this rotation mismatch immediately: if
-/// rotation differs, the recorded inputs steer the player onto a different
-/// trajectory and frame 1 (or 2) already diverges from rec_coords[1..].
+/// This is the actual rotation/velocity-mismatch check: same position +
+/// same inputs MUST produce the same trajectory under deterministic physics,
+/// so if rotation/velocity differs at the matched start position, the next
+/// few replayed frames will diverge immediately even though rec_coords[0]
+/// matches bit-perfectly. We verify enough frames to catch this.
 ///
 /// For F5-spawn recordings (acceptance/regression/reliability), position-0
-/// already uniquely determines rotation per the f5-probe data, so this
-/// check is a no-op — the additional frames also match trivially.
-const MATCH_VERIFY_FRAMES: u32 = 5;
+/// already uniquely determines rotation per the f5-probe data, so the
+/// trajectory check passes trivially. For mid-run recordings whose
+/// rec_coords[0] is along a slide, multiple F5 buckets can pass through
+/// the same point with different rotations — this check filters them out
+/// and forces another F5 retry.
+const MATCH_VERIFY_FRAMES: u32 = 10;
 
 fn restart_play_and_match_with<F>(
     client: &mut TasSharedMemoryClient,
@@ -632,8 +632,21 @@ where
 
         arm_play(client);
         // Wait long enough for MATCH_VERIFY_FRAMES of playback to be captured
-        // (at 1x speed: ~10ms/tick; allow margin for cave2 thread scheduling).
-        thread::sleep(Duration::from_millis(150));
+        // (at 1x speed: ~10ms/tick; cap polling at a few hundred ms so
+        // long-stationary recordings don't drag here forever — if the
+        // snowboarder is stationary the position match check is still valid
+        // even with few frames captured).
+        let wait_start = Instant::now();
+        loop {
+            let pos = client.playback_pos_volatile();
+            if pos >= MATCH_VERIFY_FRAMES.min(client.state().recorded_count) {
+                break;
+            }
+            if wait_start.elapsed() > Duration::from_millis(500) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
         let s = client.state();
         if s.playback_pos == 0 {
             eprintln!("  WARNING: Playback didn't start");
@@ -653,8 +666,12 @@ where
         }
 
         // Frame-0 position matched. Verify the next few frames also match the
-        // recording — if rotation/velocity at the match moment is wrong, the
-        // recorded inputs produce a divergent trajectory immediately.
+        // recording — same position + same inputs MUST produce same trajectory
+        // under deterministic physics. If rotation/velocity at the match
+        // moment is wrong, recorded inputs steer the snowboarder onto a
+        // divergent trajectory immediately. This catches mid-run recording
+        // rotation mismatches without needing a separate rotation_matrix
+        // field in the recording metadata.
         let frames_available = s
             .playback_pos
             .min(s.recorded_count)
