@@ -31,10 +31,15 @@ use crate::harness;
 use crate::patterns;
 use crate::replay;
 
-const REC_DURATION_SECS: u64 = 5;
+/// Record for long enough that the 1000-frame trajectory match exercises a
+/// full window of post-stationary, post-initial-input motion — not just a
+/// short blip. At 1x speed (100 ticks/s) we need ~11 seconds of game time
+/// to fill 1100 ticks; pattern + tail yields ~1200 ticks so playback exits
+/// match-verification with the recording still running.
+const REC_DURATION_SECS: u64 = 13;
 const PATTERN: &str = "LR";
-const HOLD_TICKS: u32 = 100;
-const TAIL_NEUTRAL_TICKS: u32 = 50;
+const HOLD_TICKS: u32 = 500;
+const TAIL_NEUTRAL_TICKS: u32 = 200;
 
 pub fn run() -> bool {
     println!("=== Save / Reload / Replay End-to-End Test ===\n");
