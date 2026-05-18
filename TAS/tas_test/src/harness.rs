@@ -595,22 +595,22 @@ pub fn restart_play_and_match_inprocess(
     })
 }
 
-/// Number of leading PLAY frames whose positions must match the recording's
-/// rec_coords for a start match to be accepted.
+/// Number of leading PLAY frames whose positions must bit-identically match
+/// the recording's rec_coords for a start match to be accepted.
 ///
-/// This is the actual rotation/velocity-mismatch check: same position +
-/// same inputs MUST produce the same trajectory under deterministic physics,
-/// so if rotation/velocity differs at the matched start position, the next
-/// few replayed frames will diverge immediately even though rec_coords[0]
-/// matches bit-perfectly. We verify enough frames to catch this.
-///
-/// For F5-spawn recordings (acceptance/regression/reliability), position-0
-/// already uniquely determines rotation per the f5-probe data, so the
-/// trajectory check passes trivially. For mid-run recordings whose
-/// rec_coords[0] is along a slide, multiple F5 buckets can pass through
-/// the same point with different rotations — this check filters them out
-/// and forces another F5 retry.
-const MATCH_VERIFY_FRAMES: u32 = 10;
+/// Must be large enough to traverse any stationary phase at the start of a
+/// recording (e.g. a race-start countdown that's stationary for 200-300
+/// frames before motion begins). Recordings whose first N frames are
+/// stationary can trivially "match" any F5 bucket on a 10-frame check while
+/// having a totally wrong rotation/velocity — divergence only appears once
+/// physics activates and the recorded inputs start steering. 1000 frames
+/// covers all realistic countdowns plus several seconds of active gameplay,
+/// so any rotation/velocity mismatch surfaces inside the verification
+/// window. For F5-spawn recordings (acceptance/regression/reliability) the
+/// match passes within a few frames; for stationary-start recordings
+/// (load-from-disk in tas_ui) the snowboarder begins moving inside this
+/// window and the recorded inputs immediately surface any mismatch.
+const MATCH_VERIFY_FRAMES: u32 = 1000;
 
 fn restart_play_and_match_with<F>(
     client: &mut TasSharedMemoryClient,
@@ -631,21 +631,21 @@ where
         }
 
         arm_play(client);
-        // Wait long enough for MATCH_VERIFY_FRAMES of playback to be captured
-        // (at 1x speed: ~10ms/tick; cap polling at a few hundred ms so
-        // long-stationary recordings don't drag here forever — if the
-        // snowboarder is stationary the position match check is still valid
-        // even with few frames captured).
+        // Wait until playback_pos reaches MATCH_VERIFY_FRAMES (or end of
+        // recording). At 1x speed this is ~10s for 1000 frames; we poll
+        // rather than fixed-sleep so faster playback speeds finish sooner.
+        // Cap at 20s wall to bound retries.
+        let wait_until = MATCH_VERIFY_FRAMES.min(client.state().recorded_count);
         let wait_start = Instant::now();
         loop {
             let pos = client.playback_pos_volatile();
-            if pos >= MATCH_VERIFY_FRAMES.min(client.state().recorded_count) {
+            if pos >= wait_until {
                 break;
             }
-            if wait_start.elapsed() > Duration::from_millis(500) {
+            if wait_start.elapsed() > Duration::from_secs(20) {
                 break;
             }
-            thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(50));
         }
         let s = client.state();
         if s.playback_pos == 0 {
