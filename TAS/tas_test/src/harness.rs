@@ -47,6 +47,34 @@ pub fn focus_game() {
     thread::sleep(Duration::from_millis(200));
 }
 
+/// Send Escape to the game. Uses keybd_event with hardware-scancode flag,
+/// which writes both the OS keyboard state (so GetAsyncKeyState sees it,
+/// matching cave2::SampleGAKS) and produces the scancode that DirectInput
+/// drivers consume. The game window must be focused first.
+pub fn send_escape() -> bool {
+    focus_game();
+    thread::sleep(Duration::from_millis(150));
+    let script = r#"
+Add-Type @'
+using System; using System.Runtime.InteropServices;
+public class K { [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra); }
+'@
+$VK_ESCAPE = 0x1B
+$SCAN_ESCAPE = 0x01
+$KEYEVENTF_EXTENDEDKEY = 0x0001
+$KEYEVENTF_KEYUP = 0x0002
+$KEYEVENTF_SCANCODE = 0x0008
+# Hardware scancode + extended bit so DirectInput-driven games see the press
+[K]::keybd_event($VK_ESCAPE, $SCAN_ESCAPE, $KEYEVENTF_EXTENDEDKEY -bor $KEYEVENTF_SCANCODE, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 80
+[K]::keybd_event($VK_ESCAPE, $SCAN_ESCAPE, $KEYEVENTF_EXTENDEDKEY -bor $KEYEVENTF_KEYUP -bor $KEYEVENTF_SCANCODE, [UIntPtr]::Zero)
+"#;
+    Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .is_ok()
+}
+
 /// Send Enter to the game to dismiss the post-run "Save attempt" dialog.
 ///
 /// The dialog only appears after some run completions, but Enter is harmless

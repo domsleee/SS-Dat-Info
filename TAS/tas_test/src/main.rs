@@ -23,6 +23,7 @@ mod f5_probe;
 mod gates;
 mod harness;
 mod patterns;
+mod pause_resume;
 mod refresh_recording;
 mod regression;
 mod reliability;
@@ -96,6 +97,14 @@ fn main() {
             // reload from disk → replay → verify zero drift. The one workflow
             // tas_ui actually exercises that no other test mode covers.
             let ok = save_reload::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "pause-resume" => {
+            // Record → start playback → Escape (pause) → wait → Escape
+            // (resume — game fast-forwards) → finish playback → verify the
+            // first 1000 frames replay with zero drift across the pause
+            // boundary.
+            let ok = pause_resume::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
         "f5-probe" => {
