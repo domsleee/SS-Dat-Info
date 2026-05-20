@@ -45,6 +45,13 @@ static constexpr float TICK_ADVANCE_DEFAULT = 0.01f;
 // the game pauses, producing a fast-forward on resume.
 static float g_nativeTickAdvance = TICK_ADVANCE_DEFAULT;
 
+// Per-frame ticks-per-cycle ceiling after raising the game's clamp.
+// The game originally clamps esi to 14h (20). Raising the in-memory bytes
+// to 40h (64) at install time lifts that ceiling, so effective playback-
+// speed catch-up tops out at 64 ticks/frame × ~60 fps ÷ 100tps native ≈
+// 38× rather than 12×. Cave5's own clamp is bumped to match.
+static constexpr int32_t CAVE5_PER_FRAME_TICK_CAP = 64;
+
 // Cave 5 callback with FPU preservation
 static void Cave5_MidCallback(SafetyHookContext& ctx) {
     uint64_t t0 = __rdtsc();
@@ -56,24 +63,30 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         int32_t realTick = (int32_t)ctx.esi;
 
         // Pause-resume catchup detection: when the game is unpaused after a
-        // pause, __ftol computes (wall_time - prev_time) / tick_advance and
-        // hands a huge tick count (e.g. 20s pause @ 0.01s/tick = 2000) to
-        // the physics loop. The original clamp at 20 just spreads the burst
-        // over many frames (visible as a ~2× speedup for a second or so).
+        // pause (Escape, or the "save replay" dialog at end of a run), __ftol
+        // computes (wall_time - prev_time) / tick_advance and hands a huge
+        // tick count (e.g. 20s pause @ 0.01s/tick = 2000) to the physics
+        // loop. The original clamp at 20 just spreads the burst over many
+        // frames (visible as a ~2× speedup for a second or so).
+        //
         // Drain the accumulator in a single frame instead: set this frame's
         // tick_advance to realTick * native so 1 physics tick consumes the
         // entire wall-time gap. The game advances 1 physics tick (snowboarder
         // barely moves), prev_time catches up to wall_time, next frame is
         // back to a normal tick count under native tick_advance.
         //
-        // Only fires in OFF mode at 1x speed — REC/PLAY runs must stay
-        // deterministic (force_fixed_tick path) and speed-scaled playback
-        // owns the tick_advance constant.
+        // Fires in any mode at 1x speed (OFF/REC/PLAY) — the save-replay
+        // dialog can appear mid-PLAY or at the boundary between modes, and
+        // the user-visible bug ("fast-forward after dismissing dialog") needs
+        // the drain regardless of which mode is active when Escape is
+        // dismissed. Gated to playback_speed == 1.0 so speed-scaled playback
+        // (the 12× CONT catch-up etc.) still owns tick_advance, and gated to
+        // force_fixed_tick == 0 so the deterministic regression-suite path
+        // is untouched.
         const int32_t CATCHUP_THRESHOLD = 50;
         bool catchup_drain =
             realTick > CATCHUP_THRESHOLD
             && s->force_fixed_tick == 0
-            && s->mode == MODE_OFF
             && s->playback_speed == 1.0f;
 
         if (s->force_fixed_tick > 0) {
@@ -88,9 +101,11 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             }
             ctx.esi = 1;
         } else {
-            // Clamp raw tick first (fix __ftol garbage)
+            // Clamp raw tick first (fix __ftol garbage). The game's own
+            // clamp (cmp esi, 14h / mov ebx, 14h) is patched at install
+            // time to use 40h instead, so we match that here.
             if (realTick < 0) realTick = 0;
-            if (realTick > 20) realTick = 20;
+            if (realTick > CAVE5_PER_FRAME_TICK_CAP) realTick = CAVE5_PER_FRAME_TICK_CAP;
             ctx.esi = (uintptr_t)realTick;
         }
 
@@ -143,6 +158,45 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
         // Non-fatal: speed scaling won't work but fixed tick still does
     } else {
         Log(std::format("Cave 5: tick advance constant at {:p} unprotected (was 0x{:X})", (void*)g_tickAdvancePtr, oldProtect));
+    }
+
+    // Raise the game's per-frame tick clamp from 14h (20) to 40h (64) so
+    // playback_speed > 12× actually delivers higher catch-up rates instead
+    // of being bottlenecked by the game's own cmp/clamp pair. Two bytes:
+    //   EXE+0x25C83: immediate of `cmp esi, 14h` (the comparison)
+    //   EXE+0x26001: immediate of `mov ebx, 14h`  (the clamp value)
+    // Patches must happen BEFORE installing the SafetyHook mid-hook —
+    // SafetyHook captures the bytes at the hook site into its trampoline,
+    // and we want that trampoline copy to use the bumped immediate.
+    {
+        uint8_t* cmp_imm = exeBase + 0x25C83;
+        uint8_t* mov_imm = exeBase + 0x26001;
+        DWORD cmpProtect = 0;
+        DWORD movProtect = 0;
+        bool cmp_ok = VirtualProtect(cmp_imm, 1, PAGE_READWRITE, &cmpProtect) != 0;
+        bool mov_ok = VirtualProtect(mov_imm, 1, PAGE_READWRITE, &movProtect) != 0;
+        if (cmp_ok && mov_ok) {
+            // Sanity-check current values before clobbering — refuse to patch
+            // if the game's bytes drifted from what we expect (defends against
+            // wrong-build EXEs).
+            if (*cmp_imm == 0x14 && *mov_imm == 0x14) {
+                *cmp_imm = (uint8_t)CAVE5_PER_FRAME_TICK_CAP;
+                *mov_imm = (uint8_t)CAVE5_PER_FRAME_TICK_CAP;
+                Log(std::format(
+                    "Cave 5: raised tick clamp 0x14 -> 0x{:02X} at EXE+0x25C83 and EXE+0x26001",
+                    CAVE5_PER_FRAME_TICK_CAP));
+            } else {
+                Log(std::format(
+                    "Cave 5: tick clamp bytes unexpected (cmp_imm=0x{:02X} mov_imm=0x{:02X}); not patching",
+                    *cmp_imm, *mov_imm));
+            }
+        } else {
+            Log(std::format(
+                "Cave 5: VirtualProtect on tick clamp bytes FAILED (cmp_ok={} mov_ok={} err={})",
+                cmp_ok, mov_ok, GetLastError()));
+        }
+        // Leave page RW — restoring protection on a 1-byte slice would
+        // probably affect surrounding code on the same page anyway.
     }
 
     Log(std::format("Cave 5: hooking tick override at {:p} (EXE+0x25C81)", (void*)addr.cave5_site));

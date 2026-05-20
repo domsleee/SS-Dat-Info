@@ -298,6 +298,23 @@ static void ProcessCommand(TasSharedState* s) {
                 g_cave2_pendingLog = 3;  // "stopped"
                 break;
             }
+            // Refuse ARM_CONTINUE if we're already in REC/PLAY: the prefix
+            // playback assumes the snowboarder is at rec_coords[0]'s state,
+            // which is only true right after an F5 restart. Firing CONT
+            // mid-run injects the recorded inputs against whatever state
+            // the player happens to be in, producing drift or worse. The
+            // tas_ui CONT button uses RestartThen(ArmContinue), which goes
+            // through CMD_RESTART first — that's the only safe entry. Any
+            // direct CMD_ARM_CONTINUE from mid-run (e.g. a segments-panel
+            // "redo from frame" without an explicit restart) lands here and
+            // gets bounced.
+            if (s->mode != MODE_OFF) {
+                LogRing(s, LOG_ERROR,
+                    "ARM_CONTINUE: refused — game is REC/PLAY; CONT requires a fresh restart first");
+                s->mode = MODE_OFF;
+                g_cave2_pendingLog = 3;  // "stopped"
+                break;
+            }
             g_cave2_logParam = s->continue_from_frame;
             s->playback_pos = 0;
             s->prev_mask = 0;
