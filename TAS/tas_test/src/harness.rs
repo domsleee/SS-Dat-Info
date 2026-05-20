@@ -47,13 +47,35 @@ pub fn focus_game() {
     thread::sleep(Duration::from_millis(200));
 }
 
-/// Send Escape to the game. Uses keybd_event with hardware-scancode flag,
-/// which writes both the OS keyboard state (so GetAsyncKeyState sees it,
-/// matching cave2::SampleGAKS) and produces the scancode that DirectInput
-/// drivers consume. The game window must be focused first.
+/// Send Escape to the game via the Pico HID (bit 7 in the input-mask
+/// protocol — added to firmware alongside the existing LRUD/JUMP/SHIFT/F5
+/// bits). The Pico is a real USB HID keyboard so the keystroke updates the
+/// OS keyboard state and reaches Supreme's pause handler. The fallback
+/// keybd_event path is kept for development environments without the Pico,
+/// but synthetic input does not engage the game's pause and the
+/// `escape-speedup` test will report "pause didn't engage" in that mode.
 pub fn send_escape() -> bool {
     focus_game();
-    thread::sleep(Duration::from_millis(150));
+    let port_name = pico_port();
+    let com_path = format!("\\\\.\\{}", port_name);
+    if let Ok(mut p) = std::fs::OpenOptions::new().write(true).open(&com_path) {
+        // Bit 7 = Escape per the updated Pico firmware (BIT_TO_KEY[7] = Keycode.ESCAPE).
+        let _ = p.write_all(&[0x80]);
+        let _ = p.flush();
+        thread::sleep(Duration::from_millis(80));
+        let _ = p.write_all(&[0xFF]); // release all
+        let _ = p.flush();
+        println!("  Escape sent via Pico ({})", port_name);
+        return true;
+    }
+
+    // Fallback for machines without the Pico: synthetic key event. The game
+    // typically ignores this (game polls hardware state via DirectInput),
+    // but it's better than nothing.
+    eprintln!(
+        "  WARNING: Pico not available on {} — falling back to keybd_event (likely won't pause the game)",
+        port_name
+    );
     let script = r#"
 Add-Type @'
 using System; using System.Runtime.InteropServices;
@@ -64,7 +86,6 @@ $SCAN_ESCAPE = 0x01
 $KEYEVENTF_EXTENDEDKEY = 0x0001
 $KEYEVENTF_KEYUP = 0x0002
 $KEYEVENTF_SCANCODE = 0x0008
-# Hardware scancode + extended bit so DirectInput-driven games see the press
 [K]::keybd_event($VK_ESCAPE, $SCAN_ESCAPE, $KEYEVENTF_EXTENDEDKEY -bor $KEYEVENTF_SCANCODE, [UIntPtr]::Zero)
 Start-Sleep -Milliseconds 80
 [K]::keybd_event($VK_ESCAPE, $SCAN_ESCAPE, $KEYEVENTF_EXTENDEDKEY -bor $KEYEVENTF_KEYUP -bor $KEYEVENTF_SCANCODE, [UIntPtr]::Zero)
