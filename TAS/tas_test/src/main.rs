@@ -23,6 +23,8 @@ mod f5_probe;
 mod gates;
 mod harness;
 mod patterns;
+mod escape_speedup;
+mod fe_cont_reliability;
 mod pause_resume;
 mod refresh_recording;
 mod regression;
@@ -105,6 +107,22 @@ fn main() {
             // first 1000 frames replay with zero drift across the pause
             // boundary.
             let ok = pause_resume::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "escape-speedup" => {
+            // Press Escape → wait 20s → press Escape → wait 5s. Verify the
+            // ticker (cave2 frame_count) behaves sensibly: ~0 ticks during
+            // the pause window, normal ~100 tps during the resume window.
+            // Catches the originally reported "fast-forward on resume" bug.
+            let ok = escape_speedup::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "fe-cont-reliability" => {
+            // CONT splice against TAS/recordings/FE-tremendous.tasrec at
+            // frame 2200, 5 iterations at 12x catchup. Pinned variant of
+            // cont-reliability for the specific recording the user cares
+            // about; passes only if all 5/5 splices are zero-drift.
+            let ok = fe_cont_reliability::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
         "f5-probe" => {
