@@ -31,6 +31,7 @@ mod regression;
 mod reliability;
 mod replay;
 mod save_reload;
+mod stop_play_flake;
 mod speed;
 mod speed_reset;
 
@@ -123,6 +124,15 @@ fn main() {
             // cont-reliability for the specific recording the user cares
             // about; passes only if all 5/5 splices are zero-drift.
             let ok = fe_cont_reliability::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "stop-play-flake" => {
+            // Load FE-tremendous, PLAY → STOP at a varying mid-playback
+            // frame → PLAY again, verify zero drift over the first 1000
+            // frames of the second playback. 10 iterations with stop
+            // points spread across the recording to surface intermittent
+            // post-STOP replay drift.
+            let ok = stop_play_flake::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
         "f5-probe" => {
