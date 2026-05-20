@@ -35,7 +35,11 @@ impl Default for Settings {
             show_config: false,
             show_log: false,
             playback_speed: 1.0,
-            cont_catchup_speed: 12.0,
+            // Cave5 patches the game's tick clamp from 0x14 (20) to 0x40 (64)
+            // at install time, lifting effective catch-up from ~12× to ~38×.
+            // 32× gives the user a fast-but-not-pathological default that
+            // still leaves headroom for cave5's catchup-drain detection.
+            cont_catchup_speed: 32.0,
         }
     }
 }

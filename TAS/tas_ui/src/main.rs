@@ -131,6 +131,11 @@ struct TasApp {
     // In-process restart state: command to send once restart completes
     pending_after_restart: Option<TasCommand>,
     continue_start_guard: Option<ContinueStartGuard>,
+    // Deferred restart-then-CONT request from the segments panel's "Redo from
+    // frame" action. The action handler can't call queue_restart_then directly
+    // because it runs while self.shared is mutably borrowed; we stash the
+    // splice frame here and process it after the egui closure ends.
+    pending_redo_restart_cont: Option<u32>,
 
     // Crash recovery
     last_frame_count: u32,
@@ -222,6 +227,7 @@ impl TasApp {
             analysis_cache: analysis::AnalysisCache::default(),
             pending_after_restart: None,
             continue_start_guard: None,
+            pending_redo_restart_cont: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
@@ -1649,18 +1655,31 @@ impl eframe::App for TasApp {
                             self.continue_from_frame = frame;
                             self.continue_from_text = frame.to_string();
                             shared.state_mut().continue_from_frame = frame;
-                            self.pending_session_kind = Some(RecordingSessionKind::Continue);
-                            self.pending_continue_start_tick = Some(frame);
-                            shared.send_command(TasCommand::ArmContinue);
                             self.segment_tracker.segments.retain(|s| s.start_tick < frame);
+                            // Defer the restart-then-CONT call until after the
+                            // shared borrow ends — queue_restart_then needs
+                            // &mut self including self.shared, which is
+                            // currently re-borrowed here. The Some(frame)
+                            // flag below is checked once we drop out of the
+                            // egui::CentralPanel closure.
+                            self.pending_redo_restart_cont = Some(frame);
                             self.log_lines.push(format!(
-                                "[{}] Redo from frame {} — armed CONT", ts, frame
+                                "[{}] Redo from frame {} — restart+CONT queued", ts, frame
                             ));
                         }
                     }
                 }
             }
         });
+
+        // Process deferred segments-panel "Redo from frame" — runs after the
+        // egui closure drops its mutable borrow of self.shared. Routes the
+        // CONT through queue_restart_then so cave2 sees a fresh F5 + then
+        // ARM_CONTINUE, not raw ARM_CONTINUE on top of an active REC/PLAY.
+        if let Some(_frame) = self.pending_redo_restart_cont.take() {
+            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+            self.queue_restart_then(TasCommand::ArmContinue, &ts);
+        }
 
         // Poll DLL log ring buffer
         if let Some(ref shared) = self.shared {
@@ -1887,6 +1906,7 @@ mod tests {
             analysis_cache: analysis::AnalysisCache::default(),
             pending_after_restart: None,
             continue_start_guard: None,
+            pending_redo_restart_cont: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
