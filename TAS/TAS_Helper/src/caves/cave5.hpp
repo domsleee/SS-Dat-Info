@@ -55,9 +55,38 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
     if (s) {
         int32_t realTick = (int32_t)ctx.esi;
 
+        // Pause-resume catchup detection: when the game is unpaused after a
+        // pause, __ftol computes (wall_time - prev_time) / tick_advance and
+        // hands a huge tick count (e.g. 20s pause @ 0.01s/tick = 2000) to
+        // the physics loop. The original clamp at 20 just spreads the burst
+        // over many frames (visible as a ~2× speedup for a second or so).
+        // Drain the accumulator in a single frame instead: set this frame's
+        // tick_advance to realTick * native so 1 physics tick consumes the
+        // entire wall-time gap. The game advances 1 physics tick (snowboarder
+        // barely moves), prev_time catches up to wall_time, next frame is
+        // back to a normal tick count under native tick_advance.
+        //
+        // Only fires in OFF mode at 1x speed — REC/PLAY runs must stay
+        // deterministic (force_fixed_tick path) and speed-scaled playback
+        // owns the tick_advance constant.
+        const int32_t CATCHUP_THRESHOLD = 50;
+        bool catchup_drain =
+            realTick > CATCHUP_THRESHOLD
+            && s->force_fixed_tick == 0
+            && s->mode == MODE_OFF
+            && s->playback_speed == 1.0f;
+
         if (s->force_fixed_tick > 0) {
             // Deterministic mode: exact tick count per frame
             ctx.esi = s->force_fixed_tick;
+        } else if (catchup_drain) {
+            // Set tick_advance large enough that 1 tick drains the whole
+            // wall-time gap (gap ≈ realTick * native because __ftol used
+            // tick_advance = native last frame).
+            if (g_tickAdvancePtr) {
+                *g_tickAdvancePtr = (float)realTick * g_nativeTickAdvance;
+            }
+            ctx.esi = 1;
         } else {
             // Clamp raw tick first (fix __ftol garbage)
             if (realTick < 0) realTick = 0;
@@ -70,7 +99,9 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // speed, write the captured native value so the game runs at its
         // own natural speed. Writing the native value (vs not writing at
         // all) restores correct state when transitioning down from 2x→1x.
-        if (g_tickAdvancePtr) {
+        // Skipped during catchup_drain — that path wrote a temporary large
+        // value to tick_advance that the game must read next frame.
+        if (g_tickAdvancePtr && !catchup_drain) {
             if (s->mode != MODE_OFF && s->playback_speed > 0.0f && s->playback_speed != 1.0f) {
                 *g_tickAdvancePtr = g_nativeTickAdvance / s->playback_speed;
             } else {
