@@ -25,6 +25,7 @@ mod harness;
 mod patterns;
 mod escape_speedup;
 mod fe_cont_reliability;
+mod fe_cont_stress;
 mod pause_resume;
 mod refresh_recording;
 mod regression;
@@ -116,6 +117,24 @@ fn main() {
             // the pause window, normal ~100 tps during the resume window.
             // Catches the originally reported "fast-forward on resume" bug.
             let ok = escape_speedup::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "fe-cont-stress" => {
+            // Speed sweep for CONT splice against FE-tremendous, using
+            // reference-comparison (first splice's prefix is the truth)
+            // instead of strict bit-match-vs-rec_coords. Reports the
+            // fastest speed where N iterations match the reference.
+            let mut speeds: Vec<f32> = vec![1.0, 12.0, 32.0, 64.0, 128.0, 256.0];
+            // Optional override: tas_test fe-cont-stress 512 1024 ...
+            let extra: Vec<f32> = args
+                .iter()
+                .skip(2)
+                .filter_map(|s| s.parse::<f32>().ok())
+                .collect();
+            if !extra.is_empty() {
+                speeds = extra;
+            }
+            let ok = fe_cont_stress::run(&speeds);
             std::process::exit(if ok { 0 } else { 1 });
         }
         "fe-cont-reliability" => {
