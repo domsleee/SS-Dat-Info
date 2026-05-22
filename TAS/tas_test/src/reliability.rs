@@ -107,6 +107,11 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
 
+    // tas_ui (if running) writes playback_speed = 1.0 every frame from its
+    // in-memory state, which clobbers our speed setting and collapses the
+    // test back to 1× rate. Kill it before doing speed-sensitive work.
+    harness::ensure_exclusive_runtime_ownership(&mut client, "reliability speed scaling");
+
     // Config preconditions
     {
         let s = client.state();

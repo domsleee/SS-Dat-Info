@@ -282,6 +282,12 @@ pub fn run(speeds: &[f32]) -> bool {
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
 
+    // tas_ui (if running) writes playback_speed = 1.0 every frame from its
+    // in-memory state, which clobbers our scripted speed setting and
+    // collapses the test back to 1× rate. Kill it before doing any
+    // speed-sensitive work.
+    harness::ensure_exclusive_runtime_ownership(&mut client, "fe-cont-stress speed scaling");
+
     let mut results: Vec<SpeedResult> = Vec::with_capacity(speeds.len());
     for &speed in speeds {
         let r = run_one_speed(&mut client, &rec, speed);
