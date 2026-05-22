@@ -52,6 +52,12 @@ static float g_nativeTickAdvance = TICK_ADVANCE_DEFAULT;
 // 38× rather than 12×. Cave5's own clamp is bumped to match.
 static constexpr int32_t CAVE5_PER_FRAME_TICK_CAP = 64;
 
+// Original game clamp value (cmp esi, 14h). Cave5 enforces this in software
+// during normal 1× gameplay so the game's defensive smooth-catchup behaviour
+// is preserved — the larger CAVE5_PER_FRAME_TICK_CAP only kicks in for
+// scripted fast-forward (playback_speed > 1) or the catchup-drain path.
+static constexpr int32_t NATIVE_GAME_CLAMP_AT_1X = 20;
+
 // Cave 5 callback with FPU preservation
 static void Cave5_MidCallback(SafetyHookContext& ctx) {
     uint64_t t0 = __rdtsc();
@@ -106,6 +112,20 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             // time to use 40h instead, so we match that here.
             if (realTick < 0) realTick = 0;
             if (realTick > CAVE5_PER_FRAME_TICK_CAP) realTick = CAVE5_PER_FRAME_TICK_CAP;
+
+            // OPTION 1: at normal playback speed (1×) preserve the game's
+            // original defensive clamp at 20 ticks/frame. Only relax the
+            // cap when the user has explicitly requested fast-forward via
+            // playback_speed > 1. This keeps non-fast-forward play
+            // behaviorally identical to the unpatched game — including its
+            // spiral-of-death protection for moderate stalls. The
+            // catchup-drain branch above handles long pauses (> 50 ticks
+            // accumulated) for 1× play, so this lower cap is only the
+            // ceiling for "normal stutter recovery" at 1×.
+            if (s->playback_speed <= 1.0f && realTick > NATIVE_GAME_CLAMP_AT_1X) {
+                realTick = NATIVE_GAME_CLAMP_AT_1X;
+            }
+
             ctx.esi = (uintptr_t)realTick;
         }
 
