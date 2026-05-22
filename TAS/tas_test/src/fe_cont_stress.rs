@@ -41,6 +41,14 @@ struct SpeedResult {
     reference_ok: bool,
     matched: u32,
     iterations: u32,
+    /// Reference-splice wall-clock to reach VERIFY_FRAMES (seconds).
+    ref_wall_secs: f64,
+    /// Effective speedup of the reference splice vs 1× game time. At 1×
+    /// the game advances 100 ticks/second, so VERIFY_FRAMES ticks would
+    /// take VERIFY_FRAMES/100 seconds. Ratio is how much faster than that
+    /// the actual catch-up was. Effective ≠ playback_speed setting once
+    /// the per-frame tick cap or render-rate ceiling is hit.
+    effective_x: f64,
 }
 
 fn wait_restart_complete(client: &mut tas_shared::TasSharedMemoryClient) -> bool {
@@ -59,33 +67,48 @@ fn wait_restart_complete(client: &mut tas_shared::TasSharedMemoryClient) -> bool
     }
 }
 
+/// Returns (success, wall_clock_seconds from ARM_CONTINUE send to reaching
+/// VERIFY_FRAMES).
 fn arm_continue_and_wait_for_verify(
     client: &mut tas_shared::TasSharedMemoryClient,
-) -> bool {
-    client.send_command(TasCommand::ArmContinue);
-    // Wait for cave2 to process the command before polling. Otherwise the
-    // first poll sees mode==OFF (command not yet processed) and the
-    // OFF-bailout path returns immediately with highest_pos=0.
-    thread::sleep(Duration::from_millis(100));
+) -> (bool, f64) {
+    // Reset playback_pos before ArmContinue — a previous splice leaves
+    // playback_pos at 2200 (the splice frame), and if the polling loop
+    // reads that stale value it spuriously sees "verify frame already
+    // reached" and returns 0.0s wall.
+    client.state_mut().playback_pos = 0;
     let start = Instant::now();
+    client.send_command(TasCommand::ArmContinue);
+    // Wait long enough for cave2 to process the command (mode flips to
+    // PLAY) before starting to poll. Don't just sleep — wait for mode.
+    let mode_wait_start = Instant::now();
+    while client.mode_volatile() != TasMode::Play as u32 {
+        if mode_wait_start.elapsed() > Duration::from_secs(2) {
+            // Command didn't switch mode to PLAY — bail.
+            return (false, start.elapsed().as_secs_f64());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
     let mut highest_pos: u32 = 0;
+    let last_diag = Instant::now();
     loop {
         let pos = client.playback_pos_volatile();
         if pos > highest_pos {
             highest_pos = pos;
         }
         if highest_pos >= VERIFY_FRAMES {
-            return true;
+            return (true, start.elapsed().as_secs_f64());
         }
         let mode = client.mode_volatile();
+        let _ = last_diag;
         if mode == TasMode::Rec as u32 {
-            return highest_pos >= VERIFY_FRAMES;
+            return (highest_pos >= VERIFY_FRAMES, start.elapsed().as_secs_f64());
         }
         if mode == TasMode::Off as u32 {
-            return highest_pos >= VERIFY_FRAMES;
+            return (highest_pos >= VERIFY_FRAMES, start.elapsed().as_secs_f64());
         }
         if start.elapsed() > Duration::from_secs(60) {
-            return highest_pos >= VERIFY_FRAMES;
+            return (highest_pos >= VERIFY_FRAMES, start.elapsed().as_secs_f64());
         }
         thread::sleep(Duration::from_millis(15));
     }
@@ -125,18 +148,28 @@ fn run_one_speed(
     // ---- Reference splice ----
     println!("  Capturing reference splice...");
     replay::write_to_shared(client, rec);
-    client.state_mut().continue_from_frame = SPLICE_FRAME;
-
     if !wait_restart_complete(client) {
         println!("  Reference restart timed out");
-        return SpeedResult { speed, reference_ok: false, matched: 0, iterations: ITERATIONS_PER_SPEED };
+        return SpeedResult { speed, reference_ok: false, matched: 0, iterations: ITERATIONS_PER_SPEED, ref_wall_secs: 0.0, effective_x: 0.0 };
     }
-    if !arm_continue_and_wait_for_verify(client) {
+    // CMD_RESTART zeros continue_from_frame; re-write so ARM_CONTINUE's
+    // validity check sees the right value.
+    client.state_mut().continue_from_frame = SPLICE_FRAME;
+    let (verify_ok, ref_wall) = arm_continue_and_wait_for_verify(client);
+    if !verify_ok {
         println!("  Reference ARM_CONTINUE didn't reach frame {}", VERIFY_FRAMES);
-        let _ = harness::send_escape; // pacify unused-import lints if any
         harness::stop(client);
-        return SpeedResult { speed, reference_ok: false, matched: 0, iterations: ITERATIONS_PER_SPEED };
+        return SpeedResult { speed, reference_ok: false, matched: 0, iterations: ITERATIONS_PER_SPEED, ref_wall_secs: 0.0, effective_x: 0.0 };
     }
+    // Effective speedup: at 1× the game runs ~100 ticks/sec, so the
+    // 1×-equivalent wall time for VERIFY_FRAMES ticks is VERIFY_FRAMES/100.
+    // The actual prefix took ref_wall seconds.
+    let baseline_wall = (VERIFY_FRAMES as f64) / 100.0;
+    let effective_x = if ref_wall > 0.0 { baseline_wall / ref_wall } else { 0.0 };
+    println!(
+        "  Reference splice: {:.2}s wall to reach {} ticks (1× baseline {:.2}s → effective {:.2}×)",
+        ref_wall, VERIFY_FRAMES, baseline_wall, effective_x
+    );
     let reference = capture_play_prefix(client);
     println!(
         "  Reference: start=({:.4}, {:.4}, {:.4})  anchor[{}]=({:.4}, {:.4}, {:.4})",
@@ -163,7 +196,10 @@ fn run_one_speed(
                 println!("  Iter {}: restart timeout", i + 1);
                 break;
             }
-            if !arm_continue_and_wait_for_verify(client) {
+            // Re-set continue_from_frame after restart — CMD_RESTART zeros it.
+            client.state_mut().continue_from_frame = SPLICE_FRAME;
+            let (verify_ok, _wall) = arm_continue_and_wait_for_verify(client);
+            if !verify_ok {
                 println!("  Iter {}: didn't reach verify frame", i + 1);
                 harness::stop(client);
                 continue;
@@ -206,6 +242,8 @@ fn run_one_speed(
         reference_ok: true,
         matched,
         iterations: ITERATIONS_PER_SPEED,
+        ref_wall_secs: ref_wall,
+        effective_x,
     }
 }
 
@@ -253,8 +291,11 @@ pub fn run(speeds: &[f32]) -> bool {
     client.state_mut().playback_speed = 1.0;
 
     println!("\n\n=== FE-CONT STRESS SUMMARY ===");
-    println!("{:>10}  {:>8}  {:>20}", "speed", "ref_ok", "matched/iters");
-    println!("{}", "-".repeat(50));
+    println!(
+        "{:>8}  {:>6}  {:>8}  {:>10}  {:>10}  {}",
+        "setting", "ref_ok", "matched", "wall_sec", "effective", ""
+    );
+    println!("{}", "-".repeat(70));
     let mut highest_ok: Option<f32> = None;
     for r in &results {
         let ok = r.reference_ok && r.matched == r.iterations;
@@ -262,11 +303,13 @@ pub fn run(speeds: &[f32]) -> bool {
             highest_ok = Some(r.speed);
         }
         println!(
-            "{:>10.1}  {:>8}  {:>14}/{:<5} {}",
+            "{:>8.1}  {:>6}  {:>4}/{:<3}  {:>9.2}s  {:>9.2}×  {}",
             r.speed,
             if r.reference_ok { "yes" } else { "NO" },
             r.matched,
             r.iterations,
+            r.ref_wall_secs,
+            r.effective_x,
             if ok { "PASS" } else { "FAIL" },
         );
     }
