@@ -131,12 +131,12 @@ pub fn show(
         }
         ui.add(
             egui::DragValue::new(cont_catchup_speed)
-                .range(1.0..=64.0)
+                .range(1.0..=128.0)
                 .prefix("catch-up: ")
                 .suffix("x")
                 .speed(0.5),
         )
-        .on_hover_text("CONT catch-up speed (in-game tick clamp raised to 64; effective top ~30-40× per frame budget)");
+        .on_hover_text("CONT catch-up speed. Default 64× = ~1.1s for a 5200-frame splice with 80% one-shot. 128× saves ~200ms but one-shot drops to ~65% (auto-reroll handles misses).");
 
         ui.separator();
 

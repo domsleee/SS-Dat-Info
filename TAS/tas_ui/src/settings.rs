@@ -35,11 +35,18 @@ impl Default for Settings {
             show_config: false,
             show_log: false,
             playback_speed: 1.0,
-            // Cave5 patches the game's tick clamp from 0x14 (20) to 0x40 (64)
-            // at install time, lifting effective catch-up from ~12× to ~38×.
-            // 32× gives the user a fast-but-not-pathological default that
-            // still leaves headroom for cave5's catchup-drain detection.
-            cont_catchup_speed: 32.0,
+            // Cave5 patches the game's tick clamp from 0x14 (20) to 0x40
+            // (64) at install time, lifting effective catch-up from ~12×
+            // to ~57× (measured). The catchup-speed setting controls
+            // tick_advance scaling — at 64× setting the game's frame
+            // loop spends less time per tick, so frame rate (and
+            // playback throughput) goes up. 64× one-shot reliability
+            // is ~80% on real recordings (vs 65% at 128×), and the
+            // auto-reroll handles the misses transparently. Slider
+            // allows up to 128× for power users; at 128 we're close
+            // to the per-frame overhead ceiling so going higher is
+            // diminishing returns.
+            cont_catchup_speed: 64.0,
         }
     }
 }
