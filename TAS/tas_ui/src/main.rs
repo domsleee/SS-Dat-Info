@@ -436,12 +436,14 @@ impl TasApp {
     }
 
     fn queue_restart_then(&mut self, command: TasCommand, ts: &str) {
-        // Refuse ArmContinue if there's no recording to continue from —
-        // F12 (and any other CONT trigger) shouldn't be able to drag the
-        // app into a half-armed state: cont_catchup_speed=Some, playback_
-        // speed=catchup_multiplier, but no actual playback ever starts,
-        // so clear_cont_catchup never fires and the user is stuck at
-        // catchup speed in OFF mode with nothing to do.
+        // Refuse degenerate CONT requests that would leave the app
+        // half-armed: cont_catchup_speed=Some, playback_speed=multiplier,
+        // but no actual playback ever starts (cave2 has nothing to splice),
+        // so the PLAY→REC transition that calls clear_cont_catchup never
+        // fires and the user is stuck at catchup speed in OFF mode with
+        // the green "Catching up..." label glued on. Two cases:
+        //   - recorded_count == 0: no recording to continue from
+        //   - continue_from_frame == 0: that's just PLAY, not CONT
         if command == TasCommand::ArmContinue {
             let recorded = self
                 .shared
@@ -452,6 +454,20 @@ impl TasApp {
                 self.log_lines.push(format!(
                     "[{}] CONT ignored: no recording loaded (recorded_count=0)",
                     ts
+                ));
+                return;
+            }
+            if self.continue_from_frame == 0 {
+                self.log_lines.push(format!(
+                    "[{}] CONT ignored: continue_from_frame=0 — press PLAY instead",
+                    ts
+                ));
+                return;
+            }
+            if self.continue_from_frame >= recorded {
+                self.log_lines.push(format!(
+                    "[{}] CONT ignored: continue_from_frame={} >= recorded_count={}",
+                    ts, self.continue_from_frame, recorded
                 ));
                 return;
             }
@@ -1494,16 +1510,31 @@ impl eframe::App for TasApp {
                             self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
                         }
                         transport::Action::RestartThen(c) => {
-                            // Refuse CONT with no recording — see
-                            // queue_restart_then for rationale.
-                            if c == TasCommand::ArmContinue
-                                && shared.state().recorded_count == 0
-                            {
-                                self.log_lines.push(format!(
-                                    "[{}] CONT ignored: no recording loaded (recorded_count=0)",
-                                    ts
-                                ));
-                                continue;
+                            // Refuse degenerate CONT requests — see
+                            // queue_restart_then for the full rationale.
+                            if c == TasCommand::ArmContinue {
+                                if shared.state().recorded_count == 0 {
+                                    self.log_lines.push(format!(
+                                        "[{}] CONT ignored: no recording loaded (recorded_count=0)",
+                                        ts
+                                    ));
+                                    continue;
+                                }
+                                if self.continue_from_frame == 0 {
+                                    self.log_lines.push(format!(
+                                        "[{}] CONT ignored: continue_from_frame=0 — press PLAY instead",
+                                        ts
+                                    ));
+                                    continue;
+                                }
+                                let recorded = shared.state().recorded_count;
+                                if self.continue_from_frame >= recorded {
+                                    self.log_lines.push(format!(
+                                        "[{}] CONT ignored: continue_from_frame={} >= recorded_count={}",
+                                        ts, self.continue_from_frame, recorded
+                                    ));
+                                    continue;
+                                }
                             }
                             if c == TasCommand::ArmContinue {
                                 if self.cont_catchup_speed.is_none() {
