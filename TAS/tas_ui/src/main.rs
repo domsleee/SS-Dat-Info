@@ -55,6 +55,20 @@ const CONT_START_MATCH_MAX_RETRIES: u32 = 30;
 /// plenty of margin to disambiguate without slowing down detection.
 const CONT_BUCKET_CHECK_HEADROOM: u32 = 3;
 
+/// Open `tas_ui.log` in append mode next to the history JSON for this
+/// session. Returns `None` if the file system isn't usable — silent
+/// failure mode, since losing the on-disk mirror is preferable to
+/// blocking the UI from starting.
+fn open_session_log_file(history_path: &std::path::Path) -> Option<std::fs::File> {
+    let dir = history_path.parent()?;
+    let log_path = dir.join("tas_ui.log");
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok()
+}
+
 fn normalize_playback_speed(speed: f32) -> f32 {
     if !speed.is_finite() {
         return DEFAULT_PLAYBACK_SPEED;
@@ -106,6 +120,16 @@ struct TasApp {
     recovery_store: Option<recording::RecoveryStore>,
     pending_recovery: Option<recording::RecoveryCheckpoint>,
     log_lines: Vec<String>,
+    /// Append-only on-disk mirror of `log_lines`. Lives under
+    /// `~/.ssb-inspector/{session}/tas_ui.log` (same session dir as the
+    /// history store) so AI agents and post-mortem debuggers can read
+    /// the full transport-log scrollback after `log_lines` has been
+    /// truncated to its 500-entry in-memory cap.
+    log_file: Option<std::fs::File>,
+    /// Index in `log_lines` up to which we've already flushed to
+    /// `log_file`. Bumped each UI frame; resilient to the cap-drain
+    /// because the drain happens AFTER we've persisted.
+    log_lines_persisted: usize,
     timeline_zoom: f32,
     timeline_scroll: f32,
     continue_from_frame: u32,
@@ -197,6 +221,9 @@ impl TasApp {
         } else {
             None
         };
+        let log_file = history_store
+            .as_ref()
+            .and_then(|s| open_session_log_file(s.path()));
         let mut app = Self {
             shared,
             connect_error,
@@ -208,6 +235,8 @@ impl TasApp {
             recovery_store,
             pending_recovery,
             log_lines: Vec::new(),
+            log_file,
+            log_lines_persisted: 0,
             timeline_zoom: 1.0,
             timeline_scroll: 0.0,
             continue_from_frame: 0,
@@ -307,8 +336,36 @@ impl TasApp {
         let ts = chrono::Local::now().format("%H:%M:%S");
         self.log_lines.push(format!("[{}] {}", ts, msg));
         if self.log_lines.len() > 500 {
-            self.log_lines.drain(..100);
+            // Drain the oldest 100 entries. The on-disk log already has
+            // them (flush_log_lines_to_file is called before any drain
+            // could be hit on the same frame), so we only need to keep
+            // the persisted-cursor coherent.
+            let drained = 100;
+            self.log_lines.drain(..drained);
+            self.log_lines_persisted = self.log_lines_persisted.saturating_sub(drained);
         }
+    }
+
+    /// Append any newly-pushed log lines to the session log file. Called
+    /// once per UI frame from `update`. If the file is unavailable
+    /// (couldn't open at start) this is a no-op — the in-memory log
+    /// remains the only record.
+    fn flush_log_lines_to_file(&mut self) {
+        use std::io::Write;
+        let Some(file) = self.log_file.as_mut() else {
+            return;
+        };
+        if self.log_lines_persisted >= self.log_lines.len() {
+            return;
+        }
+        for line in &self.log_lines[self.log_lines_persisted..] {
+            // Best-effort: a single write failure shouldn't crash the
+            // UI. The on-disk log may end up missing entries but that's
+            // strictly better than panicking.
+            let _ = writeln!(file, "{}", line);
+        }
+        let _ = file.flush();
+        self.log_lines_persisted = self.log_lines.len();
     }
 
     #[cfg(test)]
@@ -413,6 +470,15 @@ impl TasApp {
             if command == TasCommand::ArmPlay {
                 shared.state_mut().continue_from_frame = 0;
             }
+            // Cave2's ARM_CONTINUE handler refuses if the game is currently
+            // in REC or PLAY (the guard added previously to stop CONT from
+            // corrupting an in-progress recording). If the user hits CONT/
+            // PLAY/REC while still in a non-OFF mode, we need to send Stop
+            // first so the mode transitions back to OFF before the new
+            // command lands.
+            if shared.mode_volatile() != TasMode::Off as u32 {
+                shared.send_command(TasCommand::Stop);
+            }
             shared.reset_restart_state();
             shared.send_command(TasCommand::Restart);
         }
@@ -425,6 +491,16 @@ impl TasApp {
         let Some(mut guard) = self.continue_start_guard else {
             return;
         };
+        // If a restart sequence is in flight (Stop+Restart sent, ArmContinue
+        // pending), skip bucket judgment until the cycle completes —
+        // otherwise we'd re-judge stale play_coords from the PREVIOUS run
+        // before cave2 has had a chance to actually restart. Without this
+        // gate the bucket-mismatch retry path burned through all 30 retries
+        // in a single second, all judging the same stale frame.
+        if self.pending_after_restart.is_some() {
+            ctx.request_repaint();
+            return;
+        }
         let Some(shared) = self.shared.as_ref() else {
             return;
         };
@@ -1009,6 +1085,11 @@ impl eframe::App for TasApp {
             set_dark_title_bar("SSB Inspect");
         }
 
+        // Persist any new log lines added since last frame to the on-disk
+        // session log. Done first so a panic later in the frame still
+        // captures the events that led up to it.
+        self.flush_log_lines_to_file();
+
         // Check game health (crash detection)
         self.check_game_health();
 
@@ -1444,6 +1525,12 @@ impl eframe::App for TasApp {
                                 self.playback_speed = DEFAULT_PLAYBACK_SPEED;
                             }
                             shared.state_mut().playback_speed = self.playback_speed;
+                            // See queue_restart_then for rationale: cave2
+                            // refuses ARM_* commands mid-REC/PLAY, so Stop
+                            // first if we're not already in OFF.
+                            if shared.mode_volatile() != TasMode::Off as u32 {
+                                shared.send_command(TasCommand::Stop);
+                            }
                             shared.reset_restart_state();
                             shared.send_command(TasCommand::Restart);
                             self.pending_after_restart = Some(c);
@@ -2007,6 +2094,8 @@ mod tests {
             recovery_store: None,
             pending_recovery: None,
             log_lines: Vec::new(),
+            log_file: None,
+            log_lines_persisted: 0,
             timeline_zoom: 1.0,
             timeline_scroll: 0.0,
             continue_from_frame: 0,
