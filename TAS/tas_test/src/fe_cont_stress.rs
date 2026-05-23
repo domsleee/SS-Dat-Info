@@ -31,7 +31,7 @@ const SPLICE_FRAME: u32 = 2200;
 /// flip — once mode flips, playback_pos stops advancing and waiting for
 /// it to hit SPLICE_FRAME would hang.
 const VERIFY_FRAMES: u32 = 2199;
-const ITERATIONS_PER_SPEED: u32 = 5;
+const DEFAULT_ITERATIONS_PER_SPEED: u32 = 20;
 const REF_MATCH_RETRIES: u32 = 30;
 const RESTART_TIMEOUT_SECS: u64 = 15;
 
@@ -150,7 +150,7 @@ fn run_one_speed(
     replay::write_to_shared(client, rec);
     if !wait_restart_complete(client) {
         println!("  Reference restart timed out");
-        return SpeedResult { speed, reference_ok: false, matched: 0, iterations: ITERATIONS_PER_SPEED, ref_wall_secs: 0.0, effective_x: 0.0 };
+        return SpeedResult { speed, reference_ok: false, matched: 0, iterations: DEFAULT_ITERATIONS_PER_SPEED, ref_wall_secs: 0.0, effective_x: 0.0 };
     }
     // CMD_RESTART zeros continue_from_frame; re-write so ARM_CONTINUE's
     // validity check sees the right value.
@@ -159,7 +159,7 @@ fn run_one_speed(
     if !verify_ok {
         println!("  Reference ARM_CONTINUE didn't reach frame {}", VERIFY_FRAMES);
         harness::stop(client);
-        return SpeedResult { speed, reference_ok: false, matched: 0, iterations: ITERATIONS_PER_SPEED, ref_wall_secs: 0.0, effective_x: 0.0 };
+        return SpeedResult { speed, reference_ok: false, matched: 0, iterations: DEFAULT_ITERATIONS_PER_SPEED, ref_wall_secs: 0.0, effective_x: 0.0 };
     }
     // Effective speedup: at 1× the game runs ~100 ticks/sec, so the
     // 1×-equivalent wall time for VERIFY_FRAMES ticks is VERIFY_FRAMES/100.
@@ -185,7 +185,7 @@ fn run_one_speed(
 
     // ---- Verification iterations ----
     let mut matched = 0u32;
-    for i in 0..ITERATIONS_PER_SPEED {
+    for i in 0..DEFAULT_ITERATIONS_PER_SPEED {
         let mut attempt_matched = false;
         for attempt in 0..=REF_MATCH_RETRIES {
             replay::write_to_shared(client, rec);
@@ -241,7 +241,7 @@ fn run_one_speed(
         speed,
         reference_ok: true,
         matched,
-        iterations: ITERATIONS_PER_SPEED,
+        iterations: DEFAULT_ITERATIONS_PER_SPEED,
         ref_wall_secs: ref_wall,
         effective_x,
     }
@@ -250,7 +250,7 @@ fn run_one_speed(
 pub fn run(speeds: &[f32]) -> bool {
     println!(
         "=== FE-tremendous CONT-stress sweep (splice={}, verify={} frames, {} iters/speed) ===\n",
-        SPLICE_FRAME, VERIFY_FRAMES, ITERATIONS_PER_SPEED
+        SPLICE_FRAME, VERIFY_FRAMES, DEFAULT_ITERATIONS_PER_SPEED
     );
 
     let exe_dir = std::env::current_exe()
@@ -324,7 +324,7 @@ pub fn run(speeds: &[f32]) -> bool {
         Some(s) => {
             println!(
                 "*** Fastest speed where all {}/{} iterations matched the reference: {}× ***",
-                ITERATIONS_PER_SPEED, ITERATIONS_PER_SPEED, s
+                DEFAULT_ITERATIONS_PER_SPEED, DEFAULT_ITERATIONS_PER_SPEED, s
             );
             true
         }
