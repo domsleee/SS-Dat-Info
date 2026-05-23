@@ -436,6 +436,26 @@ impl TasApp {
     }
 
     fn queue_restart_then(&mut self, command: TasCommand, ts: &str) {
+        // Refuse ArmContinue if there's no recording to continue from —
+        // F12 (and any other CONT trigger) shouldn't be able to drag the
+        // app into a half-armed state: cont_catchup_speed=Some, playback_
+        // speed=catchup_multiplier, but no actual playback ever starts,
+        // so clear_cont_catchup never fires and the user is stuck at
+        // catchup speed in OFF mode with nothing to do.
+        if command == TasCommand::ArmContinue {
+            let recorded = self
+                .shared
+                .as_ref()
+                .map(|s| s.state().recorded_count)
+                .unwrap_or(0);
+            if recorded == 0 {
+                self.log_lines.push(format!(
+                    "[{}] CONT ignored: no recording loaded (recorded_count=0)",
+                    ts
+                ));
+                return;
+            }
+        }
         if command == TasCommand::ArmContinue {
             if self.cont_catchup_speed.is_none() {
                 self.cont_catchup_speed = Some(self.playback_speed);
@@ -1474,6 +1494,17 @@ impl eframe::App for TasApp {
                             self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
                         }
                         transport::Action::RestartThen(c) => {
+                            // Refuse CONT with no recording — see
+                            // queue_restart_then for rationale.
+                            if c == TasCommand::ArmContinue
+                                && shared.state().recorded_count == 0
+                            {
+                                self.log_lines.push(format!(
+                                    "[{}] CONT ignored: no recording loaded (recorded_count=0)",
+                                    ts
+                                ));
+                                continue;
+                            }
                             if c == TasCommand::ArmContinue {
                                 if self.cont_catchup_speed.is_none() {
                                     self.cont_catchup_speed = Some(self.playback_speed);
@@ -2451,6 +2482,40 @@ mod tests {
             "Second CONT press must re-apply the catchup multiplier (32), got {}",
             app.playback_speed
         );
+    }
+
+    /// Pressing CONT (via F12 or otherwise) with no recording loaded
+    /// must NOT leave the app half-armed at catchup speed. Previously
+    /// it set cont_catchup_speed=Some(saved) and playback_speed=multiplier,
+    /// then sent Restart, but cave2 couldn't start playback (nothing to
+    /// continue from). The PLAY→REC transition that normally calls
+    /// clear_cont_catchup never fires, leaving the UI stuck at e.g. 32×
+    /// in OFF mode with the green "Catching up..." label glued on.
+    ///
+    /// This test exercises queue_restart_then directly because the test
+    /// harness's prepare_restart_action helper bypasses the recorded-count
+    /// check. (We can't trigger the real shared-memory path in a unit
+    /// test without a live DLL.)
+    #[test]
+    fn cont_with_no_recording_does_not_arm_catchup() {
+        let mut app = test_app();
+        app.playback_speed = 1.0;
+        app.cont_catchup_multiplier = 32.0;
+        // No shared memory set, so recorded_count is implicitly 0 (the
+        // helper returns 0 via the unwrap_or fallback). queue_restart_then
+        // should bail before touching catchup state.
+        app.queue_restart_then(TasCommand::ArmContinue, "test");
+        assert!(
+            app.cont_catchup_speed.is_none(),
+            "CONT without recording must not engage catchup speed"
+        );
+        assert!(
+            (app.playback_speed - 1.0).abs() < 0.001,
+            "playback_speed must remain at pre-CONT value, got {}",
+            app.playback_speed
+        );
+        assert!(app.continue_start_guard.is_none());
+        assert!(app.pending_after_restart.is_none());
     }
 
     /// The CONT catchup slider must allow speeds the cave5 patch
