@@ -47,9 +47,19 @@ static float g_nativeTickAdvance = TICK_ADVANCE_DEFAULT;
 
 // Per-frame ticks-per-cycle ceiling after raising the game's clamp.
 // The game originally clamps esi to 14h (20). Raising the in-memory bytes
-// to 40h (64) at install time lifts that ceiling, so effective playback-
-// speed catch-up tops out at 64 ticks/frame × ~60 fps ÷ 100tps native ≈
-// 38× rather than 12×. Cave5's own clamp is bumped to match.
+// at install time lifts that ceiling. Cave5's own clamp is bumped to
+// match.
+//
+// Empirical findings:
+//   * 0x14 (20) — game default, ~12× effective ceiling at 60 fps.
+//   * 0x40 (64) — current value. ~57× measured on FE-5867 at 128× setting.
+//   * 0x64 (100) — tried; NO speed improvement (per-frame game overhead
+//     dominates, not tick budget) AND degraded reliability at the 64×
+//     setting (4/20 one-shot vs 16/20 at cap=64). Reverted.
+//   * 4096 with JA NOP'd — crashes instantly, physics loop unsafe.
+//
+// Conclusion: 64 is at or above the practical performance ceiling for
+// this game/workload. Raising further is a no-op or worse.
 static constexpr int32_t CAVE5_PER_FRAME_TICK_CAP = 64;
 
 // Original game clamp value (cmp esi, 14h). Cave5 enforces this in software
