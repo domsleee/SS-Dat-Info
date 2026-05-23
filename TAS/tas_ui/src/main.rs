@@ -1948,8 +1948,16 @@ impl eframe::App for TasApp {
                     );
                 });
 
-                // Keep shared continue target aligned with transport text field / timeline marker.
-                shared.state_mut().continue_from_frame = self.continue_from_frame;
+                // NOTE: do NOT sync self.continue_from_frame → shared every
+                // frame. That value is *staging* for the next CONT, not a
+                // live signal: cave2's PLAY handler treats any non-zero
+                // continue_from_frame in shared as a splice marker and
+                // auto-switches PLAY → REC at that frame. If we synced
+                // every frame, then editing the "From:" textbox or dragging
+                // the timeline continue marker during PLAY would silently
+                // hijack PLAY into a CONT-like splice. Shared is written
+                // only when CONT is actually armed (queue_restart_then,
+                // SetContinueFrame action, retry paths).
 
                 // Process segment actions (after state borrow is no longer needed)
                 let recorded_count = shared.state().recorded_count;
