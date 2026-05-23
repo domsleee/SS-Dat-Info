@@ -17,6 +17,7 @@ mod benchmark;
 mod cache;
 mod certificate;
 mod cont_reliability;
+mod cont_restart_race;
 mod drift;
 mod drift_speed;
 mod f5_probe;
@@ -117,6 +118,16 @@ fn main() {
             // the pause window, normal ~100 tps during the resume window.
             // Catches the originally reported "fast-forward on resume" bug.
             let ok = escape_speedup::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+"cont-restart-race" => {
+            // Verifies the cave2 contract that tas_ui's Stop→Restart
+            // serialisation depends on: confirms (1) sending Stop + Restart
+            // back-to-back loses the Stop, so cave2 still sees REC/PLAY
+            // mode when ArmContinue arrives, and (2) sending Stop, waiting
+            // for mode==OFF, then sending Restart cleanly gets ArmContinue
+            // accepted. If half 2 fails, tas_ui's CONT-twice fix is broken.
+            let ok = cont_restart_race::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
         "fe-cont-stress" => {
