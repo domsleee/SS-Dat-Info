@@ -10,6 +10,92 @@ use eframe::egui;
 use std::os::windows::process::CommandExt;
 use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 
+/// Find Supreme.exe's PID by enumerating processes. Returns None if not
+/// running. Used by the global-shortcut poll to gate "F-key fired while
+/// game has focus" — we don't want F9 in the user's browser to start a
+/// recording. Cached at the call site and invalidated when shared-memory
+/// disconnects (game closed/restarted).
+#[cfg(windows)]
+fn find_supreme_pid() -> Option<u32> {
+    use std::ffi::c_void;
+    type HANDLE = *mut c_void;
+    type DWORD = u32;
+    type BOOL = i32;
+    type WCHAR = u16;
+    const TH32CS_SNAPPROCESS: DWORD = 0x00000002;
+    const MAX_PATH: usize = 260;
+    const INVALID_HANDLE_VALUE: HANDLE = -1isize as *mut c_void;
+
+    #[repr(C)]
+    struct ProcessEntry32W {
+        dw_size: DWORD,
+        cnt_usage: DWORD,
+        th32_process_id: DWORD,
+        th32_default_heap_id: usize,
+        th32_module_id: DWORD,
+        cnt_threads: DWORD,
+        th32_parent_process_id: DWORD,
+        pc_pri_class_base: i32,
+        dw_flags: DWORD,
+        sz_exe_file: [WCHAR; MAX_PATH],
+    }
+
+    extern "system" {
+        fn CreateToolhelp32Snapshot(flags: DWORD, pid: DWORD) -> HANDLE;
+        fn Process32FirstW(snap: HANDLE, entry: *mut ProcessEntry32W) -> BOOL;
+        fn Process32NextW(snap: HANDLE, entry: *mut ProcessEntry32W) -> BOOL;
+        fn CloseHandle(h: HANDLE) -> BOOL;
+    }
+
+    let target: Vec<u16> = "Supreme.exe".encode_utf16().collect();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut entry: ProcessEntry32W = std::mem::zeroed();
+        entry.dw_size = std::mem::size_of::<ProcessEntry32W>() as DWORD;
+        let mut ok = Process32FirstW(snap, &mut entry);
+        while ok != 0 {
+            let len = entry
+                .sz_exe_file
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(MAX_PATH);
+            if entry.sz_exe_file[..len].eq(target.as_slice()) {
+                CloseHandle(snap);
+                return Some(entry.th32_process_id);
+            }
+            ok = Process32NextW(snap, &mut entry);
+        }
+        CloseHandle(snap);
+    }
+    None
+}
+
+/// Identifiers for the four TAS shortcut keys, used both for
+/// `poll_global_shortcuts` and for the pure edge-detector unit tests
+/// (which can't link Win32). Order matches `GLOBAL_SHORTCUT_KEYS`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GlobalShortcutSlot {
+    F9 = 0,
+    F10 = 1,
+    F11 = 2,
+    F12 = 3,
+}
+
+/// Compute press-edge transitions for the four shortcut keys. Pure
+/// function so we can unit-test the edge logic without faking Win32.
+/// Mutates `prev` to current so the caller's state stays in sync.
+fn compute_global_key_edges(now: [bool; 4], prev: &mut [bool; 4]) -> [bool; 4] {
+    let mut edges = [false; 4];
+    for i in 0..4 {
+        edges[i] = now[i] && !prev[i];
+        prev[i] = now[i];
+    }
+    edges
+}
+
 /// Force dark title bar on Windows 10+ via DwmSetWindowAttribute.
 #[cfg(windows)]
 fn set_dark_title_bar(title: &str) {
@@ -187,6 +273,17 @@ struct TasApp {
     /// slot (single u32, no queue) — cave2 only sees Restart, mode
     /// stays in REC/PLAY, and the subsequent ArmContinue is refused.
     pending_stop_then_restart: Option<TasCommand>,
+    /// Previous-frame pressed state for the four global-shortcut keys
+    /// (F9, F10, F11, F12 in that order). Diffed against the current
+    /// GetAsyncKeyState result to detect press edges. Updated every
+    /// frame regardless of which window has focus so we never get
+    /// stuck on stale "was pressed" state after a focus change.
+    prev_global_keys: [bool; 4],
+    /// Cached Supreme.exe PID. Resolved on first poll, invalidated when
+    /// the shared-memory connection drops (game closed/restarted).
+    /// Stored as Option so a re-resolution attempt is just `.take()`
+    /// followed by re-call.
+    game_pid_cached: Option<u32>,
     continue_start_guard: Option<ContinueStartGuard>,
     // Deferred restart-then-CONT request from the segments panel's "Redo from
     // frame" action. The action handler can't call queue_restart_then directly
@@ -289,6 +386,8 @@ impl TasApp {
             analysis_cache: analysis::AnalysisCache::default(),
             pending_after_restart: None,
             pending_stop_then_restart: None,
+            prev_global_keys: [false; 4],
+            game_pid_cached: None,
             continue_start_guard: None,
             pending_redo_restart_cont: None,
             last_frame_count: 0,
@@ -988,6 +1087,10 @@ impl TasApp {
                         );
                         self.stale_frame_ticks = 0;
                         self.log_read_cursor = 0;
+                        // Invalidate cached game PID — a fresh Supreme.exe
+                        // launch will get a different PID and our global-
+                        // shortcut foreground gate would otherwise stay stale.
+                        self.game_pid_cached = None;
                     }
                 }
             } else {
@@ -995,6 +1098,91 @@ impl TasApp {
                 self.stale_frame_ticks = 0;
             }
         }
+    }
+
+    /// Poll the global keyboard state for F9–F12 and emit the same
+    /// transport actions the in-window shortcut handler would, but only
+    /// when Supreme.exe is the foreground window. Lets the user trigger
+    /// REC/PLAY/STOP/CONT without alt-tabbing to tas_ui. Crucially, the
+    /// keys are *observed*, not consumed — the game still receives them.
+    ///
+    /// Edge state is updated every frame regardless of focus so we
+    /// never strand on a "was pressed last time we looked" entry after
+    /// a focus change while a key was held.
+    #[cfg(windows)]
+    fn poll_global_shortcuts(&mut self) -> Vec<transport::Action> {
+        use std::ffi::c_void;
+        type HWND = *mut c_void;
+        type DWORD = u32;
+        const VK_F9: i32 = 0x78;
+        const VK_F10: i32 = 0x79;
+        const VK_F11: i32 = 0x7A;
+        const VK_F12: i32 = 0x7B;
+
+        extern "system" {
+            fn GetAsyncKeyState(vk: i32) -> i16;
+            fn GetForegroundWindow() -> HWND;
+            fn GetWindowThreadProcessId(hwnd: HWND, pid: *mut DWORD) -> DWORD;
+        }
+
+        // Step 1: read current pressed state for all four keys.
+        let now: [bool; 4] = [VK_F9, VK_F10, VK_F11, VK_F12].map(|vk| unsafe {
+            (GetAsyncKeyState(vk) as u16 & 0x8000) != 0
+        });
+        // Step 2: compute edges and update cache (always — see doc comment).
+        let edges = compute_global_key_edges(now, &mut self.prev_global_keys);
+        // Short-circuit if no key transitioned this frame.
+        if !edges.iter().any(|&e| e) {
+            return Vec::new();
+        }
+
+        // Step 3: gate emission on Supreme.exe being the foreground window.
+        // If the cache is stale or unresolved, try to fill it. We invalidate
+        // the cache when shared-memory disconnects (game closed), so a stale
+        // PID only persists across a same-session game restart that doesn't
+        // tear down shared memory — rare and benign (the PID just won't match).
+        let game_pid = self.game_pid_cached.or_else(|| {
+            let resolved = find_supreme_pid();
+            self.game_pid_cached = resolved;
+            resolved
+        });
+        let Some(game_pid) = game_pid else { return Vec::new() };
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.is_null() {
+            return Vec::new();
+        }
+        let mut fg_pid: DWORD = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut fg_pid) };
+        if fg_pid != game_pid {
+            return Vec::new();
+        }
+
+        // Step 4: emit actions for each newly-pressed key.
+        let mut actions = Vec::new();
+        if edges[GlobalShortcutSlot::F9 as usize] {
+            actions.push(transport::Action::RestartThen(TasCommand::ArmRec));
+            actions.push(transport::Action::Log("Global F9 (in-game): REC".into()));
+        }
+        if edges[GlobalShortcutSlot::F10 as usize] {
+            actions.push(transport::Action::RestartThen(TasCommand::ArmPlay));
+            actions.push(transport::Action::Log("Global F10 (in-game): PLAY".into()));
+        }
+        if edges[GlobalShortcutSlot::F11 as usize] {
+            actions.push(transport::Action::Send(TasCommand::Stop));
+            actions.push(transport::Action::Log("Global F11 (in-game): STOP".into()));
+        }
+        if edges[GlobalShortcutSlot::F12 as usize] {
+            actions.push(transport::Action::SetContinueFrame(self.continue_from_frame));
+            actions.push(transport::Action::RestartThen(TasCommand::ArmContinue));
+            actions.push(transport::Action::Log("Global F12 (in-game): CONT".into()));
+        }
+        actions
+    }
+
+    /// Non-Windows shim so the call site doesn't need conditional compilation.
+    #[cfg(not(windows))]
+    fn poll_global_shortcuts(&mut self) -> Vec<transport::Action> {
+        Vec::new()
     }
 
     /// Process keyboard shortcuts. Returns actions to execute.
@@ -1238,8 +1426,15 @@ impl eframe::App for TasApp {
             }
         }
 
-        // Process keyboard shortcuts first
-        let shortcut_actions = self.handle_shortcuts(ctx);
+        // Process keyboard shortcuts first. handle_shortcuts handles
+        // keys delivered to tas_ui via egui (i.e. when tas_ui has
+        // focus); poll_global_shortcuts handles keys observed via
+        // GetAsyncKeyState when the game has focus. The two paths are
+        // mutually exclusive (gated on which window is foreground), so
+        // a single F-key press fires exactly one action regardless of
+        // which window the user was in.
+        let mut shortcut_actions = self.handle_shortcuts(ctx);
+        shortcut_actions.extend(self.poll_global_shortcuts());
         let mut restore_pending_recovery = false;
         let mut discard_pending_recovery = false;
 
@@ -2288,6 +2483,8 @@ mod tests {
             analysis_cache: analysis::AnalysisCache::default(),
             pending_after_restart: None,
             pending_stop_then_restart: None,
+            prev_global_keys: [false; 4],
+            game_pid_cached: None,
             continue_start_guard: None,
             pending_redo_restart_cont: None,
             last_frame_count: 0,
@@ -2612,6 +2809,43 @@ mod tests {
             "Second CONT press must re-apply the catchup multiplier (32), got {}",
             app.playback_speed
         );
+    }
+
+    /// The global-shortcut edge detector must fire exactly once per
+    /// false→true transition and update the previous-state cache so
+    /// subsequent calls with the same held state do NOT re-fire. If
+    /// this breaks, holding F9 in-game would spam REC actions every
+    /// frame instead of arming once.
+    #[test]
+    fn global_shortcut_edges_fire_only_on_press() {
+        let mut prev = [false; 4];
+        // First call: F9 pressed → edge for slot 0 only.
+        let edges = compute_global_key_edges([true, false, false, false], &mut prev);
+        assert_eq!(edges, [true, false, false, false]);
+        assert_eq!(prev, [true, false, false, false]);
+        // Hold: F9 still pressed → no edge.
+        let edges = compute_global_key_edges([true, false, false, false], &mut prev);
+        assert_eq!(edges, [false, false, false, false]);
+        // Release: F9 released → no edge (we fire on press, not release).
+        let edges = compute_global_key_edges([false, false, false, false], &mut prev);
+        assert_eq!(edges, [false, false, false, false]);
+        assert_eq!(prev, [false, false, false, false]);
+        // Re-press: F9 pressed again → edge fires.
+        let edges = compute_global_key_edges([true, false, false, false], &mut prev);
+        assert_eq!(edges, [true, false, false, false]);
+    }
+
+    /// Holding a key across multiple frames with intervening focus loss
+    /// (simulated here by repeated identical reads) must not produce
+    /// repeated edges. This guarantees in-game F9 hold won't spam REC.
+    #[test]
+    fn global_shortcut_held_does_not_repeat() {
+        let mut prev = [false; 4];
+        compute_global_key_edges([true, true, true, true], &mut prev);
+        for _ in 0..100 {
+            let edges = compute_global_key_edges([true, true, true, true], &mut prev);
+            assert_eq!(edges, [false, false, false, false]);
+        }
     }
 
     /// The CONT retry-jitter sequence must visit a spread of distinct
