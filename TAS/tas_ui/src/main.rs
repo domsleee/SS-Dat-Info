@@ -49,6 +49,11 @@ const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
 const PLAYBACK_SPEED_PRESETS: [f32; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
 const TRAJECTORY_ROTATION_SPLIT_MIN_WIDTH: f32 = 900.0;
 const CONT_START_MATCH_MAX_RETRIES: u32 = 30;
+/// Extra frames of headroom past the recording's first-moving frame before
+/// we sample the live play_coords to decide if we landed in the right
+/// bucket. The bucket signal is a 1-frame phase offset, so 3 frames is
+/// plenty of margin to disambiguate without slowing down detection.
+const CONT_BUCKET_CHECK_HEADROOM: u32 = 3;
 
 fn normalize_playback_speed(speed: f32) -> f32 {
     if !speed.is_finite() {
@@ -78,6 +83,14 @@ struct ContinueStartGuard {
     expected_start_bits: [u32; 3],
     continue_from_frame: u32,
     retries_remaining: u32,
+    /// Frame index of the first position in `rec_coords` that differs from
+    /// `rec_coords[0]` — i.e. when the recorded player first moved out of
+    /// spawn. None if the recording never moves (degenerate / not loaded).
+    /// Used as a "bucket fingerprint": the F5-restart accumulator-leftover
+    /// shifts when the countdown completes by ±1 frame; comparing observed
+    /// first-moving vs expected discriminates buckets long before chaos
+    /// has amplified into a visible position miss.
+    expected_first_moving: Option<u32>,
 }
 
 struct TasApp {
@@ -325,12 +338,32 @@ impl TasApp {
                 return None;
             }
             let rec0 = state.rec_coords[0];
-            Some([rec0[0].to_bits(), rec0[1].to_bits(), rec0[2].to_bits()])
+            let start_bits = [rec0[0].to_bits(), rec0[1].to_bits(), rec0[2].to_bits()];
+            // Walk rec_coords up to recorded_count looking for the first
+            // index whose position differs from rec_coords[0]. The bucket
+            // fingerprint: the recorded countdown completion frame.
+            let n = state.recorded_count as usize;
+            let n = n.min(state.rec_coords.len());
+            let mut first_moving: Option<u32> = None;
+            for j in 1..n {
+                let c = state.rec_coords[j];
+                if c[0].to_bits() != rec0[0].to_bits()
+                    || c[1].to_bits() != rec0[1].to_bits()
+                    || c[2].to_bits() != rec0[2].to_bits()
+                {
+                    first_moving = Some(j as u32);
+                    break;
+                }
+            }
+            Some((start_bits, first_moving))
         });
-        self.continue_start_guard = expected.map(|expected_start_bits| ContinueStartGuard {
-            expected_start_bits,
-            continue_from_frame: self.continue_from_frame,
-            retries_remaining: CONT_START_MATCH_MAX_RETRIES,
+        self.continue_start_guard = expected.map(|(expected_start_bits, expected_first_moving)| {
+            ContinueStartGuard {
+                expected_start_bits,
+                continue_from_frame: self.continue_from_frame,
+                retries_remaining: CONT_START_MATCH_MAX_RETRIES,
+                expected_first_moving,
+            }
         });
     }
 
@@ -413,19 +446,106 @@ impl TasApp {
 
         let play0 = shared.state().play_coords[0];
         let play0_bits = [play0[0].to_bits(), play0[1].to_bits(), play0[2].to_bits()];
-        if play0_bits == guard.expected_start_bits {
-            if guard.retries_remaining < CONT_START_MATCH_MAX_RETRIES {
-                let used = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
-                self.push_log(&format!(
-                    "CONT start aligned after {} restart retr{}",
-                    used,
-                    if used == 1 { "y" } else { "ies" }
-                ));
+        let start_matches = play0_bits == guard.expected_start_bits;
+
+        // Phase 2: bucket fingerprint check. Only meaningful once the
+        // start position matches (otherwise we'd be running the bucket
+        // check on a degenerate run that's about to retry anyway). Needs
+        // enough frames played past the recording's expected first-moving
+        // frame to distinguish the two buckets.
+        if start_matches {
+            let expected_first_moving = match guard.expected_first_moving {
+                Some(f) => f,
+                None => {
+                    // Recording never moves out of spawn (or wasn't
+                    // loaded with positions). No bucket signal — done.
+                    if guard.retries_remaining < CONT_START_MATCH_MAX_RETRIES {
+                        let used = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
+                        self.push_log(&format!(
+                            "CONT start aligned after {} restart retr{}",
+                            used,
+                            if used == 1 { "y" } else { "ies" }
+                        ));
+                    }
+                    self.continue_start_guard = None;
+                    return;
+                }
+            };
+            let needed = expected_first_moving + CONT_BUCKET_CHECK_HEADROOM;
+            if playback_pos < needed {
+                ctx.request_repaint();
+                return;
             }
-            self.continue_start_guard = None;
+            // Compute the live first-moving frame from play_coords.
+            let state = shared.state();
+            let spawn_bits = guard.expected_start_bits;
+            let scan_end = (playback_pos as usize).min(state.play_coords.len());
+            let mut observed: Option<u32> = None;
+            for j in 1..scan_end {
+                let c = state.play_coords[j];
+                if c[0].to_bits() != spawn_bits[0]
+                    || c[1].to_bits() != spawn_bits[1]
+                    || c[2].to_bits() != spawn_bits[2]
+                {
+                    observed = Some(j as u32);
+                    break;
+                }
+            }
+            if observed == Some(expected_first_moving) {
+                // Bucket match — full success.
+                let used = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
+                if used > 0 {
+                    self.push_log(&format!(
+                        "CONT bucket aligned after {} restart retr{}",
+                        used,
+                        if used == 1 { "y" } else { "ies" }
+                    ));
+                }
+                self.continue_start_guard = None;
+                return;
+            }
+            // Wrong bucket — fall through to the retry path with a
+            // bucket-specific log message.
+            if guard.retries_remaining == 0 {
+                if let Some(shared) = self.shared.as_mut() {
+                    shared.send_command(TasCommand::Stop);
+                }
+                self.clear_cont_catchup();
+                self.pending_after_restart = None;
+                self.reset_continue_runtime_state();
+                self.push_log(&format!(
+                    "CONT aborted: bucket mismatch after {} retries (observed first-moving={:?}, expected={})",
+                    CONT_START_MATCH_MAX_RETRIES, observed, expected_first_moving
+                ));
+                return;
+            }
+            let continue_from_frame = guard.continue_from_frame;
+            guard.retries_remaining -= 1;
+            let attempt = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
+            self.pending_session_kind = Some(RecordingSessionKind::Continue);
+            self.pending_continue_start_tick = Some(continue_from_frame);
+            self.playback_speed = self.cont_catchup_multiplier;
+            if self.cont_catchup_speed.is_none() {
+                self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
+            }
+            self.pending_after_restart = Some(TasCommand::ArmContinue);
+            if let Some(shared) = self.shared.as_mut() {
+                shared.send_command(TasCommand::Stop);
+                shared.state_mut().continue_from_frame = continue_from_frame;
+                shared.state_mut().playback_speed = self.playback_speed;
+                shared.reset_restart_state();
+                shared.send_command(TasCommand::Restart);
+            }
+            self.continue_start_guard = Some(guard);
+            self.push_log(&format!(
+                "CONT bucket mismatch (observed first-moving={:?}, expected={}) -> retry {}/{}",
+                observed, expected_first_moving, attempt, CONT_START_MATCH_MAX_RETRIES
+            ));
+            ctx.request_repaint();
             return;
         }
 
+        // Phase 1: start-position mismatch path (existing behavior).
         let expected_x = f32::from_bits(guard.expected_start_bits[0]);
         let expected_z = f32::from_bits(guard.expected_start_bits[2]);
         let dx = (play0[0] as f64 - expected_x as f64).abs();
@@ -1283,6 +1403,18 @@ impl eframe::App for TasApp {
                                 let state = shared.state();
                                 if state.recorded_count > 0 {
                                     let rec0 = state.rec_coords[0];
+                                    let n = (state.recorded_count as usize).min(state.rec_coords.len());
+                                    let mut first_moving: Option<u32> = None;
+                                    for j in 1..n {
+                                        let c = state.rec_coords[j];
+                                        if c[0].to_bits() != rec0[0].to_bits()
+                                            || c[1].to_bits() != rec0[1].to_bits()
+                                            || c[2].to_bits() != rec0[2].to_bits()
+                                        {
+                                            first_moving = Some(j as u32);
+                                            break;
+                                        }
+                                    }
                                     self.continue_start_guard = Some(ContinueStartGuard {
                                         expected_start_bits: [
                                             rec0[0].to_bits(),
@@ -1291,6 +1423,7 @@ impl eframe::App for TasApp {
                                         ],
                                         continue_from_frame: self.continue_from_frame,
                                         retries_remaining: CONT_START_MATCH_MAX_RETRIES,
+                                        expected_first_moving: first_moving,
                                     });
                                 } else {
                                     self.continue_start_guard = None;
