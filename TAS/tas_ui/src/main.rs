@@ -577,13 +577,12 @@ impl TasApp {
         let Some(mut guard) = self.continue_start_guard else {
             return;
         };
-        // If a restart sequence is in flight (Stop+Restart sent, ArmContinue
-        // pending), skip bucket judgment until the cycle completes —
-        // otherwise we'd re-judge stale play_coords from the PREVIOUS run
-        // before cave2 has had a chance to actually restart. Without this
-        // gate the bucket-mismatch retry path burned through all 30 retries
-        // in a single second, all judging the same stale frame.
-        if self.pending_after_restart.is_some() {
+        // If a restart sequence is in flight (Stop sent + waiting for OFF,
+        // or Restart sent + ArmContinue pending), skip bucket judgment
+        // until the cycle completes — otherwise we'd re-judge stale
+        // play_coords from the PREVIOUS run before cave2 has had a chance
+        // to actually restart.
+        if self.pending_after_restart.is_some() || self.pending_stop_then_restart.is_some() {
             ctx.request_repaint();
             return;
         }
@@ -690,14 +689,21 @@ impl TasApp {
             if self.cont_catchup_speed.is_none() {
                 self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
             }
-            self.pending_after_restart = Some(TasCommand::ArmContinue);
+            // Use the two-step Stop→Restart serialisation: send Stop, let
+            // poll_pending_stop_then_restart fire Restart once cave2 has
+            // confirmed mode==OFF. Same race trap that queue_restart_then
+            // had (single-u32 command slot loses Stop if Restart follows
+            // immediately) — without this, every retry kept landing in
+            // the SAME bucket because the timing of Stop+Restart was
+            // identical and the F5 accumulator-leftover never varied.
+            // The Stop→OFF wait introduces natural wall-clock jitter,
+            // which is exactly what we need to explore other buckets.
             if let Some(shared) = self.shared.as_mut() {
-                shared.send_command(TasCommand::Stop);
                 shared.state_mut().continue_from_frame = continue_from_frame;
                 shared.state_mut().playback_speed = self.playback_speed;
-                shared.reset_restart_state();
-                shared.send_command(TasCommand::Restart);
+                shared.send_command(TasCommand::Stop);
             }
+            self.pending_stop_then_restart = Some(TasCommand::ArmContinue);
             self.continue_start_guard = Some(guard);
             self.push_log(&format!(
                 "CONT bucket mismatch (observed first-moving={:?}, expected={}) -> retry {}/{}",
@@ -736,14 +742,14 @@ impl TasApp {
         if self.cont_catchup_speed.is_none() {
             self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
         }
-        self.pending_after_restart = Some(TasCommand::ArmContinue);
+        // Use two-step Stop→Restart so cave2 actually sees the Stop.
+        // See bucket-retry path above for the full rationale.
         if let Some(shared) = self.shared.as_mut() {
-            shared.send_command(TasCommand::Stop);
             shared.state_mut().continue_from_frame = continue_from_frame;
             shared.state_mut().playback_speed = self.playback_speed;
-            shared.reset_restart_state();
-            shared.send_command(TasCommand::Restart);
+            shared.send_command(TasCommand::Stop);
         }
+        self.pending_stop_then_restart = Some(TasCommand::ArmContinue);
         self.continue_start_guard = Some(guard);
         self.push_log(&format!(
             "CONT start mismatch (dx={:.9}, dz={:.9}) -> retry {}/{}",
