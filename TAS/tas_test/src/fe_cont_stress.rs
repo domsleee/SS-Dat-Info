@@ -12,8 +12,11 @@
 //! compares to the original recording's coords.
 //!
 //! For each speed in [1, 12, 32, 64, 128, 256] (configurable), runs
-//! the reference cycle plus N verification cycles and reports whether
-//! all N matched the reference within the retry budget.
+//! the reference cycle plus N verification cycles and reports how many
+//! match the reference on the FIRST attempt — i.e. the user experience
+//! of pressing "cont" once with no F5 retries. Anything less than N/N
+//! means the user will sometimes see a "wrong" trajectory after pressing
+//! cont and have to restart.
 
 use std::path::PathBuf;
 use std::thread;
@@ -32,6 +35,9 @@ const SPLICE_FRAME: u32 = 2200;
 /// it to hit SPLICE_FRAME would hang.
 const VERIFY_FRAMES: u32 = 2199;
 const DEFAULT_ITERATIONS_PER_SPEED: u32 = 20;
+/// Retries used ONLY to capture the reference. Real iterations are
+/// single-shot (no retries) to reflect the user's "press cont once"
+/// experience.
 const REF_MATCH_RETRIES: u32 = 30;
 const RESTART_TIMEOUT_SECS: u64 = 15;
 
@@ -183,58 +189,57 @@ fn run_one_speed(
     harness::stop(client);
     thread::sleep(Duration::from_millis(200));
 
-    // ---- Verification iterations ----
+    // ---- Verification iterations (single-shot, no F5 retries) ----
+    // Each iteration is ONE press of "cont" — exactly what the user does.
+    // We count how many of these one-shot attempts produce the same
+    // trajectory as the reference. Any miss is a user-visible flake:
+    // they pressed cont, the snowboarder went to a different place,
+    // they'd have to restart and try again.
     let mut matched = 0u32;
     for i in 0..DEFAULT_ITERATIONS_PER_SPEED {
-        let mut attempt_matched = false;
-        for attempt in 0..=REF_MATCH_RETRIES {
-            replay::write_to_shared(client, rec);
-            client.state_mut().playback_speed = speed;
-            client.state_mut().continue_from_frame = SPLICE_FRAME;
+        replay::write_to_shared(client, rec);
+        client.state_mut().playback_speed = speed;
+        client.state_mut().continue_from_frame = SPLICE_FRAME;
 
-            if !wait_restart_complete(client) {
-                println!("  Iter {}: restart timeout", i + 1);
-                break;
+        if !wait_restart_complete(client) {
+            println!("  Iter {}: restart timeout — counting as FAIL", i + 1);
+            continue;
+        }
+        // Re-set continue_from_frame after restart — CMD_RESTART zeros it.
+        client.state_mut().continue_from_frame = SPLICE_FRAME;
+        let (verify_ok, _wall) = arm_continue_and_wait_for_verify(client);
+        if !verify_ok {
+            println!("  Iter {}: didn't reach verify frame — FAIL", i + 1);
+            harness::stop(client);
+            thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        match matches_reference(client, &reference) {
+            None => {
+                let last_idx = (VERIFY_FRAMES - 1) as usize;
+                let p = client.state().play_coords[last_idx];
+                println!(
+                    "  Iter {:>2}: MATCH    end=({:.4},{:.4},{:.4})",
+                    i + 1,
+                    p[0], p[1], p[2]
+                );
+                matched += 1;
             }
-            // Re-set continue_from_frame after restart — CMD_RESTART zeros it.
-            client.state_mut().continue_from_frame = SPLICE_FRAME;
-            let (verify_ok, _wall) = arm_continue_and_wait_for_verify(client);
-            if !verify_ok {
-                println!("  Iter {}: didn't reach verify frame", i + 1);
-                harness::stop(client);
-                continue;
-            }
-            match matches_reference(client, &reference) {
-                None => {
-                    println!(
-                        "  Iter {} matched on attempt {} ({} frames bit-identical)",
-                        i + 1,
-                        attempt + 1,
-                        VERIFY_FRAMES
-                    );
-                    attempt_matched = true;
-                    harness::stop(client);
-                    thread::sleep(Duration::from_millis(200));
-                    break;
-                }
-                Some(diverge_frame) => {
-                    println!(
-                        "  Iter {} attempt {}/{}: diverges at frame {}",
-                        i + 1,
-                        attempt + 1,
-                        REF_MATCH_RETRIES,
-                        diverge_frame
-                    );
-                    harness::stop(client);
-                    thread::sleep(Duration::from_millis(200));
-                }
+            Some(diverge_frame) => {
+                let last_idx = (VERIFY_FRAMES - 1) as usize;
+                let p = client.state().play_coords[last_idx];
+                let r = reference[last_idx];
+                println!(
+                    "  Iter {:>2}: MISS     diverges@{}  end=({:.4},{:.4},{:.4}) vs ref=({:.4},{:.4},{:.4})",
+                    i + 1,
+                    diverge_frame,
+                    p[0], p[1], p[2],
+                    r[0], r[1], r[2]
+                );
             }
         }
-        if attempt_matched {
-            matched += 1;
-        } else {
-            println!("  Iter {}: gave up after {} retries", i + 1, REF_MATCH_RETRIES);
-        }
+        harness::stop(client);
+        thread::sleep(Duration::from_millis(200));
     }
 
     SpeedResult {
