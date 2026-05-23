@@ -55,6 +55,18 @@ const CONT_START_MATCH_MAX_RETRIES: u32 = 30;
 /// plenty of margin to disambiguate without slowing down detection.
 const CONT_BUCKET_CHECK_HEADROOM: u32 = 3;
 
+/// Computes a varied wall-clock delay (in ms) to insert before a CONT
+/// retry's Stop. The F5-restart bucket the runtime lands in is
+/// determined by the wall-clock-modulo-tick-period at restart time;
+/// without varying our retry timing, every retry hits the same modulo
+/// and lands in the same bucket. We don't need true randomness — just
+/// a sequence that cycles through enough phase offsets to cross tick
+/// boundaries (~10ms at 1× tick_advance). Step is 7 because gcd(7,17)
+/// is 1 so the sequence visits all 17 residues before repeating.
+fn cont_retry_jitter_ms(attempt: u32) -> u64 {
+    (attempt as u64 * 7 + 3) % 17 + 1
+}
+
 /// Open `tas_ui.log` in append mode next to the history JSON for this
 /// session. Returns `None` if the file system isn't usable — silent
 /// failure mode, since losing the on-disk mirror is preferable to
@@ -689,15 +701,20 @@ impl TasApp {
             if self.cont_catchup_speed.is_none() {
                 self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
             }
-            // Use the two-step Stop→Restart serialisation: send Stop, let
-            // poll_pending_stop_then_restart fire Restart once cave2 has
-            // confirmed mode==OFF. Same race trap that queue_restart_then
-            // had (single-u32 command slot loses Stop if Restart follows
-            // immediately) — without this, every retry kept landing in
-            // the SAME bucket because the timing of Stop+Restart was
-            // identical and the F5 accumulator-leftover never varied.
-            // The Stop→OFF wait introduces natural wall-clock jitter,
-            // which is exactly what we need to explore other buckets.
+            // Explicit timing jitter: vary the wall-clock offset before
+            // each retry's Stop, so the F5 lands at a different
+            // accumulator-modulo-tick-period than the previous attempt.
+            // Without this the natural mode-wait jitter is too small/
+            // consistent and we just keep hitting the same bucket. See
+            // cont_retry_jitter_ms — sequence cycles through 17 distinct
+            // offsets, plenty to cross tick boundaries.
+            let jitter = cont_retry_jitter_ms(attempt);
+            std::thread::sleep(std::time::Duration::from_millis(jitter));
+            // Use the two-step Stop→Restart serialisation: send Stop,
+            // let poll_pending_stop_then_restart fire Restart once cave2
+            // has confirmed mode==OFF. The shared `command` slot is a
+            // single u32, so sending Stop+Restart same-frame just loses
+            // the Stop.
             if let Some(shared) = self.shared.as_mut() {
                 shared.state_mut().continue_from_frame = continue_from_frame;
                 shared.state_mut().playback_speed = self.playback_speed;
@@ -742,8 +759,10 @@ impl TasApp {
         if self.cont_catchup_speed.is_none() {
             self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
         }
+        // Vary wall-clock timing before retry (see bucket-retry path).
+        let jitter = cont_retry_jitter_ms(attempt);
+        std::thread::sleep(std::time::Duration::from_millis(jitter));
         // Use two-step Stop→Restart so cave2 actually sees the Stop.
-        // See bucket-retry path above for the full rationale.
         if let Some(shared) = self.shared.as_mut() {
             shared.state_mut().continue_from_frame = continue_from_frame;
             shared.state_mut().playback_speed = self.playback_speed;
@@ -2593,6 +2612,26 @@ mod tests {
             "Second CONT press must re-apply the catchup multiplier (32), got {}",
             app.playback_speed
         );
+    }
+
+    /// The CONT retry-jitter sequence must visit a spread of distinct
+    /// values so timing varies enough to cross tick-accumulator
+    /// boundaries between retries. If everyone hits the same ms, we'd
+    /// re-land in the same F5 bucket every retry.
+    #[test]
+    fn cont_retry_jitter_visits_distinct_values() {
+        let values: std::collections::HashSet<u64> =
+            (1..=17).map(cont_retry_jitter_ms).collect();
+        // 17 retries should hit 17 distinct phases (gcd(7,17) = 1).
+        assert!(
+            values.len() >= 10,
+            "Jitter sequence too repetitive: {} distinct values in first 17 attempts",
+            values.len()
+        );
+        // No value should exceed ~20ms — a single retry shouldn't feel
+        // like an unresponsive UI freeze.
+        let max = (1..=17).map(cont_retry_jitter_ms).max().unwrap();
+        assert!(max <= 20, "Jitter ms upper bound too large: {}", max);
     }
 
     /// Pressing CONT (via F12 or otherwise) with no recording loaded
