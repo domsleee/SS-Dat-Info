@@ -473,9 +473,15 @@ impl TasApp {
                 ));
                 return;
             }
-            if self.continue_from_frame >= recorded {
+            // Cave2 accepts continue_from_frame == recorded_count (= play
+            // the whole recording, then enter REC at the end). Only
+            // refuse the strictly-past-end case here. The strict-equal
+            // case is what the user hits after a successful CONT cycle:
+            // recorded_count caps at the splice frame and they want to
+            // press CONT again to redo the same prefix.
+            if self.continue_from_frame > recorded {
                 self.log_lines.push(format!(
-                    "[{}] CONT ignored: continue_from_frame={} >= recorded_count={}",
+                    "[{}] CONT ignored: continue_from_frame={} > recorded_count={}",
                     ts, self.continue_from_frame, recorded
                 ));
                 return;
@@ -1576,9 +1582,9 @@ impl eframe::App for TasApp {
                                     continue;
                                 }
                                 let recorded = shared.state().recorded_count;
-                                if self.continue_from_frame >= recorded {
+                                if self.continue_from_frame > recorded {
                                     self.log_lines.push(format!(
-                                        "[{}] CONT ignored: continue_from_frame={} >= recorded_count={}",
+                                        "[{}] CONT ignored: continue_from_frame={} > recorded_count={}",
                                         ts, self.continue_from_frame, recorded
                                     ));
                                     continue;
