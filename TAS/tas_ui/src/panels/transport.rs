@@ -131,12 +131,12 @@ pub fn show(
         }
         ui.add(
             egui::DragValue::new(cont_catchup_speed)
-                .range(1.0..=20.0)
+                .range(1.0..=64.0)
                 .prefix("catch-up: ")
                 .suffix("x")
                 .speed(0.5),
         )
-        .on_hover_text("CONT catch-up speed (max effective ~12x at 60 FPS)");
+        .on_hover_text("CONT catch-up speed (in-game tick clamp raised to 64; effective top ~30-40× per frame budget)");
 
         ui.separator();
 
