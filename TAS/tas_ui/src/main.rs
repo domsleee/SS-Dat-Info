@@ -167,6 +167,14 @@ struct TasApp {
 
     // In-process restart state: command to send once restart completes
     pending_after_restart: Option<TasCommand>,
+    /// Two-step Stop→Restart sequence: when set, we've sent CMD_STOP and
+    /// are waiting for cave2 to flip mode to OFF before sending
+    /// CMD_RESTART (and queueing the wrapped command for after the
+    /// restart). Without this serialisation, sending Stop and Restart
+    /// on the same UI frame just overwrites Stop in the shared `command`
+    /// slot (single u32, no queue) — cave2 only sees Restart, mode
+    /// stays in REC/PLAY, and the subsequent ArmContinue is refused.
+    pending_stop_then_restart: Option<TasCommand>,
     continue_start_guard: Option<ContinueStartGuard>,
     // Deferred restart-then-CONT request from the segments panel's "Redo from
     // frame" action. The action handler can't call queue_restart_then directly
@@ -268,6 +276,7 @@ impl TasApp {
             trajectory_cache: trajectory::TrajectoryCache::default(),
             analysis_cache: analysis::AnalysisCache::default(),
             pending_after_restart: None,
+            pending_stop_then_restart: None,
             continue_start_guard: None,
             pending_redo_restart_cont: None,
             last_frame_count: 0,
@@ -507,13 +516,20 @@ impl TasApp {
                 shared.state_mut().continue_from_frame = 0;
             }
             // Cave2's ARM_CONTINUE handler refuses if the game is currently
-            // in REC or PLAY (the guard added previously to stop CONT from
-            // corrupting an in-progress recording). If the user hits CONT/
-            // PLAY/REC while still in a non-OFF mode, we need to send Stop
-            // first so the mode transitions back to OFF before the new
-            // command lands.
+            // in REC or PLAY. We can't send Stop + Restart on the same
+            // frame: the shared `command` slot is a single u32 — the
+            // second write clobbers the first, so cave2 only sees Restart
+            // and never the Stop. Instead, send Stop now and stash the
+            // wrapped command in pending_stop_then_restart; the per-frame
+            // poll fires Restart once cave2 has flipped mode to OFF.
             if shared.mode_volatile() != TasMode::Off as u32 {
                 shared.send_command(TasCommand::Stop);
+                self.pending_stop_then_restart = Some(command);
+                self.log_lines.push(format!(
+                    "[{}] In-process Stop → wait for OFF → Restart → {:?}",
+                    ts, command
+                ));
+                return;
             }
             shared.reset_restart_state();
             shared.send_command(TasCommand::Restart);
@@ -521,6 +537,34 @@ impl TasApp {
         self.pending_after_restart = Some(command);
         self.log_lines
             .push(format!("[{}] In-process F5 restart → {:?}", ts, command));
+    }
+
+    /// Poll the deferred Stop→Restart sequence. Once cave2 has processed
+    /// our earlier CMD_STOP (mode == OFF), send the CMD_RESTART and let
+    /// the existing pending_after_restart machinery take over.
+    fn poll_pending_stop_then_restart(&mut self, ctx: &egui::Context) {
+        let Some(command) = self.pending_stop_then_restart else {
+            return;
+        };
+        let Some(shared) = self.shared.as_mut() else {
+            self.pending_stop_then_restart = None;
+            return;
+        };
+        if shared.mode_volatile() != TasMode::Off as u32 {
+            ctx.request_repaint();
+            return;
+        }
+        shared.state_mut().playback_speed = self.playback_speed;
+        shared.reset_restart_state();
+        shared.send_command(TasCommand::Restart);
+        self.pending_stop_then_restart = None;
+        self.pending_after_restart = Some(command);
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        self.log_lines.push(format!(
+            "[{}] Stop landed (mode=OFF) → Restart → {:?}",
+            ts, command
+        ));
+        ctx.request_repaint();
     }
 
     fn poll_continue_start_guard(&mut self, ctx: &egui::Context) {
@@ -1126,6 +1170,10 @@ impl eframe::App for TasApp {
         // captures the events that led up to it.
         self.flush_log_lines_to_file();
 
+        // Two-step Stop→Restart: fire the deferred Restart once cave2
+        // has confirmed mode==OFF.
+        self.poll_pending_stop_then_restart(ctx);
+
         // Check game health (crash detection)
         self.check_game_health();
 
@@ -1587,17 +1635,28 @@ impl eframe::App for TasApp {
                                 self.playback_speed = DEFAULT_PLAYBACK_SPEED;
                             }
                             shared.state_mut().playback_speed = self.playback_speed;
-                            // See queue_restart_then for rationale: cave2
-                            // refuses ARM_* commands mid-REC/PLAY, so Stop
-                            // first if we're not already in OFF.
+                            // See queue_restart_then for full rationale: the
+                            // shared `command` slot is a single u32, so we
+                            // can't send Stop and Restart on the same frame
+                            // (Restart overwrites Stop). Defer Restart until
+                            // cave2 confirms mode==OFF via the per-frame
+                            // poll_pending_stop_then_restart.
                             if shared.mode_volatile() != TasMode::Off as u32 {
                                 shared.send_command(TasCommand::Stop);
+                                self.pending_stop_then_restart = Some(c);
+                                self.log_lines.push(format!(
+                                    "[{}] In-process Stop → wait for OFF → Restart → {:?}",
+                                    ts, c
+                                ));
+                            } else {
+                                shared.reset_restart_state();
+                                shared.send_command(TasCommand::Restart);
+                                self.pending_after_restart = Some(c);
+                                self.log_lines.push(format!(
+                                    "[{}] In-process F5 restart → {:?}",
+                                    ts, c
+                                ));
                             }
-                            shared.reset_restart_state();
-                            shared.send_command(TasCommand::Restart);
-                            self.pending_after_restart = Some(c);
-                            self.log_lines
-                                .push(format!("[{}] In-process F5 restart → {:?}", ts, c));
                         }
                         transport::Action::Undo => {
                             if let Some(snap) = self.history.undo() {
@@ -2189,6 +2248,7 @@ mod tests {
             trajectory_cache: trajectory::TrajectoryCache::default(),
             analysis_cache: analysis::AnalysisCache::default(),
             pending_after_restart: None,
+            pending_stop_then_restart: None,
             continue_start_guard: None,
             pending_redo_restart_cont: None,
             last_frame_count: 0,
