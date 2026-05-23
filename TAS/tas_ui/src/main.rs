@@ -2902,24 +2902,29 @@ mod tests {
         assert!(app.pending_after_restart.is_none());
     }
 
-    /// The CONT catchup slider must allow speeds the cave5 patch
-    /// supports (we raised the in-game tick clamp from 20 to 64). If
-    /// the slider is capped below 64, the user is silently bottlenecked.
-    /// Pure UI assertion against the panel module's constant — no DLL
-    /// interaction needed.
+    /// The CONT catchup slider must allow speeds up to the
+    /// per-frame-overhead ceiling. Empirically 128× setting saves
+    /// ~200ms over 64× on a 5200-frame splice (one-shot reliability
+    /// drops 80%→65% but auto-reroll covers misses). If anyone ever
+    /// caps the slider below 128, power users on long recordings
+    /// would be silently throttled. Also locks the new default of
+    /// 64×, which strikes the reliability/wall-time balance.
     #[test]
-    fn cont_catchup_slider_range_supports_64x() {
-        // The slider lives in panels/transport.rs as a DragValue with
-        // .range(1.0..=64.0). We can't easily introspect that from
-        // outside, so we check the persisted-settings default makes
-        // sense within the new range (which it does at 32) and that
-        // a value of 64 round-trips through settings without clamping.
+    fn cont_catchup_settings_default_and_range() {
         use crate::settings::Settings;
-        let mut s = Settings::default();
-        s.cont_catchup_speed = 64.0;
+        let s = Settings::default();
         assert!(
             (s.cont_catchup_speed - 64.0).abs() < f32::EPSILON,
-            "Settings must allow 64x catchup (raised tick clamp)"
+            "Default catchup must be 64×, got {}",
+            s.cont_catchup_speed
+        );
+        // Verify a 128× setting round-trips through settings without
+        // clamping or rounding.
+        let mut s = Settings::default();
+        s.cont_catchup_speed = 128.0;
+        assert!(
+            (s.cont_catchup_speed - 128.0).abs() < f32::EPSILON,
+            "Settings must allow 128× catchup for power users"
         );
     }
 
