@@ -1,4 +1,4 @@
-use chrono::{Local, NaiveDate};
+use chrono::{Datelike, Local, NaiveDate};
 use eframe::egui;
 
 use crate::recording::{HistoryEntry, HistoryEntryKind, RecordingHistory};
@@ -55,22 +55,46 @@ fn render_day_header(
     today: NaiveDate,
     yesterday: Option<NaiveDate>,
 ) {
+    // Avoid chrono's `%-d` (POSIX no-pad day) which is unsupported on
+    // Windows' strftime — would render the literal `-d` instead of the
+    // day number. Build the day-month string by hand.
+    let short = format!("{} {}", date.day(), month_abbr(date.month()));
     let label = if date == today {
-        format!("Today · {}", date.format("%-d %b"))
+        format!("Today · {}", short)
     } else if Some(date) == yesterday {
-        format!("Yesterday · {}", date.format("%-d %b"))
+        format!("Yesterday · {}", short)
     } else {
-        date.format("%a %-d %b %Y").to_string()
+        format!(
+            "{} {} {} {}",
+            weekday_abbr(date.weekday().num_days_from_monday()),
+            date.day(),
+            month_abbr(date.month()),
+            date.year()
+        )
     };
-    // Day header style: small, dim, uppercase-ish via spacing.
     ui.add_space(6.0);
     ui.label(
         egui::RichText::new(label)
             .size(10.0)
-            .color(egui::Color32::from_gray(120))
-            .strong(),
+            .color(egui::Color32::from_gray(120)),
     );
     ui.add_space(2.0);
+}
+
+fn month_abbr(m: u32) -> &'static str {
+    match m {
+        1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr", 5 => "May", 6 => "Jun",
+        7 => "Jul", 8 => "Aug", 9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+        _ => "???",
+    }
+}
+
+fn weekday_abbr(d: u32) -> &'static str {
+    match d {
+        0 => "Mon", 1 => "Tue", 2 => "Wed", 3 => "Thu",
+        4 => "Fri", 5 => "Sat", 6 => "Sun",
+        _ => "???",
+    }
 }
 
 fn render_row(
@@ -82,67 +106,41 @@ fn render_row(
 ) {
     let parts = parse_entry(entry);
     let restorable = entry.can_restore();
-    let icon_color = kind_color(entry.kind);
-    let context_color = if parts.is_marker {
-        egui::Color32::from_gray(140)
+
+    // Markers have an empty total column; skip the 7-space pad in that
+    // case so the layout reads as `💾  Saved → file  21:17` instead of
+    // `💾           Saved → file  21:17`.
+    let total_slot = if parts.total.is_empty() {
+        String::new()
     } else {
-        egui::Color32::from_rgb(180, 180, 185)
+        parts.total_padded()
     };
     let row_text = format!(
         "{}  {}  {}  {}",
         parts.icon,
-        parts.total_padded(),
+        total_slot,
         parts.context,
         entry.created_at.format("%H:%M"),
     );
 
+    let mut richtext = egui::RichText::new(&row_text).monospace().size(12.0);
+    if parts.is_marker {
+        richtext = richtext
+            .italics()
+            .color(match entry.kind {
+                HistoryEntryKind::SaveMarker => egui::Color32::from_rgb(120, 170, 220),
+                _ => egui::Color32::from_gray(140),
+            });
+    }
+
     let response = if restorable {
-        // Use selectable_label so egui handles the click + the current-row
-        // visual (selected = magenta-ish via egui's selection palette).
-        let mut richtext = egui::RichText::new(format!(
-            "{}  {}  {}  {}",
-            parts.icon,
-            parts.total_padded(),
-            parts.context,
-            entry.created_at.format("%H:%M"),
-        ))
-        .monospace()
-        .size(12.0);
-        if parts.is_marker {
-            richtext = richtext.italics();
-        }
-        // Hint: colorize the icon prefix via a leading space-padded
-        // RichText. egui doesn't easily mix colors in one label, so we
-        // accept a single text color for the row and rely on the kind-
-        // icon glyph for differentiation. Save/load markers stay dim.
         ui.selectable_label(is_current, richtext)
     } else {
-        // Marker rows (save/load): show as colored label, not clickable.
-        let _ = icon_color;
-        let mut richtext = egui::RichText::new(row_text)
-            .monospace()
-            .size(12.0)
-            .color(context_color)
-            .italics();
-        if entry.kind == HistoryEntryKind::SaveMarker {
-            richtext = richtext.color(egui::Color32::from_rgb(120, 170, 220));
-        }
         ui.label(richtext)
     };
 
     if restorable && response.clicked() {
         actions.push(HistoryAction::Restore(idx));
-    }
-}
-
-/// Map a `HistoryEntryKind` to a representative color. Currently unused at
-/// the per-character level (egui doesn't mix colors mid-label cheaply), but
-/// kept for future per-row visual treatments.
-fn kind_color(kind: HistoryEntryKind) -> egui::Color32 {
-    match kind {
-        HistoryEntryKind::Snapshot => egui::Color32::from_rgb(98, 196, 122),
-        HistoryEntryKind::SaveMarker => egui::Color32::from_rgb(106, 166, 236),
-        HistoryEntryKind::LoadSnapshot => egui::Color32::from_rgb(192, 160, 96),
     }
 }
 

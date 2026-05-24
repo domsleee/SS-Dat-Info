@@ -782,14 +782,25 @@ impl RecordingHistory {
                 Some(snapshot) => Some(RecordingSnapshot::from_persisted(snapshot)?),
                 None => None,
             };
-            // Parse the persisted ISO timestamp into a chrono DateTime. If
-            // the field is empty (legacy entry from before the field
-            // existed), fall back to today's date + the persisted HH:MM:SS
-            // — best-effort so legacy entries cluster under "today"
-            // rather than scattering.
+            // Parse the persisted ISO timestamp into a chrono DateTime.
+            // For legacy entries that pre-date the `created_at_iso` field,
+            // fall back to today's date combined with the persisted
+            // HH:MM:SS — that preserves the original time-of-day so the
+            // row displays e.g. `21:04` rather than the load-time clock,
+            // while still clustering all legacy entries under "today" in
+            // the day-header grouping. If the timestamp is also unparsable,
+            // last-resort is `Local::now()`.
             let created_at = chrono::DateTime::parse_from_rfc3339(&entry.created_at_iso)
                 .ok()
                 .map(|dt| dt.with_timezone(&chrono::Local))
+                .or_else(|| {
+                    let today = chrono::Local::now().date_naive();
+                    let hms = chrono::NaiveTime::parse_from_str(&entry.timestamp, "%H:%M:%S").ok()?;
+                    today
+                        .and_time(hms)
+                        .and_local_timezone(chrono::Local)
+                        .single()
+                })
                 .unwrap_or_else(chrono::Local::now);
             entries.push(HistoryEntry {
                 label: entry.label,
