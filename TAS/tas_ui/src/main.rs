@@ -47,7 +47,14 @@ fn find_supreme_pid() -> Option<u32> {
         fn CloseHandle(h: HANDLE) -> BOOL;
     }
 
-    let target: Vec<u16> = "Supreme.exe".encode_utf16().collect();
+    // Match both the unversioned and versioned Supreme executable names —
+    // is_supreme_running() and the injector also accept Supreme_v1.035.exe,
+    // so if we only look for the plain name here, F9-F12 global shortcuts
+    // silently stop firing when the user runs the versioned build.
+    let targets: [Vec<u16>; 2] = [
+        "Supreme.exe".encode_utf16().collect(),
+        "Supreme_v1.035.exe".encode_utf16().collect(),
+    ];
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snap == INVALID_HANDLE_VALUE {
@@ -62,7 +69,8 @@ fn find_supreme_pid() -> Option<u32> {
                 .iter()
                 .position(|&c| c == 0)
                 .unwrap_or(MAX_PATH);
-            if entry.sz_exe_file[..len].eq(target.as_slice()) {
+            let name = &entry.sz_exe_file[..len];
+            if targets.iter().any(|t| name == t.as_slice()) {
                 CloseHandle(snap);
                 return Some(entry.th32_process_id);
             }
