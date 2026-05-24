@@ -7,7 +7,7 @@ all: clean _build
 
 [private]
 [parallel]
-_build: display_config display_config_helper
+_build: display_config display_config_helper tas_helper
 
 display_config:
     cd Display_Config && bun tauri build {{ if dc_profile == "debug" { "--debug" } else { "" } }};
@@ -25,6 +25,25 @@ display_config_helper:
     if (!(Test-Path ./output/Display_Config_Resources)) { mkdir ./output/Display_Config_Resources > $null }; \
     cp .\Display_Config_Resources\Display_Config_Helper\Release\Display_Config_Helper.dll ./output/Display_Config_Resources/; \
     cp .\Display_Config_Resources\Injector\Release\Injector.exe ./output/Display_Config_Resources/
+
+tas_helper:
+    # Stage TAS_Helper.dll (and optionally tas_ui.exe) into
+    # Display_Config_Resources/TAS so the "Enable TAS" checkbox in
+    # Display_Config can find it. Without this step the checkbox fails
+    # with "TAS_Helper.dll not found" on a clean build.
+    $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath; \
+    $msbuild = "$vsPath\MSBuild\Current\Bin\MSBuild.exe"; \
+    & $msbuild ..\TAS\TAS_Helper\TAS_Helper.vcxproj /v:minimal /p:Configuration=Release /p:Platform=Win32; \
+    if (!(Test-Path ./output)) { mkdir output > $null }; \
+    if (!(Test-Path ./output/Display_Config_Resources)) { mkdir ./output/Display_Config_Resources > $null }; \
+    if (!(Test-Path ./output/Display_Config_Resources/TAS)) { mkdir ./output/Display_Config_Resources/TAS > $null }; \
+    cp ..\TAS\TAS_Helper\Release\TAS_Helper.dll ./output/Display_Config_Resources/TAS/; \
+    # Optional: also stage tas_ui.exe if it's been built (cargo build --release --bin tas_ui in TAS/).
+    if (Test-Path ..\TAS\target\release\tas_ui.exe) { \
+        cp ..\TAS\target\release\tas_ui.exe ./output/Display_Config_Resources/TAS/; \
+    } else { \
+        Write-Host "tas_helper: tas_ui.exe not built — skipped (run 'cargo build --release --bin tas_ui' in TAS/ to include)"; \
+    }
 
 clean:
     if (Test-Path .\output) { Remove-Item .\output -Recurse -Force }

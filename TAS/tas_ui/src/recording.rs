@@ -422,7 +422,14 @@ impl RecordingFile {
             state.input_log[i] = 0;
         }
 
-        // Load rec_coords if present
+        // Load rec_coords if present. Crucially, zero the FULL coord
+        // buffer first — loading a legacy/minimal .tasrec with no coord
+        // block used to silently leave the previous recording's coords
+        // in shared memory, which then corrupted CONT start-matching,
+        // drift analysis, and any re-save of the loaded file.
+        for i in 0..TAS_MAX_TICKS {
+            state.rec_coords[i] = [0.0, 0.0, 0.0];
+        }
         let coords_start = input_end;
         let coords_size = count * 3 * 4; // 3 floats * 4 bytes
         if data.len() >= coords_start + coords_size {

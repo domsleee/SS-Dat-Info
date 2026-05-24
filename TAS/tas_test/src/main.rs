@@ -237,11 +237,18 @@ fn main() {
                 }
             }
             let report = replay::run(path, iterations, verbose, no_match);
-            let any_drift = report
-                .results
-                .iter()
-                .any(|r| r.max_drift_x > 0.0 || r.max_drift_z > 0.0);
-            std::process::exit(if any_drift { 1 } else { 0 });
+            // Exit non-zero if ANY iteration: had drift, didn't complete
+            // playback, or (unless --no-match was requested) failed position
+            // matching. The previous "drift only" check was misleading
+            // because compute_drift inspects only the frames that played —
+            // a run that never started returns 0.0 drift and would have
+            // exited 0, hiding real failures from CI.
+            let any_failure = report.results.iter().any(|r| {
+                let drifted = r.max_drift_x > 0.0 || r.max_drift_z > 0.0;
+                let pos_failed = !no_match && !r.position_matched;
+                drifted || !r.playback_complete || pos_failed
+            });
+            std::process::exit(if any_failure { 1 } else { 0 });
         }
         "refresh-tasrec" => {
             let source = args.get(2).unwrap_or_else(|| {

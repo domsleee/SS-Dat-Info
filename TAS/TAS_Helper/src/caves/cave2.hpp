@@ -280,6 +280,15 @@ static void ProcessCommand(TasSharedState* s) {
             s->handler_block_count = 0;
             s->bb3b10_block_count = 0;
 
+            // Clear any leftover CONT splice marker. The PLAY handler treats
+            // any non-zero `continue_from_frame` as a splice point and
+            // auto-switches PLAY→REC at that frame; if a prior CONT was
+            // refused or stopped before the splice fired, the field stays
+            // non-zero in shared memory. Without this explicit reset, a
+            // subsequent plain PLAY silently hijacks itself into a CONT at
+            // the stale frame and truncates/overwrites the recording.
+            s->continue_from_frame = 0;
+
             // No position forcing — F5 matching must happen naturally.
             // Position forcing (even velocity-preserving) creates physics state
             // inconsistency: position says rc0 but terrain/rotation/angular state
