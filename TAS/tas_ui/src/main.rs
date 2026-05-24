@@ -546,6 +546,14 @@ impl TasApp {
         if command == TasCommand::Stop {
             self.clear_cont_catchup();
             self.reset_continue_runtime_state();
+            // Cancel any queued restart sequence. Without this, pressing
+            // STOP after a RestartThen (CONT/PLAY/REC click but before
+            // the polling loop fires the wrapped command) would leave
+            // pending_after_restart / pending_stop_then_restart set —
+            // the next poll then "completes" the restart and silently
+            // starts recording/playback. STOP must mean STOP.
+            self.pending_after_restart = None;
+            self.pending_stop_then_restart = None;
         }
         if let Some(shared) = self.shared.as_mut() {
             shared.send_command(command);
@@ -879,6 +887,8 @@ impl TasApp {
         if command == TasCommand::Stop {
             self.clear_cont_catchup();
             self.reset_continue_runtime_state();
+            self.pending_after_restart = None;
+            self.pending_stop_then_restart = None;
         }
     }
 
@@ -1775,6 +1785,11 @@ impl eframe::App for TasApp {
                                 self.pending_session_kind = None;
                                 self.pending_continue_start_tick = None;
                                 self.continue_start_guard = None;
+                                // Cancel queued restart sequences so STOP
+                                // actually stops (see send_action_command
+                                // for the full rationale).
+                                self.pending_after_restart = None;
+                                self.pending_stop_then_restart = None;
                             }
                             shared.send_command(c);
                             self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
@@ -2628,6 +2643,29 @@ mod tests {
         // Default (zeroed) speed is 0.0 — Cave 5 interprets 0.0 as 1.0x
         let fresh = tas_shared::zeroed_boxed();
         assert_eq!(fresh.playback_speed, 0.0);
+    }
+
+    /// Regression: STOP must cancel any queued restart sequence. Without
+    /// this, pressing STOP after a CONT/PLAY click but before the polling
+    /// loop fires `pending_after_restart` would leave the queued command
+    /// in place — the next poll then "completes" the restart and
+    /// silently starts recording/playback. STOP must mean STOP.
+    #[test]
+    fn stop_cancels_queued_restart() {
+        let mut app = test_app();
+        // Simulate a CONT being queued: pending_after_restart set by
+        // queue_restart_then or the inline action handler.
+        app.pending_after_restart = Some(TasCommand::ArmContinue);
+        app.pending_stop_then_restart = Some(TasCommand::ArmContinue);
+        app.prepare_send_action(TasCommand::Stop);
+        assert!(
+            app.pending_after_restart.is_none(),
+            "STOP must clear pending_after_restart"
+        );
+        assert!(
+            app.pending_stop_then_restart.is_none(),
+            "STOP must clear pending_stop_then_restart"
+        );
     }
 
     #[test]

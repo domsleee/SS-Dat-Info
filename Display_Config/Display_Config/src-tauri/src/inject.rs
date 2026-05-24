@@ -1,4 +1,4 @@
-use std::{os::windows::process::CommandExt, path::PathBuf, process::Command};
+use std::{os::windows::process::CommandExt, path::PathBuf, process::Command, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -95,6 +95,22 @@ pub async fn run_tas_inject() -> Result<String, String> {
         return Err("Injector.exe failed.\nIs Supreme.exe running?".to_string());
     }
 
+    // Injector.exe currently exits 0 even when CreateRemoteThread or
+    // LoadLibraryA inside the target failed — the Inject sub-routine
+    // logs and returns rather than propagating. Verify success by
+    // waiting briefly for the TAS shared-memory section that
+    // TAS_Helper.dll creates on init (`Local\SupremeTAS`); without it
+    // we'd report "DLL injected" even when no real injection occurred,
+    // and tas_ui would silently fail to connect.
+    if !wait_for_shared_memory("Local\\SupremeTAS", Duration::from_secs(5)) {
+        return Err(
+            "Injector.exe exited successfully, but TAS shared memory was not created. \
+             TAS_Helper.dll may have failed to attach (e.g., Supreme.exe is elevated, \
+             or a dependency is missing)."
+                .to_string(),
+        );
+    }
+
     // Launch tas_ui.exe (SSB Inspect) as a detached process
     let tas_ui_path = tas_folder.join("tas_ui.exe");
     if tas_ui_path.exists() {
@@ -105,6 +121,39 @@ pub async fn run_tas_inject() -> Result<String, String> {
     }
 
     Ok("TAS_Helper.dll injected".to_string())
+}
+
+/// Poll for a Windows named shared-memory section by attempting to open it
+/// with `OpenFileMappingW`. Returns true as soon as the mapping exists,
+/// false on timeout. Used to verify TAS_Helper.dll actually attached and
+/// initialised, rather than just trusting Injector.exe's exit code.
+fn wait_for_shared_memory(name: &str, timeout: Duration) -> bool {
+    use std::ffi::c_void;
+    use std::iter;
+
+    type HANDLE = *mut c_void;
+    type DWORD = u32;
+    type BOOL = i32;
+    const FILE_MAP_READ: DWORD = 0x0004;
+
+    extern "system" {
+        fn OpenFileMappingW(access: DWORD, inherit: BOOL, name: *const u16) -> HANDLE;
+        fn CloseHandle(h: HANDLE) -> BOOL;
+    }
+
+    let wide: Vec<u16> = name.encode_utf16().chain(iter::once(0)).collect();
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        unsafe {
+            let h = OpenFileMappingW(FILE_MAP_READ, 0, wide.as_ptr());
+            if !h.is_null() {
+                CloseHandle(h);
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
 }
 
 fn wait_for_finished_log(log_path: &PathBuf) -> Result<String, String> {
