@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     // View panel toggles
     pub show_pico_panel: bool,
-    pub show_segments: bool,
     pub show_trajectory: bool,
     pub show_rotation: bool,
     pub show_analysis: bool,
@@ -25,7 +24,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             show_pico_panel: false,
-            show_segments: false,
             show_trajectory: false,
             show_rotation: false,
             show_analysis: false,

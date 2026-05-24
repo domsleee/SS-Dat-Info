@@ -125,8 +125,7 @@ fn set_dark_title_bar(title: &str) {
 }
 
 use panels::{
-    analysis, config, drift, history, log_panel, rotation, segments, timeline, trajectory,
-    transport,
+    analysis, config, drift, history, log_panel, rotation, timeline, trajectory, transport,
 };
 use pico::PicoState;
 use recording::{RecordingHistory, RecordingSessionKind};
@@ -239,7 +238,6 @@ struct TasApp {
     show_debug_drift: bool,
     show_rotation: bool,
     show_macros: bool,
-    show_segments: bool,
     show_history: bool,
     show_log: bool,
     macro_state: macros::MacroState,
@@ -285,12 +283,6 @@ struct TasApp {
     /// followed by re-call.
     game_pid_cached: Option<u32>,
     continue_start_guard: Option<ContinueStartGuard>,
-    // Deferred restart-then-CONT request from the segments panel's "Redo from
-    // frame" action. The action handler can't call queue_restart_then directly
-    // because it runs while self.shared is mutably borrowed; we stash the
-    // splice frame here and process it after the egui closure ends.
-    pending_redo_restart_cont: Option<u32>,
-
     // Crash recovery
     last_frame_count: u32,
     stale_frame_ticks: u32,
@@ -365,7 +357,6 @@ impl TasApp {
             show_debug_drift: settings.show_debug_drift,
             show_rotation: settings.show_rotation,
             show_macros: settings.show_macros,
-            show_segments: settings.show_segments,
             show_history: settings.show_history,
             show_log: settings.show_log,
             macro_state: macros::MacroState::new(),
@@ -389,7 +380,6 @@ impl TasApp {
             prev_global_keys: [false; 4],
             game_pid_cached: None,
             continue_start_guard: None,
-            pending_redo_restart_cont: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
@@ -1360,7 +1350,6 @@ impl eframe::App for TasApp {
     fn on_exit(&mut self) {
         let s = settings::Settings {
             show_pico_panel: self.show_pico_panel,
-            show_segments: self.show_segments,
             show_trajectory: self.show_trajectory,
             show_rotation: self.show_rotation,
             show_analysis: self.show_analysis,
@@ -1500,7 +1489,6 @@ impl eframe::App for TasApp {
                 });
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.show_pico_panel, "Pico HID Panel");
-                    ui.checkbox(&mut self.show_segments, "Segment List");
                     ui.checkbox(&mut self.show_trajectory, "Trajectory Viewer");
                     ui.checkbox(&mut self.show_rotation, "Rotation Display");
                     ui.checkbox(&mut self.show_analysis, "Analysis Panel");
@@ -1995,31 +1983,6 @@ impl eframe::App for TasApp {
                     ui.separator();
                 }
 
-                // Segment list panel (collapsible)
-                let mut seg_actions = Vec::new();
-                if self.show_segments {
-                    if self.segment_tracker.segments.is_empty() {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(120, 120, 120),
-                            "No segments. Use REC then CONT to build segments.",
-                        );
-                    } else {
-                        egui::CollapsingHeader::new(
-                            egui::RichText::new(format!(
-                                "Segments ({})",
-                                self.segment_tracker.segments.len()
-                            ))
-                            .strong(),
-                        )
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            seg_actions =
-                                segments::show(ui, &self.segment_tracker, state);
-                        });
-                    }
-                    ui.separator();
-                }
-
                 // Primary row: timeline left, analysis/drift right
                 let avail = ui.available_size();
                 ui.horizontal(|ui| {
@@ -2179,82 +2142,8 @@ impl eframe::App for TasApp {
                 // only when CONT is actually armed (queue_restart_then,
                 // SetContinueFrame action, retry paths).
 
-                // Process segment actions (after state borrow is no longer needed)
-                let recorded_count = shared.state().recorded_count;
-                for action in seg_actions {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    match action {
-                        segments::SegmentAction::ScrollTo(tick) => {
-                            self.timeline_scroll = tick as f32;
-                            self.log_lines.push(format!(
-                                "[{}] Scrolled timeline to tick {}", ts, tick
-                            ));
-                        }
-                        segments::SegmentAction::DeleteFrom(idx) => {
-                            if let Some(seg) = self.segment_tracker.segments.get(idx) {
-                                let truncate_to = seg.start_tick;
-                                let _ = self
-                                    .history
-                                    .push_snapshot(shared.state(), "Before segment delete");
-                                shared.state_mut().recorded_count = truncate_to;
-                                for i in truncate_to as usize..tas_shared::TAS_MAX_TICKS {
-                                    shared.state_mut().input_log[i] = 0;
-                                }
-                                self.segment_tracker.segments.truncate(idx);
-                                self.log_lines.push(format!(
-                                    "[{}] Deleted segments from #{} onward, truncated to frame {}",
-                                    ts, idx + 1, truncate_to
-                                ));
-                            }
-                        }
-                        segments::SegmentAction::SpliceAll => {
-                            let count = self.segment_tracker.segments.len();
-                            self.segment_tracker.segments.clear();
-                            if recorded_count > 0 {
-                                self.segment_tracker.segments.push(recording::Segment {
-                                    name: "Spliced".into(),
-                                    start_tick: 0,
-                                    end_tick: recorded_count,
-                                    timestamp: chrono::Local::now().to_rfc3339(),
-                                });
-                            }
-                            self.log_lines.push(format!(
-                                "[{}] Spliced {} segments into one contiguous recording ({} frames)",
-                                ts, count, recorded_count
-                            ));
-                        }
-                        segments::SegmentAction::RedoFrom(frame) => {
-                            let _ = self
-                                .history
-                                .push_snapshot(shared.state(), "Before segment redo");
-                            self.continue_from_frame = frame;
-                            self.continue_from_text = frame.to_string();
-                            shared.state_mut().continue_from_frame = frame;
-                            self.segment_tracker.segments.retain(|s| s.start_tick < frame);
-                            // Defer the restart-then-CONT call until after the
-                            // shared borrow ends — queue_restart_then needs
-                            // &mut self including self.shared, which is
-                            // currently re-borrowed here. The Some(frame)
-                            // flag below is checked once we drop out of the
-                            // egui::CentralPanel closure.
-                            self.pending_redo_restart_cont = Some(frame);
-                            self.log_lines.push(format!(
-                                "[{}] Redo from frame {} — restart+CONT queued", ts, frame
-                            ));
-                        }
-                    }
-                }
             }
         });
-
-        // Process deferred segments-panel "Redo from frame" — runs after the
-        // egui closure drops its mutable borrow of self.shared. Routes the
-        // CONT through queue_restart_then so cave2 sees a fresh F5 + then
-        // ARM_CONTINUE, not raw ARM_CONTINUE on top of an active REC/PLAY.
-        if let Some(_frame) = self.pending_redo_restart_cont.take() {
-            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-            self.queue_restart_then(TasCommand::ArmContinue, &ts);
-        }
 
         // Poll DLL log ring buffer
         if let Some(ref shared) = self.shared {
@@ -2462,7 +2351,6 @@ mod tests {
             show_debug_drift: false,
             show_rotation: false,
             show_macros: false,
-            show_segments: false,
             show_history: false,
             show_log: false,
             macro_state: macros::MacroState::new(),
@@ -2486,7 +2374,6 @@ mod tests {
             prev_global_keys: [false; 4],
             game_pid_cached: None,
             continue_start_guard: None,
-            pending_redo_restart_cont: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
@@ -2955,7 +2842,6 @@ mod tests {
     #[test]
     fn panel_defaults() {
         let app = test_app();
-        assert!(!app.show_segments);
         assert!(!app.show_trajectory);
         assert!(!app.show_analysis);
         assert!(!app.show_debug_drift);
