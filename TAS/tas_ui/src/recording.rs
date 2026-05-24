@@ -557,25 +557,37 @@ pub enum HistoryEntryKind {
 
 pub struct HistoryEntry {
     pub label: String,
+    /// HH:MM:SS-of-day legacy display field. Kept for backward compat with
+    /// existing persisted history files; new code should prefer
+    /// `created_at` for any logic that needs a real date.
     pub timestamp: String,
+    /// Full local-tz creation time. Used for date grouping in the panel.
+    /// For legacy entries that were persisted without this field, the
+    /// in-memory value is set to load-time `Local::now()` as a best-effort
+    /// fallback so they cluster under "today" rather than scattering.
+    pub created_at: chrono::DateTime<chrono::Local>,
     pub kind: HistoryEntryKind,
     snapshot: Option<RecordingSnapshot>,
 }
 
 impl HistoryEntry {
     fn from_snapshot(label: String, kind: HistoryEntryKind, snapshot: RecordingSnapshot) -> Self {
+        let now = chrono::Local::now();
         Self {
             label,
-            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+            timestamp: now.format("%H:%M:%S").to_string(),
+            created_at: now,
             kind,
             snapshot: Some(snapshot),
         }
     }
 
     fn marker(label: String, kind: HistoryEntryKind) -> Self {
+        let now = chrono::Local::now();
         Self {
             label,
-            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+            timestamp: now.format("%H:%M:%S").to_string(),
+            created_at: now,
             kind,
             snapshot: None,
         }
@@ -597,6 +609,14 @@ pub struct PersistedSnapshot {
 pub struct PersistedHistoryEntry {
     pub label: String,
     pub timestamp: String,
+    /// ISO 8601 local datetime with offset, e.g. `2026-05-24T21:04:43+10:00`.
+    /// Optional for backward compat — legacy entries persisted without this
+    /// field get serialised as `""` and the loader falls back to "now" when
+    /// constructing the in-memory `created_at`. Going forward, every new
+    /// entry serialises a full timestamp here so day-grouping in the panel
+    /// remains correct across multi-day sessions.
+    #[serde(default)]
+    pub created_at_iso: String,
     pub kind: HistoryEntryKind,
     pub snapshot: Option<PersistedSnapshot>,
 }
@@ -741,6 +761,7 @@ impl RecordingHistory {
             .map(|entry| PersistedHistoryEntry {
                 label: entry.label.clone(),
                 timestamp: entry.timestamp.clone(),
+                created_at_iso: entry.created_at.to_rfc3339(),
                 kind: entry.kind,
                 snapshot: entry.snapshot.as_ref().map(RecordingSnapshot::to_persisted),
             })
@@ -761,9 +782,19 @@ impl RecordingHistory {
                 Some(snapshot) => Some(RecordingSnapshot::from_persisted(snapshot)?),
                 None => None,
             };
+            // Parse the persisted ISO timestamp into a chrono DateTime. If
+            // the field is empty (legacy entry from before the field
+            // existed), fall back to today's date + the persisted HH:MM:SS
+            // — best-effort so legacy entries cluster under "today"
+            // rather than scattering.
+            let created_at = chrono::DateTime::parse_from_rfc3339(&entry.created_at_iso)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Local))
+                .unwrap_or_else(chrono::Local::now);
             entries.push(HistoryEntry {
                 label: entry.label,
                 timestamp: entry.timestamp,
+                created_at,
                 kind: entry.kind,
                 snapshot,
             });
@@ -1236,6 +1267,7 @@ mod tests {
             entries: vec![PersistedHistoryEntry {
                 label: "bad".to_string(),
                 timestamp: "00:00:00".to_string(),
+                created_at_iso: String::new(),
                 kind: HistoryEntryKind::Snapshot,
                 snapshot: Some(PersistedSnapshot {
                     recorded_count: 2,
