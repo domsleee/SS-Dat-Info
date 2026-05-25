@@ -106,41 +106,102 @@ fn render_row(
 ) {
     let parts = parse_entry(entry);
     let restorable = entry.can_restore();
+    let time_str = entry.created_at.format("%H:%M").to_string();
 
-    // Markers have an empty total column; skip the 7-space pad in that
-    // case so the layout reads as `💾  Saved → file  21:17` instead of
-    // `💾           Saved → file  21:17`.
-    let total_slot = if parts.total.is_empty() {
-        String::new()
+    // Color for markers (save/load) — italic + dimmed/blue. Snapshot rows
+    // get default text color so they're scannable. The whole row becomes
+    // a single click target.
+    let row_color = if parts.is_marker {
+        match entry.kind {
+            HistoryEntryKind::SaveMarker => egui::Color32::from_rgb(120, 170, 220),
+            _ => egui::Color32::from_gray(150),
+        }
     } else {
-        parts.total_padded()
+        ui.visuals().text_color()
     };
-    let row_text = format!(
-        "{}  {}  {}  {}",
-        parts.icon,
-        total_slot,
-        parts.context,
-        entry.created_at.format("%H:%M"),
-    );
 
-    let mut richtext = egui::RichText::new(&row_text).monospace().size(12.0);
-    if parts.is_marker {
-        richtext = richtext
-            .italics()
-            .color(match entry.kind {
-                HistoryEntryKind::SaveMarker => egui::Color32::from_rgb(120, 170, 220),
-                _ => egui::Color32::from_gray(140),
-            });
+    // Push the current-row background ourselves via a Frame, so the row
+    // contents below can use horizontal layout without losing the
+    // selection visual that selectable_label would give us.
+    let mut frame = egui::Frame::none().inner_margin(egui::Margin::symmetric(4.0, 1.0));
+    if is_current {
+        frame = frame.fill(egui::Color32::from_rgba_unmultiplied(192, 132, 252, 38));
     }
 
-    let response = if restorable {
-        ui.selectable_label(is_current, richtext)
-    } else {
-        ui.label(richtext)
-    };
+    let outer = frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            // Right side first — using right_to_left layout means the FIRST
+            // item added gets pushed to the right edge of the row, and the
+            // remaining width flows back to the left for the rest of the
+            // content. This stops the time from wrapping onto its own line
+            // when the panel is narrow.
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(&time_str)
+                            .size(11.0)
+                            .color(egui::Color32::from_gray(140))
+                            .monospace(),
+                    );
+                    ui.with_layout(
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            // Icon — kept as the kind's accent color so it
+                            // still pops even though the row is colored.
+                            ui.label(
+                                egui::RichText::new(parts.icon)
+                                    .color(kind_color(entry.kind))
+                                    .size(13.0),
+                            );
+                            // Total — right-padded with non-breaking space
+                            // equivalents so 0:55 and 1:08 line up
+                            // vertically across rows.
+                            if !parts.total.is_empty() {
+                                let mut rt = egui::RichText::new(format!("{:>7}", parts.total))
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(row_color);
+                                if parts.is_marker {
+                                    rt = rt.italics();
+                                }
+                                ui.label(rt);
+                            }
+                            // Context (e.g. "from 0:52.00"). Truncates with
+                            // ellipsis rather than wrapping if the panel
+                            // is too narrow.
+                            let mut ctx_rt = egui::RichText::new(&parts.context)
+                                .size(12.0)
+                                .color(row_color);
+                            if parts.is_marker {
+                                ctx_rt = ctx_rt.italics();
+                            }
+                            ui.add(egui::Label::new(ctx_rt).truncate());
+                        },
+                    );
+                },
+            );
+        });
+    });
 
-    if restorable && response.clicked() {
-        actions.push(HistoryAction::Restore(idx));
+    // Capture row-level click. The Frame's response is what we want; turn
+    // it into a click sensor so any pixel of the row works.
+    if restorable {
+        let interact = outer
+            .response
+            .interact(egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if interact.clicked() {
+            actions.push(HistoryAction::Restore(idx));
+        }
+    }
+}
+
+fn kind_color(kind: HistoryEntryKind) -> egui::Color32 {
+    match kind {
+        HistoryEntryKind::Snapshot => egui::Color32::from_rgb(232, 179, 74),
+        HistoryEntryKind::SaveMarker => egui::Color32::from_rgb(120, 170, 220),
+        HistoryEntryKind::LoadSnapshot => egui::Color32::from_rgb(192, 160, 96),
     }
 }
 
@@ -155,13 +216,6 @@ struct Parts {
     is_marker: bool,
 }
 
-impl Parts {
-    /// Pad the total to a fixed width so the column visually aligns in a
-    /// monospaced row layout, regardless of `0:55.05` vs `1:13.97`.
-    fn total_padded(&self) -> String {
-        format!("{:>7}", self.total)
-    }
-}
 
 /// Parse a history entry's label into (icon, total, context). The labels
 /// are produced by `RecoverySessionContext::from_ticks` (`Recorded H:MM.ss`,
@@ -195,23 +249,24 @@ fn parse_entry(entry: &HistoryEntry) -> Parts {
 
 fn parse_snapshot_label(label: &str) -> Parts {
     // "Continued from 0:42.35, total 0:50.00" → icon ▶, total 0:50.00,
-    // context "from 0:42.35 splice"
+    // context "from 0:42.35"
     if let Some(rest) = label.strip_prefix("Continued from ") {
         if let Some((splice, total_part)) = rest.split_once(", total ") {
             return Parts {
                 icon: "▶",
                 total: total_part.trim().to_string(),
-                context: format!("from {} splice", splice.trim()),
+                context: format!("from {}", splice.trim()),
                 is_marker: false,
             };
         }
     }
-    // "Recorded 0:20.55" → icon ●, total 0:20.55, context "Recorded"
+    // "Recorded 0:20.55" → icon ●, total 0:20.55, no context (the icon
+    // already says it's a recording; "Recorded" as context is just noise).
     if let Some(total) = label.strip_prefix("Recorded ") {
         return Parts {
             icon: "●",
             total: total.trim().to_string(),
-            context: "Recorded".to_string(),
+            context: String::new(),
             is_marker: false,
         };
     }
@@ -233,7 +288,7 @@ mod tests {
         let p = parse_snapshot_label("Continued from 0:42.35, total 1:08.24");
         assert_eq!(p.icon, "▶");
         assert_eq!(p.total, "1:08.24");
-        assert_eq!(p.context, "from 0:42.35 splice");
+        assert_eq!(p.context, "from 0:42.35");
         assert!(!p.is_marker);
     }
 
@@ -242,7 +297,8 @@ mod tests {
         let p = parse_snapshot_label("Recorded 0:20.55");
         assert_eq!(p.icon, "●");
         assert_eq!(p.total, "0:20.55");
-        assert_eq!(p.context, "Recorded");
+        // No context for REC — the icon already says "recording".
+        assert!(p.context.is_empty());
     }
 
     #[test]
@@ -252,24 +308,5 @@ mod tests {
         assert_eq!(p.icon, "●");
         assert!(p.total.is_empty());
         assert_eq!(p.context, "weird label that doesn't match");
-    }
-
-    #[test]
-    fn padding_aligns_short_and_long_totals() {
-        let short = Parts {
-            icon: "▶",
-            total: "0:55.05".to_string(),
-            context: String::new(),
-            is_marker: false,
-        };
-        let long = Parts {
-            icon: "▶",
-            total: "1:13.97".to_string(),
-            context: String::new(),
-            is_marker: false,
-        };
-        // Both pad to width 7 so the column lines up.
-        assert_eq!(short.total_padded().len(), 7);
-        assert_eq!(long.total_padded().len(), 7);
     }
 }

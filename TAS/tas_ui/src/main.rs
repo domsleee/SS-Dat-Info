@@ -104,6 +104,40 @@ fn compute_global_key_edges(now: [bool; 4], prev: &mut [bool; 4]) -> [bool; 4] {
     edges
 }
 
+/// Format a recovery checkpoint's `saved_at` field for compact UI
+/// display. The persisted value is an RFC 3339 ISO timestamp with
+/// nanoseconds and offset (e.g. `2026-05-23T18:00:19.843268500+10:00`);
+/// for a user-facing banner we want something humans can read at a
+/// glance — relative if recent, absolute otherwise. Falls back to the
+/// raw string if the input doesn't parse, so we never lose information.
+fn format_recovery_saved_at(iso: &str) -> String {
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(iso) else {
+        return iso.to_string();
+    };
+    let saved = parsed.with_timezone(&chrono::Local);
+    let now = chrono::Local::now();
+    let delta = now.signed_duration_since(saved);
+    if delta.num_minutes() < 60 && delta.num_seconds() >= 0 {
+        return format!("{}m ago", delta.num_minutes().max(1));
+    }
+    if saved.date_naive() == now.date_naive() {
+        return format!("today {}", saved.format("%H:%M"));
+    }
+    if Some(saved.date_naive()) == now.date_naive().pred_opt() {
+        return format!("yesterday {}", saved.format("%H:%M"));
+    }
+    // Avoid chrono's `%-d` (POSIX no-pad day) — unsupported on Windows
+    // strftime and would render the literal `-d`. Use chrono::Datelike
+    // to build the day-month string manually.
+    use chrono::Datelike;
+    let month = match saved.month() {
+        1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr", 5 => "May", 6 => "Jun",
+        7 => "Jul", 8 => "Aug", 9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+        _ => "???",
+    };
+    format!("{} {} {}", saved.day(), month, saved.format("%H:%M"))
+}
+
 /// Force dark title bar on Windows 10+ via DwmSetWindowAttribute.
 #[cfg(windows)]
 fn set_dark_title_bar(title: &str) {
@@ -1615,30 +1649,72 @@ impl eframe::App for TasApp {
                 .resizable(true)
                 .default_width(280.0)
                 .show(ctx, |ui| {
-                    ui.label(egui::RichText::new("History").strong());
-                    if let Some(store) = self.history_store.as_ref() {
-                        ui.label(
-                            egui::RichText::new(format!("Autosave: {}", store.path().display()))
-                                .small()
-                                .color(egui::Color32::from_gray(145)),
+                    // Compact header: "History" + count, autosave path
+                    // moved to a tooltip on hover (was wrapping over two
+                    // lines and burning vertical space).
+                    ui.horizontal(|ui| {
+                        let title = ui.label(
+                            egui::RichText::new(format!("History · {}", self.history.len()))
+                                .strong(),
                         );
-                    }
-                    if history_dir.is_some() && ui.button("Open History Folder").clicked() {
-                        open_history_dir = true;
-                    }
+                        if let Some(store) = self.history_store.as_ref() {
+                            title.on_hover_text(format!(
+                                "Autosave: {}",
+                                store.path().display()
+                            ));
+                        }
+                        if history_dir.is_some() {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button("📂")
+                                        .on_hover_text("Open history folder")
+                                        .clicked()
+                                    {
+                                        open_history_dir = true;
+                                    }
+                                },
+                            );
+                        }
+                    });
+
+                    // Compact recovery banner — single-row hint + two
+                    // small buttons. Detail goes to a hover-tooltip
+                    // instead of taking a whole row.
                     if let Some(recovery) = self.pending_recovery.as_ref() {
-                        ui.separator();
-                        ui.colored_label(
-                            egui::Color32::from_rgb(220, 180, 90),
-                            format!("Crash recovery: {}", recovery.label()),
-                        );
-                        if ui.button("Restore Recovery").clicked() {
-                            restore_pending_recovery = true;
-                        }
-                        if ui.button("Discard Recovery").clicked() {
-                            discard_pending_recovery = true;
-                        }
+                        let saved_label = format_recovery_saved_at(&recovery.saved_at);
+                        ui.add_space(4.0);
+                        egui::Frame::none()
+                            .fill(egui::Color32::from_rgba_unmultiplied(245, 196, 84, 32))
+                            .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                            .rounding(3.0)
+                            .show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "⚠ Recovery from {}",
+                                            saved_label,
+                                        ))
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(245, 196, 84)),
+                                    )
+                                    .on_hover_text(recovery.label().to_string());
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.small_button("Discard").clicked() {
+                                                discard_pending_recovery = true;
+                                            }
+                                            if ui.small_button("Restore").clicked() {
+                                                restore_pending_recovery = true;
+                                            }
+                                        },
+                                    );
+                                });
+                            });
                     }
+
                     ui.separator();
                     history_actions = history::show(ui, &self.history);
                 });
