@@ -187,15 +187,17 @@ pub fn show(
 
         ui.separator();
 
-        // Playback speed (disabled during CONT catch-up to avoid state conflicts)
+        // Playback speed (disabled during CONT catch-up to avoid state conflicts).
+        // "Speed:" label removed — the `Nx` buttons are self-evident.
+        // Trimmed to 0.5/1/2 (the everyday-use presets); 0.25 and 4x
+        // were rarely touched and ate ~60 px of transport width.
         if catchup_active {
             ui.label(
                 egui::RichText::new(format!("Catching up at {}x...", *cont_catchup_speed))
                     .color(egui::Color32::from_rgb(200, 160, 60)),
             );
         } else {
-            ui.label("Speed:");
-            for &spd in &[0.25f32, 0.5, 1.0, 2.0, 4.0] {
+            for &spd in &[0.5f32, 1.0, 2.0] {
                 let label = format!("{}x", spd);
                 let btn = egui::Button::new(&label);
                 let btn = if (*playback_speed - spd).abs() < 0.01 {

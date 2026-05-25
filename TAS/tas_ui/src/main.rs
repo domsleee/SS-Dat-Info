@@ -195,7 +195,7 @@ use pico::PicoState;
 use recording::{RecordingHistory, RecordingSessionKind};
 
 const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
-const PLAYBACK_SPEED_PRESETS: [f32; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
+const PLAYBACK_SPEED_PRESETS: [f32; 3] = [0.5, 1.0, 2.0];
 const CONT_START_MATCH_MAX_RETRIES: u32 = 30;
 /// Extra frames of headroom past the recording's first-moving frame before
 /// we sample the live play_coords to decide if we landed in the right
@@ -2396,8 +2396,12 @@ fn main() -> eframe::Result {
         std::process::exit(0);
     }
 
+    // Default window 1100x680. Wider than the previous 960 to give the
+    // transport row breathing room when `from:` is visible alongside
+    // the 280 px history rail — at 960 the row clipped Redo and ate
+    // into the speed presets once a recording loaded.
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 640.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 680.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -2698,8 +2702,17 @@ mod tests {
 
     #[test]
     fn playback_speed_normalizer_keeps_valid_presets() {
-        assert!((normalize_playback_speed(0.25) - 0.25).abs() < 0.001);
+        assert!((normalize_playback_speed(0.5) - 0.5).abs() < 0.001);
         assert!((normalize_playback_speed(2.0) - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn playback_speed_normalizer_resets_dropped_presets() {
+        // 0.25x and 4x were preset buttons in the old picker. After the
+        // narrow-transport trim they're no longer valid presets — any
+        // persisted setting at those values should fall back to 1x.
+        assert!((normalize_playback_speed(0.25) - 1.0).abs() < 0.001);
+        assert!((normalize_playback_speed(4.0) - 1.0).abs() < 0.001);
     }
 
     #[test]
