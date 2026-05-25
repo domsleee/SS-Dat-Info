@@ -10,6 +10,7 @@ pub struct Settings {
     pub show_history: bool,
     pub show_config: bool,
     pub show_log: bool,
+    pub show_trajectory: bool,
 
     // Playback
     pub playback_speed: f32,
@@ -24,6 +25,7 @@ impl Default for Settings {
             show_history: false,
             show_config: false,
             show_log: false,
+            show_trajectory: false,
             playback_speed: 1.0,
             // Cave5 patches the game's tick clamp from 0x14 (20) to 0x40
             // (64) at install time, lifting effective catch-up from ~12×
