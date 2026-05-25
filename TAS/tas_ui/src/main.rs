@@ -162,6 +162,152 @@ fn save_color_image_as_png(
     Ok(())
 }
 
+// ===================== timeline preview harness =====================
+// `tas_ui --timeline-preview` renders the input timeline alone, fed the
+// newest `~/.ssb-inspector` recording, screenshots the framebuffer to
+// `timeline_preview.png` next to the crate, then exits.
+
+fn run_timeline_preview() -> eframe::Result {
+    let state = load_preview_state();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 380.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Timeline Preview",
+        options,
+        Box::new(|_cc| Ok(Box::new(TimelinePreview::new(state)))),
+    )
+}
+
+struct TimelinePreview {
+    state: Box<tas_shared::TasSharedState>,
+    view: timeline::TimelineView,
+    edit: timeline::TimelineEdit,
+    continue_from: u32,
+    frames: u32,
+    done: bool,
+}
+
+impl TimelinePreview {
+    fn new(state: Box<tas_shared::TasSharedState>) -> Self {
+        Self {
+            state,
+            view: timeline::TimelineView::default(),
+            edit: timeline::TimelineEdit::default(),
+            continue_from: 0,
+            frames: 0,
+            done: false,
+        }
+    }
+}
+
+impl eframe::App for TimelinePreview {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.frames == 0 {
+            ctx.set_visuals(egui::Visuals::dark());
+        }
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Input Timeline").strong());
+            let _ = timeline::show(
+                ui,
+                &self.state,
+                &mut self.view,
+                &mut self.continue_from,
+                &mut self.edit,
+            );
+        });
+
+        // Save any screenshot that arrived this frame, then exit.
+        let shots: Vec<std::sync::Arc<egui::ColorImage>> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        for image in shots {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("timeline_preview.png");
+            match save_color_image_as_png(&image, &path) {
+                Ok(()) => eprintln!("timeline preview written to {}", path.display()),
+                Err(e) => eprintln!("preview screenshot failed: {e}"),
+            }
+            self.done = true;
+        }
+        if self.done {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        self.frames += 1;
+        if self.frames == 3 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+        }
+        ctx.request_repaint();
+    }
+}
+
+fn load_preview_state() -> Box<tas_shared::TasSharedState> {
+    let mut state = tas_shared::zeroed_boxed();
+    state.mode = TasMode::Off as u32;
+    if let Some(path) = newest_history_json() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            #[derive(serde::Deserialize)]
+            struct PSnap {
+                recorded_count: u32,
+                input_log: Vec<u8>,
+            }
+            #[derive(serde::Deserialize)]
+            struct PEntry {
+                #[serde(default)]
+                snapshot: Option<PSnap>,
+            }
+            #[derive(serde::Deserialize)]
+            struct PHist {
+                #[serde(default)]
+                current_index: usize,
+                entries: Vec<PEntry>,
+            }
+            if let Ok(h) = serde_json::from_str::<PHist>(&text) {
+                let snap = h
+                    .entries
+                    .get(h.current_index)
+                    .and_then(|e| e.snapshot.as_ref())
+                    .or_else(|| h.entries.iter().rev().find_map(|e| e.snapshot.as_ref()));
+                if let Some(s) = snap {
+                    let n = (s.recorded_count as usize)
+                        .min(state.input_log.len())
+                        .min(s.input_log.len());
+                    state.input_log[..n].copy_from_slice(&s.input_log[..n]);
+                    state.recorded_count = n as u32;
+                    eprintln!("preview loaded {} ticks from {}", n, path.display());
+                }
+            }
+        }
+    }
+    state
+}
+
+fn newest_history_json() -> Option<std::path::PathBuf> {
+    let root = std::path::PathBuf::from(std::env::var("USERPROFILE").ok()?).join(".ssb-inspector");
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(&root).ok()?.flatten() {
+        let p = entry.path().join("history.json");
+        if p.is_file() {
+            if let Ok(m) = p.metadata().and_then(|md| md.modified()) {
+                let replace = best.as_ref().map(|(t, _)| m > *t).unwrap_or(true);
+                if replace {
+                    best = Some((m, p));
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 /// Force dark title bar on Windows 10+ via DwmSetWindowAttribute.
 #[cfg(windows)]
 fn set_dark_title_bar(title: &str) {
@@ -190,7 +336,7 @@ fn set_dark_title_bar(title: &str) {
     }
 }
 
-use panels::{config, drift, history, log_panel, timeline, trajectory, transport};
+use panels::{config, drift, history, input_script, log_panel, timeline, trajectory, transport};
 use pico::PicoState;
 use recording::{RecordingHistory, RecordingSessionKind};
 
@@ -286,8 +432,14 @@ struct TasApp {
     /// `log_file`. Bumped each UI frame; resilient to the cap-drain
     /// because the drain happens AFTER we've persisted.
     log_lines_persisted: usize,
-    timeline_zoom: f32,
-    timeline_scroll: f32,
+    timeline_view: timeline::TimelineView,
+    timeline_edit: timeline::TimelineEdit,
+    /// Input edit (new full event list, commit-undo flag) produced by the
+    /// timeline this frame, applied to `input_log` at the start of the next.
+    pending_input_edit: Option<(Vec<input_script::InputEvent>, bool)>,
+    /// Path + last-seen mtime of the `.tas` file opened in an external
+    /// editor; polled each frame for reload-on-save.
+    script_watch: Option<(std::path::PathBuf, std::time::SystemTime)>,
     continue_from_frame: u32,
     continue_from_text: String,
     playback_speed: f32,
@@ -399,15 +551,22 @@ impl TasApp {
             show_config: settings.show_config,
             show_pico_panel: settings.show_pico_panel,
             pico: PicoState::new(),
-            history: RecordingHistory::new(64),
+            // 500 entries × ~200 KB JSON-bloated ≈ 100 MB worst case on
+            // disk + RAM. IntelliJ-style local-history range. If we
+            // ever hit this cap in real use, revisit format efficiency
+            // (gzip / bincode / per-snapshot .tasrec blobs) before
+            // raising further.
+            history: RecordingHistory::new(500),
             history_store,
             recovery_store,
             pending_recovery,
             log_lines: Vec::new(),
             log_file,
             log_lines_persisted: 0,
-            timeline_zoom: 1.0,
-            timeline_scroll: 0.0,
+            timeline_view: timeline::TimelineView::default(),
+            timeline_edit: timeline::TimelineEdit::default(),
+            pending_input_edit: None,
+            script_watch: None,
             continue_from_frame: 0,
             continue_from_text: "0".to_string(),
             playback_speed: normalize_playback_speed(settings.playback_speed),
@@ -967,6 +1126,66 @@ impl TasApp {
         }
     }
 
+    /// Apply a pending input edit (from the timeline) to the live recording
+    /// buffer, pushing one undo snapshot per finished gesture. Runs once per
+    /// frame, before rendering, so the central panel's `state` borrow never
+    /// overlaps the `state_mut` write here.
+    fn apply_pending_input_edit(&mut self) {
+        let Some((events, commit)) = self.pending_input_edit.take() else {
+            return;
+        };
+        let Some(shared) = self.shared.as_mut() else {
+            return;
+        };
+        // Only edit while stopped — never mutate the buffer the game is
+        // actively replaying or recording.
+        if shared.state().mode != TasMode::Off as u32 {
+            self.log_lines
+                .push("[script] edit ignored — stop playback/record first".into());
+            return;
+        }
+        let total = shared.state().recorded_count;
+        input_script::apply_events_to_log(&mut shared.state_mut().input_log, total, &events);
+        if commit {
+            let snapshot = recording::RecordingSnapshot::from_state(shared.state());
+            self.history
+                .push_snapshot_data_with_session(snapshot, "Edited inputs", 0, total);
+        }
+    }
+
+    /// Poll the externally-edited `.tas` file; on save, parse it and queue
+    /// the inputs for application (reload-on-save). No-op until a file is
+    /// opened via "Open in external editor".
+    fn poll_script_file(&mut self) {
+        let Some((path, last)) = self.script_watch.clone() else {
+            return;
+        };
+        let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
+            return;
+        };
+        if mtime <= last {
+            return;
+        }
+        self.script_watch = Some((path.clone(), mtime));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let (events, errors) = input_script::parse_script(&text);
+                let n = events.len();
+                self.pending_input_edit = Some((events, true));
+                if errors.is_empty() {
+                    self.log_lines.push(format!("[script] reloaded {} inputs", n));
+                } else {
+                    self.log_lines.push(format!(
+                        "[script] reloaded {} inputs, {} line(s) ignored",
+                        n,
+                        errors.len()
+                    ));
+                }
+            }
+            Err(e) => self.log_lines.push(format!("[script] reload failed: {e}")),
+        }
+    }
+
     fn start_recording_session(&mut self, continue_from_frame: u32, recorded_count: u32) {
         let kind = self.pending_session_kind.take().unwrap_or({
             if continue_from_frame > 0 {
@@ -1008,6 +1227,19 @@ impl TasApp {
         session: &recording::RecoverySessionContext,
         force: bool,
     ) {
+        // While a previous session's recovery banner is still on screen,
+        // refuse to overwrite the on-disk checkpoint. Without this guard,
+        // pressing REC after launch silently destroys the pending
+        // recovery data (the new session's incremental writes clobber
+        // recovery_checkpoint.{json,tasrec} within ~250 ms). The user
+        // must Restore or Discard the banner before checkpointing
+        // resumes — trade-off is that an uncleared banner blocks new
+        // checkpoints, so we trade "easy crash recovery of the current
+        // session" for "the pending recovery is sacred".
+        if self.pending_recovery.is_some() {
+            return;
+        }
+
         let persist_result = match self.recovery_store.as_mut() {
             Some(store) => Some(store.persist_snapshot_if_needed(
                 snapshot,
@@ -1399,10 +1631,10 @@ impl TasApp {
         });
 
         if zoom_in {
-            self.timeline_zoom = (self.timeline_zoom * 1.25).min(10.0);
+            self.timeline_view.zoom_center(0.8);
         }
         if zoom_out {
-            self.timeline_zoom = (self.timeline_zoom / 1.25).max(0.1);
+            self.timeline_view.zoom_center(1.25);
         }
         if save {
             if let Some(ref shared) = self.shared {
@@ -1899,6 +2131,10 @@ impl eframe::App for TasApp {
             }
         }
 
+        // Apply any input edit the timeline produced last frame.
+        self.poll_script_file();
+        self.apply_pending_input_edit();
+
         // Main central area
         egui::CentralPanel::default().show(ctx, |ui| {
             // Transport bar at top
@@ -2168,16 +2404,65 @@ impl eframe::App for TasApp {
                 // here when toggled (it's a wide table that reads best
                 // next to the timeline it's drifting against).
                 ui.label(egui::RichText::new("Input Timeline").strong());
-                let continue_changed = timeline::show(
+                let tl_outcome = timeline::show(
                     ui,
                     state,
-                    &mut self.timeline_zoom,
-                    &mut self.timeline_scroll,
+                    &mut self.timeline_view,
                     &mut self.continue_from_frame,
+                    &mut self.timeline_edit,
                 );
-                if continue_changed {
+                if tl_outcome.continue_changed {
                     self.continue_from_text = self.continue_from_frame.to_string();
                 }
+                if let Some(events) = tl_outcome.events {
+                    self.pending_input_edit = Some((events, tl_outcome.commit_undo));
+                }
+
+                // Text-script route: write a .tas and open it in the user's
+                // editor; poll_script_file reloads it on save.
+                ui.horizontal(|ui| {
+                    ui.label("Text script:");
+                    if ui
+                        .button("↗ Open in external editor")
+                        .on_hover_text("Write a .tas file and open it — edits reload on save")
+                        .clicked()
+                    {
+                        let total = state.recorded_count;
+                        let events = input_script::runs_from_log(&state.input_log, total);
+                        let timer =
+                            recording::detect_first_moving(&state.rec_coords, total).unwrap_or(0);
+                        let script = input_script::events_to_script(&events, timer);
+                        let path = std::env::temp_dir().join("ssb_inputs.tas");
+                        match std::fs::write(&path, script) {
+                            Ok(()) => {
+                                #[cfg(windows)]
+                                {
+                                    let _ = std::process::Command::new("cmd")
+                                        .arg("/C")
+                                        .arg("start")
+                                        .arg("")
+                                        .arg(&path)
+                                        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                                        .spawn();
+                                }
+                                let mtime = std::fs::metadata(&path)
+                                    .and_then(|m| m.modified())
+                                    .unwrap_or_else(|_| std::time::SystemTime::now());
+                                self.script_watch = Some((path.clone(), mtime));
+                                self.log_lines.push(format!(
+                                    "[script] opened {} ({} inputs) — edits reload on save",
+                                    path.display(),
+                                    events.len()
+                                ));
+                            }
+                            Err(e) => self.log_lines.push(format!("[script] write failed: {e}")),
+                        }
+                    }
+                    if self.script_watch.is_some() {
+                        ui.weak("watching .tas — save to reload");
+                    }
+                });
+
                 if self.show_debug_drift {
                     ui.separator();
                     ui.label(egui::RichText::new("Debug drift").strong());
@@ -2372,6 +2657,13 @@ fn open_in_file_browser(path: &std::path::Path) -> Result<(), String> {
 }
 
 fn main() -> eframe::Result {
+    // Dev harness: render just the input timeline with real recording data
+    // and screenshot it (no game/DLL needed). Skips the single-instance
+    // guard so it runs alongside a live SSB Inspect.
+    if std::env::args().any(|a| a == "--timeline-preview") {
+        return run_timeline_preview();
+    }
+
     // Single-instance guard via named mutex (cross-platform crate, uses Windows mutex underneath).
     let instance = single_instance::SingleInstance::new("SSBInspect").unwrap();
     if !instance.is_single() {
@@ -2481,8 +2773,10 @@ mod tests {
             log_lines: Vec::new(),
             log_file: None,
             log_lines_persisted: 0,
-            timeline_zoom: 1.0,
-            timeline_scroll: 0.0,
+            timeline_view: timeline::TimelineView::default(),
+            timeline_edit: timeline::TimelineEdit::default(),
+            pending_input_edit: None,
+            script_watch: None,
             continue_from_frame: 0,
             continue_from_text: "0".to_string(),
             playback_speed: 1.0,
@@ -2566,7 +2860,7 @@ mod tests {
         assert!(app.shared.is_none());
         assert!(app.connect_error.is_some());
         assert_eq!(app.playback_speed, 1.0);
-        assert_eq!(app.timeline_zoom, 1.0);
+        assert_eq!(app.timeline_view, timeline::TimelineView::default());
         assert!(!app.pico.connected);
     }
 
@@ -2652,38 +2946,31 @@ mod tests {
             .any(|a| matches!(a, transport::Action::StepOne)));
     }
 
-    // ===== Timeline zoom =====
+    // ===== Timeline zoom (keyboard +/-) =====
 
     #[test]
-    fn zoom_in_increases() {
+    fn zoom_in_shrinks_window() {
         let mut app = test_app();
-        let initial = app.timeline_zoom;
+        app.timeline_view = timeline::TimelineView { start: 100, end: 1100 };
         press_key(&mut app, Key::Plus, Modifiers::NONE);
-        assert!(app.timeline_zoom > initial);
+        assert!(app.timeline_view.end - app.timeline_view.start < 1000);
     }
 
     #[test]
-    fn zoom_out_decreases() {
+    fn zoom_out_grows_window() {
         let mut app = test_app();
-        let initial = app.timeline_zoom;
+        app.timeline_view = timeline::TimelineView { start: 100, end: 1100 };
         press_key(&mut app, Key::Minus, Modifiers::NONE);
-        assert!(app.timeline_zoom < initial);
+        assert!(app.timeline_view.end - app.timeline_view.start > 1000);
     }
 
     #[test]
-    fn zoom_clamps_max() {
+    fn zoom_in_clamps_to_min_window() {
         let mut app = test_app();
-        app.timeline_zoom = 10.0;
+        // 60-tick window is already the minimum; zooming in must not go below.
+        app.timeline_view = timeline::TimelineView { start: 500, end: 560 };
         press_key(&mut app, Key::Plus, Modifiers::NONE);
-        assert!(app.timeline_zoom <= 10.0);
-    }
-
-    #[test]
-    fn zoom_clamps_min() {
-        let mut app = test_app();
-        app.timeline_zoom = 0.1;
-        press_key(&mut app, Key::Minus, Modifiers::NONE);
-        assert!(app.timeline_zoom >= 0.1);
+        assert!(app.timeline_view.end - app.timeline_view.start >= 60);
     }
 
     // ===== Speed edge values =====
