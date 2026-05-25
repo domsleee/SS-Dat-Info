@@ -803,6 +803,13 @@ impl RecordingHistory {
         self.current_index
     }
 
+    /// Clear the "current" pointer so no row is highlighted. Does not
+    /// touch any entry data. Used by the panel when the user clicks
+    /// empty space to deselect.
+    pub fn clear_selection(&mut self) {
+        self.current_index = None;
+    }
+
     pub fn can_undo(&self) -> bool {
         self.undo_depth() > 0
     }

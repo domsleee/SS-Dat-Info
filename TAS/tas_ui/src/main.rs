@@ -1827,6 +1827,9 @@ impl eframe::App for TasApp {
                                     .push(format!("[{}] History restore: {}", ts, label));
                             }
                         }
+                        history::HistoryAction::ClearSelection => {
+                            self.history.clear_selection();
+                        }
                     }
                 }
             }
@@ -2215,35 +2218,45 @@ impl eframe::App for TasApp {
                     });
                 }
 
-                ui.horizontal(|ui| {
-                    // Incremental max drift: only scan new coordinates since last frame.
+                // Incremental max drift scan. Runs every frame (no UI of
+                // its own) because the big red DRIFT ALERT BANNER above
+                // and the Debug drift panel both read from
+                // `self.cached_max_drift_x/z`. The previous "Max Drift:
+                // X=0.0 Z=0.0" status line was dropped — when there's no
+                // drift it's noise; when there is drift the banner is
+                // louder and the debug panel has the per-tick breakdown.
+                {
                     let count = (state.playback_pos as usize).min(state.recorded_count as usize);
-
-                    // Reset cache if playback restarted (count decreased)
                     if count < self.last_drift_scan_count {
                         self.cached_max_drift_x = 0.0;
                         self.cached_max_drift_z = 0.0;
                         self.last_drift_scan_count = 0;
                         self.last_logged_drift_level = 0;
                     }
-
-                    // Only scan new coordinates
                     let prev_dx = self.cached_max_drift_x;
                     let prev_dz = self.cached_max_drift_z;
                     for i in self.last_drift_scan_count..count {
                         let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
-                        if d > self.cached_max_drift_x { self.cached_max_drift_x = d; }
+                        if d > self.cached_max_drift_x {
+                            self.cached_max_drift_x = d;
+                        }
                         let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
-                        if d > self.cached_max_drift_z { self.cached_max_drift_z = d; }
+                        if d > self.cached_max_drift_z {
+                            self.cached_max_drift_z = d;
+                        }
                     }
                     self.last_drift_scan_count = count;
 
-                    // Log drift at key thresholds
                     let max_d = self.cached_max_drift_x.max(self.cached_max_drift_z);
-                    let new_level = if max_d >= 5.0 { 3 }
-                        else if max_d >= 1.0 { 2 }
-                        else if max_d > 0.0 { 1 }
-                        else { 0 };
+                    let new_level = if max_d >= 5.0 {
+                        3
+                    } else if max_d >= 1.0 {
+                        2
+                    } else if max_d > 0.0 {
+                        1
+                    } else {
+                        0
+                    };
                     if new_level > self.last_logged_drift_level {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         self.log_lines.push(format!(
@@ -2253,20 +2266,7 @@ impl eframe::App for TasApp {
                         ));
                         self.last_logged_drift_level = new_level;
                     }
-
-                    let (dx, dz) = (self.cached_max_drift_x, self.cached_max_drift_z);
-                    let drift_color = if dx == 0.0 && dz == 0.0 {
-                        egui::Color32::from_rgb(80, 200, 80)
-                    } else if dx < 1.0 && dz < 1.0 {
-                        egui::Color32::YELLOW
-                    } else {
-                        egui::Color32::from_rgb(255, 80, 80)
-                    };
-                    ui.colored_label(
-                        drift_color,
-                        format!("Max Drift: X={:.9} Z={:.9}", dx, dz),
-                    );
-                });
+                }
 
                 // NOTE: do NOT sync self.continue_from_frame → shared every
                 // frame. That value is *staging* for the next CONT, not a

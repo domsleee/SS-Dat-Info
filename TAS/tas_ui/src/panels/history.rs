@@ -7,6 +7,7 @@ use crate::recording::{
 
 pub enum HistoryAction {
     Restore(usize),
+    ClearSelection,
 }
 
 pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction> {
@@ -56,6 +57,22 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
                 }
                 let is_current = current == Some(idx);
                 render_row(ui, entry, idx, is_current, &mut actions);
+            }
+
+            // Empty space below the last row acts as a "deselect" target:
+            // a click on the background clears the current-row highlight.
+            // We reserve at least 40 px so there's always something to
+            // click even when the entries fill the visible area; if the
+            // panel has more vertical room, allocate it all so the click
+            // target spans the whole gap to the bottom edge.
+            let remaining = ui.available_height().max(40.0);
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), remaining),
+                egui::Sense::click(),
+            );
+            let _ = rect;
+            if response.clicked() {
+                actions.push(HistoryAction::ClearSelection);
             }
         });
 
