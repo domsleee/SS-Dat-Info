@@ -190,15 +190,12 @@ fn set_dark_title_bar(title: &str) {
     }
 }
 
-use panels::{
-    config, drift, history, log_panel, rotation, timeline, trajectory, transport,
-};
+use panels::{config, drift, history, log_panel, timeline, trajectory, transport};
 use pico::PicoState;
 use recording::{RecordingHistory, RecordingSessionKind};
 
 const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
 const PLAYBACK_SPEED_PRESETS: [f32; 5] = [0.25, 0.5, 1.0, 2.0, 4.0];
-const TRAJECTORY_ROTATION_SPLIT_MIN_WIDTH: f32 = 900.0;
 const CONT_START_MATCH_MAX_RETRIES: u32 = 30;
 /// Extra frames of headroom past the recording's first-moving frame before
 /// we sample the live play_coords to decide if we landed in the right
@@ -242,10 +239,6 @@ fn normalize_playback_speed(speed: f32) -> f32 {
         }
     }
     DEFAULT_PLAYBACK_SPEED
-}
-
-fn should_stack_trajectory_rotation(available_width: f32) -> bool {
-    available_width < TRAJECTORY_ROTATION_SPLIT_MIN_WIDTH
 }
 
 #[derive(Clone, Copy)]
@@ -2194,31 +2187,13 @@ impl eframe::App for TasApp {
                 // of plot content.
                 ui.add_space(4.0);
                 egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.label(egui::RichText::new("Trajectory + Rotation").strong());
+                    ui.label(egui::RichText::new("Trajectory").strong());
                     ui.separator();
                     ui.allocate_ui_with_layout(
                         egui::vec2(ui.available_width(), 220.0),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            // Sub-labels removed — the frame header above
-                            // already says what these widgets are. Rotation
-                            // and Trajectory each render their own contents
-                            // without further chrome.
-                            if should_stack_trajectory_rotation(ui.available_width()) {
-                                rotation::show(ui, state);
-                                ui.separator();
-                                trajectory::show(ui, state, &mut self.trajectory_cache);
-                            } else {
-                                ui.columns(2, |columns| {
-                                    columns[0].set_min_width(260.0);
-                                    rotation::show(&mut columns[0], state);
-                                    trajectory::show(
-                                        &mut columns[1],
-                                        state,
-                                        &mut self.trajectory_cache,
-                                    );
-                                });
-                            }
+                            trajectory::show(ui, state, &mut self.trajectory_cache);
                         },
                     );
                 });
@@ -2725,20 +2700,6 @@ mod tests {
     fn playback_speed_normalizer_keeps_valid_presets() {
         assert!((normalize_playback_speed(0.25) - 0.25).abs() < 0.001);
         assert!((normalize_playback_speed(2.0) - 2.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn trajectory_rotation_stacks_in_narrow_layout() {
-        assert!(should_stack_trajectory_rotation(
-            TRAJECTORY_ROTATION_SPLIT_MIN_WIDTH - 1.0
-        ));
-    }
-
-    #[test]
-    fn trajectory_rotation_stays_side_by_side_in_wide_layout() {
-        assert!(!should_stack_trajectory_rotation(
-            TRAJECTORY_ROTATION_SPLIT_MIN_WIDTH
-        ));
     }
 
     #[test]

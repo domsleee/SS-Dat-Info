@@ -2,7 +2,6 @@ pub mod config;
 pub mod drift;
 pub mod history;
 pub mod log_panel;
-pub mod rotation;
 pub mod timeline;
 pub mod trajectory;
 pub mod transport;
