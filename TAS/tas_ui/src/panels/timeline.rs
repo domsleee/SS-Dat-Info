@@ -224,10 +224,13 @@ pub fn show(
         );
     }
 
-    // Tick range label
+    // Tick range label. `scroll_end` is exclusive — subtract 1 for an
+    // inclusive end so "0-6514 of 6515" reads naturally instead of the
+    // off-by-one "0-6515 of 6515".
+    let display_end = scroll_end.saturating_sub(1).max(scroll_start);
     ui.label(format!(
         "Showing ticks {}-{} of {} ({:.1}x zoom)",
-        scroll_start, scroll_end, total, zoom
+        scroll_start, display_end, total, zoom
     ));
     if !has_data {
         ui.colored_label(

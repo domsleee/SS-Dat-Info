@@ -77,7 +77,9 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
     let top_height = (avail_height * 0.6).max(120.0);
     let bottom_height = (avail_height * 0.4).max(80.0);
 
-    ui.label(egui::RichText::new("Top-down (X/Z)").small());
+    // Sub-labels + per-plot legends removed — the parent frame already
+    // says "Trajectory + Rotation", and the path colours are stable
+    // across the session so a once-visible legend just adds clutter.
     Plot::new("trajectory_xz")
         .height(top_height)
         .data_aspect(1.0)
@@ -86,7 +88,6 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
         .show_axes(true)
         .x_axis_label("X")
         .y_axis_label("Z")
-        .legend(egui_plot::Legend::default())
         .show(ui, |plot_ui| {
             if !cache.rec_points.is_empty() {
                 plot_ui.line(
@@ -113,7 +114,6 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
         });
 
     ui.add_space(4.0);
-    ui.label(egui::RichText::new("Altitude (Y)").small());
     Plot::new("trajectory_altitude")
         .height(bottom_height)
         .allow_zoom(true)
@@ -121,7 +121,6 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
         .show_axes(true)
         .x_axis_label("Time (s)")
         .y_axis_label("Y (altitude)")
-        .legend(egui_plot::Legend::default())
         .show(ui, |plot_ui| {
             if !cache.rec_altitude.is_empty() {
                 plot_ui.line(

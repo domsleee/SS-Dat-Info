@@ -31,6 +31,35 @@ pub fn format_recording_duration(ticks: u32) -> String {
     }
 }
 
+/// Find the first index after 0 where the recorded position diverges from
+/// `rec_coords[0]`. This is the recording's "race-start" landmark: the
+/// character holds the start coordinate during the pre-race countdown, then
+/// moves on the first physics frame after the gate opens. Returns `None` if
+/// `recorded_count` is 0 or no movement is recorded.
+///
+/// Bit-comparison of `f32` is intentional — we want exact equality, not
+/// epsilon, so the first sub-millimetre coord change counts.
+pub fn detect_first_moving(rec_coords: &[[f32; 3]], recorded_count: u32) -> Option<u32> {
+    if recorded_count == 0 || rec_coords.is_empty() {
+        return None;
+    }
+    let n = (recorded_count as usize).min(rec_coords.len());
+    if n < 2 {
+        return None;
+    }
+    let start = rec_coords[0];
+    for j in 1..n {
+        let c = rec_coords[j];
+        if c[0].to_bits() != start[0].to_bits()
+            || c[1].to_bits() != start[1].to_bits()
+            || c[2].to_bits() != start[2].to_bits()
+        {
+            return Some(j as u32);
+        }
+    }
+    None
+}
+
 pub fn completed_session_label(
     kind: RecordingSessionKind,
     start_tick: u32,
@@ -567,17 +596,35 @@ pub struct HistoryEntry {
     /// fallback so they cluster under "today" rather than scattering.
     pub created_at: chrono::DateTime<chrono::Local>,
     pub kind: HistoryEntryKind,
+    /// Session start tick: 0 for REC entries (recording from the beginning)
+    /// or for markers, the resume tick for CONT entries. Zero on legacy
+    /// entries persisted before this field existed — the panel falls back
+    /// to label parsing in that case.
+    pub start_tick: u32,
+    /// `recorded_count` at push time. Zero on legacy entries / markers.
+    pub end_tick: u32,
+    /// First tick where the recorded position diverged from `rec_coords[0]`
+    /// — the "race-start" landmark. `None` for legacy entries, markers,
+    /// and snapshots with no detected movement.
+    pub first_moving: Option<u32>,
     snapshot: Option<RecordingSnapshot>,
 }
 
 impl HistoryEntry {
     fn from_snapshot(label: String, kind: HistoryEntryKind, snapshot: RecordingSnapshot) -> Self {
         let now = chrono::Local::now();
+        let end_tick = snapshot.recorded_count;
+        let first_moving = detect_first_moving(snapshot.rec_coords.as_ref(), end_tick);
         Self {
             label,
             timestamp: now.format("%H:%M:%S").to_string(),
             created_at: now,
             kind,
+            // start_tick is overwritten by `with_session` for CONT entries
+            // that know their resume point; REC entries leave it at 0.
+            start_tick: 0,
+            end_tick,
+            first_moving,
             snapshot: Some(snapshot),
         }
     }
@@ -589,8 +636,17 @@ impl HistoryEntry {
             timestamp: now.format("%H:%M:%S").to_string(),
             created_at: now,
             kind,
+            start_tick: 0,
+            end_tick: 0,
+            first_moving: None,
             snapshot: None,
         }
+    }
+
+    fn with_session(mut self, start_tick: u32, end_tick: u32) -> Self {
+        self.start_tick = start_tick;
+        self.end_tick = end_tick;
+        self
     }
 
     pub fn can_restore(&self) -> bool {
@@ -619,6 +675,18 @@ pub struct PersistedHistoryEntry {
     pub created_at_iso: String,
     pub kind: HistoryEntryKind,
     pub snapshot: Option<PersistedSnapshot>,
+    /// Session start tick. Legacy entries default to 0; the panel falls
+    /// back to parsing `label` when this is 0 alongside a non-zero
+    /// snapshot recorded_count.
+    #[serde(default)]
+    pub start_tick: u32,
+    /// `recorded_count` at push time. Legacy entries default to 0.
+    #[serde(default)]
+    pub end_tick: u32,
+    /// "Race-start" landmark tick — first index where rec_coords diverged
+    /// from rec_coords[0]. Legacy entries default to None.
+    #[serde(default)]
+    pub first_moving: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -653,7 +721,25 @@ impl RecordingHistory {
         snapshot: RecordingSnapshot,
         label: impl Into<String>,
     ) -> bool {
-        self.push_snapshot_entry(snapshot, label.into(), HistoryEntryKind::Snapshot)
+        self.push_snapshot_entry(snapshot, label.into(), HistoryEntryKind::Snapshot, None)
+    }
+
+    /// Like `push_snapshot_data` but records the session's `start_tick` /
+    /// `end_tick` on the entry so the panel can render "from <tick> ·
+    /// <in-game time>" without parsing the label string.
+    pub fn push_snapshot_data_with_session(
+        &mut self,
+        snapshot: RecordingSnapshot,
+        label: impl Into<String>,
+        start_tick: u32,
+        end_tick: u32,
+    ) -> bool {
+        self.push_snapshot_entry(
+            snapshot,
+            label.into(),
+            HistoryEntryKind::Snapshot,
+            Some((start_tick, end_tick)),
+        )
     }
 
     pub fn push_loaded_snapshot(&mut self, state: &TasSharedState, path: &Path) -> bool {
@@ -662,6 +748,7 @@ impl RecordingHistory {
             RecordingSnapshot::from_state(state),
             label,
             HistoryEntryKind::LoadSnapshot,
+            None,
         )
     }
 
@@ -764,6 +851,9 @@ impl RecordingHistory {
                 created_at_iso: entry.created_at.to_rfc3339(),
                 kind: entry.kind,
                 snapshot: entry.snapshot.as_ref().map(RecordingSnapshot::to_persisted),
+                start_tick: entry.start_tick,
+                end_tick: entry.end_tick,
+                first_moving: entry.first_moving,
             })
             .collect();
 
@@ -802,11 +892,26 @@ impl RecordingHistory {
                         .single()
                 })
                 .unwrap_or_else(chrono::Local::now);
+            // Legacy entries (pre-fields) come in with end_tick=0 even
+            // when a snapshot is present. Fall back to the snapshot's
+            // recorded_count so the renderer can still compute durations
+            // from structured data; start_tick stays 0 → renderer treats
+            // it as "no resume point" and falls back to label parsing
+            // for the context phrase.
+            let mut end_tick = entry.end_tick;
+            if end_tick == 0 {
+                if let Some(snap) = snapshot.as_ref() {
+                    end_tick = snap.recorded_count;
+                }
+            }
             entries.push(HistoryEntry {
                 label: entry.label,
                 timestamp: entry.timestamp,
                 created_at,
                 kind: entry.kind,
+                start_tick: entry.start_tick,
+                end_tick,
+                first_moving: entry.first_moving,
                 snapshot,
             });
         }
@@ -846,13 +951,17 @@ impl RecordingHistory {
         snapshot: RecordingSnapshot,
         label: String,
         kind: HistoryEntryKind,
+        session: Option<(u32, u32)>,
     ) -> bool {
         if snapshot.recorded_count == 0 {
             return false;
         }
 
-        self.entries
-            .push(HistoryEntry::from_snapshot(label, kind, snapshot));
+        let mut entry = HistoryEntry::from_snapshot(label, kind, snapshot);
+        if let Some((start_tick, end_tick)) = session {
+            entry = entry.with_session(start_tick, end_tick);
+        }
+        self.entries.push(entry);
         self.current_index = Some(self.entries.len() - 1);
         self.enforce_capacity();
         true
@@ -1097,6 +1206,37 @@ mod tests {
     }
 
     #[test]
+    fn detect_first_moving_finds_first_changed_coord() {
+        let mut coords = vec![[1.0, 2.0, 3.0]; 10];
+        coords[5] = [1.0, 2.0, 3.5];
+        assert_eq!(detect_first_moving(&coords, 10), Some(5));
+    }
+
+    #[test]
+    fn detect_first_moving_returns_none_when_static() {
+        let coords = vec![[1.0, 2.0, 3.0]; 10];
+        assert_eq!(detect_first_moving(&coords, 10), None);
+    }
+
+    #[test]
+    fn detect_first_moving_returns_none_for_empty_or_single_tick() {
+        assert_eq!(detect_first_moving(&[], 0), None);
+        assert_eq!(detect_first_moving(&[[0.0; 3]], 1), None);
+        let coords = vec![[1.0, 2.0, 3.0]; 10];
+        assert_eq!(detect_first_moving(&coords, 0), None);
+    }
+
+    #[test]
+    fn detect_first_moving_respects_recorded_count_bound() {
+        // Movement at index 5, but recorded_count limits the scan to 3.
+        let mut coords = vec![[1.0, 2.0, 3.0]; 10];
+        coords[5] = [9.0, 9.0, 9.0];
+        assert_eq!(detect_first_moving(&coords, 3), None);
+        // Bumping the count to 6 finds it.
+        assert_eq!(detect_first_moving(&coords, 6), Some(5));
+    }
+
+    #[test]
     fn format_recording_duration_uses_clock_format() {
         assert_eq!(format_recording_duration(0), "0:00.00");
         assert_eq!(format_recording_duration(2303), "0:23.03");
@@ -1285,6 +1425,9 @@ mod tests {
                     input_log: vec![1], // invalid: expected len=2
                     rec_coords: vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
                 }),
+                start_tick: 0,
+                end_tick: 2,
+                first_moving: None,
             }],
         };
 

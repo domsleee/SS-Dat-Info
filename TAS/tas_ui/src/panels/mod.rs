@@ -1,4 +1,3 @@
-pub mod analysis;
 pub mod config;
 pub mod drift;
 pub mod history;

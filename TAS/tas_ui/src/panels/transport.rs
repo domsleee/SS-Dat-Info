@@ -1,7 +1,7 @@
 use eframe::egui;
 use tas_shared::{TasCommand, TasMode, TasSharedState};
 
-use crate::recording::RecordingHistory;
+use crate::recording::{detect_first_moving, format_recording_duration, RecordingHistory};
 
 pub enum Action {
     Send(TasCommand),
@@ -31,7 +31,7 @@ pub fn show(
     cont_catchup_speed: &mut f32,
     _step_mode: &mut bool,
     history: &RecordingHistory,
-    _state: &TasSharedState,
+    state: &TasSharedState,
     catchup_active: bool,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
@@ -42,9 +42,10 @@ pub fn show(
         let is_play = mode == TasMode::Play;
         let can_continue = can_arm_continue(mode, recorded);
 
+        // F-key labels live in tooltips so the buttons stay narrow —
+        // history panel + transport were clipping Redo at 976 px wide.
         // REC button (red when recording)
-        let rec_label = "\u{23FA} REC  F9"; // Unicode record symbol
-        let rec_text = egui::RichText::new(rec_label);
+        let rec_text = egui::RichText::new("\u{23FA} REC");
         let rec_text = if is_rec {
             rec_text
                 .color(egui::Color32::from_rgb(255, 60, 60))
@@ -54,14 +55,14 @@ pub fn show(
         };
         if ui
             .add_enabled(is_off, egui::Button::new(rec_text))
+            .on_hover_text("Record (F9)")
             .clicked()
         {
             actions.push(Action::RestartThen(TasCommand::ArmRec));
         }
 
         // PLAY button (green when playing, but not during CONT catch-up)
-        let play_label = "\u{25B6} PLAY  F10"; // Unicode play triangle
-        let play_text = egui::RichText::new(play_label);
+        let play_text = egui::RichText::new("\u{25B6} PLAY");
         let play_text = if is_play && !catchup_active {
             play_text
                 .color(egui::Color32::from_rgb(60, 200, 60))
@@ -71,15 +72,16 @@ pub fn show(
         };
         if ui
             .add_enabled(is_off && recorded > 0, egui::Button::new(play_text))
+            .on_hover_text("Play (F10)")
             .clicked()
         {
             actions.push(Action::RestartThen(TasCommand::ArmPlay));
         }
 
         // STOP button
-        let stop_label = "\u{23F9} STOP  F11"; // Unicode stop symbol
         if ui
-            .add_enabled(!is_off, egui::Button::new(stop_label))
+            .add_enabled(!is_off, egui::Button::new("\u{23F9} STOP"))
+            .on_hover_text("Stop (F11 / Space)")
             .clicked()
         {
             actions.push(Action::Send(TasCommand::Stop));
@@ -88,8 +90,7 @@ pub fn show(
         ui.separator();
 
         // Continue Record (green when CONT catch-up is active)
-        let cont_label = "\u{23ED} CONT  F12"; // Unicode next track symbol
-        let cont_text = egui::RichText::new(cont_label);
+        let cont_text = egui::RichText::new("\u{23ED} CONT");
         let cont_text = if catchup_active {
             cont_text
                 .color(egui::Color32::from_rgb(60, 200, 60))
@@ -100,7 +101,7 @@ pub fn show(
         if ui
             .add_enabled(can_continue, egui::Button::new(cont_text))
             .on_hover_text(format!(
-                "Continue recording from a specific frame (catch-up at {}x)",
+                "Continue from a specific frame · catch-up ×{}  (F12)",
                 *cont_catchup_speed
             ))
             .clicked()
@@ -116,45 +117,69 @@ pub fn show(
 
         if recorded > 0 {
             ui.label("from:");
-            let response = ui.add_sized(
-                [72.0, 22.0],
-                egui::TextEdit::singleline(continue_from_text).hint_text("frame"),
-            );
-            if response.changed() {
-                if let Some(parsed) = parse_continue_frame(continue_from_text, recorded) {
-                    *continue_from = parsed;
+            // Stack the tick input + an in-game-time sub-label so the
+            // user can sanity-check what they typed against the race
+            // clock. `first_moving` is recomputed per-frame; with rec_coords
+            // up to ~600k floats it's cheap enough (< 1ms at the worst
+            // case) and avoids us caching anything across frames.
+            let first_moving = detect_first_moving(&state.rec_coords, recorded);
+            ui.vertical(|ui| {
+                let response = ui.add_sized(
+                    [72.0, 22.0],
+                    egui::TextEdit::singleline(continue_from_text).hint_text("frame"),
+                );
+                if response.changed() {
+                    if let Some(parsed) = parse_continue_frame(continue_from_text, recorded) {
+                        *continue_from = parsed;
+                    }
                 }
-            }
-            if response.lost_focus() {
-                normalize_continue_frame_text(continue_from_text, continue_from, recorded);
-            }
+                if response.lost_focus() {
+                    normalize_continue_frame_text(continue_from_text, continue_from, recorded);
+                }
+                let past_end = *continue_from > recorded;
+                let sub_text = if past_end {
+                    format!("past end · {}", recorded)
+                } else {
+                    let offset = first_moving.unwrap_or(0);
+                    format_recording_duration((*continue_from).saturating_sub(offset))
+                };
+                let color = if past_end {
+                    egui::Color32::from_rgb(217, 123, 92)
+                } else {
+                    egui::Color32::from_gray(140)
+                };
+                ui.label(
+                    egui::RichText::new(sub_text)
+                        .size(9.0)
+                        .color(color)
+                        .monospace(),
+                );
+            });
         }
         ui.add(
             egui::DragValue::new(cont_catchup_speed)
                 .range(1.0..=128.0)
-                .prefix("catch-up: ")
-                .suffix("x")
+                .prefix("catch \u{00D7}")
                 .speed(0.5),
         )
         .on_hover_text("CONT catch-up speed. Default 64× = ~1.1s for a 5200-frame splice with 80% one-shot. 128× saves ~200ms but one-shot drops to ~65% (auto-reroll handles misses).");
 
         ui.separator();
 
-        // Undo
+        // Undo / Redo — icon-only buttons. Labels would push the row
+        // past the 976 px wide window with the history panel visible.
         let undo_count = history.undo_depth();
         if ui
-            .add_enabled(undo_count > 0, egui::Button::new("\u{21A9} Undo"))
-            .on_hover_text(format!("{} earlier restorable state(s)", undo_count))
+            .add_enabled(undo_count > 0, egui::Button::new("\u{21A9}"))
+            .on_hover_text(format!("Undo · {} earlier state(s)  (Ctrl+Z)", undo_count))
             .clicked()
         {
             actions.push(Action::Undo);
         }
-
-        // Redo
         let redo_count = history.redo_depth();
         if ui
-            .add_enabled(redo_count > 0, egui::Button::new("\u{21AA} Redo"))
-            .on_hover_text(format!("{} later restorable state(s)", redo_count))
+            .add_enabled(redo_count > 0, egui::Button::new("\u{21AA}"))
+            .on_hover_text(format!("Redo · {} later state(s)  (Ctrl+Y)", redo_count))
             .clicked()
         {
             actions.push(Action::Redo);
@@ -184,10 +209,6 @@ pub fn show(
                 }
             }
         }
-    });
-
-    ui.horizontal(|ui| {
-        ui.label(format!("Recorded: {} ticks", recorded));
     });
 
     actions

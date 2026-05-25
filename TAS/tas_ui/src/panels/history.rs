@@ -1,7 +1,9 @@
 use chrono::{Datelike, Local, NaiveDate};
 use eframe::egui;
 
-use crate::recording::{HistoryEntry, HistoryEntryKind, RecordingHistory};
+use crate::recording::{
+    format_recording_duration, HistoryEntry, HistoryEntryKind, RecordingHistory,
+};
 
 pub enum HistoryAction {
     Restore(usize),
@@ -226,14 +228,16 @@ struct Parts {
     is_marker: bool,
 }
 
-/// Parse a history entry's label into (total, context). The labels are
-/// produced by `RecoverySessionContext::from_ticks` (`Recorded H:MM.ss`,
-/// `Continued from H:MM.ss, total H:MM.ss`) and by `push_save_marker` /
-/// `push_loaded_snapshot` (`Save: filename`, `Load: filename`).
-/// The icon is no longer part of `Parts` — every row uses the same `▶`
-/// glyph, colored by kind. This sidesteps egui's per-codepoint font
-/// fallback which was making different icons render at inconsistent
-/// sizes.
+/// Build display parts for a history entry. Snapshot rows prefer the
+/// structured `start_tick` / `end_tick` / `first_moving` fields when
+/// present, so we render `from <tick> · <in-game time>` directly; legacy
+/// entries (persisted before those fields existed) fall back to parsing
+/// the label string with the original `parse_snapshot_label`.
+///
+/// In-game time is `tick - first_moving` converted to clock format via
+/// `format_recording_duration`. When `first_moving` is `None` we fall
+/// back to raw `tick / 100`, which is recording-elapsed (not in-game)
+/// time — flagged the same way in the panel layout.
 fn parse_entry(entry: &HistoryEntry) -> Parts {
     match entry.kind {
         HistoryEntryKind::SaveMarker => Parts {
@@ -258,7 +262,53 @@ fn parse_entry(entry: &HistoryEntry) -> Parts {
                 .unwrap_or_else(|| entry.label.clone()),
             is_marker: true,
         },
-        HistoryEntryKind::Snapshot => parse_snapshot_label(&entry.label),
+        HistoryEntryKind::Snapshot => parse_snapshot(entry),
+    }
+}
+
+fn in_game_duration(tick: u32, first_moving: Option<u32>) -> String {
+    let offset = first_moving.unwrap_or(0);
+    format_recording_duration(tick.saturating_sub(offset))
+}
+
+/// Build snapshot Parts. New entries with `start_tick > 0` get the
+/// "from <tick> · <in-game time>" form. New REC entries (start_tick = 0
+/// with end_tick > 0) get the empty context. Legacy entries — persisted
+/// with `start_tick = 0` AND a `Continued from …` label — fall back to
+/// the label parser to preserve the original "from H:MM.ss" context
+/// rather than collapsing into REC-style display.
+fn parse_snapshot(entry: &HistoryEntry) -> Parts {
+    // No structured fields at all → pure legacy entry, render via label.
+    if entry.end_tick == 0 {
+        return parse_snapshot_label(&entry.label);
+    }
+    let total = in_game_duration(entry.end_tick, entry.first_moving);
+    if entry.start_tick > 0 {
+        return Parts {
+            total,
+            context: format!(
+                "from {} · {}",
+                entry.start_tick,
+                in_game_duration(entry.start_tick, entry.first_moving)
+            ),
+            is_marker: false,
+        };
+    }
+    // start_tick == 0: real REC (label "Recorded …") has no context.
+    // A "Continued from …" label here means a legacy entry that lost
+    // its start_tick — keep its original context.
+    if entry.label.starts_with("Continued from ") {
+        let legacy = parse_snapshot_label(&entry.label);
+        return Parts {
+            total,
+            context: legacy.context,
+            is_marker: false,
+        };
+    }
+    Parts {
+        total,
+        context: String::new(),
+        is_marker: false,
     }
 }
 

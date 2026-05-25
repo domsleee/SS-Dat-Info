@@ -6,11 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     // View panel toggles
     pub show_pico_panel: bool,
-    pub show_trajectory: bool,
-    pub show_rotation: bool,
-    pub show_analysis: bool,
     pub show_debug_drift: bool,
-    pub show_macros: bool,
     pub show_history: bool,
     pub show_config: bool,
     pub show_log: bool,
@@ -24,11 +20,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             show_pico_panel: false,
-            show_trajectory: false,
-            show_rotation: false,
-            show_analysis: false,
             show_debug_drift: false,
-            show_macros: false,
             show_history: false,
             show_config: false,
             show_log: false,
@@ -61,10 +53,19 @@ fn settings_path() -> std::path::PathBuf {
 impl Settings {
     pub fn load() -> Self {
         let path = settings_path();
-        match std::fs::read_to_string(&path) {
+        let mut settings: Self = match std::fs::read_to_string(&path) {
             Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
             Err(_) => Self::default(),
+        };
+        // Migrate the stale 20.0 catch-up default. Pre-cave5 the slider
+        // capped at 20×; users who never touched it have that value
+        // persisted, but the effective game cap is now 64×. Bump those
+        // specific values up — anything else (30, 40, 100, etc.) is a
+        // deliberate user choice and we leave it alone.
+        if (settings.cont_catchup_speed - 20.0).abs() < f32::EPSILON {
+            settings.cont_catchup_speed = 64.0;
         }
+        settings
     }
 
     pub fn save(&self) {
