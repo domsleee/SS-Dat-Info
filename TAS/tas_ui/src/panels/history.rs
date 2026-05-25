@@ -25,22 +25,33 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            // Iterate newest-first. "Newest" = highest index in the stored
-            // Vec because RecordingHistory appends. We render top-down to
-            // mean newest-on-top.
+            // Render order: sort by `created_at` descending with vec index
+            // as a tie-breaker, so the displayed list is true reverse-
+            // chronological even when entries were healed (e.g. mis-
+            // migrated future timestamps walked back a day) or pushed in
+            // non-chronological order (e.g. recovered from a prior
+            // session). The model itself stays in push/action order —
+            // we only sort the view, so `current_index` semantics and
+            // undo/redo remain unchanged. The vec index travels with
+            // each row so Restore(idx) still targets the right entry.
             let entries = history.entries();
-            let mut last_date: Option<NaiveDate> = None;
-            for idx in (0..entries.len()).rev() {
-                let entry = &entries[idx];
-                let entry_date = entry.created_at.date_naive();
+            let mut visible: Vec<(usize, &HistoryEntry)> =
+                entries.iter().enumerate().collect();
+            visible.sort_by(|(a_idx, a), (b_idx, b)| {
+                // (created_at desc, idx desc) — same-timestamp entries
+                // preserve push recency at the top.
+                b.created_at
+                    .cmp(&a.created_at)
+                    .then_with(|| b_idx.cmp(a_idx))
+            });
 
-                // Sticky day header whenever the date changes as we
-                // walk newest→oldest. First entry always gets a header.
+            let mut last_date: Option<NaiveDate> = None;
+            for (idx, entry) in visible {
+                let entry_date = entry.created_at.date_naive();
                 if last_date != Some(entry_date) {
                     render_day_header(ui, entry_date, today, yesterday);
                     last_date = Some(entry_date);
                 }
-
                 let is_current = current == Some(idx);
                 render_row(ui, entry, idx, is_current, &mut actions);
             }
