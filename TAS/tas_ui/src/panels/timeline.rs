@@ -232,10 +232,15 @@ pub fn show(
     let axis_y = rows_bottom + 2.0;
 
     // Wheel zoom, centred on the cursor (mutates the view before we snapshot).
-    if response.hovered() {
-        let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
-        if scroll_y.abs() > 0.0 {
-            if let Some(p) = response.hover_pos() {
+    // Test the raw pointer position against the timeline rect rather than
+    // `response.hovered()`: when editing, per-block interact widgets sit on
+    // top of the painter and steal its hover, so hovering a key-down block
+    // would otherwise suppress zoom. rect.contains works regardless of which
+    // widget is topmost.
+    if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
+        if rect.contains(p) {
+            let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
+            if scroll_y.abs() > 0.0 {
                 let frac = ((p.x - bar_left) / bar_width).clamp(0.0, 1.0);
                 let cursor_tick = view.start as f32 + frac * view.span().max(1) as f32;
                 let factor = if scroll_y > 0.0 { 0.85 } else { 1.18 };
