@@ -143,6 +143,8 @@ enum DragMode {
 struct BlockDrag {
     idx: usize,
     mode: DragMode,
+    /// The event as it was when the drag began — used to describe the edit.
+    orig: InputEvent,
 }
 
 /// Persistent edit state for the timeline (selection + active block drag +
@@ -162,6 +164,19 @@ pub struct TimelineOutcome {
     pub events: Option<Vec<InputEvent>>,
     /// A gesture finished — push one undo snapshot.
     pub commit_undo: bool,
+    /// Human-readable description of the committed edit, for the history
+    /// entry (e.g. "Moved L 324→372t"). Set only when `commit_undo`.
+    pub action_label: Option<String>,
+}
+
+/// Describe a block edit for the history panel.
+fn edit_action_label(mode: DragMode, orig: InputEvent, now: InputEvent) -> String {
+    let k = ROW_LABELS[row_index(orig.bit).unwrap_or(0)];
+    match mode {
+        DragMode::Move => format!("Moved {} {}→{}t", k, orig.start, now.start),
+        DragMode::Start => format!("Set {} start {}→{}t", k, orig.start, now.start),
+        DragMode::End => format!("Set {} end {}→{}t", k, orig.end, now.end),
+    }
 }
 
 pub fn show(
@@ -369,13 +384,13 @@ pub fn show(
                 edit.selected = Some(ev);
             }
             if lr.drag_started() {
-                edit.drag = Some(BlockDrag { idx: i, mode: DragMode::Start });
+                edit.drag = Some(BlockDrag { idx: i, mode: DragMode::Start, orig: ev });
                 edit.selected = Some(ev);
             } else if rr.drag_started() {
-                edit.drag = Some(BlockDrag { idx: i, mode: DragMode::End });
+                edit.drag = Some(BlockDrag { idx: i, mode: DragMode::End, orig: ev });
                 edit.selected = Some(ev);
             } else if br.drag_started() {
-                edit.drag = Some(BlockDrag { idx: i, mode: DragMode::Move });
+                edit.drag = Some(BlockDrag { idx: i, mode: DragMode::Move, orig: ev });
                 edit.selected = Some(ev);
             }
 
@@ -413,6 +428,8 @@ pub fn show(
                         edited = true;
                     }
                     if lr.drag_stopped() || rr.drag_stopped() || br.drag_stopped() {
+                        outcome.action_label =
+                            Some(edit_action_label(drag.mode, drag.orig, edit.work[i]));
                         edit.drag = None;
                         outcome.commit_undo = true;
                         edited = true;
@@ -551,10 +568,12 @@ fn edit_controls(
     });
 
     if delete {
+        let label = format!("Deleted {} {}-{}t", ROW_LABELS[row], ev.start, ev.end);
         edit.work.remove(idx);
         edit.selected = None;
         outcome.events = Some(edit.work.clone());
         outcome.commit_undo = true;
+        outcome.action_label = Some(label);
         return;
     }
     if changed {
@@ -568,6 +587,7 @@ fn edit_controls(
         edit.selected = Some(ev);
         outcome.events = Some(edit.work.clone());
         outcome.commit_undo = true;
+        outcome.action_label = Some(format!("Set {} {}-{}t", ROW_LABELS[row], ev.start, ev.end));
     }
 }
 

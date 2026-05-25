@@ -436,7 +436,7 @@ struct TasApp {
     timeline_edit: timeline::TimelineEdit,
     /// Input edit (new full event list, commit-undo flag) produced by the
     /// timeline this frame, applied to `input_log` at the start of the next.
-    pending_input_edit: Option<(Vec<input_script::InputEvent>, bool)>,
+    pending_input_edit: Option<(Vec<input_script::InputEvent>, bool, String)>,
     /// Path + last-seen mtime of the `.tas` file opened in an external
     /// editor; polled each frame for reload-on-save.
     script_watch: Option<(std::path::PathBuf, std::time::SystemTime)>,
@@ -447,6 +447,7 @@ struct TasApp {
     show_debug_drift: bool,
     show_history: bool,
     show_log: bool,
+    show_trajectory: bool,
     segment_tracker: recording::SegmentTracker,
     active_recording_session: Option<ActiveRecordingSession>,
     pending_session_kind: Option<RecordingSessionKind>,
@@ -574,6 +575,7 @@ impl TasApp {
             show_debug_drift: settings.show_debug_drift,
             show_history: settings.show_history,
             show_log: settings.show_log,
+            show_trajectory: settings.show_trajectory,
             segment_tracker: recording::SegmentTracker::new(),
             active_recording_session: None,
             pending_session_kind: None,
@@ -1131,7 +1133,7 @@ impl TasApp {
     /// frame, before rendering, so the central panel's `state` borrow never
     /// overlaps the `state_mut` write here.
     fn apply_pending_input_edit(&mut self) {
-        let Some((events, commit)) = self.pending_input_edit.take() else {
+        let Some((events, commit, label)) = self.pending_input_edit.take() else {
             return;
         };
         let Some(shared) = self.shared.as_mut() else {
@@ -1148,8 +1150,15 @@ impl TasApp {
         input_script::apply_events_to_log(&mut shared.state_mut().input_log, total, &events);
         if commit {
             let snapshot = recording::RecordingSnapshot::from_state(shared.state());
+            // end_tick = 0 routes through the history panel's label parser so
+            // the descriptive action (e.g. "Moved L 324→372t") is what shows.
+            let label = if label.is_empty() {
+                "Edited inputs".to_string()
+            } else {
+                label
+            };
             self.history
-                .push_snapshot_data_with_session(snapshot, "Edited inputs", 0, total);
+                .push_snapshot_data_with_session(snapshot, label, 0, 0);
         }
     }
 
@@ -1171,7 +1180,7 @@ impl TasApp {
             Ok(text) => {
                 let (events, errors) = input_script::parse_script(&text);
                 let n = events.len();
-                self.pending_input_edit = Some((events, true));
+                self.pending_input_edit = Some((events, true, "Loaded inputs from script".to_string()));
                 if errors.is_empty() {
                     self.log_lines.push(format!("[script] reloaded {} inputs", n));
                 } else {
@@ -1678,6 +1687,7 @@ impl eframe::App for TasApp {
             show_pico_panel: self.show_pico_panel,
             show_debug_drift: self.show_debug_drift,
             show_history: self.show_history,
+            show_trajectory: self.show_trajectory,
             show_config: self.show_config,
             show_log: self.show_log,
             playback_speed: self.playback_speed_for_settings(),
@@ -1851,6 +1861,7 @@ impl eframe::App for TasApp {
                         ui.checkbox(&mut self.show_log, "Log");
                         ui.weak("Ctrl+L");
                     });
+                    ui.checkbox(&mut self.show_trajectory, "Trajectory");
                     ui.separator();
                     // Debug section — rarely touched diagnostic toggles.
                     ui.label(
@@ -2415,7 +2426,11 @@ impl eframe::App for TasApp {
                     self.continue_from_text = self.continue_from_frame.to_string();
                 }
                 if let Some(events) = tl_outcome.events {
-                    self.pending_input_edit = Some((events, tl_outcome.commit_undo));
+                    self.pending_input_edit = Some((
+                        events,
+                        tl_outcome.commit_undo,
+                        tl_outcome.action_label.unwrap_or_default(),
+                    ));
                 }
 
                 // Text-script route: write a .tas and open it in the user's
@@ -2469,22 +2484,22 @@ impl eframe::App for TasApp {
                     drift::show(ui, state, &mut self.drift_cache);
                 }
 
-                // Trajectory + Rotation — always rendered, integrated with
-                // the input timeline above. Fixed 220 px container so the
-                // section's vertical footprint stays predictable regardless
-                // of plot content.
-                ui.add_space(4.0);
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.label(egui::RichText::new("Trajectory").strong());
-                    ui.separator();
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), 220.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            trajectory::show(ui, state, &mut self.trajectory_cache);
-                        },
-                    );
-                });
+                // Trajectory + Rotation — toggleable via the View menu,
+                // hidden by default. Fixed 220 px container when shown.
+                if self.show_trajectory {
+                    ui.add_space(4.0);
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.label(egui::RichText::new("Trajectory").strong());
+                        ui.separator();
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), 220.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                trajectory::show(ui, state, &mut self.trajectory_cache);
+                            },
+                        );
+                    });
+                }
 
                 // Diagnostics footer — DLL counters. Only useful when
                 // debugging the DLL itself; gated on Debug Config so it's
@@ -2784,6 +2799,7 @@ mod tests {
             show_debug_drift: false,
             show_history: false,
             show_log: false,
+            show_trajectory: false,
             segment_tracker: recording::SegmentTracker::new(),
             active_recording_session: None,
             pending_session_kind: None,
