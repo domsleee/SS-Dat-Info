@@ -1,5 +1,4 @@
 mod history_store;
-mod macros;
 mod panels;
 mod pico;
 mod recording;
@@ -138,6 +137,31 @@ fn format_recovery_saved_at(iso: &str) -> String {
     format!("{} {} {}", saved.day(), month, saved.format("%H:%M"))
 }
 
+/// Encode an `egui::ColorImage` (RGBA premultiplied, top-to-bottom) as
+/// a PNG file. Used by the F8 screenshot path so an external caller
+/// (an automation script, the AI agent helping debug a UX problem) can
+/// read the rendered framebuffer even when the window is occluded.
+fn save_color_image_as_png(
+    image: &egui::ColorImage,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let [width, height] = image.size;
+    // ColorImage stores premultiplied RGBA in `Color32` (which is
+    // [u8; 4]). Flatten into a byte slice for png encoding.
+    let mut bytes = Vec::with_capacity(width * height * 4);
+    for c in &image.pixels {
+        bytes.extend_from_slice(&[c.r(), c.g(), c.b(), c.a()]);
+    }
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut encoder =
+        png::Encoder::new(std::io::BufWriter::new(file), width as u32, height as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+    writer.write_image_data(&bytes).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Force dark title bar on Windows 10+ via DwmSetWindowAttribute.
 #[cfg(windows)]
 fn set_dark_title_bar(title: &str) {
@@ -167,7 +191,7 @@ fn set_dark_title_bar(title: &str) {
 }
 
 use panels::{
-    analysis, config, drift, history, log_panel, rotation, timeline, trajectory, transport,
+    config, drift, history, log_panel, rotation, timeline, trajectory, transport,
 };
 use pico::PicoState;
 use recording::{RecordingHistory, RecordingSessionKind};
@@ -275,14 +299,9 @@ struct TasApp {
     continue_from_text: String,
     playback_speed: f32,
     step_mode: bool,
-    show_trajectory: bool,
-    show_analysis: bool,
     show_debug_drift: bool,
-    show_rotation: bool,
-    show_macros: bool,
     show_history: bool,
     show_log: bool,
-    macro_state: macros::MacroState,
     segment_tracker: recording::SegmentTracker,
     active_recording_session: Option<ActiveRecordingSession>,
     pending_session_kind: Option<RecordingSessionKind>,
@@ -301,7 +320,6 @@ struct TasApp {
     // Cached plot data (avoid per-frame Vec allocation)
     drift_cache: drift::DriftCache,
     trajectory_cache: trajectory::TrajectoryCache,
-    analysis_cache: analysis::AnalysisCache,
 
     // In-process restart state: command to send once restart completes
     pending_after_restart: Option<TasCommand>,
@@ -333,6 +351,13 @@ struct TasApp {
     // One-shot: force dark title bar on first frame
     #[cfg(windows)]
     dark_title_bar_set: bool,
+    /// One-shot guard for the TAS_UI_AUTOSHOT env-triggered startup
+    /// screenshot. Set true after the first request goes out.
+    auto_screenshot_taken: bool,
+    /// Wall-clock launch time, used to schedule the AUTOSHOT screenshot
+    /// reliably (egui's `input.time` doesn't advance when nothing
+    /// changes — using Instant gives a real elapsed measurement).
+    launched_at: std::time::Instant,
 }
 
 impl TasApp {
@@ -394,14 +419,9 @@ impl TasApp {
             continue_from_text: "0".to_string(),
             playback_speed: normalize_playback_speed(settings.playback_speed),
             step_mode: false,
-            show_trajectory: settings.show_trajectory,
-            show_analysis: settings.show_analysis,
             show_debug_drift: settings.show_debug_drift,
-            show_rotation: settings.show_rotation,
-            show_macros: settings.show_macros,
             show_history: settings.show_history,
             show_log: settings.show_log,
-            macro_state: macros::MacroState::new(),
             segment_tracker: recording::SegmentTracker::new(),
             active_recording_session: None,
             pending_session_kind: None,
@@ -416,7 +436,6 @@ impl TasApp {
             last_logged_drift_level: 0,
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
-            analysis_cache: analysis::AnalysisCache::default(),
             pending_after_restart: None,
             pending_stop_then_restart: None,
             prev_global_keys: [false; 4],
@@ -427,6 +446,8 @@ impl TasApp {
             last_health_check: std::time::Instant::now(),
             #[cfg(windows)]
             dark_title_bar_set: false,
+            auto_screenshot_taken: false,
+            launched_at: std::time::Instant::now(),
         };
 
         // Auto-detect Pico on startup
@@ -548,22 +569,8 @@ impl TasApp {
             }
             let rec0 = state.rec_coords[0];
             let start_bits = [rec0[0].to_bits(), rec0[1].to_bits(), rec0[2].to_bits()];
-            // Walk rec_coords up to recorded_count looking for the first
-            // index whose position differs from rec_coords[0]. The bucket
-            // fingerprint: the recorded countdown completion frame.
-            let n = state.recorded_count as usize;
-            let n = n.min(state.rec_coords.len());
-            let mut first_moving: Option<u32> = None;
-            for j in 1..n {
-                let c = state.rec_coords[j];
-                if c[0].to_bits() != rec0[0].to_bits()
-                    || c[1].to_bits() != rec0[1].to_bits()
-                    || c[2].to_bits() != rec0[2].to_bits()
-                {
-                    first_moving = Some(j as u32);
-                    break;
-                }
-            }
+            let first_moving =
+                recording::detect_first_moving(&state.rec_coords, state.recorded_count);
             Some((start_bits, first_moving))
         });
         self.continue_start_guard = expected.map(|(expected_start_bits, expected_first_moving)| {
@@ -1060,9 +1067,12 @@ impl TasApp {
             return;
         };
 
-        let _ = self
-            .history
-            .push_snapshot_data(snapshot.clone(), session_context.label.clone());
+        let _ = self.history.push_snapshot_data_with_session(
+            snapshot.clone(),
+            session_context.label.clone(),
+            session_context.start_tick,
+            session_context.end_tick,
+        );
         self.persist_recovery_snapshot_if_needed(snapshot, &session_context, true);
     }
 
@@ -1073,13 +1083,19 @@ impl TasApp {
 
         if let Some(ref mut shared) = self.shared {
             let recovery_label = recovery.label().to_string();
+            let session_start = recovery.session.start_tick;
+            let session_end = recovery.session.end_tick;
             recovery.snapshot.restore_to(shared.state_mut());
             self.segment_tracker.restore_from(recovery.segments);
             self.continue_from_frame = shared.state().recorded_count;
             self.continue_from_text = self.continue_from_frame.to_string();
-            let _ = self
-                .history
-                .push_snapshot(shared.state(), recovery_label.clone());
+            let snapshot = recording::RecordingSnapshot::from_state(shared.state());
+            let _ = self.history.push_snapshot_data_with_session(
+                snapshot,
+                recovery_label.clone(),
+                session_start,
+                session_end,
+            );
             self.push_log(&format!("Restored crash recovery: {}", recovery_label));
 
             if let Some(store) = self.recovery_store.as_mut() {
@@ -1278,6 +1294,17 @@ impl TasApp {
                 actions.push(transport::Action::Log("Shortcut: F12 CONT".into()));
             }
 
+            // F8: capture a screenshot of the egui framebuffer to disk.
+            // Used for remote debugging — Windows GDI APIs can't read
+            // wgpu-rendered windows when they're occluded by another
+            // window, but egui's own screenshot mechanism runs through
+            // the GPU pipeline and grabs the actual rendered content.
+            // The result is written to a fixed path; the caller (e.g.
+            // an automation script) reads the file after a frame or two.
+            if input.key_pressed(egui::Key::F8) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+                actions.push(transport::Action::Log("F8: screenshot requested".into()));
+            }
             // Skip remaining shortcuts if text input has focus
             if any_text_focus {
                 return;
@@ -1304,6 +1331,28 @@ impl TasApp {
             if ctrl_z_raw {
                 actions.push(transport::Action::Undo);
                 actions.push(transport::Action::Log("Shortcut: Ctrl+Z Undo".into()));
+            }
+
+            // Panel toggles: Ctrl+H (History), Ctrl+A (Analysis),
+            // Ctrl+L (Log). Match on raw Key events for the same reason
+            // as Ctrl+Z — egui may consume these as built-in shortcuts.
+            for ev in input.events.iter() {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = ev
+                {
+                    if !(modifiers.ctrl || modifiers.mac_cmd) {
+                        continue;
+                    }
+                    match key {
+                        egui::Key::H => self.show_history = !self.show_history,
+                        egui::Key::L => self.show_log = !self.show_log,
+                        _ => {}
+                    }
+                }
             }
 
             // Ctrl+Y or Ctrl+Shift+Z: Redo
@@ -1402,11 +1451,7 @@ impl eframe::App for TasApp {
     fn on_exit(&mut self) {
         let s = settings::Settings {
             show_pico_panel: self.show_pico_panel,
-            show_trajectory: self.show_trajectory,
-            show_rotation: self.show_rotation,
-            show_analysis: self.show_analysis,
             show_debug_drift: self.show_debug_drift,
-            show_macros: self.show_macros,
             show_history: self.show_history,
             show_config: self.show_config,
             show_log: self.show_log,
@@ -1429,6 +1474,31 @@ impl eframe::App for TasApp {
         // session log. Done first so a panic later in the frame still
         // captures the events that led up to it.
         self.flush_log_lines_to_file();
+
+        // If a screenshot was requested last frame (via F8), the encoded
+        // ColorImage arrives in this frame's raw events. Walk them and
+        // write any screenshots to disk. egui's screenshot path goes
+        // through the GPU pipeline, so it works even when the window
+        // is occluded by another window (unlike GDI PrintWindow which
+        // returns black for wgpu-rendered windows).
+        let screenshots: Vec<std::sync::Arc<egui::ColorImage>> = ctx.input(|i| {
+            i.raw
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        for image in screenshots {
+            let path = std::env::temp_dir()
+                .join("tas_ui_screenshot.png");
+            match save_color_image_as_png(&image, &path) {
+                Ok(()) => self.push_log(&format!("Screenshot written to {}", path.display())),
+                Err(err) => self.push_log(&format!("Screenshot save failed: {}", err)),
+            }
+        }
 
         // Two-step Stop→Restart: fire the deferred Restart once cave2
         // has confirmed mode==OFF.
@@ -1540,15 +1610,31 @@ impl eframe::App for TasApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    ui.checkbox(&mut self.show_pico_panel, "Pico HID Panel");
-                    ui.checkbox(&mut self.show_trajectory, "Trajectory Viewer");
-                    ui.checkbox(&mut self.show_rotation, "Rotation Display");
-                    ui.checkbox(&mut self.show_analysis, "Analysis Panel");
-                    ui.checkbox(&mut self.show_debug_drift, "Debug drift");
-                    ui.checkbox(&mut self.show_macros, "Macro Panel");
-                    ui.checkbox(&mut self.show_history, "History Panel");
-                    ui.checkbox(&mut self.show_log, "Log Panel");
+                    // Everyday toggles, grouped under "Panels". The
+                    // hotkey labels are advisory only — actual handling
+                    // is in `handle_shortcuts`.
+                    ui.label(
+                        egui::RichText::new("Panels")
+                            .small()
+                            .color(egui::Color32::from_gray(140)),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.show_history, "History");
+                        ui.weak("Ctrl+H");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.show_log, "Log");
+                        ui.weak("Ctrl+L");
+                    });
                     ui.separator();
+                    // Debug section — rarely touched diagnostic toggles.
+                    ui.label(
+                        egui::RichText::new("Debug")
+                            .small()
+                            .color(egui::Color32::from_gray(140)),
+                    );
+                    ui.checkbox(&mut self.show_debug_drift, "Drift overlay");
+                    ui.checkbox(&mut self.show_pico_panel, "Pico HID");
                     ui.checkbox(&mut self.show_config, "Debug Config");
                 });
             });
@@ -1563,7 +1649,9 @@ impl eframe::App for TasApp {
             discard_pending_recovery = false;
         }
 
-        // Bottom log panel (hidden by default, toggle via View menu)
+        // Bottom log panel (hidden by default, toggle via View menu).
+        // Declared FIRST so it sits at the very bottom of the window;
+        // egui stacks subsequent bottom panels above it.
         if self.show_log {
             egui::TopBottomPanel::bottom("log_panel")
                 .resizable(true)
@@ -1602,7 +1690,7 @@ impl eframe::App for TasApp {
         }
 
         // Left side panel: only shown if at least one sub-panel is visible
-        let left_panel_visible = self.show_config || self.show_pico_panel || self.show_macros;
+        let left_panel_visible = self.show_config || self.show_pico_panel;
         if left_panel_visible {
             egui::SidePanel::left("config_panel")
                 .resizable(true)
@@ -1619,19 +1707,6 @@ impl eframe::App for TasApp {
                         }
                         if self.show_pico_panel {
                             pico::show_panel(ui, &mut self.pico, &mut self.log_lines);
-                        }
-                        if self.show_macros {
-                            ui.separator();
-                            egui::CollapsingHeader::new("Input Macros")
-                                .default_open(true)
-                                .show(ui, |ui| {
-                                    macros::show_panel(
-                                        ui,
-                                        &mut self.macro_state,
-                                        shared.state_mut(),
-                                        &mut self.log_lines,
-                                    );
-                                });
                         }
                     }
                 });
@@ -1668,8 +1743,8 @@ impl eframe::App for TasApp {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui
-                                        .small_button("📂")
-                                        .on_hover_text("Open history folder")
+                                        .small_button("Open…")
+                                        .on_hover_text("Open the autosave folder in Explorer")
                                         .clicked()
                                     {
                                         open_history_dir = true;
@@ -2030,9 +2105,6 @@ impl eframe::App for TasApp {
                     TasMode::Rec if rec_count > 0 => {
                         format!("{} {} ticks", state.mode_str(), rec_count)
                     }
-                    _ if rec_count > 0 => {
-                        format!("{} ({} ticks recorded)", state.mode_str(), rec_count)
-                    }
                     _ => state.mode_str().to_string(),
                 };
                 let vx = state.velocity_x as f64;
@@ -2048,10 +2120,23 @@ impl eframe::App for TasApp {
                         "Pos: ({:.1}, {:.1}, {:.1})    Speed: {:.1} km/h",
                         state.player_x, state.player_y, state.player_z, speed_kmh
                     ));
-                    ui.label(format!(
-                        "Vel: ({:.2}, {:.2}, {:.2})    Tick: {}",
-                        state.velocity_x, state.velocity_y, state.velocity_z, state.tick_count
-                    ));
+                    // Tick is shown only when meaningful (REC/PLAY); the
+                    // headline already says "REC 1234 ticks" so duplicating
+                    // it here just adds noise.
+                    if matches!(state.mode_enum(), TasMode::Rec | TasMode::Play) {
+                        ui.label(format!(
+                            "Vel: ({:.2}, {:.2}, {:.2})    Tick: {}",
+                            state.velocity_x,
+                            state.velocity_y,
+                            state.velocity_z,
+                            state.tick_count
+                        ));
+                    } else {
+                        ui.label(format!(
+                            "Vel: ({:.2}, {:.2}, {:.2})",
+                            state.velocity_x, state.velocity_y, state.velocity_z
+                        ));
+                    }
                 });
 
                 ui.separator();
@@ -2082,71 +2167,51 @@ impl eframe::App for TasApp {
                     ui.separator();
                 }
 
-                // Primary row: timeline left, analysis/drift right
-                let avail = ui.available_size();
-                ui.horizontal(|ui| {
-                    // Input timeline (takes ~60% width)
-                    let timeline_width = (avail.x * 0.6).max(200.0);
-                    ui.vertical(|ui| {
-                        ui.set_width(timeline_width);
-                        ui.label(egui::RichText::new("Input Timeline").strong());
-                        let continue_changed = timeline::show(
-                            ui,
-                            state,
-                            &mut self.timeline_zoom,
-                            &mut self.timeline_scroll,
-                            &mut self.continue_from_frame,
-                        );
-                        if continue_changed {
-                            self.continue_from_text = self.continue_from_frame.to_string();
-                        }
-                    });
-
+                // Input Timeline — full central width. Analysis is now a
+                // bottom panel (see below); Debug drift renders inline
+                // here when toggled (it's a wide table that reads best
+                // next to the timeline it's drifting against).
+                ui.label(egui::RichText::new("Input Timeline").strong());
+                let continue_changed = timeline::show(
+                    ui,
+                    state,
+                    &mut self.timeline_zoom,
+                    &mut self.timeline_scroll,
+                    &mut self.continue_from_frame,
+                );
+                if continue_changed {
+                    self.continue_from_text = self.continue_from_frame.to_string();
+                }
+                if self.show_debug_drift {
                     ui.separator();
+                    ui.label(egui::RichText::new("Debug drift").strong());
+                    drift::show(ui, state, &mut self.drift_cache);
+                }
 
-                    // Right panel: optional analysis/debug widgets (trajectory/rotation are rendered below)
-                    ui.vertical(|ui| {
-                        if self.show_analysis {
-                            ui.label(egui::RichText::new("Input Analysis").strong());
-                            analysis::show(ui, state, &mut self.analysis_cache);
-                        }
-                        if self.show_debug_drift {
-                            if self.show_analysis {
-                                ui.separator();
-                            }
-                            ui.label(egui::RichText::new("Debug drift").strong());
-                            drift::show(ui, state, &mut self.drift_cache);
-                        }
-                        if !self.show_analysis && !self.show_debug_drift {
-                            ui.colored_label(
-                                egui::Color32::from_gray(140),
-                                "Enable Analysis Panel or Debug drift from View.",
-                            );
-                        }
-                    });
-                });
-
-                // Secondary row: merged trajectory + rotation widget
-                if self.show_trajectory || self.show_rotation {
-                    ui.add_space(4.0);
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.label(egui::RichText::new("Trajectory / Rotation").strong());
-                        ui.separator();
-
-                        if self.show_trajectory && self.show_rotation {
+                // Trajectory + Rotation — always rendered, integrated with
+                // the input timeline above. Fixed 220 px container so the
+                // section's vertical footprint stays predictable regardless
+                // of plot content.
+                ui.add_space(4.0);
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.label(egui::RichText::new("Trajectory + Rotation").strong());
+                    ui.separator();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 220.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            // Sub-labels removed — the frame header above
+                            // already says what these widgets are. Rotation
+                            // and Trajectory each render their own contents
+                            // without further chrome.
                             if should_stack_trajectory_rotation(ui.available_width()) {
-                                ui.label(egui::RichText::new("Rotation").small());
                                 rotation::show(ui, state);
                                 ui.separator();
-                                ui.label(egui::RichText::new("Trajectory").small());
                                 trajectory::show(ui, state, &mut self.trajectory_cache);
                             } else {
                                 ui.columns(2, |columns| {
                                     columns[0].set_min_width(260.0);
-                                    columns[0].label(egui::RichText::new("Rotation").small());
                                     rotation::show(&mut columns[0], state);
-
-                                    columns[1].label(egui::RichText::new("Trajectory").small());
                                     trajectory::show(
                                         &mut columns[1],
                                         state,
@@ -2154,28 +2219,26 @@ impl eframe::App for TasApp {
                                     );
                                 });
                             }
-                        } else if self.show_trajectory {
-                            ui.label(egui::RichText::new("Trajectory").small());
-                            trajectory::show(ui, state, &mut self.trajectory_cache);
-                        } else {
-                            ui.label(egui::RichText::new("Rotation").small());
-                            rotation::show(ui, state);
-                        }
+                        },
+                    );
+                });
+
+                // Diagnostics footer — DLL counters. Only useful when
+                // debugging the DLL itself; gated on Debug Config so it's
+                // hidden during normal use.
+                if self.show_config {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "Recorded: {} | Playback: {} | BB3B10: {} | Blocks: {} | Events: {}",
+                            state.recorded_count,
+                            state.playback_pos,
+                            state.bb3b10_call_count,
+                            state.handler_block_count,
+                            state.event_count
+                        ));
                     });
                 }
-
-                // Diagnostics footer
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "Recorded: {} | Playback: {} | BB3B10: {} | Blocks: {} | Events: {}",
-                        state.recorded_count,
-                        state.playback_pos,
-                        state.bb3b10_call_count,
-                        state.handler_block_count,
-                        state.event_count
-                    ));
-                });
 
                 ui.horizontal(|ui| {
                     // Incremental max drift: only scan new coordinates since last frame.
@@ -2445,14 +2508,9 @@ mod tests {
             continue_from_text: "0".to_string(),
             playback_speed: 1.0,
             step_mode: false,
-            show_trajectory: false,
-            show_analysis: false,
             show_debug_drift: false,
-            show_rotation: false,
-            show_macros: false,
             show_history: false,
             show_log: false,
-            macro_state: macros::MacroState::new(),
             segment_tracker: recording::SegmentTracker::new(),
             active_recording_session: None,
             pending_session_kind: None,
@@ -2467,7 +2525,6 @@ mod tests {
             last_logged_drift_level: 0,
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
-            analysis_cache: analysis::AnalysisCache::default(),
             pending_after_restart: None,
             pending_stop_then_restart: None,
             prev_global_keys: [false; 4],
@@ -2478,6 +2535,8 @@ mod tests {
             last_health_check: std::time::Instant::now(),
             #[cfg(windows)]
             dark_title_bar_set: false,
+            auto_screenshot_taken: false,
+            launched_at: std::time::Instant::now(),
         }
     }
 
@@ -2964,10 +3023,7 @@ mod tests {
     #[test]
     fn panel_defaults() {
         let app = test_app();
-        assert!(!app.show_trajectory);
-        assert!(!app.show_analysis);
         assert!(!app.show_debug_drift);
-        assert!(!app.show_macros);
         assert!(!app.show_pico_panel);
         assert!(!app.show_history);
     }
@@ -2975,15 +3031,9 @@ mod tests {
     #[test]
     fn panel_toggles_persist() {
         let mut app = test_app();
-        app.show_trajectory = true;
-        app.show_analysis = true;
         app.show_debug_drift = true;
-        app.show_macros = true;
         app.show_history = true;
-        assert!(app.show_trajectory);
-        assert!(app.show_analysis);
         assert!(app.show_debug_drift);
-        assert!(app.show_macros);
         assert!(app.show_history);
     }
 

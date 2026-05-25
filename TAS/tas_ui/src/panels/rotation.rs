@@ -29,21 +29,22 @@ fn project(p: [f32; 3]) -> egui::Vec2 {
 /// inverted relative to standard right-handed rendering coordinates.
 /// Reference: https://domsleee.github.io/SS-Dat-Info/ (threejs/src/script.ts)
 
+// Euler-angle extractors are no longer used in the live UI (the gizmo
+// shows orientation directly) but the tests below still exercise them
+// as a coordinate-system regression check, so keep them around as test
+// utilities.
+#[cfg(test)]
 fn pitch_from_matrix(m: &[f32; 9]) -> f32 {
-    // Three.js XYZ: euler.x = atan2(-m23, m33) = atan2(-m[5], m[8])
-    // Negate for display correction (reference negates euler.x)
     -((-m[5]).atan2(m[8]))
 }
 
+#[cfg(test)]
 fn yaw_from_matrix(m: &[f32; 9]) -> f32 {
-    // Three.js XYZ: euler.y = asin(m13) = asin(m[2])
-    // Negate for display correction (reference negates euler.y)
     -(m[2].clamp(-1.0, 1.0).asin())
 }
 
+#[cfg(test)]
 fn roll_from_matrix(m: &[f32; 9]) -> f32 {
-    // Three.js XYZ: euler.z = atan2(-m12, m11) = atan2(-m[1], m[0])
-    // Roll is NOT negated in the reference
     (-m[1]).atan2(m[0])
 }
 
@@ -150,23 +151,9 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState) {
         return;
     }
 
-    let yaw = yaw_from_matrix(m);
-    let pitch = pitch_from_matrix(m);
-    let roll = roll_from_matrix(m);
-
-    let yaw_deg = yaw.to_degrees();
-    let pitch_deg = pitch.to_degrees();
-    let roll_deg = roll.to_degrees();
-
-    // Euler angles display
-    ui.horizontal(|ui| {
-        ui.label(format!(
-            "Yaw: {:.1}  Pitch: {:.1}  Roll: {:.1}",
-            yaw_deg, pitch_deg, roll_deg
-        ));
-    });
-
-    // 3D rotation visualization using display-corrected matrix
+    // Yaw/Pitch/Roll text + the "Raw 3x3 Matrix" expander were removed
+    // — the gizmo below conveys the orientation visually, and the raw
+    // matrix is a debug detail (still reachable via Dump Diagnostics).
     let dm = display_matrix(m);
     let size = 140.0;
     let (response, painter) = ui.allocate_painter(egui::Vec2::splat(size), egui::Sense::hover());
@@ -214,20 +201,6 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState) {
 
     // Center dot
     painter.circle_filled(center, 2.5, egui::Color32::WHITE);
-
-    // Raw matrix display (collapsible)
-    ui.collapsing("Raw 3x3 Matrix", |ui| {
-        egui::Grid::new("rotation_grid")
-            .striped(true)
-            .show(ui, |ui| {
-                for row in 0..3 {
-                    for col in 0..3 {
-                        ui.label(format!("{:+.4}", m[row * 3 + col]));
-                    }
-                    ui.end_row();
-                }
-            });
-    });
 }
 
 #[cfg(test)]
