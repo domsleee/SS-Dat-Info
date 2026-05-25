@@ -130,11 +130,8 @@ fn render_row(
 
     let outer = frame.show(ui, |ui| {
         ui.horizontal(|ui| {
-            // Right side first — using right_to_left layout means the FIRST
-            // item added gets pushed to the right edge of the row, and the
-            // remaining width flows back to the left for the rest of the
-            // content. This stops the time from wrapping onto its own line
-            // when the panel is narrow.
+            // Time goes to the right edge via right_to_left layout, then
+            // the rest flows left-to-right back from there.
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
@@ -147,16 +144,20 @@ fn render_row(
                     ui.with_layout(
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            // Icon — kept as the kind's accent color so it
-                            // still pops even though the row is colored.
+                            // Single icon (▶) for every row, colored by
+                            // kind. Using one Unicode glyph for everything
+                            // sidesteps egui's per-codepoint font fallback
+                            // (which made ● / 💾 / 📂 render at wildly
+                            // inconsistent sizes next to ▶). Color does
+                            // the discrimination: orange = REC/CONT, blue
+                            // = save, amber = load.
                             ui.label(
-                                egui::RichText::new(parts.icon)
+                                egui::RichText::new("▶")
                                     .color(kind_color(entry.kind))
                                     .size(13.0),
                             );
-                            // Total — right-padded with non-breaking space
-                            // equivalents so 0:55 and 1:08 line up
-                            // vertically across rows.
+                            // Total — right-padded so 0:55 and 1:08 line
+                            // up vertically across rows.
                             if !parts.total.is_empty() {
                                 let mut rt = egui::RichText::new(format!("{:>7}", parts.total))
                                     .monospace()
@@ -168,8 +169,7 @@ fn render_row(
                                 ui.label(rt);
                             }
                             // Context (e.g. "from 0:52.00"). Truncates with
-                            // ellipsis rather than wrapping if the panel
-                            // is too narrow.
+                            // ellipsis if the panel is too narrow.
                             let mut ctx_rt = egui::RichText::new(&parts.context)
                                 .size(12.0)
                                 .color(row_color);
@@ -206,40 +206,44 @@ fn kind_color(kind: HistoryEntryKind) -> egui::Color32 {
 }
 
 struct Parts {
-    /// Single-glyph kind icon: ●/▶/💾/📂.
-    icon: &'static str,
     /// Duration like `1:08.24`. Empty for markers.
     total: String,
-    /// Right-justified context: `from 0:52.00 splice`, `Recorded`,
-    /// `Saved → file`, `Loaded ← file`.
+    /// Right-justified context: `from 0:52.00`, `Saved → file`,
+    /// `Loaded ← file`. Empty for plain REC entries (the icon-color
+    /// + the duration already convey "recording").
     context: String,
     is_marker: bool,
 }
 
-
-/// Parse a history entry's label into (icon, total, context). The labels
-/// are produced by `RecoverySessionContext::from_ticks` (`Recorded H:MM.ss`,
+/// Parse a history entry's label into (total, context). The labels are
+/// produced by `RecoverySessionContext::from_ticks` (`Recorded H:MM.ss`,
 /// `Continued from H:MM.ss, total H:MM.ss`) and by `push_save_marker` /
 /// `push_loaded_snapshot` (`Save: filename`, `Load: filename`).
+/// The icon is no longer part of `Parts` — every row uses the same `▶`
+/// glyph, colored by kind. This sidesteps egui's per-codepoint font
+/// fallback which was making different icons render at inconsistent
+/// sizes.
 fn parse_entry(entry: &HistoryEntry) -> Parts {
     match entry.kind {
         HistoryEntryKind::SaveMarker => Parts {
-            icon: "💾",
             total: String::new(),
+            // The previous `Saved → file` form looked nice in monospace
+            // mockups but the `→` glyph (U+2192) rendered as a hollow
+            // square in egui's default font fallback. ASCII keeps it
+            // tight; the verb + icon color already convey "save".
             context: entry
                 .label
                 .strip_prefix("Save: ")
-                .map(|name| format!("Saved → {}", name))
+                .map(|name| format!("Saved {}", name))
                 .unwrap_or_else(|| entry.label.clone()),
             is_marker: true,
         },
         HistoryEntryKind::LoadSnapshot => Parts {
-            icon: "📂",
             total: String::new(),
             context: entry
                 .label
                 .strip_prefix("Load: ")
-                .map(|name| format!("Loaded ← {}", name))
+                .map(|name| format!("Loaded {}", name))
                 .unwrap_or_else(|| entry.label.clone()),
             is_marker: true,
         },
@@ -248,23 +252,19 @@ fn parse_entry(entry: &HistoryEntry) -> Parts {
 }
 
 fn parse_snapshot_label(label: &str) -> Parts {
-    // "Continued from 0:42.35, total 0:50.00" → icon ▶, total 0:50.00,
-    // context "from 0:42.35"
+    // "Continued from 0:42.35, total 0:50.00" → total 0:50.00, context "from 0:42.35"
     if let Some(rest) = label.strip_prefix("Continued from ") {
         if let Some((splice, total_part)) = rest.split_once(", total ") {
             return Parts {
-                icon: "▶",
                 total: total_part.trim().to_string(),
                 context: format!("from {}", splice.trim()),
                 is_marker: false,
             };
         }
     }
-    // "Recorded 0:20.55" → icon ●, total 0:20.55, no context (the icon
-    // already says it's a recording; "Recorded" as context is just noise).
+    // "Recorded 0:20.55" → total 0:20.55, no context.
     if let Some(total) = label.strip_prefix("Recorded ") {
         return Parts {
-            icon: "●",
             total: total.trim().to_string(),
             context: String::new(),
             is_marker: false,
@@ -272,7 +272,6 @@ fn parse_snapshot_label(label: &str) -> Parts {
     }
     // Unrecognised label: dump it whole into context, no total.
     Parts {
-        icon: "●",
         total: String::new(),
         context: label.to_string(),
         is_marker: false,
@@ -286,7 +285,6 @@ mod tests {
     #[test]
     fn parses_continued_label() {
         let p = parse_snapshot_label("Continued from 0:42.35, total 1:08.24");
-        assert_eq!(p.icon, "▶");
         assert_eq!(p.total, "1:08.24");
         assert_eq!(p.context, "from 0:42.35");
         assert!(!p.is_marker);
@@ -295,9 +293,8 @@ mod tests {
     #[test]
     fn parses_recorded_label() {
         let p = parse_snapshot_label("Recorded 0:20.55");
-        assert_eq!(p.icon, "●");
         assert_eq!(p.total, "0:20.55");
-        // No context for REC — the icon already says "recording".
+        // No context for REC — the icon color already says "recording".
         assert!(p.context.is_empty());
     }
 
@@ -305,7 +302,6 @@ mod tests {
     fn parses_unrecognised_label_safely() {
         // Catch-all: unrecognised labels still render without panic.
         let p = parse_snapshot_label("weird label that doesn't match");
-        assert_eq!(p.icon, "●");
         assert!(p.total.is_empty());
         assert_eq!(p.context, "weird label that doesn't match");
     }

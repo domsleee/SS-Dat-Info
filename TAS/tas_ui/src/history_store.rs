@@ -102,19 +102,72 @@ fn load_latest_history_from_root(root: &Path) -> Result<Option<LoadedHistory>, S
         }
     }
 
-    let Some((_, path)) = latest else {
+    let Some((modified, path)) = latest else {
         return Ok(None);
     };
 
     let json = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read persisted history {}: {}", path.display(), e))?;
-    let history: PersistedHistory = serde_json::from_str(&json).map_err(|e| {
+    let mut history: PersistedHistory = serde_json::from_str(&json).map_err(|e| {
         format!(
             "failed to parse persisted history {}: {}",
             path.display(),
             e
         )
     })?;
+
+    // Migrate entries that pre-date the `created_at_iso` field. Without
+    // this, the apply_persisted fallback assigns "today" as the date,
+    // making a history loaded from yesterday's session render every
+    // 21:14 entry under "Today · 25 May" even though they were
+    // recorded yesterday.
+    //
+    // Use the history file's mtime (when it was last written) as the
+    // baseline date. The session_dir name encodes when the *current*
+    // tas_ui launch started, which is wrong — we want the date the
+    // entries were actually recorded. mtime tracks that closely
+    // because the auto-save writes the file on every history change.
+    let modified_date: chrono::DateTime<chrono::Local> = modified.into();
+    let date_str = modified_date.format("%Y-%m-%d").to_string();
+    let offset_seconds = chrono::Local::now().offset().local_minus_utc();
+    let offset_sign = if offset_seconds >= 0 { '+' } else { '-' };
+    let abs = offset_seconds.unsigned_abs();
+    let offset_str = format!("{}{:02}:{:02}", offset_sign, abs / 3600, (abs % 3600) / 60);
+    let now = chrono::Local::now();
+    let future_slop = chrono::Duration::minutes(5);
+    for entry in &mut history.entries {
+        if entry.created_at_iso.is_empty() {
+            // Legacy entry: fill from file mtime + entry's HH:MM:SS.
+            entry.created_at_iso = format!(
+                "{}T{}{}",
+                date_str,
+                entry.timestamp,
+                offset_str,
+            );
+        }
+        // Heal earlier broken migrations that wrote future-dated
+        // timestamps. A previous version of this code defaulted to
+        // `Local::now()` whenever `created_at_iso` was empty, so any
+        // entry recorded at e.g. 21:13 on day N got migrated into a
+        // 21:13 timestamp on day N+1 (today's date with yesterday's
+        // time-of-day). Those rows then bunch under "Today" even
+        // though they were recorded yesterday. Entries can't legally
+        // be created in the future, so if the parsed timestamp is
+        // ahead of now, walk it back a day at a time until it isn't.
+        if let Ok(parsed) =
+            chrono::DateTime::parse_from_rfc3339(&entry.created_at_iso)
+        {
+            let mut dt = parsed.with_timezone(&chrono::Local);
+            let mut healed = false;
+            while dt > now + future_slop {
+                dt -= chrono::Duration::days(1);
+                healed = true;
+            }
+            if healed {
+                entry.created_at_iso = dt.to_rfc3339();
+            }
+        }
+    }
 
     Ok(Some(LoadedHistory { path, history }))
 }
