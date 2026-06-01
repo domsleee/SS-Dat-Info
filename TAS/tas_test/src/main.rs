@@ -24,10 +24,13 @@ mod f5_probe;
 mod gates;
 mod harness;
 mod patterns;
+mod catchup_speed;
 mod escape_speedup;
 mod fe_cont_reliability;
 mod fe_cont_stress;
 mod pause_resume;
+mod play_pace;
+mod rec_start;
 mod refresh_recording;
 mod regression;
 mod reliability;
@@ -110,6 +113,42 @@ fn main() {
             // first 1000 frames replay with zero drift across the pause
             // boundary.
             let ok = pause_resume::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "rec-start" => {
+            // Start-position regression guard: a fresh recording must BEGIN at
+            // the stationary spawn (capturing the countdown / pre-timer inputs),
+            // not mid-fall. `--file <path>` analyzes a saved .tasrec read-only.
+            let mut file: Option<String> = None;
+            let mut i = 2;
+            while i < args.len() {
+                if args[i] == "--file" && i + 1 < args.len() {
+                    file = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            let ok = match file {
+                Some(f) => rec_start::check_file(&f),
+                None => rec_start::run(),
+            };
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "catchup-speed" => {
+            // Catch-up SPEED guard: median time-to-splice at 1× and 64×, assert
+            // the ratio (64× must stay much faster than native). The ratio
+            // cancels the harness's ~2× wall-clock environment, so it is safe to
+            // assert where an absolute wall-time would not be.
+            let ok = catchup_speed::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "play-pace" => {
+            // Playback-pace guard: 1× PLAY of a fixed frame window must take
+            // ~native wall time (frames×0.01s). Catches "skip-ahead" (PLAY
+            // running faster than real time). 1× PLAY is clock-gated, so unlike
+            // most timing here the absolute pace is a sound assertion.
+            let ok = play_pace::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
         "escape-speedup" => {

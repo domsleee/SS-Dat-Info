@@ -58,14 +58,12 @@ struct SpeedResult {
     /// Divided by iterations = average reroll cost per cont.
     total_rerolls: u32,
     iterations: u32,
-    /// Reference-splice wall-clock to reach VERIFY_FRAMES (seconds).
+    /// Reference-splice wall-clock to reach VERIFY_FRAMES (seconds). A VALID
+    /// relative measurement: the summary divides the 1× run's wall by this to
+    /// report the effective speedup. (The old per-speed `effective_x` divided
+    /// by VERIFY_FRAMES/100, which wrongly treated render-cycle frames as 0.01s
+    /// physics ticks — catchup_speed.rs has the correct T_1x/T_Nx metric.)
     ref_wall_secs: f64,
-    /// Effective speedup of the reference splice vs 1× game time. At 1×
-    /// the game advances 100 ticks/second, so VERIFY_FRAMES ticks would
-    /// take VERIFY_FRAMES/100 seconds. Ratio is how much faster than that
-    /// the actual catch-up was. Effective ≠ playback_speed setting once
-    /// the per-frame tick cap or render-rate ceiling is hit.
-    effective_x: f64,
     /// First-moving frame in the reference (bucket fingerprint).
     expected_first_moving: Option<usize>,
 }
@@ -189,7 +187,7 @@ fn run_one_speed(
     replay::write_to_shared(client, rec);
     if !wait_restart_complete(client) {
         println!("  Reference restart timed out");
-        return SpeedResult { speed, reference_ok: false, one_shot_matched: 0, eventual_matched: 0, total_rerolls: 0, iterations: DEFAULT_ITERATIONS_PER_SPEED, ref_wall_secs: 0.0, effective_x: 0.0, expected_first_moving: None };
+        return SpeedResult { speed, reference_ok: false, one_shot_matched: 0, eventual_matched: 0, total_rerolls: 0, iterations: DEFAULT_ITERATIONS_PER_SPEED, ref_wall_secs: 0.0, expected_first_moving: None };
     }
     // CMD_RESTART zeros continue_from_frame; re-write so ARM_CONTINUE's
     // validity check sees the right value.
@@ -198,16 +196,11 @@ fn run_one_speed(
     if !verify_ok {
         println!("  Reference ARM_CONTINUE didn't reach frame {}", VERIFY_FRAMES);
         harness::stop(client);
-        return SpeedResult { speed, reference_ok: false, one_shot_matched: 0, eventual_matched: 0, total_rerolls: 0, iterations: DEFAULT_ITERATIONS_PER_SPEED, ref_wall_secs: 0.0, effective_x: 0.0, expected_first_moving: None };
+        return SpeedResult { speed, reference_ok: false, one_shot_matched: 0, eventual_matched: 0, total_rerolls: 0, iterations: DEFAULT_ITERATIONS_PER_SPEED, ref_wall_secs: 0.0, expected_first_moving: None };
     }
-    // Effective speedup: at 1× the game runs ~100 ticks/sec, so the
-    // 1×-equivalent wall time for VERIFY_FRAMES ticks is VERIFY_FRAMES/100.
-    // The actual prefix took ref_wall seconds.
-    let baseline_wall = (VERIFY_FRAMES as f64) / 100.0;
-    let effective_x = if ref_wall > 0.0 { baseline_wall / ref_wall } else { 0.0 };
     println!(
-        "  Reference splice: {:.2}s wall to reach {} ticks (1× baseline {:.2}s → effective {:.2}×)",
-        ref_wall, VERIFY_FRAMES, baseline_wall, effective_x
+        "  Reference splice: {:.2}s wall to reach {} frames (speedup vs 1× computed in the summary)",
+        ref_wall, VERIFY_FRAMES
     );
     let reference = capture_play_prefix(client);
     println!(
@@ -335,7 +328,6 @@ fn run_one_speed(
         total_rerolls,
         iterations: DEFAULT_ITERATIONS_PER_SPEED,
         ref_wall_secs: ref_wall,
-        effective_x,
         expected_first_moving,
     }
 }
@@ -392,9 +384,16 @@ pub fn run(speeds: &[f32]) -> bool {
     println!("\n\n=== FE-CONT STRESS SUMMARY ===");
     println!(
         "{:>8}  {:>6}  {:>9}  {:>9}  {:>8}  {:>9}  {:>10}",
-        "setting", "ref_ok", "one_shot", "eventual", "rerolls", "wall_sec", "effective"
+        "setting", "ref_ok", "one_shot", "eventual", "rerolls", "wall_sec", "vs_1x"
     );
     println!("{}", "-".repeat(78));
+    // Honest relative speedup: the 1× run's wall to the same splice frame,
+    // divided by this speed's wall. (catchup_speed.rs is the asserted version;
+    // this column is informational across the whole sweep.)
+    let base_wall = results
+        .iter()
+        .find(|r| (r.speed - 1.0).abs() < 0.01 && r.reference_ok && r.ref_wall_secs > 0.0)
+        .map(|r| r.ref_wall_secs);
     let mut all_eventual_ok = true;
     for r in &results {
         let one_shot_pct = 100.0 * r.one_shot_matched as f64 / r.iterations as f64;
@@ -402,8 +401,12 @@ pub fn run(speeds: &[f32]) -> bool {
         if !eventual_ok {
             all_eventual_ok = false;
         }
+        let speedup = match base_wall {
+            Some(b) if r.ref_wall_secs > 0.0 => format!("{:.1}×", b / r.ref_wall_secs),
+            _ => "—".to_string(),
+        };
         println!(
-            "{:>8.1}  {:>6}  {:>2}/{:<2} {:>3.0}%  {:>4}/{:<3}  {:>7}  {:>8.2}s  {:>9.2}×{}",
+            "{:>8.1}  {:>6}  {:>2}/{:<2} {:>3.0}%  {:>4}/{:<3}  {:>7}  {:>8.2}s  {:>10}{}",
             r.speed,
             if r.reference_ok { "yes" } else { "NO" },
             r.one_shot_matched,
@@ -413,7 +416,7 @@ pub fn run(speeds: &[f32]) -> bool {
             r.iterations,
             r.total_rerolls,
             r.ref_wall_secs,
-            r.effective_x,
+            speedup,
             if eventual_ok { "  PASS" } else { "  FAIL" },
         );
     }
