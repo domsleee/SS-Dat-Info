@@ -68,8 +68,14 @@ struct GameAddresses {
     static constexpr uint32_t PLAYER_PHYSICS = 0x110; // Pointer to physics sub-object
     static constexpr uint32_t PHYSICS_ROT = 0x1B4;   // 3x3 rotation matrix in physics sub-object (9 floats, row-major)
 
-    // BB3B10 calling convention constant
-    static constexpr uint32_t BB3B10_ARG4 = 0x588;
+    // BB3B10 calling convention constant.
+    // 2026-06: live capture of the REAL key handler's BB3B10 call (cave1d
+    // diagnostic, holding a real steering key in OFF) showed arg4=0x96 for
+    // every steering key — not 0x588. The 0x588 (set in d04104f) made cave2's
+    // injected BB3B10 call a no-op for steering, which is why record AND
+    // playback steered dead. The real this(kbobj+0x18) and keyIndex(0x3A/0x3B)
+    // were already correct.
+    static constexpr uint32_t BB3B10_ARG4 = 0x96;
     // BB3B10 this pointer offset from keyboard object
     static constexpr uint32_t BB3B10_THIS_OFFSET = 0x18;
 
