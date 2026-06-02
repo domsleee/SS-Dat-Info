@@ -466,6 +466,177 @@ pub fn zeroed_boxed() -> Box<TasSharedState> {
     unsafe { Box::<TasSharedState>::new_zeroed().assume_init() }
 }
 
+/// Shared CONT (continue-record) F5-bucket judgment, used by BOTH tas_ui (the
+/// live transport's `poll_continue_start_guard`) and tas_test (the
+/// cont-reliability harness). Sharing this is the whole point: the test then
+/// accepts/rejects a CONT bucket on EXACTLY the criteria the user experiences,
+/// instead of a stricter harness-only rule (bit-exact anchor) that measured a
+/// bucket tas_ui never has to land on.
+pub mod cont {
+    /// Max F5-restart retries to land the CONT replay on the recording's bucket.
+    pub const START_MATCH_MAX_RETRIES: u32 = 30;
+    /// Frames past the recording's first-moving frame required before the bucket
+    /// fingerprint is distinguishable (so we don't judge too early).
+    pub const BUCKET_CHECK_HEADROOM: u32 = 3;
+
+    /// First frame index where `rec_coords` first differs (bit-exact) from
+    /// `rec_coords[0]` — when the recorded player leaves spawn. `None` if it
+    /// never moves within `recorded_count` (degenerate / positions not loaded).
+    pub fn detect_first_moving(rec_coords: &[[f32; 3]], recorded_count: u32) -> Option<u32> {
+        if recorded_count == 0 || rec_coords.is_empty() {
+            return None;
+        }
+        let n = (recorded_count as usize).min(rec_coords.len());
+        if n < 2 {
+            return None;
+        }
+        let start = rec_coords[0];
+        for j in 1..n {
+            let c = rec_coords[j];
+            if c[0].to_bits() != start[0].to_bits()
+                || c[1].to_bits() != start[1].to_bits()
+                || c[2].to_bits() != start[2].to_bits()
+            {
+                return Some(j as u32);
+            }
+        }
+        None
+    }
+
+    /// Verdict from judging whether a CONT replay landed on the right F5 bucket.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum BucketVerdict {
+        /// Playback hasn't progressed far enough to judge — keep polling.
+        KeepWaiting,
+        /// Spawn position doesn't match the recording's start — wrong bucket, reroll.
+        WrongStart,
+        /// Recording never moves out of spawn → no fingerprint → nothing to match.
+        NoSignal,
+        /// First-moving frame matched the recording → correct bucket.
+        Match,
+        /// First-moving frame differs from the recording → wrong bucket, reroll.
+        WrongBucket { observed: Option<u32> },
+    }
+
+    /// Judge a CONT replay's F5 bucket using the SAME criteria as tas_ui's
+    /// `poll_continue_start_guard`: the replay's spawn bits must match the
+    /// recording's start, then its observed first-moving frame must equal the
+    /// recording's `expected_first_moving`. Pure function over the shared-memory
+    /// snapshot (no I/O) so tas_ui and the harness share one source of truth.
+    pub fn judge_cont_bucket(
+        play_coords: &[[f32; 3]],
+        playback_pos: u32,
+        expected_start_bits: [u32; 3],
+        expected_first_moving: Option<u32>,
+    ) -> BucketVerdict {
+        if playback_pos == 0 || play_coords.is_empty() {
+            return BucketVerdict::KeepWaiting;
+        }
+        let play0 = play_coords[0];
+        let play0_bits = [play0[0].to_bits(), play0[1].to_bits(), play0[2].to_bits()];
+        if play0_bits != expected_start_bits {
+            return BucketVerdict::WrongStart;
+        }
+        let expected_fm = match expected_first_moving {
+            Some(f) => f,
+            None => return BucketVerdict::NoSignal,
+        };
+        let needed = expected_fm + BUCKET_CHECK_HEADROOM;
+        if playback_pos < needed {
+            return BucketVerdict::KeepWaiting;
+        }
+        let scan_end = (playback_pos as usize).min(play_coords.len());
+        let mut observed: Option<u32> = None;
+        for j in 1..scan_end {
+            let c = play_coords[j];
+            if c[0].to_bits() != expected_start_bits[0]
+                || c[1].to_bits() != expected_start_bits[1]
+                || c[2].to_bits() != expected_start_bits[2]
+            {
+                observed = Some(j as u32);
+                break;
+            }
+        }
+        if observed == Some(expected_fm) {
+            BucketVerdict::Match
+        } else {
+            BucketVerdict::WrongBucket { observed }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn bits(x: f32, y: f32, z: f32) -> [u32; 3] {
+            [x.to_bits(), y.to_bits(), z.to_bits()]
+        }
+
+        #[test]
+        fn detect_first_moving_matches_old_behavior() {
+            let mut c = vec![[1.0, 2.0, 3.0]; 10];
+            c[5] = [1.0, 2.0, 3.5];
+            assert_eq!(detect_first_moving(&c, 10), Some(5));
+            assert_eq!(detect_first_moving(&vec![[1.0, 2.0, 3.0]; 10], 10), None);
+            assert_eq!(detect_first_moving(&[], 0), None);
+            // respects recorded_count bound
+            let mut c2 = vec![[1.0, 2.0, 3.0]; 10];
+            c2[5] = [9.0, 9.0, 9.0];
+            assert_eq!(detect_first_moving(&c2, 3), None);
+            assert_eq!(detect_first_moving(&c2, 6), Some(5));
+        }
+
+        #[test]
+        fn judge_wrong_start() {
+            let play = vec![[9.0, 9.0, 9.0]; 300];
+            assert_eq!(
+                judge_cont_bucket(&play, 300, bits(1.0, 2.0, 3.0), Some(250)),
+                BucketVerdict::WrongStart
+            );
+        }
+
+        #[test]
+        fn judge_keep_waiting_before_headroom() {
+            let mut play = vec![[1.0, 2.0, 3.0]; 300];
+            play[250] = [1.0, 2.0, 3.5];
+            assert_eq!(
+                judge_cont_bucket(&play, 100, bits(1.0, 2.0, 3.0), Some(250)),
+                BucketVerdict::KeepWaiting
+            );
+            // pos must be >= first_moving + HEADROOM (253) to judge
+            assert_eq!(
+                judge_cont_bucket(&play, 252, bits(1.0, 2.0, 3.0), Some(250)),
+                BucketVerdict::KeepWaiting
+            );
+        }
+
+        #[test]
+        fn judge_match_vs_wrong_bucket() {
+            let mut right = vec![[1.0, 2.0, 3.0]; 300];
+            right[250] = [1.0, 2.0, 3.5];
+            assert_eq!(
+                judge_cont_bucket(&right, 260, bits(1.0, 2.0, 3.0), Some(250)),
+                BucketVerdict::Match
+            );
+            let mut wrong = vec![[1.0, 2.0, 3.0]; 300];
+            wrong[248] = [1.0, 2.0, 3.5];
+            assert_eq!(
+                judge_cont_bucket(&wrong, 260, bits(1.0, 2.0, 3.0), Some(250)),
+                BucketVerdict::WrongBucket { observed: Some(248) }
+            );
+        }
+
+        #[test]
+        fn judge_no_signal_for_static_recording() {
+            let play = vec![[1.0, 2.0, 3.0]; 300];
+            assert_eq!(
+                judge_cont_bucket(&play, 260, bits(1.0, 2.0, 3.0), None),
+                BucketVerdict::NoSignal
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

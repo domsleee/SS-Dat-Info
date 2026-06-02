@@ -331,7 +331,7 @@ fn main() {
         "cont-reliability" => {
             let mut iterations = 10u32;
             let mut speed = 12.0f32;
-            let mut splice = 2400u32;
+            let mut splice = 2200u32; // FE-tremendous's proven splice frame
             let mut file: Option<String> = None;
             let mut profile = cont_reliability::BaselineInputProfile::Taps;
             let mut tap_ticks: Option<u32> = None;
@@ -377,6 +377,29 @@ fn main() {
                         i += 1;
                     }
                 }
+            }
+            // Default to the real FE-tremendous recording (the user's actual
+            // workflow) when no --file is given — a real steered run makes the
+            // drift check meaningful. Falls back to a synthetic baseline only if
+            // the recording can't be located.
+            let file = file.or_else(|| {
+                let exe_dir = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(PathBuf::from))
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let candidates = [
+                    exe_dir.join("../../..").join("TAS/recordings/FE-tremendous.tasrec"),
+                    PathBuf::from("TAS/recordings/FE-tremendous.tasrec"),
+                    PathBuf::from("recordings/FE-tremendous.tasrec"),
+                ];
+                candidates
+                    .iter()
+                    .find(|p| p.exists())
+                    .map(|p| p.to_string_lossy().into_owned())
+            });
+            match &file {
+                Some(p) => println!("  Baseline: real recording {} (default)", p),
+                None => println!("  Baseline: synthetic (FE-tremendous not found)"),
             }
             let report = cont_reliability::run(
                 iterations,
