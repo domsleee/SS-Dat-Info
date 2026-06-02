@@ -40,24 +40,9 @@ pub fn format_recording_duration(ticks: u32) -> String {
 /// Bit-comparison of `f32` is intentional — we want exact equality, not
 /// epsilon, so the first sub-millimetre coord change counts.
 pub fn detect_first_moving(rec_coords: &[[f32; 3]], recorded_count: u32) -> Option<u32> {
-    if recorded_count == 0 || rec_coords.is_empty() {
-        return None;
-    }
-    let n = (recorded_count as usize).min(rec_coords.len());
-    if n < 2 {
-        return None;
-    }
-    let start = rec_coords[0];
-    for j in 1..n {
-        let c = rec_coords[j];
-        if c[0].to_bits() != start[0].to_bits()
-            || c[1].to_bits() != start[1].to_bits()
-            || c[2].to_bits() != start[2].to_bits()
-        {
-            return Some(j as u32);
-        }
-    }
-    None
+    // Delegate to the shared implementation so tas_ui and the cont-reliability
+    // harness use one source of truth for the F5-bucket fingerprint.
+    tas_shared::cont::detect_first_moving(rec_coords, recorded_count)
 }
 
 pub fn completed_session_label(
