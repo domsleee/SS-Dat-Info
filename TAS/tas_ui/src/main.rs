@@ -342,12 +342,9 @@ use recording::{RecordingHistory, RecordingSessionKind};
 
 const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
 const PLAYBACK_SPEED_PRESETS: [f32; 3] = [0.5, 1.0, 2.0];
-const CONT_START_MATCH_MAX_RETRIES: u32 = 30;
-/// Extra frames of headroom past the recording's first-moving frame before
-/// we sample the live play_coords to decide if we landed in the right
-/// bucket. The bucket signal is a 1-frame phase offset, so 3 frames is
-/// plenty of margin to disambiguate without slowing down detection.
-const CONT_BUCKET_CHECK_HEADROOM: u32 = 3;
+// Shared with the cont-reliability harness via tas_shared::cont — the bucket
+// headroom now lives inside judge_cont_bucket (one source of truth).
+const CONT_START_MATCH_MAX_RETRIES: u32 = tas_shared::cont::START_MATCH_MAX_RETRIES;
 
 /// Computes a varied wall-clock delay (in ms) to insert before a CONT
 /// retry's Stop. The F5-restart bucket the runtime lands in is
@@ -918,54 +915,37 @@ impl TasApp {
         }
 
         let play0 = shared.state().play_coords[0];
-        let play0_bits = [play0[0].to_bits(), play0[1].to_bits(), play0[2].to_bits()];
-        let start_matches = play0_bits == guard.expected_start_bits;
-
-        // Phase 2: bucket fingerprint check. Only meaningful once the
-        // start position matches (otherwise we'd be running the bucket
-        // check on a degenerate run that's about to retry anyway). Needs
-        // enough frames played past the recording's expected first-moving
-        // frame to distinguish the two buckets.
-        if start_matches {
-            let expected_first_moving = match guard.expected_first_moving {
-                Some(f) => f,
-                None => {
-                    // Recording never moves out of spawn (or wasn't
-                    // loaded with positions). No bucket signal — done.
-                    if guard.retries_remaining < CONT_START_MATCH_MAX_RETRIES {
-                        let used = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
-                        self.push_log(&format!(
-                            "CONT start aligned after {} restart retr{}",
-                            used,
-                            if used == 1 { "y" } else { "ies" }
-                        ));
-                    }
-                    self.continue_start_guard = None;
-                    return;
-                }
-            };
-            let needed = expected_first_moving + CONT_BUCKET_CHECK_HEADROOM;
-            if playback_pos < needed {
-                ctx.request_repaint();
-                return;
-            }
-            // Compute the live first-moving frame from play_coords.
+        // Judge the F5 bucket with the SHARED logic (tas_shared::cont) the
+        // cont-reliability harness also uses — one source of truth, so the test
+        // reflects exactly what happens here. `play0` (above) is kept for the
+        // start-mismatch log.
+        let verdict = {
             let state = shared.state();
-            let spawn_bits = guard.expected_start_bits;
-            let scan_end = (playback_pos as usize).min(state.play_coords.len());
-            let mut observed: Option<u32> = None;
-            for j in 1..scan_end {
-                let c = state.play_coords[j];
-                if c[0].to_bits() != spawn_bits[0]
-                    || c[1].to_bits() != spawn_bits[1]
-                    || c[2].to_bits() != spawn_bits[2]
-                {
-                    observed = Some(j as u32);
-                    break;
-                }
+            tas_shared::cont::judge_cont_bucket(
+                &state.play_coords[..],
+                playback_pos,
+                guard.expected_start_bits,
+                guard.expected_first_moving,
+            )
+        };
+        use tas_shared::cont::BucketVerdict;
+        match verdict {
+            BucketVerdict::KeepWaiting => {
+                ctx.request_repaint();
             }
-            if observed == Some(expected_first_moving) {
-                // Bucket match — full success.
+            BucketVerdict::NoSignal => {
+                // Recording never moves out of spawn — no bucket signal, accept.
+                if guard.retries_remaining < CONT_START_MATCH_MAX_RETRIES {
+                    let used = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
+                    self.push_log(&format!(
+                        "CONT start aligned after {} restart retr{}",
+                        used,
+                        if used == 1 { "y" } else { "ies" }
+                    ));
+                }
+                self.continue_start_guard = None;
+            }
+            BucketVerdict::Match => {
                 let used = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
                 if used > 0 {
                     self.push_log(&format!(
@@ -975,106 +955,92 @@ impl TasApp {
                     ));
                 }
                 self.continue_start_guard = None;
-                return;
             }
-            // Wrong bucket — fall through to the retry path with a
-            // bucket-specific log message.
-            if guard.retries_remaining == 0 {
+            BucketVerdict::WrongBucket { observed } => {
+                let expected_first_moving = guard.expected_first_moving.unwrap_or(0);
+                if guard.retries_remaining == 0 {
+                    if let Some(shared) = self.shared.as_mut() {
+                        shared.send_command(TasCommand::Stop);
+                    }
+                    self.clear_cont_catchup();
+                    self.pending_after_restart = None;
+                    self.reset_continue_runtime_state();
+                    self.push_log(&format!(
+                        "CONT aborted: bucket mismatch after {} retries (observed first-moving={:?}, expected={})",
+                        CONT_START_MATCH_MAX_RETRIES, observed, expected_first_moving
+                    ));
+                    return;
+                }
+                let continue_from_frame = guard.continue_from_frame;
+                guard.retries_remaining -= 1;
+                let attempt = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
+                self.pending_session_kind = Some(RecordingSessionKind::Continue);
+                self.pending_continue_start_tick = Some(continue_from_frame);
+                self.playback_speed = self.cont_catchup_multiplier;
+                if self.cont_catchup_speed.is_none() {
+                    self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
+                }
+                // Vary wall-clock timing so the F5 lands at a different
+                // accumulator-modulo-tick phase than the previous attempt.
+                let jitter = cont_retry_jitter_ms(attempt);
+                std::thread::sleep(std::time::Duration::from_millis(jitter));
+                // Two-step Stop→Restart so cave2 actually sees the Stop.
                 if let Some(shared) = self.shared.as_mut() {
+                    shared.state_mut().continue_from_frame = continue_from_frame;
+                    shared.state_mut().playback_speed = self.playback_speed;
                     shared.send_command(TasCommand::Stop);
                 }
-                self.clear_cont_catchup();
-                self.pending_after_restart = None;
-                self.reset_continue_runtime_state();
+                self.pending_stop_then_restart = Some(TasCommand::ArmContinue);
+                self.continue_start_guard = Some(guard);
                 self.push_log(&format!(
-                    "CONT aborted: bucket mismatch after {} retries (observed first-moving={:?}, expected={})",
-                    CONT_START_MATCH_MAX_RETRIES, observed, expected_first_moving
+                    "CONT bucket mismatch (observed first-moving={:?}, expected={}) -> retry {}/{}",
+                    observed, expected_first_moving, attempt, CONT_START_MATCH_MAX_RETRIES
                 ));
-                return;
+                ctx.request_repaint();
             }
-            let continue_from_frame = guard.continue_from_frame;
-            guard.retries_remaining -= 1;
-            let attempt = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
-            self.pending_session_kind = Some(RecordingSessionKind::Continue);
-            self.pending_continue_start_tick = Some(continue_from_frame);
-            self.playback_speed = self.cont_catchup_multiplier;
-            if self.cont_catchup_speed.is_none() {
-                self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
+            BucketVerdict::WrongStart => {
+                let expected_x = f32::from_bits(guard.expected_start_bits[0]);
+                let expected_z = f32::from_bits(guard.expected_start_bits[2]);
+                let dx = (play0[0] as f64 - expected_x as f64).abs();
+                let dz = (play0[2] as f64 - expected_z as f64).abs();
+                if guard.retries_remaining == 0 {
+                    if let Some(shared) = self.shared.as_mut() {
+                        shared.send_command(TasCommand::Stop);
+                    }
+                    self.clear_cont_catchup();
+                    self.pending_after_restart = None;
+                    self.reset_continue_runtime_state();
+                    self.push_log(&format!(
+                        "CONT aborted: start mismatch after {} retries (dx={:.9}, dz={:.9})",
+                        CONT_START_MATCH_MAX_RETRIES, dx, dz
+                    ));
+                    return;
+                }
+                let continue_from_frame = guard.continue_from_frame;
+                guard.retries_remaining -= 1;
+                let attempt = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
+                self.pending_session_kind = Some(RecordingSessionKind::Continue);
+                self.pending_continue_start_tick = Some(continue_from_frame);
+                self.playback_speed = self.cont_catchup_multiplier;
+                if self.cont_catchup_speed.is_none() {
+                    self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
+                }
+                let jitter = cont_retry_jitter_ms(attempt);
+                std::thread::sleep(std::time::Duration::from_millis(jitter));
+                if let Some(shared) = self.shared.as_mut() {
+                    shared.state_mut().continue_from_frame = continue_from_frame;
+                    shared.state_mut().playback_speed = self.playback_speed;
+                    shared.send_command(TasCommand::Stop);
+                }
+                self.pending_stop_then_restart = Some(TasCommand::ArmContinue);
+                self.continue_start_guard = Some(guard);
+                self.push_log(&format!(
+                    "CONT start mismatch (dx={:.9}, dz={:.9}) -> retry {}/{}",
+                    dx, dz, attempt, CONT_START_MATCH_MAX_RETRIES
+                ));
+                ctx.request_repaint();
             }
-            // Explicit timing jitter: vary the wall-clock offset before
-            // each retry's Stop, so the F5 lands at a different
-            // accumulator-modulo-tick-period than the previous attempt.
-            // Without this the natural mode-wait jitter is too small/
-            // consistent and we just keep hitting the same bucket. See
-            // cont_retry_jitter_ms — sequence cycles through 17 distinct
-            // offsets, plenty to cross tick boundaries.
-            let jitter = cont_retry_jitter_ms(attempt);
-            std::thread::sleep(std::time::Duration::from_millis(jitter));
-            // Use the two-step Stop→Restart serialisation: send Stop,
-            // let poll_pending_stop_then_restart fire Restart once cave2
-            // has confirmed mode==OFF. The shared `command` slot is a
-            // single u32, so sending Stop+Restart same-frame just loses
-            // the Stop.
-            if let Some(shared) = self.shared.as_mut() {
-                shared.state_mut().continue_from_frame = continue_from_frame;
-                shared.state_mut().playback_speed = self.playback_speed;
-                shared.send_command(TasCommand::Stop);
-            }
-            self.pending_stop_then_restart = Some(TasCommand::ArmContinue);
-            self.continue_start_guard = Some(guard);
-            self.push_log(&format!(
-                "CONT bucket mismatch (observed first-moving={:?}, expected={}) -> retry {}/{}",
-                observed, expected_first_moving, attempt, CONT_START_MATCH_MAX_RETRIES
-            ));
-            ctx.request_repaint();
-            return;
         }
-
-        // Phase 1: start-position mismatch path (existing behavior).
-        let expected_x = f32::from_bits(guard.expected_start_bits[0]);
-        let expected_z = f32::from_bits(guard.expected_start_bits[2]);
-        let dx = (play0[0] as f64 - expected_x as f64).abs();
-        let dz = (play0[2] as f64 - expected_z as f64).abs();
-
-        if guard.retries_remaining == 0 {
-            if let Some(shared) = self.shared.as_mut() {
-                shared.send_command(TasCommand::Stop);
-            }
-            self.clear_cont_catchup();
-            self.pending_after_restart = None;
-            self.reset_continue_runtime_state();
-            self.push_log(&format!(
-                "CONT aborted: start mismatch after {} retries (dx={:.9}, dz={:.9})",
-                CONT_START_MATCH_MAX_RETRIES, dx, dz
-            ));
-            return;
-        }
-
-        let continue_from_frame = guard.continue_from_frame;
-        guard.retries_remaining -= 1;
-        let attempt = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
-        self.pending_session_kind = Some(RecordingSessionKind::Continue);
-        self.pending_continue_start_tick = Some(continue_from_frame);
-        self.playback_speed = self.cont_catchup_multiplier;
-        if self.cont_catchup_speed.is_none() {
-            self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
-        }
-        // Vary wall-clock timing before retry (see bucket-retry path).
-        let jitter = cont_retry_jitter_ms(attempt);
-        std::thread::sleep(std::time::Duration::from_millis(jitter));
-        // Use two-step Stop→Restart so cave2 actually sees the Stop.
-        if let Some(shared) = self.shared.as_mut() {
-            shared.state_mut().continue_from_frame = continue_from_frame;
-            shared.state_mut().playback_speed = self.playback_speed;
-            shared.send_command(TasCommand::Stop);
-        }
-        self.pending_stop_then_restart = Some(TasCommand::ArmContinue);
-        self.continue_start_guard = Some(guard);
-        self.push_log(&format!(
-            "CONT start mismatch (dx={:.9}, dz={:.9}) -> retry {}/{}",
-            dx, dz, attempt, CONT_START_MATCH_MAX_RETRIES
-        ));
-        ctx.request_repaint();
     }
 
     #[cfg(test)]

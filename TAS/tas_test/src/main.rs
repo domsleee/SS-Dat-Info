@@ -333,6 +333,7 @@ fn main() {
             let mut speed = 12.0f32;
             let mut splice = 2200u32; // FE-tremendous's proven splice frame
             let mut file: Option<String> = None;
+            let mut synthetic = false;
             let mut profile = cont_reliability::BaselineInputProfile::Taps;
             let mut tap_ticks: Option<u32> = None;
             let mut i = 2;
@@ -353,6 +354,12 @@ fn main() {
                     "--file" => {
                         file = args.get(i + 1).cloned();
                         i += 2;
+                    }
+                    "--synthetic" => {
+                        // Force a fresh REC baseline (bucket-compatible with the
+                        // current in-process restart) instead of the FE default.
+                        synthetic = true;
+                        i += 1;
                     }
                     "--profile" => {
                         let raw = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
@@ -382,21 +389,25 @@ fn main() {
             // workflow) when no --file is given — a real steered run makes the
             // drift check meaningful. Falls back to a synthetic baseline only if
             // the recording can't be located.
-            let file = file.or_else(|| {
-                let exe_dir = std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(PathBuf::from))
-                    .unwrap_or_else(|| PathBuf::from("."));
-                let candidates = [
-                    exe_dir.join("../../..").join("TAS/recordings/FE-tremendous.tasrec"),
-                    PathBuf::from("TAS/recordings/FE-tremendous.tasrec"),
-                    PathBuf::from("recordings/FE-tremendous.tasrec"),
-                ];
-                candidates
-                    .iter()
-                    .find(|p| p.exists())
-                    .map(|p| p.to_string_lossy().into_owned())
-            });
+            let file = if synthetic {
+                None
+            } else {
+                file.or_else(|| {
+                    let exe_dir = std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(PathBuf::from))
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    let candidates = [
+                        exe_dir.join("../../..").join("TAS/recordings/FE-tremendous.tasrec"),
+                        PathBuf::from("TAS/recordings/FE-tremendous.tasrec"),
+                        PathBuf::from("recordings/FE-tremendous.tasrec"),
+                    ];
+                    candidates
+                        .iter()
+                        .find(|p| p.exists())
+                        .map(|p| p.to_string_lossy().into_owned())
+                })
+            };
             match &file {
                 Some(p) => println!("  Baseline: real recording {} (default)", p),
                 None => println!("  Baseline: synthetic (FE-tremendous not found)"),
