@@ -651,10 +651,22 @@ pub mod transport {
     use super::cont::{judge_cont_bucket, BucketVerdict};
     use super::{TasCommand, TasMode};
 
+    /// First N rerolls use NO jitter — the plain restart already has natural
+    /// wall-clock variance, and for a recording whose restart usually lands the
+    /// right bucket (the common case), jittering immediately shoves the phase
+    /// AWAY from that natural center and scatters into wrong buckets. Only once
+    /// genuinely stuck do we start jittering to escape.
+    pub const NATURAL_RESTART_ATTEMPTS: u32 = 8;
+
     /// Wall-clock jitter (ms) before a reroll's restart, so the injected F5
     /// lands at a different accumulator-modulo-tick phase than the last attempt.
-    /// Kept here (not in tas_ui) so the harness reroll jitters identically.
+    /// Zero for the first `NATURAL_RESTART_ATTEMPTS` (let natural variance work),
+    /// then a phase-cycling delay to escape a stuck bucket. Kept here (not in
+    /// tas_ui) so the harness reroll jitters identically.
     pub fn cont_retry_jitter_ms(attempt: u32) -> u64 {
+        if attempt <= NATURAL_RESTART_ATTEMPTS {
+            return 0;
+        }
         (attempt as u64 * 7 + 3) % 17 + 1
     }
 
@@ -711,15 +723,37 @@ pub mod transport {
         fn set_playback_speed(&mut self, speed: f32);
     }
 
+    /// Fixed wall-clock delay (ms) between sending Stop and sending Restart.
+    /// This both serialises the single-u32 command slot (cave2 processes Stop →
+    /// mode OFF before Restart) AND — critically — fixes the F5 phase: the
+    /// post-restart bucket is decided by the wall-clock-modulo-tick at the
+    /// Restart, so a CONSISTENT Stop→Restart delay lands a consistent (good)
+    /// bucket. The old "poll until mode==OFF" fired Restart at a variable,
+    /// step-rate-dependent phase (~10-20ms), scattering hard recordings into
+    /// wrong buckets. Matches the legacy restart_and_stabilize_inprocess (50ms),
+    /// which lands hard recordings like FE-10065 reliably.
+    pub const STOP_SETTLE_MS: u64 = 50;
+
+    /// Delay (ms) between restart_state==2 and sending the Arm command. The arm
+    /// point sets where play_coords[0] is captured in the spawn countdown, which
+    /// shifts the OBSERVED first-moving frame. The legacy loop arms ~15-20ms
+    /// after rs==2 (20ms poll + extra steps); arming immediately (as the bare
+    /// controller did) reads first-moving ~2 frames late and never matches
+    /// recordings captured with the legacy timing (e.g. FE-10065 wants 298, the
+    /// bare controller saw 300). This pins the arm phase to match.
+    pub const ARM_SETTLE_MS: u64 = 10;
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Phase {
         Start,
-        /// Stop sent; waiting for cave2 to flip mode to OFF before Restart.
-        /// (The shared command slot is a single u32 — Stop and Restart can't be
-        /// written on the same tick or Restart clobbers Stop.)
-        StopWaitOff,
+        /// Stop sent; the caller is honouring a fixed STOP_SETTLE_MS wait (during
+        /// which cave2 flips mode to OFF) before we send Restart.
+        StopSettle,
         /// Restart sent; waiting for restart_state == 2.
         RestartWaitDone,
+        /// restart_state==2 seen; honouring a fixed ARM_SETTLE_MS wait before the
+        /// Arm command so the arm phase (→ observed first-moving) is consistent.
+        ArmSettle,
         /// CONT only: replaying — judge the F5 bucket each step.
         JudgeBucket,
         Done,
@@ -731,9 +765,19 @@ pub mod transport {
     pub enum StepOutcome {
         /// Mid-cycle; call `step()` again (after a short poll delay).
         InProgress,
+        /// Wait exactly `ms` (wall-clock) before the next `step()` — used for the
+        /// fixed Stop→Restart settle that pins the F5 phase.
+        Wait { ms: u64 },
         /// A reroll was scheduled. Caller should wait `suggested_delay_ms`
         /// (harness: sleep; egui: it already slept) before the next `step()`.
-        Reroll { attempt: u32, suggested_delay_ms: u64 },
+        /// `observed`/`expected` are the rejected bucket's first-moving frame and
+        /// the recording's target (diagnostic — shows HOW it mismatched).
+        Reroll {
+            attempt: u32,
+            suggested_delay_ms: u64,
+            observed: Option<u32>,
+            expected: Option<u32>,
+        },
         /// Terminal success: armed (and, for CONT, landed the bucket).
         Done { retries_used: u32 },
         /// Terminal failure: gave up after exhausting retries.
@@ -767,7 +811,6 @@ pub mod transport {
 
         /// Perform at most one transition. Never blocks/sleeps.
         pub fn step(&mut self, port: &mut impl TransportPort) -> StepOutcome {
-            let off = TasMode::Off as u32;
             let rec = TasMode::Rec as u32;
             let play = TasMode::Play as u32;
             // Re-assert the catch-up speed on EVERY step, not just at phase
@@ -781,48 +824,52 @@ pub mod transport {
                 Phase::Start => {
                     port.set_playback_speed(self.cfg.catchup_speed);
                     port.set_continue_from_frame(self.cfg.continue_from_frame);
-                    if port.mode() != off {
-                        // Can't Stop+Restart on one tick — defer Restart to OFF.
-                        port.send_command(TasCommand::Stop);
-                        self.phase = Phase::StopWaitOff;
-                    } else {
-                        port.reset_restart_state();
-                        port.send_command(TasCommand::Restart);
-                        self.phase = Phase::RestartWaitDone;
+                    // Always Stop then settle a FIXED delay before Restart (like
+                    // the legacy loop), so the Restart fires at a consistent
+                    // wall-clock phase → consistent (good) F5 bucket.
+                    port.send_command(TasCommand::Stop);
+                    self.phase = Phase::StopSettle;
+                    StepOutcome::Wait {
+                        ms: STOP_SETTLE_MS,
                     }
-                    StepOutcome::InProgress
                 }
-                Phase::StopWaitOff => {
-                    if port.mode() == off {
-                        port.reset_restart_state();
-                        port.send_command(TasCommand::Restart);
-                        self.phase = Phase::RestartWaitDone;
-                    }
+                Phase::StopSettle => {
+                    // The settle wait elapsed (caller honoured the Wait), so cave2
+                    // has flipped to OFF. Fire the Restart now.
+                    port.reset_restart_state();
+                    port.send_command(TasCommand::Restart);
+                    self.phase = Phase::RestartWaitDone;
                     StepOutcome::InProgress
                 }
                 Phase::RestartWaitDone => {
                     if port.restart_state() == 2 {
                         port.reset_restart_state();
-                        // cave2 reads these at ARM time — re-assert post-restart.
-                        port.set_continue_from_frame(self.cfg.continue_from_frame);
-                        port.set_playback_speed(self.cfg.catchup_speed);
-                        port.send_command(self.cfg.arm.command());
-                        // Judge the F5 bucket whenever a fingerprint was given —
-                        // CONT always has one; PLAY can too, so a replay rerolls
-                        // until it lands the recording's bucket (zero drift),
-                        // exactly like the harness's restart_play_and_match. REC
-                        // has no target (it's a fresh recording) → done.
-                        if self.cfg.target.is_some() {
-                            self.phase = Phase::JudgeBucket;
-                            StepOutcome::InProgress
-                        } else {
-                            self.phase = Phase::Done;
-                            StepOutcome::Done {
-                                retries_used: self.retries_used(),
-                            }
-                        }
+                        // Don't arm immediately — honour a fixed arm settle so the
+                        // arm phase (→ observed first-moving) matches the recording.
+                        self.phase = Phase::ArmSettle;
+                        StepOutcome::Wait { ms: ARM_SETTLE_MS }
                     } else {
                         StepOutcome::InProgress
+                    }
+                }
+                Phase::ArmSettle => {
+                    // cave2 reads these at ARM time — re-assert post-restart.
+                    port.set_continue_from_frame(self.cfg.continue_from_frame);
+                    port.set_playback_speed(self.cfg.catchup_speed);
+                    port.send_command(self.cfg.arm.command());
+                    // Judge the F5 bucket whenever a fingerprint was given — CONT
+                    // always has one; PLAY can too, so a replay rerolls until it
+                    // lands the recording's bucket (zero drift), exactly like the
+                    // harness's restart_play_and_match. REC has no target (it's a
+                    // fresh recording) → done.
+                    if self.cfg.target.is_some() {
+                        self.phase = Phase::JudgeBucket;
+                        StepOutcome::InProgress
+                    } else {
+                        self.phase = Phase::Done;
+                        StepOutcome::Done {
+                            retries_used: self.retries_used(),
+                        }
                     }
                 }
                 Phase::JudgeBucket => {
@@ -871,9 +918,10 @@ pub mod transport {
                                 "bucket mismatch (observed first-moving={:?}, expected={:?})",
                                 observed, target.expected_first_moving
                             ),
+                            observed,
                         ),
                         BucketVerdict::WrongStart => {
-                            self.reroll(port, "start mismatch".to_string())
+                            self.reroll(port, "start mismatch".to_string(), None)
                         }
                     }
                 }
@@ -886,7 +934,12 @@ pub mod transport {
             }
         }
 
-        fn reroll(&mut self, port: &mut impl TransportPort, detail: String) -> StepOutcome {
+        fn reroll(
+            &mut self,
+            port: &mut impl TransportPort,
+            detail: String,
+            observed: Option<u32>,
+        ) -> StepOutcome {
             if self.retries_remaining == 0 {
                 port.send_command(TasCommand::Stop);
                 self.phase = Phase::Aborted;
@@ -899,10 +952,14 @@ pub mod transport {
             port.set_continue_from_frame(self.cfg.continue_from_frame);
             port.set_playback_speed(self.cfg.catchup_speed);
             port.send_command(TasCommand::Stop);
-            self.phase = Phase::StopWaitOff;
+            self.phase = Phase::StopSettle;
+            // Wait the fixed settle plus any escape jitter before the next
+            // Restart, so the reroll's Restart phase is settle-pinned too.
             StepOutcome::Reroll {
                 attempt,
-                suggested_delay_ms: cont_retry_jitter_ms(attempt),
+                suggested_delay_ms: STOP_SETTLE_MS + cont_retry_jitter_ms(attempt),
+                observed,
+                expected: self.cfg.target.and_then(|t| t.expected_first_moving),
             }
         }
     }
@@ -976,17 +1033,18 @@ pub mod transport {
             };
             let mut c = TransportController::new(cfg(Arm::Rec, None, 0));
 
-            assert_eq!(c.step(&mut p), StepOutcome::InProgress); // Start -> Stop
+            // Start: Stop, then a FIXED settle wait before Restart.
+            assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: STOP_SETTLE_MS });
             assert_eq!(p.commands, vec![TasCommand::Stop]);
-            // game hasn't gone OFF yet — must keep waiting, NOT send Restart
-            assert_eq!(c.step(&mut p), StepOutcome::InProgress);
-            assert_eq!(p.commands, vec![TasCommand::Stop]);
-
+            // During the settle, cave2 processes the Stop → mode flips OFF.
             p.mode = TasMode::Off as u32;
-            assert_eq!(c.step(&mut p), StepOutcome::InProgress); // -> Restart
+            // StopSettle: Restart fires (mode is OFF, so no clobber).
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress);
             assert_eq!(p.commands.last(), Some(&TasCommand::Restart));
 
             p.restart_state = 2;
+            // RestartWaitDone → arm settle wait, then ArmSettle → ArmRec.
+            assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: ARM_SETTLE_MS });
             assert_eq!(c.step(&mut p), StepOutcome::Done { retries_used: 0 });
             assert_eq!(
                 p.commands,
@@ -997,31 +1055,51 @@ pub mod transport {
         }
 
         #[test]
-        fn play_from_off_skips_stop() {
+        fn play_from_off_still_stops_first() {
             let mut p = FakePort {
                 mode: TasMode::Off as u32,
                 ..Default::default()
             };
             let mut c = TransportController::new(cfg(Arm::Play, None, 0));
-            assert_eq!(c.step(&mut p), StepOutcome::InProgress); // Start -> Restart
-            assert_eq!(p.commands, vec![TasCommand::Restart]);
+            // Even from OFF, always Stop + settle (matches the legacy loop, which
+            // is what lands hard buckets reliably).
+            assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: STOP_SETTLE_MS });
+            assert_eq!(p.commands, vec![TasCommand::Stop]);
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress); // Restart
+            assert_eq!(p.commands, vec![TasCommand::Stop, TasCommand::Restart]);
             p.restart_state = 2;
+            assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: ARM_SETTLE_MS });
             assert_eq!(c.step(&mut p), StepOutcome::Done { retries_used: 0 });
-            assert_eq!(p.commands, vec![TasCommand::Restart, TasCommand::ArmPlay]);
+            assert_eq!(
+                p.commands,
+                vec![TasCommand::Stop, TasCommand::Restart, TasCommand::ArmPlay]
+            );
             assert_eq!(p.continue_from_frame, 0);
         }
 
         /// Drive the controller through restart until it's armed CONT and in the
         /// JudgeBucket phase. Returns once ArmContinue has been sent.
         fn drive_to_judge(c: &mut TransportController, p: &mut FakePort) {
-            // Start (mode REC -> Stop), go OFF, Restart, rs=2 -> ArmContinue.
+            // Start (Stop, Wait) → settle→OFF → StopSettle (Restart) → rs=2 →
+            // RestartWaitDone (arm-settle Wait) → ArmSettle (ArmContinue).
             c.step(p);
             p.mode = TasMode::Off as u32;
             c.step(p);
             p.restart_state = 2;
-            c.step(p); // sends ArmContinue, phase -> JudgeBucket
+            c.step(p); // RestartWaitDone -> ArmSettle (Wait)
+            c.step(p); // ArmSettle -> ArmContinue, phase -> JudgeBucket
             assert_eq!(p.commands.last(), Some(&TasCommand::ArmContinue));
             // game enters PLAY for the replay
+            p.mode = TasMode::Play as u32;
+        }
+
+        /// Drive the reroll restart (after a Reroll outcome) up to re-arm.
+        fn drive_reroll_to_judge(c: &mut TransportController, p: &mut FakePort) {
+            p.mode = TasMode::Off as u32;
+            c.step(p); // StopSettle -> Restart
+            p.restart_state = 2;
+            c.step(p); // RestartWaitDone -> ArmSettle (Wait)
+            c.step(p); // ArmSettle -> ArmContinue
             p.mode = TasMode::Play as u32;
         }
 
@@ -1075,11 +1153,7 @@ pub mod transport {
             assert_eq!(p.commands.last(), Some(&TasCommand::Stop));
 
             // complete the reroll restart, this time landing the right bucket
-            p.mode = TasMode::Off as u32;
-            c.step(&mut p); // -> Restart
-            p.restart_state = 2;
-            c.step(&mut p); // -> ArmContinue, JudgeBucket
-            p.mode = TasMode::Play as u32;
+            drive_reroll_to_judge(&mut c, &mut p);
             let mut right = vec![[1.0f32, 2.0, 3.0]; 300];
             right[250] = [1.0, 2.0, 3.5];
             p.play_coords = right;
@@ -1112,11 +1186,7 @@ pub mod transport {
                 StepOutcome::Reroll { attempt, .. } => assert_eq!(attempt, 1),
                 other => panic!("expected Reroll, got {:?}", other),
             }
-            p.mode = TasMode::Off as u32;
-            c.step(&mut p);
-            p.restart_state = 2;
-            c.step(&mut p);
-            p.mode = TasMode::Play as u32;
+            drive_reroll_to_judge(&mut c, &mut p);
             p.play_coords = wrong;
             p.playback_pos = 260;
             // second wrong bucket -> no retries left -> abort
@@ -1187,8 +1257,13 @@ pub mod transport {
         }
 
         #[test]
-        fn jitter_is_bounded_and_nonzero() {
-            for a in 1..=40 {
+        fn jitter_zero_early_then_bounded() {
+            // First NATURAL_RESTART_ATTEMPTS use no jitter (natural variance).
+            for a in 1..=NATURAL_RESTART_ATTEMPTS {
+                assert_eq!(cont_retry_jitter_ms(a), 0, "attempt {} should not jitter", a);
+            }
+            // After that, a bounded non-zero escape jitter.
+            for a in (NATURAL_RESTART_ATTEMPTS + 1)..=40 {
                 let j = cont_retry_jitter_ms(a);
                 assert!((1..=17).contains(&j), "jitter {} out of range", j);
             }
