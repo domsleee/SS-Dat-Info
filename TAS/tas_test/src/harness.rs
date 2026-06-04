@@ -1043,6 +1043,11 @@ fn poll_cont_verdict(
 ) -> tas_shared::cont::BucketVerdict {
     use tas_shared::cont::{judge_cont_bucket, BucketVerdict};
     let t0 = Instant::now();
+    // The replay advances playback_pos at ~100*speed frames/sec, so a slow speed
+    // (e.g. 0.25x) needs a proportionally longer window to reach the bucket
+    // fingerprint. Scale the base timeout by 1/speed.
+    let speed = (client.state().playback_speed as f64).max(0.05);
+    let timeout = Duration::from_secs_f64(CONT_ANCHOR_TIMEOUT_SECS as f64 * (1.0 / speed).max(1.0));
     loop {
         let (verdict, mode, pos) = {
             let s = client.state();
@@ -1072,7 +1077,7 @@ fn poll_cont_verdict(
         if mode == TasMode::Off as u32 {
             return BucketVerdict::WrongStart;
         }
-        if t0.elapsed() > Duration::from_secs(CONT_ANCHOR_TIMEOUT_SECS) {
+        if t0.elapsed() > timeout {
             return BucketVerdict::KeepWaiting;
         }
         thread::sleep(Duration::from_millis(5));
