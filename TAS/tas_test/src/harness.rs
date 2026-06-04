@@ -348,7 +348,14 @@ pub fn restart_and_stabilize_inprocess(client: &mut TasSharedMemoryClient) -> bo
         "  In-process restart stabilized at frame {}",
         client.frame_count_volatile()
     );
-    check_liveness(client)
+    // restart_state==2 is set BY cave2's restart machine, which only runs inside
+    // the Supreme::Cycle hook — so reaching it already proves the game is alive
+    // and cave2 is firing. Do NOT call check_liveness here: its 500ms sleep
+    // burned ~50 frames of the 3s spawn countdown before the caller could arm,
+    // which is why CONT/REC captured play_coords[0] ~90 frames late (first-moving
+    // ~211 instead of ~300) and could never match recordings made by tas_ui
+    // (which arms immediately after the restart). Arm ASAP, like tas_ui.
+    true
 }
 
 /// Arm recording and wait for mode to switch.
@@ -952,8 +959,11 @@ where
             eprintln!("  ERROR: Game not alive after restart");
             return false;
         }
-        // Keep CONT retries on the same focus path as baseline REC capture.
-        focus_game();
+        // No focus_game() here: in-process injection writes game memory directly
+        // (no window focus needed), and its 200ms sleep was ~20 more frames of
+        // the spawn countdown lost before arming. Arm immediately after restart,
+        // matching tas_ui's CONT path, so play_coords[0] captures the countdown
+        // from its start and first-moving lines up with recordings.
 
         // ARM_CONTINUE: starts as PLAY from tick 0, will auto-switch to REC at splice_frame
         arm_continue(client, splice_frame);
