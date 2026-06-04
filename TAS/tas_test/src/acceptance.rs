@@ -100,7 +100,7 @@ pub fn run() -> AcceptanceResult {
 
     // ---- Phase 1: BASELINE (no input) ----
     println!("--- Phase 1: BASELINE (no steering) ---");
-    if !harness::restart_and_stabilize(&client) {
+    if !harness::restart_and_stabilize_inprocess(&mut client) {
         eprintln!("ERROR: Game not alive for Phase 1");
         std::process::exit(1);
     }
@@ -137,7 +137,7 @@ pub fn run() -> AcceptanceResult {
 
     // ---- Phase 2: RECORD (with steering) ----
     println!("\n--- Phase 2: RECORD (with Pico steering) ---");
-    if !harness::restart_and_stabilize(&client) {
+    if !harness::restart_and_stabilize_inprocess(&mut client) {
         eprintln!("ERROR: Game not alive for Phase 2");
         std::process::exit(1);
     }
@@ -171,7 +171,7 @@ pub fn run() -> AcceptanceResult {
     // ---- Phase 3: PLAYBACK ----
     println!("\n--- Phase 3: PLAYBACK ---");
     // Match Phase 2 start position via play_coords[0] for zero drift
-    if !harness::restart_play_and_match(&mut client, rec_start, 60) {
+    if !harness::restart_play_and_match_inprocess(&mut client, rec_start, 60) {
         eprintln!("ERROR: Could not match REC position for Phase 3 after 60 F5 retries");
     }
     // Playback is already running from restart_play_and_match
