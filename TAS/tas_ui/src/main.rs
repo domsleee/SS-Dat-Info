@@ -898,13 +898,22 @@ impl TasApp {
                 // starved the speed re-assertion and slowed F5 phase variation).
                 ctx.request_repaint();
             }
+            StepOutcome::Wait { ms } => {
+                // Fixed Stop→Restart settle — sleep exactly this long (brief,
+                // like the legacy two-step) so the Restart fires at a consistent
+                // F5 phase, then advance.
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                ctx.request_repaint();
+            }
             StepOutcome::Reroll {
                 attempt,
                 suggested_delay_ms,
+                observed,
+                expected,
             } => {
                 self.push_log(&format!(
-                    "CONT bucket reroll {}/{}",
-                    attempt, CONT_START_MATCH_MAX_RETRIES
+                    "CONT bucket reroll {}/{} (observed first-moving={:?} expected={:?})",
+                    attempt, CONT_START_MATCH_MAX_RETRIES, observed, expected
                 ));
                 // Vary the wall clock so the next F5 lands at a different
                 // accumulator-modulo-tick phase. Blocking sleep here is precise
@@ -2860,19 +2869,23 @@ mod tests {
     /// re-land in the same F5 bucket every retry.
     #[test]
     fn cont_retry_jitter_visits_distinct_values() {
-        use tas_shared::transport::cont_retry_jitter_ms;
+        use tas_shared::transport::{cont_retry_jitter_ms, NATURAL_RESTART_ATTEMPTS};
+        // The escape jitter (after the un-jittered natural-variance attempts)
+        // should cycle through distinct phases (gcd(7,17) = 1).
+        let lo = NATURAL_RESTART_ATTEMPTS + 1;
         let values: std::collections::HashSet<u64> =
-            (1..=17).map(cont_retry_jitter_ms).collect();
-        // 17 retries should hit 17 distinct phases (gcd(7,17) = 1).
+            (lo..lo + 17).map(cont_retry_jitter_ms).collect();
         assert!(
             values.len() >= 10,
-            "Jitter sequence too repetitive: {} distinct values in first 17 attempts",
+            "Jitter sequence too repetitive: {} distinct values",
             values.len()
         );
         // No value should exceed ~20ms — a single retry shouldn't feel
         // like an unresponsive UI freeze.
-        let max = (1..=17).map(cont_retry_jitter_ms).max().unwrap();
+        let max = (lo..lo + 17).map(cont_retry_jitter_ms).max().unwrap();
         assert!(max <= 20, "Jitter ms upper bound too large: {}", max);
+        // And the first attempts must be jitter-free.
+        assert_eq!(cont_retry_jitter_ms(1), 0);
     }
 
     /// Pressing CONT (via F12 or otherwise) with no recording loaded

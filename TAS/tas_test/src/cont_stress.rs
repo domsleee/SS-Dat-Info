@@ -104,10 +104,19 @@ pub fn run(
         // Wall-clock "time to continue": from the CONT request to the splice
         // landing (the lag the user actually feels on F12).
         let t0 = std::time::Instant::now();
-        // A/B the restart mechanism via the SAME judge loop (isolates the
-        // restart as the only variable): Pico-F5 keypress vs in-process F5.
+        // Restart path under test:
+        //   pico       -> Pico-F5 keypress (legacy loop)
+        //   controller -> the shared TransportController (what tas_ui runs)
+        //   inprocess  -> in-process F5 via the legacy loop (default)
         let result = if pico {
             harness::restart_continue_and_splice(&mut client, rec_start, splice_frame, RETRIES)
+        } else if restart.eq_ignore_ascii_case("controller") {
+            harness::restart_continue_and_splice_inprocess(
+                &mut client,
+                rec_start,
+                splice_frame,
+                RETRIES,
+            )
         } else {
             harness::restart_continue_and_splice_inprocess_loop(
                 &mut client,

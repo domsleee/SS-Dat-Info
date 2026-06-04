@@ -994,11 +994,21 @@ pub fn restart_continue_and_splice_inprocess(
                 }
                 thread::sleep(Duration::from_millis(5));
             }
+            StepOutcome::Wait { ms } => {
+                // Fixed Stop→Restart settle — sleep exactly this long so the
+                // Restart fires at a consistent F5 phase.
+                thread::sleep(Duration::from_millis(ms));
+            }
             StepOutcome::Reroll {
                 attempt,
                 suggested_delay_ms,
+                observed,
+                expected,
             } => {
-                println!("  Retry {}/{}: CONT bucket reroll", attempt, max_retries);
+                println!(
+                    "  Retry {}/{}: CONT bucket reroll  observed first-moving={:?} expected={:?}",
+                    attempt, max_retries, observed, expected
+                );
                 // Clear any save dialog that re-appeared after the Stop, then
                 // jitter the wall clock so the next F5 lands at a new phase.
                 dismiss_save_dialog();
