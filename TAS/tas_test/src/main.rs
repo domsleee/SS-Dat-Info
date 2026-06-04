@@ -441,11 +441,16 @@ fn main() {
             let mut record_speed = 0.5f32;
             let mut max_median = 8u32;
             let mut file: Option<String> = None;
+            let mut restart = "inprocess".to_string();
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
                     "--iterations" | "-n" => {
                         iterations = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(5);
+                        i += 2;
+                    }
+                    "--restart" => {
+                        restart = args.get(i + 1).cloned().unwrap_or_else(|| "inprocess".into());
                         i += 2;
                     }
                     "--splice" => {
@@ -480,6 +485,7 @@ fn main() {
                 record_speed,
                 max_median,
                 file.as_deref(),
+                &restart,
             );
             std::process::exit(if ok { 0 } else { 1 });
         }
@@ -637,7 +643,7 @@ fn run_segment_test() {
         splice_frame,
         30, // more retries
     );
-    if !matched {
+    if matched.is_none() {
         eprintln!("ERROR: Could not position-match for CONT after retries");
         std::process::exit(1);
     }
