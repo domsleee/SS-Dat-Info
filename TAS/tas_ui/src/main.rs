@@ -346,18 +346,6 @@ const PLAYBACK_SPEED_PRESETS: [f32; 3] = [0.5, 1.0, 2.0];
 // headroom now lives inside judge_cont_bucket (one source of truth).
 const CONT_START_MATCH_MAX_RETRIES: u32 = tas_shared::cont::START_MATCH_MAX_RETRIES;
 
-/// Computes a varied wall-clock delay (in ms) to insert before a CONT
-/// retry's Stop. The F5-restart bucket the runtime lands in is
-/// determined by the wall-clock-modulo-tick-period at restart time;
-/// without varying our retry timing, every retry hits the same modulo
-/// and lands in the same bucket. We don't need true randomness — just
-/// a sequence that cycles through enough phase offsets to cross tick
-/// boundaries (~10ms at 1× tick_advance). Step is 7 because gcd(7,17)
-/// is 1 so the sequence visits all 17 residues before repeating.
-fn cont_retry_jitter_ms(attempt: u32) -> u64 {
-    (attempt as u64 * 7 + 3) % 17 + 1
-}
-
 /// Open `tas_ui.log` in append mode next to the history JSON for this
 /// session. Returns `None` if the file system isn't usable — silent
 /// failure mode, since losing the on-disk mirror is preferable to
@@ -391,20 +379,6 @@ struct ActiveRecordingSession {
     max_recorded_count: u32,
 }
 
-#[derive(Clone, Copy)]
-struct ContinueStartGuard {
-    expected_start_bits: [u32; 3],
-    continue_from_frame: u32,
-    retries_remaining: u32,
-    /// Frame index of the first position in `rec_coords` that differs from
-    /// `rec_coords[0]` — i.e. when the recorded player first moved out of
-    /// spawn. None if the recording never moves (degenerate / not loaded).
-    /// Used as a "bucket fingerprint": the F5-restart accumulator-leftover
-    /// shifts when the countdown completes by ±1 frame; comparing observed
-    /// first-moving vs expected discriminates buckets long before chaos
-    /// has amplified into a visible position miss.
-    expected_first_moving: Option<u32>,
-}
 
 struct TasApp {
     shared: Option<TasSharedMemoryClient>,
@@ -464,16 +438,14 @@ struct TasApp {
     drift_cache: drift::DriftCache,
     trajectory_cache: trajectory::TrajectoryCache,
 
-    // In-process restart state: command to send once restart completes
-    pending_after_restart: Option<TasCommand>,
-    /// Two-step Stop→Restart sequence: when set, we've sent CMD_STOP and
-    /// are waiting for cave2 to flip mode to OFF before sending
-    /// CMD_RESTART (and queueing the wrapped command for after the
-    /// restart). Without this serialisation, sending Stop and Restart
-    /// on the same UI frame just overwrites Stop in the shared `command`
-    /// slot (single u32, no queue) — cave2 only sees Restart, mode
-    /// stays in REC/PLAY, and the subsequent ArmContinue is refused.
-    pending_stop_then_restart: Option<TasCommand>,
+    /// In-flight restart→arm(→judge→reroll) cycle, driven by the shared
+    /// `tas_shared::transport` controller — the SAME state machine the tas_test
+    /// harness runs, so the test is a true oracle. Stepped once per egui frame
+    /// via `step_cont_controller`; `None` when idle. Encapsulates the old
+    /// two-step Stop→wait-OFF→Restart→wait-rs2 serialisation (the shared
+    /// `command` slot is a single u32, so Stop and Restart can't be written on
+    /// the same frame) plus the CONT bucket judge/reroll loop.
+    cont_controller: Option<tas_shared::transport::TransportController>,
     /// Previous-frame pressed state for the four global-shortcut keys
     /// (F9, F10, F11, F12 in that order). Diffed against the current
     /// GetAsyncKeyState result to detect press edges. Updated every
@@ -485,7 +457,6 @@ struct TasApp {
     /// Stored as Option so a re-resolution attempt is just `.take()`
     /// followed by re-call.
     game_pid_cached: Option<u32>,
-    continue_start_guard: Option<ContinueStartGuard>,
     // Crash recovery
     last_frame_count: u32,
     stale_frame_ticks: u32,
@@ -587,11 +558,9 @@ impl TasApp {
             last_logged_drift_level: 0,
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
-            pending_after_restart: None,
-            pending_stop_then_restart: None,
+            cont_controller: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
-            continue_start_guard: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
@@ -709,43 +678,38 @@ impl TasApp {
     fn reset_continue_runtime_state(&mut self) {
         self.pending_session_kind = None;
         self.pending_continue_start_tick = None;
-        self.continue_start_guard = None;
+        // Cancel any in-flight restart/arm/reroll cycle. STOP must mean STOP —
+        // without this the controller would keep stepping and silently start
+        // recording/playback after the restart completes.
+        self.cont_controller = None;
     }
 
-    fn set_continue_start_guard(&mut self) {
-        let expected = self.shared.as_ref().and_then(|shared| {
-            let state = shared.state();
-            if state.recorded_count == 0 {
-                return None;
-            }
-            let rec0 = state.rec_coords[0];
-            let start_bits = [rec0[0].to_bits(), rec0[1].to_bits(), rec0[2].to_bits()];
-            let first_moving =
-                recording::detect_first_moving(&state.rec_coords, state.recorded_count);
-            Some((start_bits, first_moving))
-        });
-        self.continue_start_guard = expected.map(|(expected_start_bits, expected_first_moving)| {
-            ContinueStartGuard {
-                expected_start_bits,
-                continue_from_frame: self.continue_from_frame,
-                retries_remaining: CONT_START_MATCH_MAX_RETRIES,
-                expected_first_moving,
-            }
-        });
+    /// Build the CONT bucket fingerprint (spawn bits + first-moving frame) from
+    /// the loaded recording, or `None` if nothing is loaded. Uses the shared
+    /// `detect_first_moving` so the app and the harness judge identically.
+    fn cont_bucket_target(&self) -> Option<tas_shared::transport::BucketTarget> {
+        let shared = self.shared.as_ref()?;
+        let state = shared.state();
+        if state.recorded_count == 0 {
+            return None;
+        }
+        let rec0 = state.rec_coords[0];
+        Some(tas_shared::transport::BucketTarget {
+            expected_start_bits: [rec0[0].to_bits(), rec0[1].to_bits(), rec0[2].to_bits()],
+            expected_first_moving: recording::detect_first_moving(
+                &state.rec_coords,
+                state.recorded_count,
+            ),
+        })
     }
 
     fn send_action_command(&mut self, command: TasCommand, ts: &str) {
         if command == TasCommand::Stop {
             self.clear_cont_catchup();
+            // reset_continue_runtime_state also cancels any in-flight
+            // cont_controller cycle, so STOP after a RestartThen click can't
+            // silently complete the restart and start recording/playback.
             self.reset_continue_runtime_state();
-            // Cancel any queued restart sequence. Without this, pressing
-            // STOP after a RestartThen (CONT/PLAY/REC click but before
-            // the polling loop fires the wrapped command) would leave
-            // pending_after_restart / pending_stop_then_restart set —
-            // the next poll then "completes" the restart and silently
-            // starts recording/playback. STOP must mean STOP.
-            self.pending_after_restart = None;
-            self.pending_stop_then_restart = None;
         }
         if let Some(shared) = self.shared.as_mut() {
             shared.send_command(command);
@@ -839,6 +803,14 @@ impl TasApp {
                 return;
             }
         }
+        let arm = match command {
+            TasCommand::ArmPlay => tas_shared::transport::Arm::Play,
+            TasCommand::ArmContinue => tas_shared::transport::Arm::Continue,
+            _ => tas_shared::transport::Arm::Rec,
+        };
+
+        let mut target = None;
+        let continue_from_frame;
         if command == TasCommand::ArmContinue {
             if self.cont_catchup_speed.is_none() {
                 self.cont_catchup_speed = Some(self.playback_speed);
@@ -846,7 +818,8 @@ impl TasApp {
             self.playback_speed = self.cont_catchup_multiplier;
             self.pending_session_kind = Some(RecordingSessionKind::Continue);
             self.pending_continue_start_tick = Some(self.continue_from_frame);
-            self.set_continue_start_guard();
+            target = self.cont_bucket_target();
+            continue_from_frame = self.continue_from_frame;
         } else {
             self.clear_cont_catchup();
             self.pending_session_kind = if command == TasCommand::ArmRec {
@@ -855,226 +828,99 @@ impl TasApp {
                 None
             };
             self.pending_continue_start_tick = None;
-            self.continue_start_guard = None;
+            if command == TasCommand::ArmRec {
+                self.playback_speed = DEFAULT_PLAYBACK_SPEED;
+            }
+            // PLAY always starts from tick 0.
+            if command == TasCommand::ArmPlay {
+                self.continue_from_frame = 0;
+                self.continue_from_text = "0".to_string();
+            }
+            continue_from_frame = 0;
         }
 
-        if command == TasCommand::ArmRec {
-            self.playback_speed = DEFAULT_PLAYBACK_SPEED;
-        }
-
-        // PLAY always starts from tick 0 — reset continue_from_frame
-        if command == TasCommand::ArmPlay {
-            self.continue_from_frame = 0;
-            self.continue_from_text = "0".to_string();
-        }
-
+        // Reflect the speed the controller will assert into the live state now
+        // so the UI updates immediately (the controller re-asserts it too).
         if let Some(shared) = self.shared.as_mut() {
             shared.state_mut().playback_speed = self.playback_speed;
-            if command == TasCommand::ArmPlay {
-                shared.state_mut().continue_from_frame = 0;
-            }
-            // Cave2's ARM_CONTINUE handler refuses if the game is currently
-            // in REC or PLAY. We can't send Stop + Restart on the same
-            // frame: the shared `command` slot is a single u32 — the
-            // second write clobbers the first, so cave2 only sees Restart
-            // and never the Stop. Instead, send Stop now and stash the
-            // wrapped command in pending_stop_then_restart; the per-frame
-            // poll fires Restart once cave2 has flipped mode to OFF.
-            if shared.mode_volatile() != TasMode::Off as u32 {
-                shared.send_command(TasCommand::Stop);
-                self.pending_stop_then_restart = Some(command);
-                self.log_lines.push(format!(
-                    "[{}] In-process Stop → wait for OFF → Restart → {:?}",
-                    ts, command
-                ));
-                return;
-            }
-            shared.reset_restart_state();
-            shared.send_command(TasCommand::Restart);
         }
-        self.pending_after_restart = Some(command);
+
+        // Hand the whole restart→arm(→judge→reroll) cycle to the shared
+        // controller — the SAME state machine the tas_test harness drives. It
+        // serialises Stop→wait-OFF→Restart→wait-rs2→Arm (the command slot is a
+        // single u32, so Stop+Restart can't share a frame) and, for CONT, runs
+        // the bucket judge/reroll. step_cont_controller advances it each frame.
+        let cfg = tas_shared::transport::ArmConfig {
+            arm,
+            catchup_speed: self.playback_speed,
+            continue_from_frame,
+            target,
+            max_retries: CONT_START_MATCH_MAX_RETRIES,
+        };
+        self.cont_controller = Some(tas_shared::transport::TransportController::new(cfg));
         self.log_lines
-            .push(format!("[{}] In-process F5 restart → {:?}", ts, command));
+            .push(format!("[{}] In-process restart → {:?}", ts, command));
     }
 
     /// Poll the deferred Stop→Restart sequence. Once cave2 has processed
     /// our earlier CMD_STOP (mode == OFF), send the CMD_RESTART and let
     /// the existing pending_after_restart machinery take over.
-    fn poll_pending_stop_then_restart(&mut self, ctx: &egui::Context) {
-        let Some(command) = self.pending_stop_then_restart else {
-            return;
-        };
-        let Some(shared) = self.shared.as_mut() else {
-            self.pending_stop_then_restart = None;
-            return;
-        };
-        if shared.mode_volatile() != TasMode::Off as u32 {
-            ctx.request_repaint();
-            return;
-        }
-        shared.state_mut().playback_speed = self.playback_speed;
-        shared.reset_restart_state();
-        shared.send_command(TasCommand::Restart);
-        self.pending_stop_then_restart = None;
-        self.pending_after_restart = Some(command);
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        self.log_lines.push(format!(
-            "[{}] Stop landed (mode=OFF) → Restart → {:?}",
-            ts, command
-        ));
-        ctx.request_repaint();
-    }
-
-    fn poll_continue_start_guard(&mut self, ctx: &egui::Context) {
-        let Some(guard) = self.continue_start_guard else {
-            return;
-        };
-        // If a restart sequence is in flight (Stop sent + waiting for OFF,
-        // or Restart sent + ArmContinue pending), skip bucket judgment
-        // until the cycle completes — otherwise we'd re-judge stale
-        // play_coords from the PREVIOUS run before cave2 has had a chance
-        // to actually restart.
-        if self.pending_after_restart.is_some() || self.pending_stop_then_restart.is_some() {
-            ctx.request_repaint();
+    /// Advance the in-flight transport controller one transition per egui frame
+    /// and handle its outcome. This replaces the old hand-rolled
+    /// poll_pending_stop_then_restart + pending_after_restart poll +
+    /// poll_continue_start_guard + schedule_cont_reroll machinery with the
+    /// shared state machine the tas_test harness also drives — so the app and
+    /// the test can't diverge. Logs/jitter/clear live here (egui side); the
+    /// transitions live in tas_shared::transport.
+    fn step_cont_controller(&mut self, ctx: &egui::Context) {
+        if self.cont_controller.is_none() {
             return;
         }
-        let Some(shared) = self.shared.as_ref() else {
-            return;
+        use tas_shared::transport::StepOutcome;
+        // Borrow the controller and the client (disjoint fields) for one step.
+        let outcome = match (self.cont_controller.as_mut(), self.shared.as_mut()) {
+            (Some(c), Some(p)) => c.step(p),
+            _ => {
+                // Lost the shared-memory connection — drop the cycle.
+                self.cont_controller = None;
+                return;
+            }
         };
-
-        let mode = shared.mode_volatile();
-        if mode == TasMode::Rec as u32 {
-            self.continue_start_guard = None;
-            return;
-        }
-        if mode != TasMode::Play as u32 {
-            return;
-        }
-
-        let playback_pos = shared.playback_pos_volatile();
-        if playback_pos == 0 {
-            ctx.request_repaint();
-            return;
-        }
-
-        let play0 = shared.state().play_coords[0];
-        // Judge the F5 bucket with the SHARED logic (tas_shared::cont) the
-        // cont-reliability harness also uses — one source of truth, so the test
-        // reflects exactly what happens here. `play0` (above) is kept for the
-        // start-mismatch log.
-        let verdict = {
-            let state = shared.state();
-            tas_shared::cont::judge_cont_bucket(
-                &state.play_coords[..],
-                playback_pos,
-                guard.expected_start_bits,
-                guard.expected_first_moving,
-            )
-        };
-        use tas_shared::cont::BucketVerdict;
-        match verdict {
-            BucketVerdict::KeepWaiting => {
+        match outcome {
+            StepOutcome::InProgress => {
+                // Keep repainting so the machine advances even with no input.
                 ctx.request_repaint();
             }
-            BucketVerdict::NoSignal => {
-                // Recording never moves out of spawn — no bucket signal, accept.
-                if guard.retries_remaining < CONT_START_MATCH_MAX_RETRIES {
-                    let used = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
-                    self.push_log(&format!(
-                        "CONT start aligned after {} restart retr{}",
-                        used,
-                        if used == 1 { "y" } else { "ies" }
-                    ));
-                }
-                self.continue_start_guard = None;
+            StepOutcome::Reroll {
+                attempt,
+                suggested_delay_ms,
+            } => {
+                self.push_log(&format!(
+                    "CONT bucket reroll {}/{}",
+                    attempt, CONT_START_MATCH_MAX_RETRIES
+                ));
+                // Vary the wall clock so the next F5 lands at a different
+                // accumulator-modulo-tick phase (same jitter the harness uses).
+                std::thread::sleep(std::time::Duration::from_millis(suggested_delay_ms));
+                ctx.request_repaint();
             }
-            BucketVerdict::Match => {
-                let used = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
-                if used > 0 {
+            StepOutcome::Done { retries_used } => {
+                if retries_used > 0 {
                     self.push_log(&format!(
                         "CONT bucket aligned after {} restart retr{}",
-                        used,
-                        if used == 1 { "y" } else { "ies" }
+                        retries_used,
+                        if retries_used == 1 { "y" } else { "ies" }
                     ));
                 }
-                self.continue_start_guard = None;
+                self.cont_controller = None;
             }
-            BucketVerdict::WrongBucket { observed } => {
-                let expected_first_moving = guard.expected_first_moving.unwrap_or(0);
-                let abort_msg = format!(
-                    "CONT aborted: bucket mismatch after {} retries (observed first-moving={:?}, expected={})",
-                    CONT_START_MATCH_MAX_RETRIES, observed, expected_first_moving
-                );
-                let retry_detail = format!(
-                    "CONT bucket mismatch (observed first-moving={:?}, expected={})",
-                    observed, expected_first_moving
-                );
-                self.schedule_cont_reroll(guard, ctx, &abort_msg, &retry_detail);
-            }
-            BucketVerdict::WrongStart => {
-                let expected_x = f32::from_bits(guard.expected_start_bits[0]);
-                let expected_z = f32::from_bits(guard.expected_start_bits[2]);
-                let dx = (play0[0] as f64 - expected_x as f64).abs();
-                let dz = (play0[2] as f64 - expected_z as f64).abs();
-                let abort_msg = format!(
-                    "CONT aborted: start mismatch after {} retries (dx={:.9}, dz={:.9})",
-                    CONT_START_MATCH_MAX_RETRIES, dx, dz
-                );
-                let retry_detail = format!("CONT start mismatch (dx={:.9}, dz={:.9})", dx, dz);
-                self.schedule_cont_reroll(guard, ctx, &abort_msg, &retry_detail);
+            StepOutcome::Aborted { reason } => {
+                self.push_log(&format!("CONT aborted: {}", reason));
+                self.clear_cont_catchup();
+                // also clears cont_controller
+                self.reset_continue_runtime_state();
             }
         }
-    }
-
-    /// Shared reroll/abort step for a failed CONT bucket judgment (WrongBucket
-    /// or WrongStart). On the final retry it aborts (Stop + clear runtime
-    /// state); otherwise it decrements the counter, jitters the wall-clock
-    /// phase, and fires a two-step Stop→Restart→ArmContinue. `abort_msg` is the
-    /// complete log line on exhaustion; `retry_detail` is the per-verdict prefix
-    /// (the " -> retry n/N" suffix is appended here with the live attempt count).
-    fn schedule_cont_reroll(
-        &mut self,
-        mut guard: ContinueStartGuard,
-        ctx: &egui::Context,
-        abort_msg: &str,
-        retry_detail: &str,
-    ) {
-        if guard.retries_remaining == 0 {
-            if let Some(shared) = self.shared.as_mut() {
-                shared.send_command(TasCommand::Stop);
-            }
-            self.clear_cont_catchup();
-            self.pending_after_restart = None;
-            self.reset_continue_runtime_state();
-            self.push_log(abort_msg);
-            return;
-        }
-        let continue_from_frame = guard.continue_from_frame;
-        guard.retries_remaining -= 1;
-        let attempt = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
-        self.pending_session_kind = Some(RecordingSessionKind::Continue);
-        self.pending_continue_start_tick = Some(continue_from_frame);
-        self.playback_speed = self.cont_catchup_multiplier;
-        if self.cont_catchup_speed.is_none() {
-            self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
-        }
-        // Vary wall-clock timing so the F5 lands at a different
-        // accumulator-modulo-tick phase than the previous attempt.
-        let jitter = cont_retry_jitter_ms(attempt);
-        std::thread::sleep(std::time::Duration::from_millis(jitter));
-        // Two-step Stop→Restart so cave2 actually sees the Stop.
-        if let Some(shared) = self.shared.as_mut() {
-            shared.state_mut().continue_from_frame = continue_from_frame;
-            shared.state_mut().playback_speed = self.playback_speed;
-            shared.send_command(TasCommand::Stop);
-        }
-        self.pending_stop_then_restart = Some(TasCommand::ArmContinue);
-        self.continue_start_guard = Some(guard);
-        self.push_log(&format!(
-            "{} -> retry {}/{}",
-            retry_detail, attempt, CONT_START_MATCH_MAX_RETRIES
-        ));
-        ctx.request_repaint();
     }
 
     #[cfg(test)]
@@ -1082,8 +928,6 @@ impl TasApp {
         if command == TasCommand::Stop {
             self.clear_cont_catchup();
             self.reset_continue_runtime_state();
-            self.pending_after_restart = None;
-            self.pending_stop_then_restart = None;
         }
     }
 
@@ -1110,9 +954,6 @@ impl TasApp {
                 self.pending_session_kind = None;
                 self.pending_continue_start_tick = None;
             }
-        }
-        if command != TasCommand::ArmContinue {
-            self.continue_start_guard = None;
         }
     }
 
@@ -1735,10 +1576,6 @@ impl eframe::App for TasApp {
             }
         }
 
-        // Two-step Stop→Restart: fire the deferred Restart once cave2
-        // has confirmed mode==OFF.
-        self.poll_pending_stop_then_restart(ctx);
-
         // Check game health (crash detection)
         self.check_game_health();
 
@@ -1758,7 +1595,9 @@ impl eframe::App for TasApp {
                 if current_mode == 1 {
                     self.start_recording_session(continue_from, recorded);
                     self.clear_cont_catchup();
-                    self.continue_start_guard = None;
+                    // Splice fired (or REC began) — the controller already
+                    // cleared itself at bucket-accept, but be defensive.
+                    self.cont_controller = None;
                 }
                 // REC stopped (mode went from REC to OFF)
                 if self.last_mode == 1 && current_mode == 0 {
@@ -2078,28 +1917,8 @@ impl eframe::App for TasApp {
             }
         }
 
-        // Poll in-process restart state machine
-        if let Some(pending_cmd) = self.pending_after_restart {
-            let mut restart_done = false;
-            if let Some(shared) = self.shared.as_mut() {
-                let rs = shared.restart_state();
-                if rs == 2 {
-                    // Restart complete — send the pending command
-                    shared.reset_restart_state();
-                    shared.send_command(pending_cmd);
-                    restart_done = true;
-                }
-                // Keep polling even with no user input.
-                ctx.request_repaint();
-            }
-            if restart_done {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                self.log_lines
-                    .push(format!("[{}] Restart done, sent: {:?}", ts, pending_cmd));
-                self.pending_after_restart = None;
-            }
-        }
-        self.poll_continue_start_guard(ctx);
+        // Advance the in-flight restart/arm/reroll cycle (shared controller).
+        self.step_cont_controller(ctx);
 
         // Apply shortcut actions to shared state (same dispatch as the buttons).
         for cmd in shortcut_actions {
@@ -2641,11 +2460,9 @@ mod tests {
             last_logged_drift_level: 0,
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
-            pending_after_restart: None,
-            pending_stop_then_restart: None,
+            cont_controller: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
-            continue_start_guard: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
@@ -2892,18 +2709,20 @@ mod tests {
     #[test]
     fn stop_cancels_queued_restart() {
         let mut app = test_app();
-        // Simulate a CONT being queued: pending_after_restart set by
-        // queue_restart_then or the inline action handler.
-        app.pending_after_restart = Some(TasCommand::ArmContinue);
-        app.pending_stop_then_restart = Some(TasCommand::ArmContinue);
+        // Simulate a CONT being queued: a restart/arm cycle is in flight.
+        app.cont_controller = Some(tas_shared::transport::TransportController::new(
+            tas_shared::transport::ArmConfig {
+                arm: tas_shared::transport::Arm::Continue,
+                catchup_speed: 12.0,
+                continue_from_frame: 100,
+                target: None,
+                max_retries: 30,
+            },
+        ));
         app.prepare_send_action(TasCommand::Stop);
         assert!(
-            app.pending_after_restart.is_none(),
-            "STOP must clear pending_after_restart"
-        );
-        assert!(
-            app.pending_stop_then_restart.is_none(),
-            "STOP must clear pending_stop_then_restart"
+            app.cont_controller.is_none(),
+            "STOP must cancel the in-flight restart/arm cycle"
         );
     }
 
@@ -3026,6 +2845,7 @@ mod tests {
     /// re-land in the same F5 bucket every retry.
     #[test]
     fn cont_retry_jitter_visits_distinct_values() {
+        use tas_shared::transport::cont_retry_jitter_ms;
         let values: std::collections::HashSet<u64> =
             (1..=17).map(cont_retry_jitter_ms).collect();
         // 17 retries should hit 17 distinct phases (gcd(7,17) = 1).
@@ -3070,8 +2890,10 @@ mod tests {
             "playback_speed must remain at pre-CONT value, got {}",
             app.playback_speed
         );
-        assert!(app.continue_start_guard.is_none());
-        assert!(app.pending_after_restart.is_none());
+        assert!(
+            app.cont_controller.is_none(),
+            "CONT without recording must not arm a controller"
+        );
     }
 
     /// The CONT catchup slider must allow speeds up to the
@@ -3248,22 +3070,12 @@ mod tests {
         assert_eq!(app.history.len(), 0);
     }
 
-    // ===== Pending restart state machine =====
+    // ===== Transport controller state =====
 
     #[test]
-    fn pending_restart_initially_none() {
+    fn cont_controller_initially_none() {
         let app = test_app();
-        assert!(app.pending_after_restart.is_none());
-    }
-
-    #[test]
-    fn pending_restart_can_be_set() {
-        let mut app = test_app();
-        app.pending_after_restart = Some(TasCommand::ArmRec);
-        assert!(matches!(
-            app.pending_after_restart,
-            Some(TasCommand::ArmRec)
-        ));
+        assert!(app.cont_controller.is_none());
     }
 
     // ===== Incremental drift cache =====
