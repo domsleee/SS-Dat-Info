@@ -446,10 +446,6 @@ struct TasApp {
     /// `command` slot is a single u32, so Stop and Restart can't be written on
     /// the same frame) plus the CONT bucket judge/reroll loop.
     cont_controller: Option<tas_shared::transport::TransportController>,
-    /// When set, the controller must not be stepped again until this instant —
-    /// used to apply reroll jitter WITHOUT blocking the egui thread (the old
-    /// code slept the UI thread, which froze the window during reroll storms).
-    cont_step_not_before: Option<std::time::Instant>,
     /// Previous-frame pressed state for the four global-shortcut keys
     /// (F9, F10, F11, F12 in that order). Diffed against the current
     /// GetAsyncKeyState result to detect press edges. Updated every
@@ -563,7 +559,6 @@ impl TasApp {
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
             cont_controller: None,
-            cont_step_not_before: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
             last_frame_count: 0,
@@ -885,16 +880,6 @@ impl TasApp {
         if self.cont_controller.is_none() {
             return;
         }
-        // Reroll jitter: wait out the delay WITHOUT blocking the UI thread.
-        // Schedule a repaint for when it elapses and bail until then.
-        if let Some(t) = self.cont_step_not_before {
-            let now = std::time::Instant::now();
-            if now < t {
-                ctx.request_repaint_after(t - now);
-                return;
-            }
-            self.cont_step_not_before = None;
-        }
         use tas_shared::transport::StepOutcome;
         // Borrow the controller and the client (disjoint fields) for one step.
         let outcome = match (self.cont_controller.as_mut(), self.shared.as_mut()) {
@@ -907,10 +892,11 @@ impl TasApp {
         };
         match outcome {
             StepOutcome::InProgress => {
-                // Advance again soon — but THROTTLED (~5ms, like the harness's
-                // poll), not a tight request_repaint() busy-loop that pegs a CPU
-                // core and makes the game (same machine) and STOP feel laggy.
-                ctx.request_repaint_after(std::time::Duration::from_millis(5));
+                // Force an immediate repaint so the cycle keeps advancing at full
+                // rate even when tas_ui is in the background (a throttled
+                // request_repaint_after gets coalesced when unfocused, which
+                // starved the speed re-assertion and slowed F5 phase variation).
+                ctx.request_repaint();
             }
             StepOutcome::Reroll {
                 attempt,
@@ -921,12 +907,11 @@ impl TasApp {
                     attempt, CONT_START_MATCH_MAX_RETRIES
                 ));
                 // Vary the wall clock so the next F5 lands at a different
-                // accumulator-modulo-tick phase — without sleeping the UI thread.
-                self.cont_step_not_before = Some(
-                    std::time::Instant::now()
-                        + std::time::Duration::from_millis(suggested_delay_ms),
-                );
-                ctx.request_repaint_after(std::time::Duration::from_millis(suggested_delay_ms));
+                // accumulator-modulo-tick phase. Blocking sleep here is precise
+                // (a non-blocking timer was imprecise → poorer bucket coverage →
+                // far more rerolls).
+                std::thread::sleep(std::time::Duration::from_millis(suggested_delay_ms));
+                ctx.request_repaint();
             }
             StepOutcome::Done { retries_used } => {
                 if retries_used > 0 {
@@ -1990,14 +1975,14 @@ impl eframe::App for TasApp {
             }
 
             if let Some(ref mut shared) = self.shared {
-                // Sync playback_speed to shared state for Cave 5 — but ONLY when
-                // no transport cycle is in flight. During a CONT catch-up the
-                // controller owns the speed (it asserts the catch-up multiplier);
-                // letting this per-frame line write self.playback_speed back
-                // could clobber it to 1x and the catch-up wouldn't speed up.
-                if self.cont_controller.is_none() {
-                    shared.state_mut().playback_speed = self.playback_speed;
-                }
+                // Sync playback_speed to shared state for Cave 5 every frame.
+                // During a CONT catch-up self.playback_speed IS the catch-up
+                // multiplier (set in queue_restart_then), so this continuously
+                // re-asserts it — overriding the brief speed reset the in-process
+                // F5 restart causes. (Gating this on an in-flight controller
+                // removed the continuous re-assertion and the catch-up replayed
+                // at the play speed instead of the multiplier.)
+                shared.state_mut().playback_speed = self.playback_speed;
 
                 ui.separator();
 
@@ -2491,7 +2476,6 @@ mod tests {
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
             cont_controller: None,
-            cont_step_not_before: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
             last_frame_count: 0,
