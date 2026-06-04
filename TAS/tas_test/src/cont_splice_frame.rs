@@ -71,7 +71,7 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
 
     let spliced =
         harness::restart_continue_and_splice_inprocess(&mut client, rec_start, splice_frame, RETRIES);
-    if !spliced {
+    if spliced.is_none() {
         println!("*** CONT-SPLICE-FRAME FAILED: never landed a CONT bucket ***");
         return false;
     }
