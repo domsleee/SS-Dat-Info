@@ -770,6 +770,13 @@ pub mod transport {
             let off = TasMode::Off as u32;
             let rec = TasMode::Rec as u32;
             let play = TasMode::Play as u32;
+            // Re-assert the catch-up speed on EVERY step, not just at phase
+            // boundaries. The in-process F5 restart momentarily resets the game's
+            // speed; without continuous re-assertion the post-restart countdown
+            // replays at 1x for ~3s until the next phase re-sets it. (tas_ui used
+            // to do this via an ungated per-frame sync; the controller owns it
+            // now.)
+            port.set_playback_speed(self.cfg.catchup_speed);
             match self.phase {
                 Phase::Start => {
                     port.set_playback_speed(self.cfg.catchup_speed);
