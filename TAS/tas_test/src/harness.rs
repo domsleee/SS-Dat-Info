@@ -910,18 +910,101 @@ pub fn restart_continue_and_splice(
     })
 }
 
-/// In-process restart variant of CONT splice retry logic.
+/// In-process CONT splice via the SHARED transport controller
+/// (`tas_shared::transport`) — the exact restart/arm/reroll state machine tas_ui
+/// drives. The harness just steps the controller in a poll loop and applies its
+/// suggested reroll delays, so this test reflects precisely what the app does
+/// (one source of truth — they can't drift).
 ///
-/// Uses CMD_RESTART/restart_state, matching the egui transport path.
+/// The controller reaches `Done` when the F5 bucket is accepted (at the
+/// first-moving fingerprint, BEFORE the splice fires); we then wait for the
+/// PLAY→REC splice at `splice_frame`. Returns true on a clean splice.
 pub fn restart_continue_and_splice_inprocess(
     client: &mut TasSharedMemoryClient,
     target: [f32; 3],
     splice_frame: u32,
     max_retries: u32,
 ) -> bool {
-    restart_continue_and_splice_with(client, target, splice_frame, max_retries, |c| {
-        restart_and_stabilize_inprocess(c)
-    })
+    use tas_shared::transport::{Arm, ArmConfig, BucketTarget, StepOutcome, TransportController};
+
+    let expected_start_bits = [target[0].to_bits(), target[1].to_bits(), target[2].to_bits()];
+    let expected_first_moving = {
+        let s = client.state();
+        tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count)
+    };
+    match expected_first_moving {
+        Some(fm) => println!(
+            "  CONT bucket criteria (shared controller): spawn match + first-moving frame {}",
+            fm
+        ),
+        None => println!(
+            "  CONT bucket criteria (shared controller): recording never moves — spawn match only"
+        ),
+    }
+
+    let catchup_speed = client.state().playback_speed;
+    let cfg = ArmConfig {
+        arm: Arm::Continue,
+        catchup_speed,
+        continue_from_frame: splice_frame,
+        target: Some(BucketTarget {
+            expected_start_bits,
+            expected_first_moving,
+        }),
+        max_retries,
+    };
+    let mut controller = TransportController::new(cfg);
+
+    // Keep a competing tas_ui process out of the single-slot command channel,
+    // and clear any post-run "Save attempt" dialog before the first restart
+    // (it can eat the in-process F5).
+    stop_competing_tas_ui_writer();
+    dismiss_save_dialog();
+
+    let speed = (catchup_speed as f64).max(0.05);
+    // Per-attempt budget: restart handshake + replay-to-judge at this speed.
+    let per_attempt = Duration::from_secs_f64(
+        RESTART_TIMEOUT_SECS as f64 + (CONT_ANCHOR_TIMEOUT_SECS as f64) * (1.0 / speed).max(1.0),
+    );
+    let mut attempt_deadline = Instant::now() + per_attempt;
+
+    loop {
+        match controller.step(client) {
+            StepOutcome::InProgress => {
+                if Instant::now() > attempt_deadline {
+                    eprintln!("  ERROR: CONT attempt stalled (no progress within budget)");
+                    client.send_command(TasCommand::Stop);
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            StepOutcome::Reroll {
+                attempt,
+                suggested_delay_ms,
+            } => {
+                println!("  Retry {}/{}: CONT bucket reroll", attempt, max_retries);
+                // Clear any save dialog that re-appeared after the Stop, then
+                // jitter the wall clock so the next F5 lands at a new phase.
+                dismiss_save_dialog();
+                thread::sleep(Duration::from_millis(suggested_delay_ms));
+                attempt_deadline = Instant::now() + per_attempt;
+            }
+            StepOutcome::Done { retries_used } => {
+                if retries_used > 0 {
+                    println!(
+                        "  CONT bucket accepted (shared controller) after {} reroll(s)",
+                        retries_used
+                    );
+                }
+                println!("  CONT bucket accepted, waiting for splice...");
+                return wait_continue_splice(client, splice_frame);
+            }
+            StepOutcome::Aborted { reason } => {
+                eprintln!("  WARNING: CONT aborted: {}", reason);
+                return false;
+            }
+        }
+    }
 }
 
 fn restart_continue_and_splice_with<F>(
