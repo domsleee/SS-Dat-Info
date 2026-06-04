@@ -17,6 +17,7 @@ mod benchmark;
 mod cache;
 mod certificate;
 mod cont_reliability;
+mod cont_splice_frame;
 mod cont_restart_race;
 mod drift;
 mod drift_speed;
@@ -430,6 +431,31 @@ fn main() {
             );
             std::process::exit(if report.all_pass() { 0 } else { 1 });
         }
+        "cont-splice-frame" => {
+            // "Continue continues on the correct frame": CONT at N must splice
+            // EXACTLY at frame N. 0.25x by default so the catch-up is slow and any
+            // overshoot is visible.
+            let mut splice = 1000u32;
+            let mut speed = 0.25f32;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--splice" => {
+                        splice = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(1000);
+                        i += 2;
+                    }
+                    "--speed" | "-s" => {
+                        speed = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0.25);
+                        i += 2;
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            let ok = cont_splice_frame::run(splice, speed);
+            std::process::exit(if ok { 0 } else { 1 });
+        }
         _ => {
             println!("Usage: tas_test <mode>");
             println!();
@@ -449,6 +475,9 @@ fn main() {
             );
             println!(
                 "  cont-reliability CONT splice reliability (default 10x, splice 2400 @ 12x; profile=taps)"
+            );
+            println!(
+                "  cont-splice-frame CONT splices on the EXACT requested frame (default splice 1000 @ 0.25x)"
             );
             println!("  replay      Load .tasrec file and play back N times (drift check)");
             println!("  refresh-tasrec Re-record a .tasrec baseline from live runtime");
