@@ -753,6 +753,49 @@ impl TasApp {
         self.log_lines.push(format!("[{}] Sent: {:?}", ts, command));
     }
 
+    /// Single dispatch for a transport `Action`, shared by the keyboard-shortcut
+    /// path and the transport-bar button path so the two can never diverge. (The
+    /// button path used to inline its own copy — including a hand-rolled
+    /// first-moving scan — which silently bypassed `detect_first_moving`.)
+    fn apply_transport_action(&mut self, cmd: transport::Action, ts: &str) {
+        match cmd {
+            transport::Action::Send(c) => self.send_action_command(c, ts),
+            transport::Action::RestartThen(c) => self.queue_restart_then(c, ts),
+            transport::Action::Undo => {
+                if let Some(snap) = self.history.undo() {
+                    if let Some(shared) = self.shared.as_mut() {
+                        snap.restore_to(shared.state_mut());
+                    }
+                    self.log_lines
+                        .push(format!("[{}] Undo: restored previous recording", ts));
+                }
+            }
+            transport::Action::Redo => {
+                if let Some(snap) = self.history.redo() {
+                    if let Some(shared) = self.shared.as_mut() {
+                        snap.restore_to(shared.state_mut());
+                    }
+                    self.log_lines
+                        .push(format!("[{}] Redo: restored next recording", ts));
+                }
+            }
+            transport::Action::SetContinueFrame(frame) => {
+                self.continue_from_frame = frame;
+                self.continue_from_text = frame.to_string();
+                if let Some(shared) = self.shared.as_mut() {
+                    shared.state_mut().continue_from_frame = frame;
+                }
+            }
+            transport::Action::StepOne => {
+                self.log_lines
+                    .push(format!("[{}] Step one frame (requires DLL support)", ts));
+            }
+            transport::Action::Log(msg) => {
+                self.log_lines.push(format!("[{}] {}", ts, msg));
+            }
+        }
+    }
+
     fn queue_restart_then(&mut self, command: TasCommand, ts: &str) {
         // Refuse degenerate CONT requests that would leave the app
         // half-armed: cont_catchup_speed=Some, playback_speed=multiplier,
@@ -883,7 +926,7 @@ impl TasApp {
     }
 
     fn poll_continue_start_guard(&mut self, ctx: &egui::Context) {
-        let Some(mut guard) = self.continue_start_guard else {
+        let Some(guard) = self.continue_start_guard else {
             return;
         };
         // If a restart sequence is in flight (Stop sent + waiting for OFF,
@@ -958,89 +1001,80 @@ impl TasApp {
             }
             BucketVerdict::WrongBucket { observed } => {
                 let expected_first_moving = guard.expected_first_moving.unwrap_or(0);
-                if guard.retries_remaining == 0 {
-                    if let Some(shared) = self.shared.as_mut() {
-                        shared.send_command(TasCommand::Stop);
-                    }
-                    self.clear_cont_catchup();
-                    self.pending_after_restart = None;
-                    self.reset_continue_runtime_state();
-                    self.push_log(&format!(
-                        "CONT aborted: bucket mismatch after {} retries (observed first-moving={:?}, expected={})",
-                        CONT_START_MATCH_MAX_RETRIES, observed, expected_first_moving
-                    ));
-                    return;
-                }
-                let continue_from_frame = guard.continue_from_frame;
-                guard.retries_remaining -= 1;
-                let attempt = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
-                self.pending_session_kind = Some(RecordingSessionKind::Continue);
-                self.pending_continue_start_tick = Some(continue_from_frame);
-                self.playback_speed = self.cont_catchup_multiplier;
-                if self.cont_catchup_speed.is_none() {
-                    self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
-                }
-                // Vary wall-clock timing so the F5 lands at a different
-                // accumulator-modulo-tick phase than the previous attempt.
-                let jitter = cont_retry_jitter_ms(attempt);
-                std::thread::sleep(std::time::Duration::from_millis(jitter));
-                // Two-step Stop→Restart so cave2 actually sees the Stop.
-                if let Some(shared) = self.shared.as_mut() {
-                    shared.state_mut().continue_from_frame = continue_from_frame;
-                    shared.state_mut().playback_speed = self.playback_speed;
-                    shared.send_command(TasCommand::Stop);
-                }
-                self.pending_stop_then_restart = Some(TasCommand::ArmContinue);
-                self.continue_start_guard = Some(guard);
-                self.push_log(&format!(
-                    "CONT bucket mismatch (observed first-moving={:?}, expected={}) -> retry {}/{}",
-                    observed, expected_first_moving, attempt, CONT_START_MATCH_MAX_RETRIES
-                ));
-                ctx.request_repaint();
+                let abort_msg = format!(
+                    "CONT aborted: bucket mismatch after {} retries (observed first-moving={:?}, expected={})",
+                    CONT_START_MATCH_MAX_RETRIES, observed, expected_first_moving
+                );
+                let retry_detail = format!(
+                    "CONT bucket mismatch (observed first-moving={:?}, expected={})",
+                    observed, expected_first_moving
+                );
+                self.schedule_cont_reroll(guard, ctx, &abort_msg, &retry_detail);
             }
             BucketVerdict::WrongStart => {
                 let expected_x = f32::from_bits(guard.expected_start_bits[0]);
                 let expected_z = f32::from_bits(guard.expected_start_bits[2]);
                 let dx = (play0[0] as f64 - expected_x as f64).abs();
                 let dz = (play0[2] as f64 - expected_z as f64).abs();
-                if guard.retries_remaining == 0 {
-                    if let Some(shared) = self.shared.as_mut() {
-                        shared.send_command(TasCommand::Stop);
-                    }
-                    self.clear_cont_catchup();
-                    self.pending_after_restart = None;
-                    self.reset_continue_runtime_state();
-                    self.push_log(&format!(
-                        "CONT aborted: start mismatch after {} retries (dx={:.9}, dz={:.9})",
-                        CONT_START_MATCH_MAX_RETRIES, dx, dz
-                    ));
-                    return;
-                }
-                let continue_from_frame = guard.continue_from_frame;
-                guard.retries_remaining -= 1;
-                let attempt = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
-                self.pending_session_kind = Some(RecordingSessionKind::Continue);
-                self.pending_continue_start_tick = Some(continue_from_frame);
-                self.playback_speed = self.cont_catchup_multiplier;
-                if self.cont_catchup_speed.is_none() {
-                    self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
-                }
-                let jitter = cont_retry_jitter_ms(attempt);
-                std::thread::sleep(std::time::Duration::from_millis(jitter));
-                if let Some(shared) = self.shared.as_mut() {
-                    shared.state_mut().continue_from_frame = continue_from_frame;
-                    shared.state_mut().playback_speed = self.playback_speed;
-                    shared.send_command(TasCommand::Stop);
-                }
-                self.pending_stop_then_restart = Some(TasCommand::ArmContinue);
-                self.continue_start_guard = Some(guard);
-                self.push_log(&format!(
-                    "CONT start mismatch (dx={:.9}, dz={:.9}) -> retry {}/{}",
-                    dx, dz, attempt, CONT_START_MATCH_MAX_RETRIES
-                ));
-                ctx.request_repaint();
+                let abort_msg = format!(
+                    "CONT aborted: start mismatch after {} retries (dx={:.9}, dz={:.9})",
+                    CONT_START_MATCH_MAX_RETRIES, dx, dz
+                );
+                let retry_detail = format!("CONT start mismatch (dx={:.9}, dz={:.9})", dx, dz);
+                self.schedule_cont_reroll(guard, ctx, &abort_msg, &retry_detail);
             }
         }
+    }
+
+    /// Shared reroll/abort step for a failed CONT bucket judgment (WrongBucket
+    /// or WrongStart). On the final retry it aborts (Stop + clear runtime
+    /// state); otherwise it decrements the counter, jitters the wall-clock
+    /// phase, and fires a two-step Stop→Restart→ArmContinue. `abort_msg` is the
+    /// complete log line on exhaustion; `retry_detail` is the per-verdict prefix
+    /// (the " -> retry n/N" suffix is appended here with the live attempt count).
+    fn schedule_cont_reroll(
+        &mut self,
+        mut guard: ContinueStartGuard,
+        ctx: &egui::Context,
+        abort_msg: &str,
+        retry_detail: &str,
+    ) {
+        if guard.retries_remaining == 0 {
+            if let Some(shared) = self.shared.as_mut() {
+                shared.send_command(TasCommand::Stop);
+            }
+            self.clear_cont_catchup();
+            self.pending_after_restart = None;
+            self.reset_continue_runtime_state();
+            self.push_log(abort_msg);
+            return;
+        }
+        let continue_from_frame = guard.continue_from_frame;
+        guard.retries_remaining -= 1;
+        let attempt = CONT_START_MATCH_MAX_RETRIES - guard.retries_remaining;
+        self.pending_session_kind = Some(RecordingSessionKind::Continue);
+        self.pending_continue_start_tick = Some(continue_from_frame);
+        self.playback_speed = self.cont_catchup_multiplier;
+        if self.cont_catchup_speed.is_none() {
+            self.cont_catchup_speed = Some(DEFAULT_PLAYBACK_SPEED);
+        }
+        // Vary wall-clock timing so the F5 lands at a different
+        // accumulator-modulo-tick phase than the previous attempt.
+        let jitter = cont_retry_jitter_ms(attempt);
+        std::thread::sleep(std::time::Duration::from_millis(jitter));
+        // Two-step Stop→Restart so cave2 actually sees the Stop.
+        if let Some(shared) = self.shared.as_mut() {
+            shared.state_mut().continue_from_frame = continue_from_frame;
+            shared.state_mut().playback_speed = self.playback_speed;
+            shared.send_command(TasCommand::Stop);
+        }
+        self.pending_stop_then_restart = Some(TasCommand::ArmContinue);
+        self.continue_start_guard = Some(guard);
+        self.push_log(&format!(
+            "{} -> retry {}/{}",
+            retry_detail, attempt, CONT_START_MATCH_MAX_RETRIES
+        ));
+        ctx.request_repaint();
     }
 
     #[cfg(test)]
@@ -2067,45 +2101,10 @@ impl eframe::App for TasApp {
         }
         self.poll_continue_start_guard(ctx);
 
-        // Apply shortcut actions to shared state
+        // Apply shortcut actions to shared state (same dispatch as the buttons).
         for cmd in shortcut_actions {
             let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-            match cmd {
-                transport::Action::Send(c) => self.send_action_command(c, &ts),
-                transport::Action::RestartThen(c) => self.queue_restart_then(c, &ts),
-                transport::Action::Undo => {
-                    if let Some(snap) = self.history.undo() {
-                        if let Some(shared) = self.shared.as_mut() {
-                            snap.restore_to(shared.state_mut());
-                        }
-                        self.log_lines
-                            .push(format!("[{}] Undo: restored previous recording", ts));
-                    }
-                }
-                transport::Action::Redo => {
-                    if let Some(snap) = self.history.redo() {
-                        if let Some(shared) = self.shared.as_mut() {
-                            snap.restore_to(shared.state_mut());
-                        }
-                        self.log_lines
-                            .push(format!("[{}] Redo: restored next recording", ts));
-                    }
-                }
-                transport::Action::SetContinueFrame(frame) => {
-                    self.continue_from_frame = frame;
-                    self.continue_from_text = frame.to_string();
-                    if let Some(shared) = self.shared.as_mut() {
-                        shared.state_mut().continue_from_frame = frame;
-                    }
-                }
-                transport::Action::StepOne => {
-                    self.log_lines
-                        .push(format!("[{}] Step one frame (requires DLL support)", ts));
-                }
-                transport::Action::Log(msg) => {
-                    self.log_lines.push(format!("[{}] {}", ts, msg));
-                }
-            }
+            self.apply_transport_action(cmd, &ts);
         }
 
         // Apply any input edit the timeline produced last frame.
@@ -2115,11 +2114,11 @@ impl eframe::App for TasApp {
         // Main central area
         egui::CentralPanel::default().show(ctx, |ui| {
             // Transport bar at top
-            if let Some(ref mut shared) = self.shared {
+            let cmds = if let Some(ref mut shared) = self.shared {
                 let mode = shared.state().mode_enum();
                 let recorded = shared.state().recorded_count;
 
-                let cmds = transport::show(
+                transport::show(
                     ui,
                     mode,
                     recorded,
@@ -2131,161 +2130,23 @@ impl eframe::App for TasApp {
                     &self.history,
                     shared.state(),
                     self.cont_catchup_speed.is_some(),
-                );
+                )
+            } else {
+                Vec::new()
+            };
 
-                // Process actions - use log_lines directly to avoid borrow conflicts
-                for cmd in cmds {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    match cmd {
-                        transport::Action::Send(c) => {
-                            if c == TasCommand::Stop {
-                                if let Some(saved) = self.cont_catchup_speed.take() {
-                                    self.playback_speed = saved;
-                                }
-                                self.pending_session_kind = None;
-                                self.pending_continue_start_tick = None;
-                                self.continue_start_guard = None;
-                                // Cancel queued restart sequences so STOP
-                                // actually stops (see send_action_command
-                                // for the full rationale).
-                                self.pending_after_restart = None;
-                                self.pending_stop_then_restart = None;
-                            }
-                            shared.send_command(c);
-                            self.log_lines.push(format!("[{}] Sent: {:?}", ts, c));
-                        }
-                        transport::Action::RestartThen(c) => {
-                            // Refuse degenerate CONT requests — see
-                            // queue_restart_then for the full rationale.
-                            if c == TasCommand::ArmContinue {
-                                if shared.state().recorded_count == 0 {
-                                    self.log_lines.push(format!(
-                                        "[{}] CONT ignored: no recording loaded (recorded_count=0)",
-                                        ts
-                                    ));
-                                    continue;
-                                }
-                                if self.continue_from_frame == 0 {
-                                    self.log_lines.push(format!(
-                                        "[{}] CONT ignored: continue_from_frame=0 — press PLAY instead",
-                                        ts
-                                    ));
-                                    continue;
-                                }
-                                let recorded = shared.state().recorded_count;
-                                if self.continue_from_frame > recorded {
-                                    self.log_lines.push(format!(
-                                        "[{}] CONT ignored: continue_from_frame={} > recorded_count={}",
-                                        ts, self.continue_from_frame, recorded
-                                    ));
-                                    continue;
-                                }
-                            }
-                            if c == TasCommand::ArmContinue {
-                                if self.cont_catchup_speed.is_none() {
-                                    self.cont_catchup_speed = Some(self.playback_speed);
-                                }
-                                self.playback_speed = self.cont_catchup_multiplier;
-                                self.pending_session_kind = Some(RecordingSessionKind::Continue);
-                                self.pending_continue_start_tick = Some(self.continue_from_frame);
-                                let state = shared.state();
-                                if state.recorded_count > 0 {
-                                    let rec0 = state.rec_coords[0];
-                                    let n = (state.recorded_count as usize).min(state.rec_coords.len());
-                                    let mut first_moving: Option<u32> = None;
-                                    for j in 1..n {
-                                        let c = state.rec_coords[j];
-                                        if c[0].to_bits() != rec0[0].to_bits()
-                                            || c[1].to_bits() != rec0[1].to_bits()
-                                            || c[2].to_bits() != rec0[2].to_bits()
-                                        {
-                                            first_moving = Some(j as u32);
-                                            break;
-                                        }
-                                    }
-                                    self.continue_start_guard = Some(ContinueStartGuard {
-                                        expected_start_bits: [
-                                            rec0[0].to_bits(),
-                                            rec0[1].to_bits(),
-                                            rec0[2].to_bits(),
-                                        ],
-                                        continue_from_frame: self.continue_from_frame,
-                                        retries_remaining: CONT_START_MATCH_MAX_RETRIES,
-                                        expected_first_moving: first_moving,
-                                    });
-                                } else {
-                                    self.continue_start_guard = None;
-                                }
-                            } else {
-                                if let Some(saved) = self.cont_catchup_speed.take() {
-                                    self.playback_speed = saved;
-                                }
-                                self.pending_session_kind = if c == TasCommand::ArmRec {
-                                    Some(RecordingSessionKind::Rec)
-                                } else {
-                                    None
-                                };
-                                self.pending_continue_start_tick = None;
-                                self.continue_start_guard = None;
-                            }
-                            if c == TasCommand::ArmRec {
-                                self.playback_speed = DEFAULT_PLAYBACK_SPEED;
-                            }
-                            shared.state_mut().playback_speed = self.playback_speed;
-                            // See queue_restart_then for full rationale: the
-                            // shared `command` slot is a single u32, so we
-                            // can't send Stop and Restart on the same frame
-                            // (Restart overwrites Stop). Defer Restart until
-                            // cave2 confirms mode==OFF via the per-frame
-                            // poll_pending_stop_then_restart.
-                            if shared.mode_volatile() != TasMode::Off as u32 {
-                                shared.send_command(TasCommand::Stop);
-                                self.pending_stop_then_restart = Some(c);
-                                self.log_lines.push(format!(
-                                    "[{}] In-process Stop → wait for OFF → Restart → {:?}",
-                                    ts, c
-                                ));
-                            } else {
-                                shared.reset_restart_state();
-                                shared.send_command(TasCommand::Restart);
-                                self.pending_after_restart = Some(c);
-                                self.log_lines.push(format!(
-                                    "[{}] In-process F5 restart → {:?}",
-                                    ts, c
-                                ));
-                            }
-                        }
-                        transport::Action::Undo => {
-                            if let Some(snap) = self.history.undo() {
-                                snap.restore_to(shared.state_mut());
-                                self.log_lines
-                                    .push(format!("[{}] Undo: restored previous recording", ts));
-                            }
-                        }
-                        transport::Action::Redo => {
-                            if let Some(snap) = self.history.redo() {
-                                snap.restore_to(shared.state_mut());
-                                self.log_lines
-                                    .push(format!("[{}] Redo: restored next recording", ts));
-                            }
-                        }
-                        transport::Action::SetContinueFrame(frame) => {
-                            self.continue_from_frame = frame;
-                            self.continue_from_text = frame.to_string();
-                            shared.state_mut().continue_from_frame = frame;
-                        }
-                        transport::Action::StepOne => {
-                            self.log_lines.push(format!(
-                                "[{}] Step one frame (requires DLL support)",
-                                ts
-                            ));
-                        }
-                        transport::Action::Log(msg) => {
-                            self.log_lines.push(format!("[{}] {}", ts, msg));
-                        }
-                    }
-                }
+            // Dispatch button actions through the SAME path as keyboard
+            // shortcuts (apply_transport_action) so the two can't diverge. This
+            // routes CONT-arming through queue_restart_then →
+            // set_continue_start_guard → detect_first_moving (the shared fn),
+            // replacing the button path's old hand-rolled first-moving scan, and
+            // also fixes the button PLAY path to reset continue_from_frame.
+            for cmd in cmds {
+                let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                self.apply_transport_action(cmd, &ts);
+            }
 
+            if let Some(ref mut shared) = self.shared {
                 // Sync playback_speed to shared state for Cave 5
                 shared.state_mut().playback_speed = self.playback_speed;
 
