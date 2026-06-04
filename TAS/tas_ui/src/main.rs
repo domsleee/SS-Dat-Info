@@ -868,13 +868,12 @@ impl TasApp {
             max_retries: CONT_START_MATCH_MAX_RETRIES,
         };
         self.cont_controller = Some(tas_shared::transport::TransportController::new(cfg));
-        self.log_lines
-            .push(format!("[{}] In-process restart → {:?}", ts, command));
+        self.log_lines.push(format!(
+            "[{}] In-process restart → {:?} (speed {}x)",
+            ts, command, self.playback_speed
+        ));
     }
 
-    /// Poll the deferred Stop→Restart sequence. Once cave2 has processed
-    /// our earlier CMD_STOP (mode == OFF), send the CMD_RESTART and let
-    /// the existing pending_after_restart machinery take over.
     /// Advance the in-flight transport controller one transition per egui frame
     /// and handle its outcome. This replaces the old hand-rolled
     /// poll_pending_stop_then_restart + pending_after_restart poll +
@@ -1991,8 +1990,14 @@ impl eframe::App for TasApp {
             }
 
             if let Some(ref mut shared) = self.shared {
-                // Sync playback_speed to shared state for Cave 5
-                shared.state_mut().playback_speed = self.playback_speed;
+                // Sync playback_speed to shared state for Cave 5 — but ONLY when
+                // no transport cycle is in flight. During a CONT catch-up the
+                // controller owns the speed (it asserts the catch-up multiplier);
+                // letting this per-frame line write self.playback_speed back
+                // could clobber it to 1x and the catch-up wouldn't speed up.
+                if self.cont_controller.is_none() {
+                    shared.state_mut().playback_speed = self.playback_speed;
+                }
 
                 ui.separator();
 
