@@ -1137,6 +1137,44 @@ pub mod transport {
         }
 
         #[test]
+        fn cont_drives_splice_frame_to_the_game() {
+            // "Continue must continue on the correct frame": the controller has
+            // to push continue_from_frame (the splice frame) into the game both
+            // before arming AND re-assert it on every reroll, or cave2 splices
+            // at the wrong tick. cfg() sets continue_from_frame = 1000 for CONT.
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Continue, Some(target), 30));
+            drive_to_judge(&mut c, &mut p);
+            assert_eq!(
+                p.continue_from_frame, 1000,
+                "splice frame not handed to the game before arming"
+            );
+
+            // Force a wrong bucket so the controller rerolls, after corrupting
+            // the frame — the reroll must restore it.
+            let mut wrong = vec![[1.0f32, 2.0, 3.0]; 300];
+            wrong[248] = [1.0, 2.0, 3.5];
+            p.play_coords = wrong;
+            p.playback_pos = 260;
+            p.continue_from_frame = 0;
+            match c.step(&mut p) {
+                StepOutcome::Reroll { .. } => {}
+                other => panic!("expected Reroll, got {:?}", other),
+            }
+            assert_eq!(
+                p.continue_from_frame, 1000,
+                "splice frame not re-asserted on reroll"
+            );
+        }
+
+        #[test]
         fn jitter_is_bounded_and_nonzero() {
             for a in 1..=40 {
                 let j = cont_retry_jitter_ms(a);
