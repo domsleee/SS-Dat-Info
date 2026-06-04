@@ -40,10 +40,16 @@ pub fn run(
     record_speed: f32,
     max_median_rerolls: u32,
     file: Option<&str>,
+    restart: &str,
 ) -> bool {
+    let pico = restart.eq_ignore_ascii_case("pico");
     println!(
-        "=== CONT-STRESS: {} iterations — catch up @ {}x → record @ {}x, splice {} ===",
-        iterations, catchup, record_speed, splice_frame
+        "=== CONT-STRESS: {} iterations — catch up @ {}x → record @ {}x, splice {}, restart={} ===",
+        iterations,
+        catchup,
+        record_speed,
+        splice_frame,
+        if pico { "PICO-F5" } else { "in-process" }
     );
     println!("  (replicates the user's F12 flow: slow play speed, fast catch-up)");
 
@@ -98,12 +104,18 @@ pub fn run(
         // Wall-clock "time to continue": from the CONT request to the splice
         // landing (the lag the user actually feels on F12).
         let t0 = std::time::Instant::now();
-        let result = harness::restart_continue_and_splice_inprocess(
-            &mut client,
-            rec_start,
-            splice_frame,
-            RETRIES,
-        );
+        // A/B the restart mechanism via the SAME judge loop (isolates the
+        // restart as the only variable): Pico-F5 keypress vs in-process F5.
+        let result = if pico {
+            harness::restart_continue_and_splice(&mut client, rec_start, splice_frame, RETRIES)
+        } else {
+            harness::restart_continue_and_splice_inprocess_loop(
+                &mut client,
+                rec_start,
+                splice_frame,
+                RETRIES,
+            )
+        };
         let elapsed = t0.elapsed().as_secs_f64();
         match result {
             Some(rerolls) => {

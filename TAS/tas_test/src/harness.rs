@@ -898,15 +898,30 @@ fn wait_continue_anchor(client: &TasSharedMemoryClient, anchor_frame: u32) -> bo
 /// Same as restart_play_and_match but uses ARM_CONTINUE instead of ARM_PLAY.
 /// On position match, waits for PLAY→REC splice at splice_frame.
 ///
-/// Returns true if CONT successfully spliced (PLAY→REC transition at splice_frame).
+/// Returns `Some(reroll_count)` if CONT spliced (Pico-F5 restart path), else
+/// `None`. Used for the cont-stress A/B vs the in-process restart.
 pub fn restart_continue_and_splice(
     client: &mut TasSharedMemoryClient,
     target: [f32; 3],
     splice_frame: u32,
     max_retries: u32,
-) -> bool {
+) -> Option<u32> {
     restart_continue_and_splice_with(client, target, splice_frame, max_retries, |c| {
         restart_and_stabilize(c)
+    })
+}
+
+/// In-process-restart CONT via the SAME poll loop as the Pico path — used only
+/// for the cont-stress A/B so the restart MECHANISM is the only variable (the
+/// production path uses `restart_continue_and_splice_inprocess`, the controller).
+pub fn restart_continue_and_splice_inprocess_loop(
+    client: &mut TasSharedMemoryClient,
+    target: [f32; 3],
+    splice_frame: u32,
+    max_retries: u32,
+) -> Option<u32> {
+    restart_continue_and_splice_with(client, target, splice_frame, max_retries, |c| {
+        restart_and_stabilize_inprocess(c)
     })
 }
 
@@ -1018,7 +1033,7 @@ fn restart_continue_and_splice_with<F>(
     splice_frame: u32,
     max_retries: u32,
     mut restart_fn: F,
-) -> bool
+) -> Option<u32>
 where
     F: FnMut(&mut TasSharedMemoryClient) -> bool,
 {
@@ -1045,7 +1060,7 @@ where
         }
         if !restart_fn(client) {
             eprintln!("  ERROR: Game not alive after restart");
-            return false;
+            return None;
         }
         // No focus_game() here: in-process injection writes game memory directly
         // (no window focus needed), and its 200ms sleep was ~20 more frames of
@@ -1083,7 +1098,7 @@ where
                 }
                 println!("  CONT bucket accepted, waiting for splice...");
                 if wait_continue_splice(client, splice_frame) {
-                    return true;
+                    return Some(attempt);
                 }
                 stop(client);
                 continue;
@@ -1115,7 +1130,7 @@ where
         "  WARNING: Could not land a tas_ui-acceptable CONT bucket after {} retries",
         max_retries
     );
-    false
+    None
 }
 
 /// Poll `tas_shared::cont::judge_cont_bucket` until a definitive verdict,
