@@ -518,13 +518,28 @@ pub mod cont {
         WrongBucket { observed: Option<u32> },
     }
 
-    /// Judge a CONT replay's F5 bucket using the SAME criteria as tas_ui's
-    /// `poll_continue_start_guard`: the replay's spawn bits must match the
-    /// recording's start, then its observed first-moving frame must equal the
-    /// recording's `expected_first_moving`. Pure function over the shared-memory
-    /// snapshot (no I/O) so tas_ui and the harness share one source of truth.
+    /// Frames PAST the recording's first-moving frame that the replay must
+    /// reproduce BIT-EXACTLY for the bucket to be accepted. The first-moving
+    /// frame alone is a coarse fingerprint — two F5 buckets can share a
+    /// first-moving frame yet have slightly different physics, so matching only
+    /// the frame number lets a near-miss bucket through and the continue resumes
+    /// a few frames off. Requiring the trajectory to be bit-identical out to
+    /// first_moving + this window rejects those: a wrong bucket diverges within
+    /// a few frames of leaving spawn.
+    pub const BUCKET_MATCH_WINDOW: u32 = 64;
+
+    /// Judge a CONT replay's F5 bucket. The replay's spawn bits must match the
+    /// recording's start, and the replay must then be BIT-IDENTICAL to the
+    /// recording out to `expected_first_moving + BUCKET_MATCH_WINDOW` — not just
+    /// share the first-moving frame. So only the exact bucket is accepted; a
+    /// same-first-moving-but-different-physics bucket (which would resume a few
+    /// frames off) is rejected as `WrongBucket`. Pure function over the
+    /// shared-memory snapshot so tas_ui and the harness share one source of
+    /// truth. `observed` in WrongBucket is the first frame that diverged.
     pub fn judge_cont_bucket(
         play_coords: &[[f32; 3]],
+        rec_coords: &[[f32; 3]],
+        recorded_count: u32,
         playback_pos: u32,
         expected_start_bits: [u32; 3],
         expected_first_moving: Option<u32>,
@@ -541,27 +556,31 @@ pub mod cont {
             Some(f) => f,
             None => return BucketVerdict::NoSignal,
         };
-        let needed = expected_fm + BUCKET_CHECK_HEADROOM;
+        // Need to see far enough past first-moving to discriminate the bucket.
+        let needed = expected_fm + BUCKET_MATCH_WINDOW;
         if playback_pos < needed {
             return BucketVerdict::KeepWaiting;
         }
-        let scan_end = (playback_pos as usize).min(play_coords.len());
-        let mut observed: Option<u32> = None;
-        for j in 1..scan_end {
-            let c = play_coords[j];
-            if c[0].to_bits() != expected_start_bits[0]
-                || c[1].to_bits() != expected_start_bits[1]
-                || c[2].to_bits() != expected_start_bits[2]
+        // The replay must reproduce the recording bit-for-bit up to the window.
+        // The first divergence (one moves while the other is stationary, or the
+        // trajectories differ) marks a wrong bucket.
+        let end = (needed as usize)
+            .min(play_coords.len())
+            .min(rec_coords.len())
+            .min(recorded_count as usize);
+        for k in 0..end {
+            let p = play_coords[k];
+            let r = rec_coords[k];
+            if p[0].to_bits() != r[0].to_bits()
+                || p[1].to_bits() != r[1].to_bits()
+                || p[2].to_bits() != r[2].to_bits()
             {
-                observed = Some(j as u32);
-                break;
+                return BucketVerdict::WrongBucket {
+                    observed: Some(k as u32),
+                };
             }
         }
-        if observed == Some(expected_fm) {
-            BucketVerdict::Match
-        } else {
-            BucketVerdict::WrongBucket { observed }
-        }
+        BucketVerdict::Match
     }
 
     #[cfg(test)]
@@ -588,49 +607,64 @@ pub mod cont {
 
         #[test]
         fn judge_wrong_start() {
-            let play = vec![[9.0, 9.0, 9.0]; 300];
+            let play = vec![[9.0, 9.0, 9.0]; 400];
+            let rec = vec![[1.0, 2.0, 3.0]; 400];
             assert_eq!(
-                judge_cont_bucket(&play, 300, bits(1.0, 2.0, 3.0), Some(250)),
+                judge_cont_bucket(&play, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250)),
                 BucketVerdict::WrongStart
             );
         }
 
         #[test]
-        fn judge_keep_waiting_before_headroom() {
-            let mut play = vec![[1.0, 2.0, 3.0]; 300];
+        fn judge_keep_waiting_before_window() {
+            let mut play = vec![[1.0, 2.0, 3.0]; 400];
             play[250] = [1.0, 2.0, 3.5];
+            let rec = play.clone();
+            // pos must be >= first_moving + BUCKET_MATCH_WINDOW (314) to judge.
             assert_eq!(
-                judge_cont_bucket(&play, 100, bits(1.0, 2.0, 3.0), Some(250)),
+                judge_cont_bucket(&play, &rec, 400, 100, bits(1.0, 2.0, 3.0), Some(250)),
                 BucketVerdict::KeepWaiting
             );
-            // pos must be >= first_moving + HEADROOM (253) to judge
             assert_eq!(
-                judge_cont_bucket(&play, 252, bits(1.0, 2.0, 3.0), Some(250)),
+                judge_cont_bucket(&play, &rec, 400, 313, bits(1.0, 2.0, 3.0), Some(250)),
                 BucketVerdict::KeepWaiting
             );
         }
 
         #[test]
         fn judge_match_vs_wrong_bucket() {
-            let mut right = vec![[1.0, 2.0, 3.0]; 300];
-            right[250] = [1.0, 2.0, 3.5];
+            let mut rec = vec![[1.0, 2.0, 3.0]; 400];
+            rec[250] = [1.0, 2.0, 3.5];
+            // identical trajectory → Match
             assert_eq!(
-                judge_cont_bucket(&right, 260, bits(1.0, 2.0, 3.0), Some(250)),
+                judge_cont_bucket(&rec, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250)),
                 BucketVerdict::Match
             );
-            let mut wrong = vec![[1.0, 2.0, 3.0]; 300];
+            // moves at 248 not 250 → diverges at 248
+            let mut wrong = vec![[1.0, 2.0, 3.0]; 400];
             wrong[248] = [1.0, 2.0, 3.5];
             assert_eq!(
-                judge_cont_bucket(&wrong, 260, bits(1.0, 2.0, 3.0), Some(250)),
+                judge_cont_bucket(&wrong, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250)),
                 BucketVerdict::WrongBucket { observed: Some(248) }
+            );
+            // THE KEY CASE: same first-moving frame (250) as rec, but the
+            // trajectory diverges later (260). The old frame-only fingerprint
+            // accepted this (→ resume a few frames off); now it's rejected.
+            let mut near = vec![[1.0, 2.0, 3.0]; 400];
+            near[250] = [1.0, 2.0, 3.5];
+            near[260] = [9.0, 9.0, 9.0];
+            assert_eq!(
+                judge_cont_bucket(&near, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250)),
+                BucketVerdict::WrongBucket { observed: Some(260) }
             );
         }
 
         #[test]
         fn judge_no_signal_for_static_recording() {
-            let play = vec![[1.0, 2.0, 3.0]; 300];
+            let play = vec![[1.0, 2.0, 3.0]; 400];
+            let rec = play.clone();
             assert_eq!(
-                judge_cont_bucket(&play, 260, bits(1.0, 2.0, 3.0), None),
+                judge_cont_bucket(&play, &rec, 400, 320, bits(1.0, 2.0, 3.0), None),
                 BucketVerdict::NoSignal
             );
         }
@@ -719,6 +753,10 @@ pub mod transport {
         fn reset_restart_state(&mut self);
         fn playback_pos(&self) -> u32;
         fn play_coords(&self) -> &[[f32; 3]];
+        /// The loaded recording's trajectory + length — for the bit-exact bucket
+        /// fingerprint (the replay must reproduce this, not just its first-move).
+        fn rec_coords(&self) -> &[[f32; 3]];
+        fn recorded_count(&self) -> u32;
         fn set_continue_from_frame(&mut self, frame: u32);
         fn set_playback_speed(&mut self, speed: f32);
     }
@@ -900,6 +938,8 @@ pub mod transport {
                     };
                     let verdict = judge_cont_bucket(
                         port.play_coords(),
+                        port.rec_coords(),
+                        port.recorded_count(),
                         pos,
                         target.expected_start_bits,
                         target.expected_first_moving,
@@ -974,6 +1014,8 @@ pub mod transport {
             restart_state: u32,
             playback_pos: u32,
             play_coords: Vec<[f32; 3]>,
+            rec_coords: Vec<[f32; 3]>,
+            recorded_count: u32,
             continue_from_frame: u32,
             playback_speed: f32,
             commands: Vec<TasCommand>,
@@ -1002,6 +1044,12 @@ pub mod transport {
             }
             fn play_coords(&self) -> &[[f32; 3]] {
                 &self.play_coords
+            }
+            fn rec_coords(&self) -> &[[f32; 3]] {
+                &self.rec_coords
+            }
+            fn recorded_count(&self) -> u32 {
+                self.recorded_count
             }
             fn set_continue_from_frame(&mut self, frame: u32) {
                 self.continue_from_frame = frame;
@@ -1114,13 +1162,16 @@ pub mod transport {
                 ..Default::default()
             };
             let mut c = TransportController::new(cfg(Arm::Continue, Some(target), 30));
+            // recording moves at frame 250
+            let mut coords = vec![[1.0f32, 2.0, 3.0]; 400];
+            coords[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = coords.clone();
+            p.recorded_count = 400;
             drive_to_judge(&mut c, &mut p);
 
-            // replay landed the right bucket: moves at frame 250
-            let mut coords = vec![[1.0f32, 2.0, 3.0]; 300];
-            coords[250] = [1.0, 2.0, 3.5];
+            // replay reproduces it bit-for-bit → Match (pos past the 314 window)
             p.play_coords = coords;
-            p.playback_pos = 260;
+            p.playback_pos = 320;
 
             assert_eq!(c.step(&mut p), StepOutcome::Done { retries_used: 0 });
             assert!(c.is_terminal());
@@ -1137,13 +1188,17 @@ pub mod transport {
                 ..Default::default()
             };
             let mut c = TransportController::new(cfg(Arm::Continue, Some(target), 30));
+            let mut right = vec![[1.0f32, 2.0, 3.0]; 400];
+            right[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = right.clone();
+            p.recorded_count = 400;
             drive_to_judge(&mut c, &mut p);
 
-            // wrong bucket: moves at 248, not 250
-            let mut wrong = vec![[1.0f32, 2.0, 3.0]; 300];
+            // wrong bucket: moves at 248, not 250 → diverges from rec
+            let mut wrong = vec![[1.0f32, 2.0, 3.0]; 400];
             wrong[248] = [1.0, 2.0, 3.5];
             p.play_coords = wrong;
-            p.playback_pos = 260;
+            p.playback_pos = 320;
 
             match c.step(&mut p) {
                 StepOutcome::Reroll { attempt, .. } => assert_eq!(attempt, 1),
@@ -1152,12 +1207,10 @@ pub mod transport {
             // reroll sent Stop and is waiting for OFF again
             assert_eq!(p.commands.last(), Some(&TasCommand::Stop));
 
-            // complete the reroll restart, this time landing the right bucket
+            // complete the reroll restart, this time reproducing the recording
             drive_reroll_to_judge(&mut c, &mut p);
-            let mut right = vec![[1.0f32, 2.0, 3.0]; 300];
-            right[250] = [1.0, 2.0, 3.5];
             p.play_coords = right;
-            p.playback_pos = 260;
+            p.playback_pos = 320;
 
             assert_eq!(c.step(&mut p), StepOutcome::Done { retries_used: 1 });
             assert!(!p.restart_while_not_off, "Restart sent while mode != OFF!");
@@ -1175,12 +1228,16 @@ pub mod transport {
             };
             // only 1 retry allowed
             let mut c = TransportController::new(cfg(Arm::Continue, Some(target), 1));
-            let mut wrong = vec![[1.0f32, 2.0, 3.0]; 300];
+            let mut rec = vec![[1.0f32, 2.0, 3.0]; 400];
+            rec[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = rec;
+            p.recorded_count = 400;
+            let mut wrong = vec![[1.0f32, 2.0, 3.0]; 400];
             wrong[248] = [1.0, 2.0, 3.5];
 
             drive_to_judge(&mut c, &mut p);
             p.play_coords = wrong.clone();
-            p.playback_pos = 260;
+            p.playback_pos = 320;
             // first wrong bucket -> reroll (attempt 1, uses the only retry)
             match c.step(&mut p) {
                 StepOutcome::Reroll { attempt, .. } => assert_eq!(attempt, 1),
@@ -1188,7 +1245,7 @@ pub mod transport {
             }
             drive_reroll_to_judge(&mut c, &mut p);
             p.play_coords = wrong;
-            p.playback_pos = 260;
+            p.playback_pos = 320;
             // second wrong bucket -> no retries left -> abort
             match c.step(&mut p) {
                 StepOutcome::Aborted { reason } => assert!(reason.contains("bucket mismatch")),
@@ -1233,6 +1290,10 @@ pub mod transport {
                 ..Default::default()
             };
             let mut c = TransportController::new(cfg(Arm::Continue, Some(target), 30));
+            let mut rec = vec![[1.0f32, 2.0, 3.0]; 400];
+            rec[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = rec;
+            p.recorded_count = 400;
             drive_to_judge(&mut c, &mut p);
             assert_eq!(
                 p.continue_from_frame, 1000,
@@ -1241,10 +1302,10 @@ pub mod transport {
 
             // Force a wrong bucket so the controller rerolls, after corrupting
             // the frame — the reroll must restore it.
-            let mut wrong = vec![[1.0f32, 2.0, 3.0]; 300];
+            let mut wrong = vec![[1.0f32, 2.0, 3.0]; 400];
             wrong[248] = [1.0, 2.0, 3.5];
             p.play_coords = wrong;
-            p.playback_pos = 260;
+            p.playback_pos = 320;
             p.continue_from_frame = 0;
             match c.step(&mut p) {
                 StepOutcome::Reroll { .. } => {}
@@ -1295,6 +1356,12 @@ impl transport::TransportPort for TasSharedMemoryClient {
     fn play_coords(&self) -> &[[f32; 3]] {
         &self.state().play_coords[..]
     }
+    fn rec_coords(&self) -> &[[f32; 3]] {
+        &self.state().rec_coords[..]
+    }
+    fn recorded_count(&self) -> u32 {
+        self.state().recorded_count
+    }
     fn set_continue_from_frame(&mut self, frame: u32) {
         self.state_mut().continue_from_frame = frame;
     }
@@ -1322,6 +1389,12 @@ impl transport::TransportPort for TasSharedMemoryClient {
     }
     fn play_coords(&self) -> &[[f32; 3]] {
         &self.state().play_coords[..]
+    }
+    fn rec_coords(&self) -> &[[f32; 3]] {
+        &self.state().rec_coords[..]
+    }
+    fn recorded_count(&self) -> u32 {
+        self.state().recorded_count
     }
     fn set_continue_from_frame(&mut self, frame: u32) {
         self.state_mut().continue_from_frame = frame;

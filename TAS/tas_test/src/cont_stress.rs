@@ -95,6 +95,7 @@ pub fn run(
     let mut reroll_counts: Vec<u32> = Vec::new();
     let mut wall_secs: Vec<f64> = Vec::new();
     let mut all_spliced = true;
+    let mut all_exact_frame = true;
     let mut worst_drift: f64 = 0.0;
 
     for i in 0..iterations {
@@ -130,13 +131,24 @@ pub fn run(
             Some(rerolls) => {
                 reroll_counts.push(rerolls);
                 wall_secs.push(elapsed);
-                let d = {
+                // Read the splice boundary (set at the splice moment) — this is
+                // the EXACT frame the continue spliced on. Must equal the request.
+                let (d, splice_boundary) = {
                     let s = client.state();
                     if s.mode != TasMode::Rec as u32 {
                         all_spliced = false;
                     }
-                    drift::compute_drift(s, splice_frame)
+                    let sc = s.segment_count;
+                    let boundary = if sc >= 1 && (sc as usize) <= s.segment_boundaries.len() {
+                        s.segment_boundaries[(sc - 1) as usize].frame
+                    } else {
+                        0
+                    };
+                    (drift::compute_drift(s, splice_frame), boundary)
                 };
+                if splice_boundary != splice_frame {
+                    all_exact_frame = false;
+                }
                 let it_drift = d.max_drift_x.max(d.max_drift_z);
                 worst_drift = worst_drift.max(it_drift);
                 // Drop to the slow record speed and record a short burst, like
@@ -145,10 +157,12 @@ pub fn run(
                 std::thread::sleep(std::time::Duration::from_millis(800));
                 harness::stop(&mut client);
                 println!(
-                    "  iteration {}: {} reroll(s), {:.2}s to continue, prefix drift X={:.6} Z={:.6}",
+                    "  iteration {}: {} reroll(s), {:.2}s to continue, splice@{} (want {}), prefix drift X={:.6} Z={:.6}",
                     i + 1,
                     rerolls,
                     elapsed,
+                    splice_boundary,
+                    splice_frame,
                     d.max_drift_x,
                     d.max_drift_z
                 );
@@ -198,13 +212,14 @@ pub fn run(
         wall_median, wall_mean, wall_max
     );
     println!("  all spliced:    {}", all_spliced);
+    println!("  splice on exact frame: {}", all_exact_frame);
     println!("  worst drift:    {:.9}", worst_drift);
 
     let rerolls_ok = median <= max_median_rerolls;
     let drift_ok = worst_drift == 0.0;
-    if all_spliced && rerolls_ok && drift_ok {
+    if all_spliced && all_exact_frame && rerolls_ok && drift_ok {
         println!(
-            "\n*** CONT-STRESS PASSED: median {} rerolls (<= {}), all spliced, zero drift ***",
+            "\n*** CONT-STRESS PASSED: median {} rerolls (<= {}), all spliced on the EXACT frame, zero drift ***",
             median, max_median_rerolls
         );
         true
@@ -215,9 +230,12 @@ pub fn run(
                 median, max_median_rerolls
             );
         }
+        if !all_exact_frame {
+            println!("  >> CONT spliced on the WRONG frame (resumed a few frames off)");
+        }
         println!(
-            "\n*** CONT-STRESS FAILED: all_spliced={} median_rerolls_ok={} drift_ok={} ***",
-            all_spliced, rerolls_ok, drift_ok
+            "\n*** CONT-STRESS FAILED: all_spliced={} exact_frame={} median_rerolls_ok={} drift_ok={} ***",
+            all_spliced, all_exact_frame, rerolls_ok, drift_ok
         );
         false
     }
