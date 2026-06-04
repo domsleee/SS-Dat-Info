@@ -39,6 +39,7 @@ pub fn run(
     catchup: f32,
     record_speed: f32,
     max_median_rerolls: u32,
+    file: Option<&str>,
 ) -> bool {
     println!(
         "=== CONT-STRESS: {} iterations — catch up @ {}x → record @ {}x, splice {} ===",
@@ -46,12 +47,25 @@ pub fn run(
     );
     println!("  (replicates the user's F12 flow: slow play speed, fast catch-up)");
 
-    let path = match locate() {
-        Some(p) => p,
-        None => {
-            eprintln!("ERROR: couldn't locate {}", RECORDING_REL);
-            return false;
+    // Reroll behaviour is recording-specific (the bucket the recording lives in
+    // may be easy or hard to re-land), so use the user's actual tasrec when
+    // given; otherwise fall back to FE-tremendous.
+    let path = match file {
+        Some(f) => {
+            let p = PathBuf::from(f);
+            if !p.exists() {
+                eprintln!("ERROR: --file {} not found", f);
+                return false;
+            }
+            p
         }
+        None => match locate() {
+            Some(p) => p,
+            None => {
+                eprintln!("ERROR: couldn't locate {} (pass --file <path>)", RECORDING_REL);
+                return false;
+            }
+        },
     };
     let rec = match replay::load_tasrec(&path) {
         Ok(r) => r,

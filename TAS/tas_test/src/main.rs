@@ -440,6 +440,7 @@ fn main() {
             let mut catchup = 64.0f32;
             let mut record_speed = 0.5f32;
             let mut max_median = 8u32;
+            let mut file: Option<String> = None;
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
@@ -463,12 +464,23 @@ fn main() {
                         max_median = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(8);
                         i += 2;
                     }
+                    "--file" => {
+                        file = args.get(i + 1).cloned();
+                        i += 2;
+                    }
                     _ => {
                         i += 1;
                     }
                 }
             }
-            let ok = cont_stress::run(iterations, splice, catchup, record_speed, max_median);
+            let ok = cont_stress::run(
+                iterations,
+                splice,
+                catchup,
+                record_speed,
+                max_median,
+                file.as_deref(),
+            );
             std::process::exit(if ok { 0 } else { 1 });
         }
         "cont-splice-frame" => {
