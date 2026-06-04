@@ -918,13 +918,14 @@ pub fn restart_continue_and_splice(
 ///
 /// The controller reaches `Done` when the F5 bucket is accepted (at the
 /// first-moving fingerprint, BEFORE the splice fires); we then wait for the
-/// PLAY→REC splice at `splice_frame`. Returns true on a clean splice.
+/// PLAY→REC splice at `splice_frame`. Returns `Some(reroll_count)` on a clean
+/// splice (0 = landed the bucket first try), `None` on failure.
 pub fn restart_continue_and_splice_inprocess(
     client: &mut TasSharedMemoryClient,
     target: [f32; 3],
     splice_frame: u32,
     max_retries: u32,
-) -> bool {
+) -> Option<u32> {
     use tas_shared::transport::{Arm, ArmConfig, BucketTarget, StepOutcome, TransportController};
 
     let expected_start_bits = [target[0].to_bits(), target[1].to_bits(), target[2].to_bits()];
@@ -974,7 +975,7 @@ pub fn restart_continue_and_splice_inprocess(
                 if Instant::now() > attempt_deadline {
                     eprintln!("  ERROR: CONT attempt stalled (no progress within budget)");
                     client.send_command(TasCommand::Stop);
-                    return false;
+                    return None;
                 }
                 thread::sleep(Duration::from_millis(5));
             }
@@ -997,11 +998,15 @@ pub fn restart_continue_and_splice_inprocess(
                     );
                 }
                 println!("  CONT bucket accepted, waiting for splice...");
-                return wait_continue_splice(client, splice_frame);
+                return if wait_continue_splice(client, splice_frame) {
+                    Some(retries_used)
+                } else {
+                    None
+                };
             }
             StepOutcome::Aborted { reason } => {
                 eprintln!("  WARNING: CONT aborted: {}", reason);
-                return false;
+                return None;
             }
         }
     }

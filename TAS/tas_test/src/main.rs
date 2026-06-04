@@ -18,6 +18,7 @@ mod cache;
 mod certificate;
 mod cont_reliability;
 mod cont_splice_frame;
+mod cont_stress;
 mod cont_restart_race;
 mod drift;
 mod drift_speed;
@@ -430,6 +431,45 @@ fn main() {
                 tap_ticks,
             );
             std::process::exit(if report.all_pass() { 0 } else { 1 });
+        }
+        "cont-stress" => {
+            // The user's exact CONT flow: slow play speed, fast catch-up,
+            // repeated F12. Measures the reroll distribution.
+            let mut iterations = 5u32;
+            let mut splice = 1000u32;
+            let mut catchup = 64.0f32;
+            let mut record_speed = 0.5f32;
+            let mut max_median = 8u32;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--iterations" | "-n" => {
+                        iterations = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(5);
+                        i += 2;
+                    }
+                    "--splice" => {
+                        splice = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(1000);
+                        i += 2;
+                    }
+                    "--catchup" => {
+                        catchup = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(64.0);
+                        i += 2;
+                    }
+                    "--record-speed" => {
+                        record_speed = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0.5);
+                        i += 2;
+                    }
+                    "--max-median-rerolls" => {
+                        max_median = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(8);
+                        i += 2;
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            let ok = cont_stress::run(iterations, splice, catchup, record_speed, max_median);
+            std::process::exit(if ok { 0 } else { 1 });
         }
         "cont-splice-frame" => {
             // "Continue continues on the correct frame": CONT at N must splice

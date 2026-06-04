@@ -513,7 +513,8 @@ pub fn run(
                 rec_start,
                 splice_frame,
                 CONT_RESTART_RETRIES,
-            );
+            )
+            .is_some();
             let mut mode_rec_after_splice = false;
             let mut replay_coverage_ok = false;
             let mut playback_pos_at_splice = 0;
