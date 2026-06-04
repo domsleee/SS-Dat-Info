@@ -800,7 +800,12 @@ pub mod transport {
                         port.set_continue_from_frame(self.cfg.continue_from_frame);
                         port.set_playback_speed(self.cfg.catchup_speed);
                         port.send_command(self.cfg.arm.command());
-                        if self.cfg.arm == Arm::Continue {
+                        // Judge the F5 bucket whenever a fingerprint was given —
+                        // CONT always has one; PLAY can too, so a replay rerolls
+                        // until it lands the recording's bucket (zero drift),
+                        // exactly like the harness's restart_play_and_match. REC
+                        // has no target (it's a fresh recording) → done.
+                        if self.cfg.target.is_some() {
                             self.phase = Phase::JudgeBucket;
                             StepOutcome::InProgress
                         } else {

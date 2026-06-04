@@ -446,6 +446,10 @@ struct TasApp {
     /// `command` slot is a single u32, so Stop and Restart can't be written on
     /// the same frame) plus the CONT bucket judge/reroll loop.
     cont_controller: Option<tas_shared::transport::TransportController>,
+    /// When set, the controller must not be stepped again until this instant —
+    /// used to apply reroll jitter WITHOUT blocking the egui thread (the old
+    /// code slept the UI thread, which froze the window during reroll storms).
+    cont_step_not_before: Option<std::time::Instant>,
     /// Previous-frame pressed state for the four global-shortcut keys
     /// (F9, F10, F11, F12 in that order). Diffed against the current
     /// GetAsyncKeyState result to detect press edges. Updated every
@@ -559,6 +563,7 @@ impl TasApp {
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
             cont_controller: None,
+            cont_step_not_before: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
             last_frame_count: 0,
@@ -831,7 +836,12 @@ impl TasApp {
             if command == TasCommand::ArmRec {
                 self.playback_speed = DEFAULT_PLAYBACK_SPEED;
             }
-            // PLAY always starts from tick 0.
+            // PLAY always starts from tick 0. NOTE: PLAY does not currently
+            // bucket-match (target stays None), so the F5 lottery can land a
+            // near-miss bucket that diverges once the player moves (~tick 299).
+            // The controller supports PLAY bucket-matching (target.is_some()),
+            // but at 1x each reroll replays ~3s before it can judge — a UX
+            // decision pending (see the diagnosis to the user).
             if command == TasCommand::ArmPlay {
                 self.continue_from_frame = 0;
                 self.continue_from_text = "0".to_string();
@@ -876,6 +886,16 @@ impl TasApp {
         if self.cont_controller.is_none() {
             return;
         }
+        // Reroll jitter: wait out the delay WITHOUT blocking the UI thread.
+        // Schedule a repaint for when it elapses and bail until then.
+        if let Some(t) = self.cont_step_not_before {
+            let now = std::time::Instant::now();
+            if now < t {
+                ctx.request_repaint_after(t - now);
+                return;
+            }
+            self.cont_step_not_before = None;
+        }
         use tas_shared::transport::StepOutcome;
         // Borrow the controller and the client (disjoint fields) for one step.
         let outcome = match (self.cont_controller.as_mut(), self.shared.as_mut()) {
@@ -888,8 +908,10 @@ impl TasApp {
         };
         match outcome {
             StepOutcome::InProgress => {
-                // Keep repainting so the machine advances even with no input.
-                ctx.request_repaint();
+                // Advance again soon — but THROTTLED (~5ms, like the harness's
+                // poll), not a tight request_repaint() busy-loop that pegs a CPU
+                // core and makes the game (same machine) and STOP feel laggy.
+                ctx.request_repaint_after(std::time::Duration::from_millis(5));
             }
             StepOutcome::Reroll {
                 attempt,
@@ -900,9 +922,12 @@ impl TasApp {
                     attempt, CONT_START_MATCH_MAX_RETRIES
                 ));
                 // Vary the wall clock so the next F5 lands at a different
-                // accumulator-modulo-tick phase (same jitter the harness uses).
-                std::thread::sleep(std::time::Duration::from_millis(suggested_delay_ms));
-                ctx.request_repaint();
+                // accumulator-modulo-tick phase — without sleeping the UI thread.
+                self.cont_step_not_before = Some(
+                    std::time::Instant::now()
+                        + std::time::Duration::from_millis(suggested_delay_ms),
+                );
+                ctx.request_repaint_after(std::time::Duration::from_millis(suggested_delay_ms));
             }
             StepOutcome::Done { retries_used } => {
                 if retries_used > 0 {
@@ -2461,6 +2486,7 @@ mod tests {
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
             cont_controller: None,
+            cont_step_not_before: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
             last_frame_count: 0,
