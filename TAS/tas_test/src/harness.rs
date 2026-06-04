@@ -1167,6 +1167,8 @@ fn poll_cont_verdict(
             (
                 judge_cont_bucket(
                     &s.play_coords[..],
+                    &s.rec_coords[..],
+                    s.recorded_count,
                     s.playback_pos,
                     expected_start_bits,
                     expected_first_moving,
@@ -1182,6 +1184,8 @@ fn poll_cont_verdict(
             let s = client.state();
             return judge_cont_bucket(
                 &s.play_coords[..],
+                &s.rec_coords[..],
+                s.recorded_count,
                 splice_frame.max(1),
                 expected_start_bits,
                 expected_first_moving,
