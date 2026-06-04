@@ -637,6 +637,575 @@ pub mod cont {
     }
 }
 
+/// Shared restart/arm/reroll state machine driven by BOTH tas_ui (once per egui
+/// frame) and the tas_test harness (in a poll loop), so the test exercises the
+/// exact transport sequence the app runs — one source of truth, no drift.
+///
+/// The machine is a non-blocking **stepper**: `step()` performs at most one
+/// transition and never sleeps or blocks, so the egui thread can call it per
+/// frame and the harness can call it in a `while !terminal { sleep; step }`
+/// loop. All side effects go through the [`TransportPort`] trait, which is
+/// implemented for the real shared-memory client and for a `FakePort` in tests
+/// (so the serialization invariants are checked without a running game).
+pub mod transport {
+    use super::cont::{judge_cont_bucket, BucketVerdict};
+    use super::{TasCommand, TasMode};
+
+    /// Wall-clock jitter (ms) before a reroll's restart, so the injected F5
+    /// lands at a different accumulator-modulo-tick phase than the last attempt.
+    /// Kept here (not in tas_ui) so the harness reroll jitters identically.
+    pub fn cont_retry_jitter_ms(attempt: u32) -> u64 {
+        (attempt as u64 * 7 + 3) % 17 + 1
+    }
+
+    /// Which session to arm after the restart completes.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Arm {
+        Rec,
+        Play,
+        Continue,
+    }
+
+    impl Arm {
+        fn command(self) -> TasCommand {
+            match self {
+                Arm::Rec => TasCommand::ArmRec,
+                Arm::Play => TasCommand::ArmPlay,
+                Arm::Continue => TasCommand::ArmContinue,
+            }
+        }
+    }
+
+    /// The recording's F5-bucket fingerprint a CONT replay must match (computed
+    /// by the caller from `rec_coords` via [`super::cont::detect_first_moving`]).
+    #[derive(Debug, Clone, Copy)]
+    pub struct BucketTarget {
+        pub expected_start_bits: [u32; 3],
+        pub expected_first_moving: Option<u32>,
+    }
+
+    /// Everything the controller needs to drive one arm cycle to completion.
+    #[derive(Debug, Clone, Copy)]
+    pub struct ArmConfig {
+        pub arm: Arm,
+        /// Replay/catch-up speed to assert before arming.
+        pub catchup_speed: f32,
+        /// Splice frame for CONT (0 for REC/PLAY).
+        pub continue_from_frame: u32,
+        /// Bucket fingerprint to match; `Some` only for CONT.
+        pub target: Option<BucketTarget>,
+        /// Max F5 rerolls to land the recording's bucket (CONT only).
+        pub max_retries: u32,
+    }
+
+    /// The few shared-memory operations the transport machine performs. Returns
+    /// raw `u32` for mode/restart_state to match the live client's accessors.
+    pub trait TransportPort {
+        fn send_command(&mut self, cmd: TasCommand);
+        fn mode(&self) -> u32;
+        fn restart_state(&self) -> u32;
+        fn reset_restart_state(&mut self);
+        fn playback_pos(&self) -> u32;
+        fn play_coords(&self) -> &[[f32; 3]];
+        fn set_continue_from_frame(&mut self, frame: u32);
+        fn set_playback_speed(&mut self, speed: f32);
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Phase {
+        Start,
+        /// Stop sent; waiting for cave2 to flip mode to OFF before Restart.
+        /// (The shared command slot is a single u32 — Stop and Restart can't be
+        /// written on the same tick or Restart clobbers Stop.)
+        StopWaitOff,
+        /// Restart sent; waiting for restart_state == 2.
+        RestartWaitDone,
+        /// CONT only: replaying — judge the F5 bucket each step.
+        JudgeBucket,
+        Done,
+        Aborted,
+    }
+
+    /// Result of one `step()`.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum StepOutcome {
+        /// Mid-cycle; call `step()` again (after a short poll delay).
+        InProgress,
+        /// A reroll was scheduled. Caller should wait `suggested_delay_ms`
+        /// (harness: sleep; egui: it already slept) before the next `step()`.
+        Reroll { attempt: u32, suggested_delay_ms: u64 },
+        /// Terminal success: armed (and, for CONT, landed the bucket).
+        Done { retries_used: u32 },
+        /// Terminal failure: gave up after exhausting retries.
+        Aborted { reason: String },
+    }
+
+    /// Drives one restart→arm(→judge→reroll) cycle to a terminal outcome.
+    pub struct TransportController {
+        cfg: ArmConfig,
+        phase: Phase,
+        retries_remaining: u32,
+    }
+
+    impl TransportController {
+        pub fn new(cfg: ArmConfig) -> Self {
+            let retries_remaining = cfg.max_retries;
+            Self {
+                cfg,
+                phase: Phase::Start,
+                retries_remaining,
+            }
+        }
+
+        pub fn is_terminal(&self) -> bool {
+            matches!(self.phase, Phase::Done | Phase::Aborted)
+        }
+
+        fn retries_used(&self) -> u32 {
+            self.cfg.max_retries - self.retries_remaining
+        }
+
+        /// Perform at most one transition. Never blocks/sleeps.
+        pub fn step(&mut self, port: &mut impl TransportPort) -> StepOutcome {
+            let off = TasMode::Off as u32;
+            let rec = TasMode::Rec as u32;
+            let play = TasMode::Play as u32;
+            match self.phase {
+                Phase::Start => {
+                    port.set_playback_speed(self.cfg.catchup_speed);
+                    port.set_continue_from_frame(self.cfg.continue_from_frame);
+                    if port.mode() != off {
+                        // Can't Stop+Restart on one tick — defer Restart to OFF.
+                        port.send_command(TasCommand::Stop);
+                        self.phase = Phase::StopWaitOff;
+                    } else {
+                        port.reset_restart_state();
+                        port.send_command(TasCommand::Restart);
+                        self.phase = Phase::RestartWaitDone;
+                    }
+                    StepOutcome::InProgress
+                }
+                Phase::StopWaitOff => {
+                    if port.mode() == off {
+                        port.reset_restart_state();
+                        port.send_command(TasCommand::Restart);
+                        self.phase = Phase::RestartWaitDone;
+                    }
+                    StepOutcome::InProgress
+                }
+                Phase::RestartWaitDone => {
+                    if port.restart_state() == 2 {
+                        port.reset_restart_state();
+                        // cave2 reads these at ARM time — re-assert post-restart.
+                        port.set_continue_from_frame(self.cfg.continue_from_frame);
+                        port.set_playback_speed(self.cfg.catchup_speed);
+                        port.send_command(self.cfg.arm.command());
+                        if self.cfg.arm == Arm::Continue {
+                            self.phase = Phase::JudgeBucket;
+                            StepOutcome::InProgress
+                        } else {
+                            self.phase = Phase::Done;
+                            StepOutcome::Done {
+                                retries_used: self.retries_used(),
+                            }
+                        }
+                    } else {
+                        StepOutcome::InProgress
+                    }
+                }
+                Phase::JudgeBucket => {
+                    let mode = port.mode();
+                    if mode == rec {
+                        // Splice already fired (PLAY→REC) — bucket accepted.
+                        self.phase = Phase::Done;
+                        return StepOutcome::Done {
+                            retries_used: self.retries_used(),
+                        };
+                    }
+                    if mode != play {
+                        return StepOutcome::InProgress;
+                    }
+                    let pos = port.playback_pos();
+                    if pos == 0 {
+                        return StepOutcome::InProgress;
+                    }
+                    let target = match self.cfg.target {
+                        Some(t) => t,
+                        // CONT with no fingerprint can't be judged — accept.
+                        None => {
+                            self.phase = Phase::Done;
+                            return StepOutcome::Done {
+                                retries_used: self.retries_used(),
+                            };
+                        }
+                    };
+                    let verdict = judge_cont_bucket(
+                        port.play_coords(),
+                        pos,
+                        target.expected_start_bits,
+                        target.expected_first_moving,
+                    );
+                    match verdict {
+                        BucketVerdict::KeepWaiting => StepOutcome::InProgress,
+                        BucketVerdict::Match | BucketVerdict::NoSignal => {
+                            self.phase = Phase::Done;
+                            StepOutcome::Done {
+                                retries_used: self.retries_used(),
+                            }
+                        }
+                        BucketVerdict::WrongBucket { observed } => self.reroll(
+                            port,
+                            format!(
+                                "bucket mismatch (observed first-moving={:?}, expected={:?})",
+                                observed, target.expected_first_moving
+                            ),
+                        ),
+                        BucketVerdict::WrongStart => {
+                            self.reroll(port, "start mismatch".to_string())
+                        }
+                    }
+                }
+                Phase::Done => StepOutcome::Done {
+                    retries_used: self.retries_used(),
+                },
+                Phase::Aborted => StepOutcome::Aborted {
+                    reason: "CONT aborted".to_string(),
+                },
+            }
+        }
+
+        fn reroll(&mut self, port: &mut impl TransportPort, detail: String) -> StepOutcome {
+            if self.retries_remaining == 0 {
+                port.send_command(TasCommand::Stop);
+                self.phase = Phase::Aborted;
+                return StepOutcome::Aborted {
+                    reason: format!("{} after {} retries", detail, self.cfg.max_retries),
+                };
+            }
+            self.retries_remaining -= 1;
+            let attempt = self.cfg.max_retries - self.retries_remaining;
+            port.set_continue_from_frame(self.cfg.continue_from_frame);
+            port.set_playback_speed(self.cfg.catchup_speed);
+            port.send_command(TasCommand::Stop);
+            self.phase = Phase::StopWaitOff;
+            StepOutcome::Reroll {
+                attempt,
+                suggested_delay_ms: cont_retry_jitter_ms(attempt),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[derive(Default)]
+        struct FakePort {
+            mode: u32,
+            restart_state: u32,
+            playback_pos: u32,
+            play_coords: Vec<[f32; 3]>,
+            continue_from_frame: u32,
+            playback_speed: f32,
+            commands: Vec<TasCommand>,
+            /// Invariant tracker: Restart must NEVER be sent while mode != OFF.
+            restart_while_not_off: bool,
+        }
+
+        impl TransportPort for FakePort {
+            fn send_command(&mut self, cmd: TasCommand) {
+                if cmd == TasCommand::Restart && self.mode != TasMode::Off as u32 {
+                    self.restart_while_not_off = true;
+                }
+                self.commands.push(cmd);
+            }
+            fn mode(&self) -> u32 {
+                self.mode
+            }
+            fn restart_state(&self) -> u32 {
+                self.restart_state
+            }
+            fn reset_restart_state(&mut self) {
+                self.restart_state = 0;
+            }
+            fn playback_pos(&self) -> u32 {
+                self.playback_pos
+            }
+            fn play_coords(&self) -> &[[f32; 3]] {
+                &self.play_coords
+            }
+            fn set_continue_from_frame(&mut self, frame: u32) {
+                self.continue_from_frame = frame;
+            }
+            fn set_playback_speed(&mut self, speed: f32) {
+                self.playback_speed = speed;
+            }
+        }
+
+        fn cfg(arm: Arm, target: Option<BucketTarget>, max_retries: u32) -> ArmConfig {
+            ArmConfig {
+                arm,
+                catchup_speed: 12.0,
+                continue_from_frame: if arm == Arm::Continue { 1000 } else { 0 },
+                target,
+                max_retries,
+            }
+        }
+
+        fn bits(x: f32, y: f32, z: f32) -> [u32; 3] {
+            [x.to_bits(), y.to_bits(), z.to_bits()]
+        }
+
+        #[test]
+        fn rec_restart_serializes_stop_before_restart() {
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Rec, None, 0));
+
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress); // Start -> Stop
+            assert_eq!(p.commands, vec![TasCommand::Stop]);
+            // game hasn't gone OFF yet — must keep waiting, NOT send Restart
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress);
+            assert_eq!(p.commands, vec![TasCommand::Stop]);
+
+            p.mode = TasMode::Off as u32;
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress); // -> Restart
+            assert_eq!(p.commands.last(), Some(&TasCommand::Restart));
+
+            p.restart_state = 2;
+            assert_eq!(c.step(&mut p), StepOutcome::Done { retries_used: 0 });
+            assert_eq!(
+                p.commands,
+                vec![TasCommand::Stop, TasCommand::Restart, TasCommand::ArmRec]
+            );
+            assert!(!p.restart_while_not_off, "Restart sent while mode != OFF!");
+            assert!(c.is_terminal());
+        }
+
+        #[test]
+        fn play_from_off_skips_stop() {
+            let mut p = FakePort {
+                mode: TasMode::Off as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Play, None, 0));
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress); // Start -> Restart
+            assert_eq!(p.commands, vec![TasCommand::Restart]);
+            p.restart_state = 2;
+            assert_eq!(c.step(&mut p), StepOutcome::Done { retries_used: 0 });
+            assert_eq!(p.commands, vec![TasCommand::Restart, TasCommand::ArmPlay]);
+            assert_eq!(p.continue_from_frame, 0);
+        }
+
+        /// Drive the controller through restart until it's armed CONT and in the
+        /// JudgeBucket phase. Returns once ArmContinue has been sent.
+        fn drive_to_judge(c: &mut TransportController, p: &mut FakePort) {
+            // Start (mode REC -> Stop), go OFF, Restart, rs=2 -> ArmContinue.
+            c.step(p);
+            p.mode = TasMode::Off as u32;
+            c.step(p);
+            p.restart_state = 2;
+            c.step(p); // sends ArmContinue, phase -> JudgeBucket
+            assert_eq!(p.commands.last(), Some(&TasCommand::ArmContinue));
+            // game enters PLAY for the replay
+            p.mode = TasMode::Play as u32;
+        }
+
+        #[test]
+        fn cont_matches_correct_bucket() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Continue, Some(target), 30));
+            drive_to_judge(&mut c, &mut p);
+
+            // replay landed the right bucket: moves at frame 250
+            let mut coords = vec![[1.0f32, 2.0, 3.0]; 300];
+            coords[250] = [1.0, 2.0, 3.5];
+            p.play_coords = coords;
+            p.playback_pos = 260;
+
+            assert_eq!(c.step(&mut p), StepOutcome::Done { retries_used: 0 });
+            assert!(c.is_terminal());
+        }
+
+        #[test]
+        fn cont_wrong_bucket_rerolls_then_matches() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Continue, Some(target), 30));
+            drive_to_judge(&mut c, &mut p);
+
+            // wrong bucket: moves at 248, not 250
+            let mut wrong = vec![[1.0f32, 2.0, 3.0]; 300];
+            wrong[248] = [1.0, 2.0, 3.5];
+            p.play_coords = wrong;
+            p.playback_pos = 260;
+
+            match c.step(&mut p) {
+                StepOutcome::Reroll { attempt, .. } => assert_eq!(attempt, 1),
+                other => panic!("expected Reroll, got {:?}", other),
+            }
+            // reroll sent Stop and is waiting for OFF again
+            assert_eq!(p.commands.last(), Some(&TasCommand::Stop));
+
+            // complete the reroll restart, this time landing the right bucket
+            p.mode = TasMode::Off as u32;
+            c.step(&mut p); // -> Restart
+            p.restart_state = 2;
+            c.step(&mut p); // -> ArmContinue, JudgeBucket
+            p.mode = TasMode::Play as u32;
+            let mut right = vec![[1.0f32, 2.0, 3.0]; 300];
+            right[250] = [1.0, 2.0, 3.5];
+            p.play_coords = right;
+            p.playback_pos = 260;
+
+            assert_eq!(c.step(&mut p), StepOutcome::Done { retries_used: 1 });
+            assert!(!p.restart_while_not_off, "Restart sent while mode != OFF!");
+        }
+
+        #[test]
+        fn cont_aborts_after_exhausting_retries() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            // only 1 retry allowed
+            let mut c = TransportController::new(cfg(Arm::Continue, Some(target), 1));
+            let mut wrong = vec![[1.0f32, 2.0, 3.0]; 300];
+            wrong[248] = [1.0, 2.0, 3.5];
+
+            drive_to_judge(&mut c, &mut p);
+            p.play_coords = wrong.clone();
+            p.playback_pos = 260;
+            // first wrong bucket -> reroll (attempt 1, uses the only retry)
+            match c.step(&mut p) {
+                StepOutcome::Reroll { attempt, .. } => assert_eq!(attempt, 1),
+                other => panic!("expected Reroll, got {:?}", other),
+            }
+            p.mode = TasMode::Off as u32;
+            c.step(&mut p);
+            p.restart_state = 2;
+            c.step(&mut p);
+            p.mode = TasMode::Play as u32;
+            p.play_coords = wrong;
+            p.playback_pos = 260;
+            // second wrong bucket -> no retries left -> abort
+            match c.step(&mut p) {
+                StepOutcome::Aborted { reason } => assert!(reason.contains("bucket mismatch")),
+                other => panic!("expected Aborted, got {:?}", other),
+            }
+            assert!(c.is_terminal());
+        }
+
+        #[test]
+        fn wrong_start_rerolls() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Continue, Some(target), 30));
+            drive_to_judge(&mut c, &mut p);
+            // spawn position doesn't match the recording's start
+            p.play_coords = vec![[9.0f32, 9.0, 9.0]; 300];
+            p.playback_pos = 260;
+            match c.step(&mut p) {
+                StepOutcome::Reroll { attempt, .. } => assert_eq!(attempt, 1),
+                other => panic!("expected Reroll for wrong start, got {:?}", other),
+            }
+        }
+
+        #[test]
+        fn jitter_is_bounded_and_nonzero() {
+            for a in 1..=40 {
+                let j = cont_retry_jitter_ms(a);
+                assert!((1..=17).contains(&j), "jitter {} out of range", j);
+            }
+        }
+    }
+}
+
+// Wire the live shared-memory client into the shared transport state machine.
+// Inherent methods win for `self.method()` call syntax, so the same-named
+// trait methods (send_command/restart_state/reset_restart_state) delegate to
+// the inherent ones without recursing.
+#[cfg(windows)]
+impl transport::TransportPort for TasSharedMemoryClient {
+    fn send_command(&mut self, cmd: TasCommand) {
+        self.send_command(cmd);
+    }
+    fn mode(&self) -> u32 {
+        self.mode_volatile()
+    }
+    fn restart_state(&self) -> u32 {
+        self.restart_state()
+    }
+    fn reset_restart_state(&mut self) {
+        self.reset_restart_state();
+    }
+    fn playback_pos(&self) -> u32 {
+        self.playback_pos_volatile()
+    }
+    fn play_coords(&self) -> &[[f32; 3]] {
+        &self.state().play_coords[..]
+    }
+    fn set_continue_from_frame(&mut self, frame: u32) {
+        self.state_mut().continue_from_frame = frame;
+    }
+    fn set_playback_speed(&mut self, speed: f32) {
+        self.state_mut().playback_speed = speed;
+    }
+}
+
+#[cfg(not(windows))]
+impl transport::TransportPort for TasSharedMemoryClient {
+    fn send_command(&mut self, cmd: TasCommand) {
+        self.send_command(cmd);
+    }
+    fn mode(&self) -> u32 {
+        self.state().mode
+    }
+    fn restart_state(&self) -> u32 {
+        self.restart_state()
+    }
+    fn reset_restart_state(&mut self) {
+        self.reset_restart_state();
+    }
+    fn playback_pos(&self) -> u32 {
+        self.state().playback_pos
+    }
+    fn play_coords(&self) -> &[[f32; 3]] {
+        &self.state().play_coords[..]
+    }
+    fn set_continue_from_frame(&mut self, frame: u32) {
+        self.state_mut().continue_from_frame = frame;
+    }
+    fn set_playback_speed(&mut self, speed: f32) {
+        self.state_mut().playback_speed = speed;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
