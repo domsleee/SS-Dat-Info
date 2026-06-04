@@ -35,6 +35,7 @@ mod refresh_recording;
 mod regression;
 mod reliability;
 mod replay;
+mod restart_probe;
 mod save_reload;
 mod stop_play_flake;
 mod speed;
@@ -327,6 +328,13 @@ fn main() {
             }
             let report = reliability::run(iterations, speed);
             std::process::exit(if report.all_pass() { 0 } else { 1 });
+        }
+        "restart-probe" => {
+            // Measure the in-process F5 restart timeline (F5-press -> teleport
+            // -> first motion) to tell whether the short first-moving is a
+            // truncated countdown or an arm-timing offset.
+            let ok = restart_probe::run();
+            std::process::exit(if ok { 0 } else { 1 });
         }
         "cont-reliability" => {
             let mut iterations = 10u32;
