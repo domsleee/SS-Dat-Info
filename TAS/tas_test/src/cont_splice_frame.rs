@@ -32,10 +32,10 @@ fn locate() -> Option<PathBuf> {
     candidates.iter().find(|p| p.exists()).cloned()
 }
 
-pub fn run(splice_frame: u32, speed: f32) -> bool {
+pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
     println!(
-        "=== CONT-SPLICE-FRAME: continue at frame {} @ {}x (splice must land EXACTLY on {}) ===",
-        splice_frame, speed, splice_frame
+        "=== CONT-SPLICE-FRAME: catch up @ {}x → record @ {}x (splice must land EXACTLY on {}) ===",
+        catchup_speed, record_speed, splice_frame
     );
     let path = match locate() {
         Some(p) => p,
@@ -62,7 +62,12 @@ pub fn run(splice_frame: u32, speed: f32) -> bool {
     harness::ensure_exclusive_runtime_ownership(&mut client, "cont-splice-frame");
     replay::write_to_shared(&mut client, &rec);
     let rec_start = rec.rec_coords[0];
-    client.state_mut().playback_speed = speed;
+
+    // Realistic CONT profile: catch up to the splice FAST (e.g. 64x), then drop
+    // to a SLOW record speed (e.g. 0.25x) for the precise continued recording.
+    // The controller reads playback_speed at construction, so set the catch-up
+    // speed before arming.
+    client.state_mut().playback_speed = catchup_speed;
 
     let spliced =
         harness::restart_continue_and_splice_inprocess(&mut client, rec_start, splice_frame, RETRIES);
@@ -71,16 +76,37 @@ pub fn run(splice_frame: u32, speed: f32) -> bool {
         return false;
     }
 
-    let s = client.state();
-    let mode_rec = s.mode == TasMode::Rec as u32;
-    let seg_count = s.segment_count;
-    let recorded = s.recorded_count;
-    let splice_boundary = if seg_count >= 1 && (seg_count as usize) <= s.segment_boundaries.len() {
-        s.segment_boundaries[(seg_count - 1) as usize].frame
-    } else {
-        0
+    // Capture the just-spliced state BEFORE recording/stopping: the controller
+    // returns once mode==REC at the splice, so the splice frame and REC mode are
+    // observable here. (Reading after the stop below would always show OFF.)
+    let mode_rec = client.state().mode == TasMode::Rec as u32;
+    let seg_count = client.state().segment_count;
+    let splice_boundary = {
+        let s = client.state();
+        if seg_count >= 1 && (seg_count as usize) <= s.segment_boundaries.len() {
+            s.segment_boundaries[(seg_count - 1) as usize].frame
+        } else {
+            0
+        }
     };
-    let d = drift::compute_drift(s, splice_frame);
+    let recorded_at_splice = client.state().recorded_count;
+
+    // Now record at the SLOW speed for a short burst, exercising the
+    // catch-up→record speed transition. The splice boundary (captured at the
+    // splice moment) must be unaffected, and recording must advance.
+    println!(
+        "  Spliced (mode={}) — dropping to {}x and recording a short burst...",
+        if mode_rec { "REC" } else { "NOT REC" },
+        record_speed
+    );
+    client.state_mut().playback_speed = record_speed;
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let recorded_after_burst = client.state().recorded_count;
+    harness::stop(&mut client);
+
+    let recorded = recorded_after_burst;
+    let burst_frames = recorded_after_burst.saturating_sub(recorded_at_splice);
+    let d = drift::compute_drift(client.state(), splice_frame);
 
     println!();
     println!("  requested splice frame: {}", splice_frame);
@@ -94,13 +120,18 @@ pub fn run(splice_frame: u32, speed: f32) -> bool {
         recorded
     );
     println!(
+        "  recorded during burst:  {} frames @ {}x   (slow-record after catch-up)",
+        burst_frames, record_speed
+    );
+    println!(
         "  prefix drift [0..{}):    X={:.9}  Z={:.9}",
         splice_frame, d.max_drift_x, d.max_drift_z
     );
 
     let exact = splice_boundary == splice_frame;
     let drift_ok = d.max_drift_x == 0.0 && d.max_drift_z == 0.0;
-    if exact && mode_rec && drift_ok {
+    let recorded_advanced = burst_frames > 0;
+    if exact && mode_rec && drift_ok && recorded_advanced {
         println!(
             "\n*** CONT-SPLICE-FRAME PASSED: spliced at EXACT frame {} with zero drift ***",
             splice_frame
@@ -116,8 +147,8 @@ pub fn run(splice_frame: u32, speed: f32) -> bool {
             );
         }
         println!(
-            "\n*** CONT-SPLICE-FRAME FAILED: exact={} mode_rec={} drift_ok={} ***",
-            exact, mode_rec, drift_ok
+            "\n*** CONT-SPLICE-FRAME FAILED: exact={} mode_rec={} drift_ok={} recorded_advanced={} ***",
+            exact, mode_rec, drift_ok, recorded_advanced
         );
         false
     }

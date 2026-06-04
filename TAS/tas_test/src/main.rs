@@ -433,10 +433,12 @@ fn main() {
         }
         "cont-splice-frame" => {
             // "Continue continues on the correct frame": CONT at N must splice
-            // EXACTLY at frame N. 0.25x by default so the catch-up is slow and any
-            // overshoot is visible.
+            // EXACTLY at frame N. Realistic profile — catch up fast (64x) then
+            // record slow (0.25x), so the splice frame is precise while catch-up
+            // stays quick.
             let mut splice = 1000u32;
-            let mut speed = 0.25f32;
+            let mut catchup = 64.0f32;
+            let mut record_speed = 0.25f32;
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
@@ -444,8 +446,12 @@ fn main() {
                         splice = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(1000);
                         i += 2;
                     }
-                    "--speed" | "-s" => {
-                        speed = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0.25);
+                    "--catchup" => {
+                        catchup = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(64.0);
+                        i += 2;
+                    }
+                    "--record-speed" => {
+                        record_speed = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0.25);
                         i += 2;
                     }
                     _ => {
@@ -453,7 +459,7 @@ fn main() {
                     }
                 }
             }
-            let ok = cont_splice_frame::run(splice, speed);
+            let ok = cont_splice_frame::run(splice, catchup, record_speed);
             std::process::exit(if ok { 0 } else { 1 });
         }
         _ => {
