@@ -781,6 +781,20 @@ pub mod transport {
     /// bare controller saw 300). This pins the arm phase to match.
     pub const ARM_SETTLE_MS: u64 = 10;
 
+    /// Arm-settle delay for a given attempt. The arm phase shifts the OBSERVED
+    /// first-moving frame (~1 frame per ~8ms), and different recordings were
+    /// captured at slightly different arm phases (FE-tremendous wants 299,
+    /// FE-10065 298, FE-goodstart 300, full-run 296). A single fixed value only
+    /// straddles a 1-2 frame window, so a recording outside it never aligns. The
+    /// first attempt uses the common value; rerolls SWEEP the arm phase so any
+    /// reproducible recording's first-moving is reached within a few rerolls
+    /// (the precise fingerprint then verifies the trajectory). This is the
+    /// calibrated phase-step applied to the arm phase.
+    pub fn arm_settle_ms(attempt: u32) -> u64 {
+        const SWEEP: [u64; 7] = [ARM_SETTLE_MS, 5, 15, 0, 20, 25, 30];
+        SWEEP[(attempt as usize) % SWEEP.len()]
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Phase {
         Start,
@@ -882,10 +896,13 @@ pub mod transport {
                 Phase::RestartWaitDone => {
                     if port.restart_state() == 2 {
                         port.reset_restart_state();
-                        // Don't arm immediately — honour a fixed arm settle so the
-                        // arm phase (→ observed first-moving) matches the recording.
+                        // Don't arm immediately — honour an arm settle so the arm
+                        // phase (→ observed first-moving) matches the recording.
+                        // Sweep the settle across rerolls so any recording aligns.
                         self.phase = Phase::ArmSettle;
-                        StepOutcome::Wait { ms: ARM_SETTLE_MS }
+                        StepOutcome::Wait {
+                            ms: arm_settle_ms(self.retries_used()),
+                        }
                     } else {
                         StepOutcome::InProgress
                     }
