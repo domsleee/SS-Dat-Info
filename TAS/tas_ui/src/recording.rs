@@ -838,6 +838,7 @@ impl RecordingHistory {
             self.entries.push(marker);
             self.enforce_capacity();
         }
+        self.bump();
     }
 
     pub fn undo(&mut self) -> Option<&RecordingSnapshot> {
@@ -907,15 +908,24 @@ impl RecordingHistory {
     }
 
     pub fn set_pinned(&mut self, entry_id: u64, pinned: bool) -> bool {
-        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+        let mut changed = false;
+        let found = if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
             if e.pinned != pinned {
                 e.pinned = pinned;
-                self.bump();
+                changed = true;
             }
             true
         } else {
             false
+        };
+        if changed {
+            self.bump();
+            if !pinned {
+                // Unpinning can push the unpinned count back over the cap.
+                self.enforce_capacity();
+            }
         }
+        found
     }
 
     pub fn rename(&mut self, entry_id: u64, name: impl Into<String>) -> bool {
@@ -975,17 +985,13 @@ impl RecordingHistory {
             .next_entry_id
             .max(next_entry_id_floor)
             .max(max_id_plus_1);
+        // Respect the store's already-resolved cursor exactly (it fell back to
+        // the nearest available entry, or None). Do NOT silently jump to newest.
         self.current_index = current_entry_id
             .and_then(|id| self.entries.iter().position(|e| e.entry_id == id))
             .filter(|&i| self.entries[i].snapshot.is_some());
-        if self.current_index.is_none() {
-            self.current_index = self
-                .entries
-                .iter()
-                .enumerate()
-                .rev()
-                .find_map(|(idx, e)| e.snapshot.as_ref().map(|_| idx));
-        }
+        // A lowered cap (e.g. settings changed between sessions) trims on load.
+        self.enforce_capacity_preserving_none();
         self.bump();
     }
 
@@ -1125,6 +1131,30 @@ impl RecordingHistory {
     /// fits (so the effective total can exceed `capacity` if there are many
     /// pins — pins win).
     fn enforce_capacity(&mut self) {
+        self.evict_to_cap();
+        // After eviction (e.g. from a push), make sure something restorable is
+        // selected if nothing is.
+        if self.current_index.is_none() {
+            self.current_index = self
+                .entries
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(idx, entry)| entry.snapshot.as_ref().map(|_| idx));
+        }
+    }
+
+    /// Enforce the cap but leave a `None` cursor as `None` (used on load, where
+    /// the store already resolved the cursor and a deliberate `None` must stand).
+    fn enforce_capacity_preserving_none(&mut self) {
+        self.evict_to_cap();
+    }
+
+    /// Soft cap: `capacity` bounds the UNPINNED count. Pinned entries and the
+    /// current entry are never evicted; evicts the oldest unpinned, non-current
+    /// entry until the unpinned count fits (so total can exceed `capacity` when
+    /// there are many pins — pins win).
+    fn evict_to_cap(&mut self) {
         loop {
             let unpinned = self.entries.iter().filter(|e| !e.pinned).count();
             if unpinned <= self.capacity {
@@ -1144,14 +1174,6 @@ impl RecordingHistory {
             self.current_index = self
                 .current_index
                 .map(|idx| if idx > victim { idx - 1 } else { idx });
-        }
-        if self.current_index.is_none() {
-            self.current_index = self
-                .entries
-                .iter()
-                .enumerate()
-                .rev()
-                .find_map(|(idx, entry)| entry.snapshot.as_ref().map(|_| idx));
         }
     }
 
@@ -2260,6 +2282,61 @@ mod tests {
         // snapshot content survives the round-trip
         let a2 = h2.entries().iter().find(|e| e.label == "A").unwrap();
         assert!(a2.can_restore());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn push_save_marker_bumps_revision() {
+        let mut h = RecordingHistory::new(8);
+        h.push_snapshot(&state_with_ticks(5), "A");
+        let r = h.revision();
+        h.push_save_marker(&state_with_ticks(5), Path::new("x.tasrec"));
+        assert!(h.revision() > r, "save marker must bump revision");
+    }
+
+    #[test]
+    fn unpin_triggers_eviction() {
+        let mut h = RecordingHistory::new(2);
+        h.push_snapshot(&state_with_ticks(5), "A");
+        let a = h.entries()[0].entry_id;
+        h.set_pinned(a, true);
+        h.push_snapshot(&state_with_ticks(5), "B");
+        h.push_snapshot(&state_with_ticks(5), "C"); // current=C; A pinned + B,C unpinned
+        assert_eq!(h.len(), 3);
+        h.set_pinned(a, false); // now unpinned A,B,C = 3 > cap 2 -> evict oldest (A)
+        assert!(
+            !h.entries().iter().any(|e| e.entry_id == a),
+            "unpinned-over-cap A evicted"
+        );
+        assert_eq!(h.entries().iter().filter(|e| !e.pinned).count(), 2);
+    }
+
+    #[test]
+    fn apply_loaded_lowered_cap_trims() {
+        use crate::history_store_v2::HistoryStoreV2;
+        let dir = std::env::temp_dir().join(format!(
+            "ssb_captrim_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let mut h = RecordingHistory::new(10);
+        for i in 0..6 {
+            h.push_snapshot(&state_with_ticks(5), format!("S{}", i));
+        }
+        let cur = h.current_entry_id();
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store
+            .persist(&h.to_stored_entries(), cur, h.next_entry_id())
+            .unwrap();
+
+        let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let mut h2 = RecordingHistory::new(3); // smaller cap
+        h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
+        assert_eq!(
+            h2.entries().iter().filter(|e| !e.pinned).count(),
+            3,
+            "lowered cap trims unpinned on load"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

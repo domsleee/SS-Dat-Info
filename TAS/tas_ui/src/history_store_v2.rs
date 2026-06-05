@@ -105,6 +105,11 @@ pub struct HistoryStoreV2 {
     /// Blob info for ids that currently have a blob on disk (lets us skip
     /// re-serializing immutable blobs and carry checksums into the manifest).
     blobs: HashMap<u64, BlobInfo>,
+    /// Ids whose manifest entry references a blob that was missing/corrupt at
+    /// load. We preserve their blob metadata across re-persists so a transient
+    /// disappearance doesn't permanently demote a snapshot entry to a marker
+    /// (and so the entry recovers if the file reappears).
+    unavailable: HashMap<u64, BlobInfo>,
 }
 
 impl HistoryStoreV2 {
@@ -119,6 +124,7 @@ impl HistoryStoreV2 {
         let mut entries = Vec::new();
         let mut referenced = HashSet::new();
         let mut blobs = HashMap::new();
+        let mut unavailable: HashMap<u64, BlobInfo> = HashMap::new();
         let mut max_manifest_id = 0u64;
         let mut stored_next = 0u64;
         let mut persisted_current = None;
@@ -148,6 +154,13 @@ impl HistoryStoreV2 {
                                 "history entry {} ('{}') blob missing — kept but unavailable",
                                 me.entry_id, me.name
                             ));
+                            unavailable.insert(
+                                me.entry_id,
+                                BlobInfo {
+                                    size: me.size.unwrap_or(0),
+                                    checksum: expected,
+                                },
+                            );
                             (None, false)
                         }
                         Err(BlobError::Corrupt) => {
@@ -157,6 +170,13 @@ impl HistoryStoreV2 {
                                 "history entry {} ('{}') blob corrupt — quarantined, unavailable",
                                 me.entry_id, me.name
                             ));
+                            unavailable.insert(
+                                me.entry_id,
+                                BlobInfo {
+                                    size: me.size.unwrap_or(0),
+                                    checksum: expected,
+                                },
+                            );
                             (None, false)
                         }
                     },
@@ -177,14 +197,24 @@ impl HistoryStoreV2 {
             }
         }
 
-        // GC: delete blob files on disk not referenced by the manifest.
-        for id in &disk_ids {
-            if !referenced.contains(id) {
-                let p = blob_path(&dir, *id);
-                if std::fs::remove_file(&p).is_ok() {
-                    warnings.push(format!("removed orphan blob {}", p.display()));
+        // GC: delete blob files not referenced by the manifest — but ONLY when
+        // we actually loaded a usable manifest. If the manifest is absent or
+        // unparseable we must NOT delete blobs (that would turn a transiently
+        // bad manifest into permanent data loss).
+        if manifest.is_some() {
+            for id in &disk_ids {
+                if !referenced.contains(id) {
+                    let p = blob_path(&dir, *id);
+                    if std::fs::remove_file(&p).is_ok() {
+                        warnings.push(format!("removed orphan blob {}", p.display()));
+                    }
                 }
             }
+        } else if !disk_ids.is_empty() {
+            warnings.push(format!(
+                "no usable manifest — {} blob(s) preserved (not GC'd)",
+                disk_ids.len()
+            ));
         }
 
         let max_disk_id = disk_ids.iter().copied().max().unwrap_or(0);
@@ -202,6 +232,7 @@ impl HistoryStoreV2 {
                 dir,
                 referenced,
                 blobs,
+                unavailable,
             },
             LoadResult {
                 entries,
@@ -228,7 +259,16 @@ impl HistoryStoreV2 {
         let mut manifest_entries = Vec::with_capacity(entries.len());
         for e in entries {
             let (size, checksum) = match &e.snapshot {
-                None => (None, None),
+                None => {
+                    // No bytes in hand. If this id is a snapshot entry whose
+                    // blob is currently missing/corrupt, preserve its manifest
+                    // blob reference (don't demote it to a marker) so it can
+                    // recover if the file reappears.
+                    match self.unavailable.get(&e.entry_id) {
+                        Some(info) => (Some(info.size), Some(info.checksum)),
+                        None => (None, None),
+                    }
+                }
                 Some(snap) => {
                     if let Some(info) = self.blobs.get(&e.entry_id) {
                         (Some(info.size), Some(info.checksum))
@@ -274,6 +314,7 @@ impl HistoryStoreV2 {
             .filter(|id| !desired_ids.contains(id))
             .collect();
         for id in removed {
+            self.unavailable.remove(&id);
             if self.blobs.remove(&id).is_some() {
                 let p = blob_path(&self.dir, id);
                 if std::fs::remove_file(&p).is_ok() {
@@ -375,10 +416,14 @@ fn read_manifest(dir: &Path, warnings: &mut Vec<String>) -> Option<Manifest> {
             return None;
         }
     };
-    if manifest.magic != MAGIC || manifest.schema != SCHEMA {
+    if manifest.magic != MAGIC
+        || manifest.schema != SCHEMA
+        || manifest.blob_format != BLOB_FORMAT
+        || manifest.hash_algo != HASH_ALGO
+    {
         warnings.push(format!(
-            "manifest magic/schema mismatch ({}/{}) — ignored",
-            manifest.magic, manifest.schema
+            "manifest incompatible (magic={}, schema={}, blob_format={}, hash_algo={}) — ignored",
+            manifest.magic, manifest.schema, manifest.blob_format, manifest.hash_algo
         ));
         return None;
     }
@@ -772,6 +817,55 @@ mod tests {
         std::fs::remove_file(blob_path(&dir, 2)).unwrap();
         let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
         assert_eq!(res.current_entry_id, Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_manifest_preserves_blobs() {
+        let dir = tmp_dir("corruptman");
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store
+            .persist(&[entry(1, "A", false, 3), entry(2, "B", false, 3)], Some(2), 3)
+            .unwrap();
+        // Corrupt the manifest — must NOT trigger GC of the blobs.
+        std::fs::write(dir.join("manifest.json"), b"{ not valid json").unwrap();
+        let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        assert!(blob_path(&dir, 1).exists(), "blob 1 preserved");
+        assert!(blob_path(&dir, 2).exists(), "blob 2 preserved");
+        assert!(res.entries.is_empty(), "unusable manifest -> no entries");
+        assert!(res.warnings.iter().any(|w| w.contains("preserved")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unavailable_entry_not_demoted_to_marker_on_repersist() {
+        let dir = tmp_dir("undemote");
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store
+            .persist(&[entry(1, "A", false, 3), entry(2, "B", false, 3)], Some(2), 3)
+            .unwrap();
+        std::fs::remove_file(blob_path(&dir, 1)).unwrap(); // blob 1 disappears
+
+        let (mut store2, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        assert!(!res.entries[0].available, "1 unavailable on load");
+
+        // App re-persists: entry 1 returns with snapshot None (bridge couldn't
+        // load it), but it is STILL a Snapshot-kind entry.
+        let e1_none = StoredEntry {
+            snapshot: None,
+            ..entry(1, "A", false, 3)
+        };
+        store2
+            .persist(&[e1_none, entry(2, "B", false, 3)], Some(2), 3)
+            .unwrap();
+
+        // Reopen: 1 must remain a missing-blob snapshot (available == false),
+        // NOT a marker (which would be available == true).
+        let (_s3, res3) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        assert!(
+            !res3.entries[0].available,
+            "preserved as missing-blob entry, not demoted to a marker"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
