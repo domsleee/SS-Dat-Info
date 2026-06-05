@@ -15,6 +15,11 @@ pub struct Settings {
     // Playback
     pub playback_speed: f32,
     pub cont_catchup_speed: f32,
+
+    /// Max UNPINNED undo-history entries kept (the v2 store soft cap). Pinned
+    /// entries and the current entry are always kept. Default preserves the old
+    /// 500-entry depth so existing histories migrate without trimming.
+    pub history_cap: usize,
 }
 
 impl Default for Settings {
@@ -39,6 +44,7 @@ impl Default for Settings {
             // to the per-frame overhead ceiling so going higher is
             // diminishing returns.
             cont_catchup_speed: 64.0,
+            history_cap: 500,
         }
     }
 }
