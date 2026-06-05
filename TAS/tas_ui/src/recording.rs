@@ -1122,6 +1122,7 @@ impl RecordingHistory {
         }
 
         self.enforce_capacity();
+        self.bump(); // mark dirty so the (revision-gated) writer persists it
         Ok(())
     }
 
@@ -2283,6 +2284,21 @@ mod tests {
         let a2 = h2.entries().iter().find(|e| e.label == "A").unwrap();
         assert!(a2.can_restore());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_persisted_bumps_revision() {
+        // Migration relies on this: apply_persisted -> revision bumps ->
+        // the revision-gated writer persists the migrated history.
+        let persisted = {
+            let mut src = RecordingHistory::new(8);
+            src.push_snapshot(&state_with_ticks(5), "A");
+            src.to_persisted()
+        };
+        let mut h = RecordingHistory::new(8);
+        let r0 = h.revision();
+        h.apply_persisted(persisted).unwrap();
+        assert!(h.revision() > r0, "apply_persisted must bump revision");
     }
 
     #[test]
