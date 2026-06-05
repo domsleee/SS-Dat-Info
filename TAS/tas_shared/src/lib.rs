@@ -781,18 +781,30 @@ pub mod transport {
     /// bare controller saw 300). This pins the arm phase to match.
     pub const ARM_SETTLE_MS: u64 = 10;
 
-    /// Arm-settle delay for a given attempt. The arm phase shifts the OBSERVED
-    /// first-moving frame (~1 frame per ~8ms), and different recordings were
-    /// captured at slightly different arm phases (FE-tremendous wants 299,
-    /// FE-10065 298, FE-goodstart 300, full-run 296). A single fixed value only
-    /// straddles a 1-2 frame window, so a recording outside it never aligns. The
-    /// first attempt uses the common value; rerolls SWEEP the arm phase so any
-    /// reproducible recording's first-moving is reached within a few rerolls
-    /// (the precise fingerprint then verifies the trajectory). This is the
-    /// calibrated phase-step applied to the arm phase.
-    pub fn arm_settle_ms(attempt: u32) -> u64 {
-        const SWEEP: [u64; 7] = [ARM_SETTLE_MS, 5, 15, 0, 20, 25, 30];
-        SWEEP[(attempt as usize) % SWEEP.len()]
+    /// Observed first-moving frame when the arm fires with ZERO settle, and the
+    /// ms of settle that shifts the observed first-moving by one frame (the arm
+    /// arms later → shorter remaining countdown → smaller first-moving). Both
+    /// empirical (FE-10065: 0ms→300, 20ms→~297.5).
+    pub const OBSERVED_AT_ZERO_SETTLE: i64 = 300;
+    pub const ARM_SETTLE_MS_PER_FRAME: i64 = 8;
+
+    /// Arm-settle delay (ms) for a given attempt. Rather than blindly sweeping,
+    /// COMPUTE the settle that targets the recording's known first-moving
+    /// (`observed ≈ OBSERVED_AT_ZERO_SETTLE - settle/MS_PER_FRAME`), then dither
+    /// a few frames around it to absorb the ±1-2 frame restart variance. So a
+    /// recording whose first-moving is an outlier (FE-goodstart=300) is targeted
+    /// on attempt 0 instead of found ~1-in-10. Deterministic calibration applied
+    /// to the arm phase.
+    pub fn arm_settle_ms(attempt: u32, expected_first_moving: Option<u32>) -> u64 {
+        let base = match expected_first_moving {
+            Some(fm) => {
+                ((OBSERVED_AT_ZERO_SETTLE - fm as i64) * ARM_SETTLE_MS_PER_FRAME).clamp(0, 48)
+            }
+            None => ARM_SETTLE_MS as i64,
+        };
+        // Dither ±frames around the target (in ms) for the restart variance.
+        const DITHER: [i64; 7] = [0, 8, -8, 16, -16, 24, -24];
+        (base + DITHER[(attempt as usize) % DITHER.len()]).clamp(0, 64) as u64
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -900,8 +912,10 @@ pub mod transport {
                         // phase (→ observed first-moving) matches the recording.
                         // Sweep the settle across rerolls so any recording aligns.
                         self.phase = Phase::ArmSettle;
+                        let expected_fm =
+                            self.cfg.target.and_then(|t| t.expected_first_moving);
                         StepOutcome::Wait {
-                            ms: arm_settle_ms(self.retries_used()),
+                            ms: arm_settle_ms(self.retries_used(), expected_fm),
                         }
                     } else {
                         StepOutcome::InProgress
