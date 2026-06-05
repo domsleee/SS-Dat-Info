@@ -390,7 +390,11 @@ struct TasApp {
     show_pico_panel: bool,
     pico: PicoState,
     history: RecordingHistory,
-    history_store: Option<history_store::HistoryStore>,
+    history_writer: Option<history_store_v2::HistoryWriter>,
+    /// `history.revision()` value as of the last persist (dirty detection).
+    last_persisted_revision: u64,
+    /// Soft cap (max unpinned entries) — from settings.
+    history_cap: usize,
     recovery_store: Option<recording::RecoveryStore>,
     pending_recovery: Option<recording::RecoveryCheckpoint>,
     log_lines: Vec<String>,
@@ -483,18 +487,46 @@ impl TasApp {
         };
 
         let settings = settings::Settings::load();
-        let mut history_load_notice = None;
-        let pending_history = match history_store::load_latest_history() {
-            Ok(history) => history,
-            Err(err) => {
-                history_load_notice = Some(format!("History restore disabled: {}", err));
+        // v2 file-per-entry history store. Open (loads existing), else migrate
+        // the legacy history.json once (with a safety backup).
+        let history_cap = settings.history_cap.max(1);
+        let mut history = RecordingHistory::new(history_cap);
+        let history_dir = history_store_v2::default_history_dir();
+        let mut history_notices: Vec<String> = Vec::new();
+        let history_writer = match history_store_v2::HistoryWriter::open(history_dir.clone()) {
+            Ok((writer, load)) => {
+                if load.entries.is_empty() {
+                    // Possibly fresh — migrate legacy history.json once. No-ops
+                    // if a v2 manifest already exists or there's no legacy data.
+                    match history_store_v2::migrate_legacy(&history_dir) {
+                        Ok(Some((backup, persisted))) => match history.apply_persisted(persisted) {
+                            Ok(()) => history_notices.push(format!(
+                                "Migrated legacy history ({} entries) → {} (backup: {})",
+                                history.len(),
+                                history_dir.display(),
+                                backup.display()
+                            )),
+                            Err(e) => {
+                                history_notices.push(format!("Legacy migration parse failed: {}", e))
+                            }
+                        },
+                        Ok(None) => {}
+                        Err(e) => history_notices.push(format!("Legacy migration skipped: {}", e)),
+                    }
+                } else {
+                    for w in &load.warnings {
+                        history_notices.push(format!("History: {}", w));
+                    }
+                    history.apply_loaded(load.entries, load.current_entry_id, load.next_entry_id);
+                }
+                history_notices.push(format!("History store: {}", history_dir.display()));
+                Some(writer)
+            }
+            Err(e) => {
+                history_notices.push(format!("History store disabled: {}", e));
                 None
             }
         };
-        let history_store = history_store::HistoryStore::new().ok();
-        let history_store_notice = history_store
-            .as_ref()
-            .map(|store| format!("History autosave: {}", store.path().display()));
         let mut recovery_store = recording::RecoveryStore::new().ok();
         let recovery_store_notice = recovery_store
             .as_ref()
@@ -512,22 +544,17 @@ impl TasApp {
         } else {
             None
         };
-        let log_file = history_store
-            .as_ref()
-            .and_then(|s| open_session_log_file(s.path()));
+        let log_file = open_session_log_file(&history_dir);
         let mut app = Self {
             shared,
             connect_error,
             show_config: settings.show_config,
             show_pico_panel: settings.show_pico_panel,
             pico: PicoState::new(),
-            // 500 entries × ~200 KB JSON-bloated ≈ 100 MB worst case on
-            // disk + RAM. IntelliJ-style local-history range. If we
-            // ever hit this cap in real use, revisit format efficiency
-            // (gzip / bincode / per-snapshot .tasrec blobs) before
-            // raising further.
-            history: RecordingHistory::new(500),
-            history_store,
+            history,
+            history_writer,
+            last_persisted_revision: 0,
+            history_cap,
             recovery_store,
             pending_recovery,
             log_lines: Vec::new(),
@@ -579,17 +606,7 @@ impl TasApp {
         }
         // Pico auto-detected but panel hidden by default (use View menu to show)
         let _ = app.pico.auto_detected;
-        if let Some(loaded) = pending_history {
-            let source = loaded.path.display().to_string();
-            match app.history.apply_persisted(loaded.history) {
-                Ok(()) => app.push_log(&format!("Recovered history from {}", source)),
-                Err(err) => app.push_log(&format!("History restore skipped: {}", err)),
-            }
-        }
-        if let Some(msg) = history_store_notice {
-            app.push_log(&msg);
-        }
-        if let Some(msg) = history_load_notice {
+        for msg in history_notices {
             app.push_log(&msg);
         }
         if let Some(msg) = recovery_store_notice {
@@ -977,11 +994,20 @@ impl TasApp {
     }
 
     fn persist_history_if_needed(&mut self) {
-        let _t = std::time::Instant::now();
-        let persist_result = match self.history_store.as_mut() {
-            Some(store) => Some(store.persist_if_changed(&self.history)),
-            None => None,
+        let revision = self.history.revision();
+        if revision == self.last_persisted_revision {
+            return; // nothing changed since the last persist
+        }
+        let Some(writer) = self.history_writer.as_ref() else {
+            return;
         };
+        let _t = std::time::Instant::now();
+        // UI-thread cost is only the clone; the worker does serialize + disk.
+        let entries = self.history.to_stored_entries();
+        let current = self.history.current_entry_id();
+        let next = self.history.next_entry_id();
+        writer.persist(entries, current, next);
+        self.last_persisted_revision = revision;
         let dt = _t.elapsed();
         if dt.as_millis() > 30 {
             self.log_lines.push(format!(
@@ -989,11 +1015,6 @@ impl TasApp {
                 dt.as_millis(),
                 self.history.len()
             ));
-        }
-
-        if let Some(Err(err)) = persist_result {
-            self.history_store = None;
-            self.push_log(&format!("History autosave disabled: {}", err));
         }
     }
 
@@ -1568,8 +1589,13 @@ impl eframe::App for TasApp {
             show_log: self.show_log,
             playback_speed: self.playback_speed_for_settings(),
             cont_catchup_speed: self.cont_catchup_multiplier,
+            history_cap: self.history_cap,
         };
         s.save();
+        // Make sure the latest history is flushed to disk before we exit.
+        if let Some(writer) = self.history_writer.as_ref() {
+            writer.flush();
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -1831,9 +1857,9 @@ impl eframe::App for TasApp {
         // Right-side history panel (optional)
         let mut history_actions = Vec::new();
         let history_dir = self
-            .history_store
+            .history_writer
             .as_ref()
-            .and_then(|store| store.path().parent().map(|path| path.to_path_buf()));
+            .map(|_| history_store_v2::default_history_dir());
         let mut open_history_dir = false;
         if self.show_history {
             egui::SidePanel::right("history_panel")
@@ -1848,11 +1874,8 @@ impl eframe::App for TasApp {
                             egui::RichText::new(format!("History · {}", self.history.len()))
                                 .strong(),
                         );
-                        if let Some(store) = self.history_store.as_ref() {
-                            title.on_hover_text(format!(
-                                "Autosave: {}",
-                                store.path().display()
-                            ));
+                        if let Some(dir) = history_dir.as_ref() {
+                            title.on_hover_text(format!("Autosave: {}", dir.display()));
                         }
                         if history_dir.is_some() {
                             ui.with_layout(
@@ -2475,7 +2498,9 @@ mod tests {
             show_pico_panel: false,
             pico: PicoState::new(),
             history: RecordingHistory::new(64),
-            history_store: None,
+            history_writer: None,
+            last_persisted_revision: 0,
+            history_cap: 64,
             recovery_store: None,
             pending_recovery: None,
             log_lines: Vec::new(),

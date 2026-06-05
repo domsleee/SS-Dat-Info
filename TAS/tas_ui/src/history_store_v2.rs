@@ -15,6 +15,8 @@ use crate::recording::{HistoryEntryKind, PersistedSnapshot};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Sender};
+use std::thread::JoinHandle;
 
 const MAGIC: &str = "ssb-history";
 const SCHEMA: u32 = 1;
@@ -351,6 +353,147 @@ impl HistoryStoreV2 {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+}
+
+/// Default v2 store directory: `<history-root>/history/`.
+pub fn default_history_dir() -> PathBuf {
+    crate::history_store::default_history_root_dir().join("history")
+}
+
+/// If there is no v2 manifest yet but a legacy `history.json` exists, copy a
+/// timestamped backup into the v2 dir and return the parsed legacy history for
+/// the caller to apply + persist. Returns `None` if already on v2 or there's no
+/// legacy data. Non-destructive: the original legacy files are left in place.
+pub fn migrate_legacy(
+    v2_dir: &Path,
+) -> Result<Option<(PathBuf, crate::recording::PersistedHistory)>, String> {
+    migrate_legacy_in(&crate::history_store::default_history_root_dir(), v2_dir)
+}
+
+fn migrate_legacy_in(
+    legacy_root: &Path,
+    v2_dir: &Path,
+) -> Result<Option<(PathBuf, crate::recording::PersistedHistory)>, String> {
+    if v2_dir.join("manifest.json").exists() {
+        return Ok(None); // already on v2 (incl. a deliberately-empty store)
+    }
+    let loaded = match crate::history_store::load_latest_history_from_root(legacy_root)? {
+        Some(l) => l,
+        None => return Ok(None), // no legacy data to migrate
+    };
+    std::fs::create_dir_all(v2_dir)
+        .map_err(|e| format!("failed to create v2 dir {}: {}", v2_dir.display(), e))?;
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let backup = v2_dir.join(format!("legacy-backup-{}.json", ts));
+    std::fs::copy(&loaded.path, &backup).map_err(|e| {
+        format!(
+            "failed to back up legacy history {} -> {}: {}",
+            loaded.path.display(),
+            backup.display(),
+            e
+        )
+    })?;
+    Ok(Some((backup, loaded.history)))
+}
+
+/// Background writer: owns the store on a worker thread so the expensive
+/// serialize + disk writes never touch the UI thread. The UI thread only
+/// clones `to_stored_entries()` and hands it off. Bursts coalesce to the latest.
+pub struct HistoryWriter {
+    tx: Option<Sender<WriteMsg>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+enum WriteMsg {
+    Persist {
+        entries: Vec<StoredEntry>,
+        current_entry_id: Option<u64>,
+        next_entry_id: u64,
+    },
+    Flush(Sender<()>),
+}
+
+impl HistoryWriter {
+    /// Open (loading existing data) and spawn the writer thread.
+    pub fn open(dir: PathBuf) -> Result<(Self, LoadResult), String> {
+        let (store, load) = HistoryStoreV2::open_in(dir)?;
+        let (tx, rx) = channel::<WriteMsg>();
+        let worker = std::thread::Builder::new()
+            .name("history-v2-writer".into())
+            .spawn(move || {
+                let mut store = store;
+                while let Ok(msg) = rx.recv() {
+                    // Coalesce: keep only the newest desired state (each job is
+                    // the full set; the store diffs it against disk), and answer
+                    // the latest flush after writing.
+                    let mut latest: Option<(Vec<StoredEntry>, Option<u64>, u64)> = None;
+                    let mut ack: Option<Sender<()>> = None;
+                    let mut next = Some(msg);
+                    while let Some(m) = next {
+                        match m {
+                            WriteMsg::Persist {
+                                entries,
+                                current_entry_id,
+                                next_entry_id,
+                            } => latest = Some((entries, current_entry_id, next_entry_id)),
+                            WriteMsg::Flush(a) => ack = Some(a),
+                        }
+                        next = rx.try_recv().ok();
+                    }
+                    if let Some((entries, current, next_id)) = latest {
+                        if let Err(e) = store.persist(&entries, current, next_id) {
+                            eprintln!("[history v2] persist failed: {}", e);
+                        }
+                    }
+                    if let Some(ack) = ack {
+                        let _ = ack.send(());
+                    }
+                }
+            })
+            .map_err(|e| format!("failed to spawn history writer: {}", e))?;
+        Ok((
+            Self {
+                tx: Some(tx),
+                worker: Some(worker),
+            },
+            load,
+        ))
+    }
+
+    pub fn persist(
+        &self,
+        entries: Vec<StoredEntry>,
+        current_entry_id: Option<u64>,
+        next_entry_id: u64,
+    ) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(WriteMsg::Persist {
+                entries,
+                current_entry_id,
+                next_entry_id,
+            });
+        }
+    }
+
+    /// Block until every queued write has hit disk.
+    pub fn flush(&self) {
+        if let Some(tx) = &self.tx {
+            let (a, r) = channel();
+            if tx.send(WriteMsg::Flush(a)).is_ok() {
+                let _ = r.recv();
+            }
+        }
+    }
+}
+
+impl Drop for HistoryWriter {
+    fn drop(&mut self) {
+        self.flush();
+        self.tx = None;
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
+        }
     }
 }
 
@@ -867,5 +1010,39 @@ mod tests {
             "preserved as missing-blob entry, not demoted to a marker"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_legacy_backs_up_and_returns_history() {
+        let root = tmp_dir("legacyroot");
+        let session = root.join("2026-06-06-00-00-00");
+        std::fs::create_dir_all(&session).unwrap();
+        // Minimal legacy history.json (PersistedHistory JSON shape).
+        let legacy = serde_json::json!({
+            "version": 2, "saved_at": "x", "current_index": 0,
+            "entries": [ {
+                "label": "A", "timestamp": "00:00:00",
+                "created_at_iso": "2026-06-06T00:00:00+00:00",
+                "kind": "snapshot", "start_tick": 0, "end_tick": 3, "first_moving": null,
+                "snapshot": { "recorded_count": 3, "input_log": [1,2,3],
+                              "rec_coords": [[0.0,0.0,0.0],[1.0,0.0,0.0],[2.0,0.0,0.0]] }
+            } ]
+        });
+        std::fs::write(session.join("history.json"), legacy.to_string()).unwrap();
+
+        let v2 = tmp_dir("v2dir");
+        let (backup, persisted) = migrate_legacy_in(&root, &v2)
+            .unwrap()
+            .expect("should migrate legacy data");
+        assert!(backup.exists(), "legacy backup copied");
+        assert_eq!(persisted.entries.len(), 1);
+        assert_eq!(persisted.entries[0].label, "A");
+
+        // Once a v2 manifest exists, migration must no-op (don't re-import).
+        std::fs::write(v2.join("manifest.json"), b"{}").unwrap();
+        assert!(migrate_legacy_in(&root, &v2).unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&v2);
     }
 }

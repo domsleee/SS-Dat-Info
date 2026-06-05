@@ -165,7 +165,9 @@ pub fn load_latest_history() -> Result<Option<LoadedHistory>, String> {
     load_latest_history_from_root(&default_history_root_dir())
 }
 
-fn load_latest_history_from_root(root: &Path) -> Result<Option<LoadedHistory>, String> {
+pub(crate) fn load_latest_history_from_root(
+    root: &Path,
+) -> Result<Option<LoadedHistory>, String> {
     if !root.exists() {
         return Ok(None);
     }
@@ -272,7 +274,7 @@ fn session_dir_name() -> String {
     chrono::Local::now().format("%Y-%m-%d-%H-%M-%S").to_string()
 }
 
-fn default_history_root_dir() -> PathBuf {
+pub fn default_history_root_dir() -> PathBuf {
     user_home_dir()
         .map(|home| home.join(".ssb-inspector"))
         .unwrap_or_else(|| PathBuf::from(".ssb-inspector"))
