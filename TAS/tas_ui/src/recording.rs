@@ -682,7 +682,7 @@ impl HistoryEntry {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct PersistedSnapshot {
     pub recorded_count: u32,
     pub input_log: Vec<u8>,
@@ -1637,15 +1637,39 @@ mod tests {
             let snap = RecordingSnapshot::from_state(&state);
             history.push_snapshot_data_with_session(snap, format!("entry {}", k), 0, 600 + k);
         }
-        let t = Instant::now();
         let payload = history.to_persisted();
+
+        let t = Instant::now();
         let json = serde_json::to_string_pretty(&payload).unwrap();
-        let dt = t.elapsed();
+        let json_dt = t.elapsed();
+
+        let t = Instant::now();
+        let bin = bincode::serialize(&payload).unwrap();
+        let bin_dt = t.elapsed();
+
+        // Load side (startup recovery parses the whole file).
+        let t = Instant::now();
+        let _: PersistedHistory = serde_json::from_str(&json).unwrap();
+        let json_load = t.elapsed();
+        let t = Instant::now();
+        let _: PersistedHistory = bincode::deserialize(&bin).unwrap();
+        let bin_load = t.elapsed();
         println!(
-            "\n>>> history serialize: {} entries -> {} MB JSON in {:?}\n",
+            "\n    LOAD:  JSON {:?}   bincode {:?}   ({:.1}x faster)",
+            json_load,
+            bin_load,
+            json_load.as_secs_f64() / bin_load.as_secs_f64()
+        );
+
+        println!(
+            "\n>>> {} entries\n    JSON:    {} MB  serialize {:?}\n    bincode: {} MB  serialize {:?}\n    binary is {:.1}x smaller, {:.1}x faster to serialize\n",
             history.len(),
             json.len() / 1_000_000,
-            dt
+            json_dt,
+            bin.len() / 1_000_000,
+            bin_dt,
+            json.len() as f64 / bin.len() as f64,
+            json_dt.as_secs_f64() / bin_dt.as_secs_f64(),
         );
     }
 
