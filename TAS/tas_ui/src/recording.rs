@@ -1619,6 +1619,36 @@ mod tests {
 
     // ===== RecoveryStore =====
 
+    // Is the 3.6s history persist a debug-build artifact? Run debug vs release:
+    //   cargo test -p tas_ui measure_history_serialize -- --ignored --nocapture
+    //   cargo test --release -p tas_ui measure_history_serialize -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn measure_history_serialize() {
+        use std::time::Instant;
+        let mut history = RecordingHistory::new(256);
+        let mut state = zeroed_state();
+        for i in 0..600usize {
+            state.rec_coords[i] = [i as f32, 1.0, 2.0];
+            state.input_log[i] = (i % 4) as u8;
+        }
+        for k in 0..190u32 {
+            state.recorded_count = 600 + k; // vary to defeat dedup
+            let snap = RecordingSnapshot::from_state(&state);
+            history.push_snapshot_data_with_session(snap, format!("entry {}", k), 0, 600 + k);
+        }
+        let t = Instant::now();
+        let payload = history.to_persisted();
+        let json = serde_json::to_string_pretty(&payload).unwrap();
+        let dt = t.elapsed();
+        println!(
+            "\n>>> history serialize: {} entries -> {} MB JSON in {:?}\n",
+            history.len(),
+            json.len() / 1_000_000,
+            dt
+        );
+    }
+
     // Measurement (not a pass/fail gate). Run with:
     //   cargo test -p tas_ui measure_rec_frame_cost -- --ignored --nocapture
     #[test]

@@ -976,10 +976,19 @@ impl TasApp {
     }
 
     fn persist_history_if_needed(&mut self) {
+        let _t = std::time::Instant::now();
         let persist_result = match self.history_store.as_mut() {
             Some(store) => Some(store.persist_if_changed(&self.history)),
             None => None,
         };
+        let dt = _t.elapsed();
+        if dt.as_millis() > 30 {
+            self.log_lines.push(format!(
+                "[perf] history persist (ui clone+handoff): {}ms ({} entries)",
+                dt.as_millis(),
+                self.history.len()
+            ));
+        }
 
         if let Some(Err(err)) = persist_result {
             self.history_store = None;
@@ -1161,12 +1170,18 @@ impl TasApp {
             return;
         };
 
+        let _t = std::time::Instant::now();
         let _ = self.history.push_snapshot_data_with_session(
             snapshot.clone(),
             session_context.label.clone(),
             session_context.start_tick,
             session_context.end_tick,
         );
+        let dt = _t.elapsed();
+        if dt.as_millis() > 30 {
+            self.log_lines
+                .push(format!("[perf] history.push_snapshot: {}ms", dt.as_millis()));
+        }
         self.persist_recovery_snapshot_if_needed(snapshot, &session_context, true);
     }
 
@@ -1620,8 +1635,14 @@ impl eframe::App for TasApp {
                 }
                 // REC stopped (mode went from REC to OFF)
                 if self.last_mode == 1 && current_mode == 0 {
+                    let _t = std::time::Instant::now();
                     self.segment_tracker.on_rec_stop(recorded);
                     self.finalize_recording_session(&state_snapshot, recorded);
+                    let dt = _t.elapsed();
+                    if dt.as_millis() > 30 {
+                        self.log_lines
+                            .push(format!("[perf] REC-stop finalize: {}ms", dt.as_millis()));
+                    }
                 }
                 self.last_mode = current_mode;
             }
