@@ -1108,19 +1108,20 @@ impl TasApp {
             return;
         }
 
-        let persist_result = match self.recovery_store.as_mut() {
-            Some(store) => Some(store.persist_snapshot_if_needed(
-                snapshot,
-                &self.segment_tracker.segments,
-                session,
-                force,
-            )),
+        // Decide on the UI thread (throttle), but run the ~12ms checkpoint disk
+        // write OFF it — otherwise STOP (which forces a write on REC-stop) and
+        // REC (a write every 250ms debounce) hitch on disk I/O. Best-effort: a
+        // failed background write just means a slightly staler recovery file.
+        let job = match self.recovery_store.as_mut() {
+            Some(store) => {
+                store.take_write_job(snapshot, &self.segment_tracker.segments, session, force)
+            }
             None => None,
         };
-
-        if let Some(Err(err)) = persist_result {
-            self.recovery_store = None;
-            self.push_log(&format!("Crash recovery disabled: {}", err));
+        if let Some(job) = job {
+            std::thread::spawn(move || {
+                let _ = job.write();
+            });
         }
     }
 

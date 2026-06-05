@@ -159,6 +159,41 @@ impl RecoveryStore {
         self.persist_snapshot_if_needed(&snapshot, segments, session, force)
     }
 
+    /// Decide whether a checkpoint is due (throttle/dedup), and if so return a
+    /// self-contained [`RecoveryWriteJob`]. The job's ~12ms disk write can then
+    /// run OFF the UI thread (so STOP / REC don't hitch). The throttle state is
+    /// updated here as if the write happened.
+    pub fn take_write_job(
+        &mut self,
+        snapshot: &RecordingSnapshot,
+        segments: &[Segment],
+        session: &RecoverySessionContext,
+        force: bool,
+    ) -> Option<RecoveryWriteJob> {
+        if snapshot.recorded_count == 0 {
+            return None;
+        }
+        if !force {
+            if snapshot.recorded_count <= self.last_recorded_count {
+                return None;
+            }
+            if let Some(last_write_at) = self.last_write_at {
+                if last_write_at.elapsed() < self.debounce {
+                    return None;
+                }
+            }
+        }
+        self.last_recorded_count = snapshot.recorded_count;
+        self.last_write_at = Some(Instant::now());
+        Some(RecoveryWriteJob {
+            snapshot: snapshot.clone(),
+            segments: segments.to_vec(),
+            session: session.clone(),
+            recording_path: self.recording_path.clone(),
+            metadata_path: self.metadata_path.clone(),
+        })
+    }
+
     pub fn persist_snapshot_if_needed(
         &mut self,
         snapshot: &RecordingSnapshot,
@@ -166,33 +201,42 @@ impl RecoveryStore {
         session: &RecoverySessionContext,
         force: bool,
     ) -> Result<bool, String> {
-        if snapshot.recorded_count == 0 {
-            return Ok(false);
-        }
-        if !force {
-            if snapshot.recorded_count <= self.last_recorded_count {
-                return Ok(false);
+        match self.take_write_job(snapshot, segments, session, force) {
+            Some(job) => {
+                job.write()?;
+                Ok(true)
             }
-            if let Some(last_write_at) = self.last_write_at {
-                if last_write_at.elapsed() < self.debounce {
-                    return Ok(false);
-                }
-            }
+            None => Ok(false),
         }
+    }
+}
 
+/// A self-contained recovery checkpoint write. Owns everything it needs so the
+/// disk write (~12ms) can be moved onto a background thread, keeping STOP and
+/// REC snappy on the UI thread.
+pub struct RecoveryWriteJob {
+    snapshot: RecordingSnapshot,
+    segments: Vec<Segment>,
+    session: RecoverySessionContext,
+    recording_path: PathBuf,
+    metadata_path: PathBuf,
+}
+
+impl RecoveryWriteJob {
+    pub fn write(self) -> Result<(), String> {
         let mut state = tas_shared::zeroed_boxed();
-        snapshot.restore_to(&mut state);
+        self.snapshot.restore_to(&mut state);
 
         let tmp_recording_path = temp_path_for(&self.recording_path);
-        RecordingFile::save_with_segments(&state, &tmp_recording_path, segments)?;
+        RecordingFile::save_with_segments(&state, &tmp_recording_path, &self.segments)?;
         atomic_replace_file(&tmp_recording_path, &self.recording_path)?;
 
         let metadata = RecoveryMetadata {
             version: 1,
             saved_at: chrono::Local::now().to_rfc3339(),
-            recorded_count: snapshot.recorded_count,
-            segment_count: segments.len(),
-            session: session.clone(),
+            recorded_count: self.snapshot.recorded_count,
+            segment_count: self.segments.len(),
+            session: self.session,
         };
         let metadata_json = serde_json::to_vec_pretty(&metadata)
             .map_err(|e| format!("failed to serialize recovery metadata: {}", e))?;
@@ -206,12 +250,11 @@ impl RecoveryStore {
             )
         })?;
         atomic_replace_file(&tmp_metadata_path, &self.metadata_path)?;
-
-        self.last_recorded_count = snapshot.recorded_count;
-        self.last_write_at = Some(Instant::now());
-        Ok(true)
+        Ok(())
     }
+}
 
+impl RecoveryStore {
     pub fn load_pending(&self) -> Result<Option<RecoveryCheckpoint>, String> {
         if !self.metadata_path.exists() || !self.recording_path.exists() {
             return Ok(None);
@@ -1575,6 +1618,46 @@ mod tests {
     }
 
     // ===== RecoveryStore =====
+
+    // Measurement (not a pass/fail gate). Run with:
+    //   cargo test -p tas_ui measure_rec_frame_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn measure_rec_frame_cost() {
+        use std::time::Instant;
+        let mut state = zeroed_state();
+        state.recorded_count = 60000;
+        for i in 0..60000usize {
+            state.rec_coords[i] = [i as f32 * 0.1, 1.0, 2.0];
+            state.input_log[i] = (i % 4) as u8;
+        }
+
+        // 1) Per-frame snapshot cost (built EVERY frame during REC).
+        let n = 500u32;
+        let t = Instant::now();
+        for _ in 0..n {
+            let s = RecordingSnapshot::from_state(&state);
+            std::hint::black_box(&s);
+        }
+        let per_snap = t.elapsed() / n;
+        println!("\n>>> from_state (per-frame snapshot): {:?} per call", per_snap);
+
+        // 2) Disk-write cost (throttled, fires ~every debounce during REC).
+        let root = unique_temp_root("measure_rec_cost");
+        let mut store = RecoveryStore::new_in_root(root, Duration::ZERO).unwrap();
+        let snap = RecordingSnapshot::from_state(&state);
+        let session =
+            RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 60000).unwrap();
+        let n2 = 20u32;
+        let t = Instant::now();
+        for _ in 0..n2 {
+            store
+                .persist_snapshot_if_needed(&snap, &[], &session, true)
+                .unwrap();
+        }
+        let per_write = t.elapsed() / n2;
+        println!(">>> persist (forced disk write): {:?} per write\n", per_write);
+    }
 
     #[test]
     fn recovery_store_persists_and_loads_checkpoint() {
