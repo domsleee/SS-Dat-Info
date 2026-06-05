@@ -795,6 +795,13 @@ pub mod transport {
     /// recording whose first-moving is an outlier (FE-goodstart=300) is targeted
     /// on attempt 0 instead of found ~1-in-10. Deterministic calibration applied
     /// to the arm phase.
+    /// Attempts that retry the computed base settle UNCHANGED before dithering.
+    /// The restart has ±1-2 frame variance, so the correct base lands within a
+    /// few plain retries; dithering immediately (as a sweep does) instead wastes
+    /// attempts on the wrong target and fattens the tail. Only after this many
+    /// base-misses do we assume the base is miscalibrated and start dithering.
+    pub const ARM_SETTLE_BASE_TRIES: u32 = 5;
+
     pub fn arm_settle_ms(attempt: u32, expected_first_moving: Option<u32>) -> u64 {
         let base = match expected_first_moving {
             Some(fm) => {
@@ -802,9 +809,15 @@ pub mod transport {
             }
             None => ARM_SETTLE_MS as i64,
         };
-        // Dither ±frames around the target (in ms) for the restart variance.
-        const DITHER: [i64; 7] = [0, 8, -8, 16, -16, 24, -24];
-        (base + DITHER[(attempt as usize) % DITHER.len()]).clamp(0, 64) as u64
+        if attempt < ARM_SETTLE_BASE_TRIES {
+            // Retry the computed target; the restart variance lands it.
+            return base.clamp(0, 64) as u64;
+        }
+        // Base kept missing → it's probably miscalibrated. Dither ±frames to
+        // find the true arm phase.
+        const DITHER: [i64; 6] = [8, -8, 16, -16, 24, -24];
+        let d = (attempt - ARM_SETTLE_BASE_TRIES) as usize;
+        (base + DITHER[d % DITHER.len()]).clamp(0, 64) as u64
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
