@@ -1,11 +1,26 @@
 use crate::recording::{PersistedHistory, RecordingHistory};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Sender};
+use std::thread::JoinHandle;
 use std::time::SystemTime;
 
 pub struct HistoryStore {
     path: PathBuf,
     last_len: usize,
     last_current_index: Option<usize>,
+    // Background writer: the UI thread only clones the history (to_persisted)
+    // and hands it off here; the worker does the expensive JSON serialize +
+    // disk write. Without this, a 130MB history serializes for ~3.6s (debug)
+    // on the UI thread every time the undo stack changes (e.g. REC stop).
+    writer_tx: Option<Sender<WriteMsg>>,
+    _writer: Option<JoinHandle<()>>,
+}
+
+enum WriteMsg {
+    Write(PersistedHistory),
+    // Carries an ack channel; the worker replies once every queued write has
+    // hit disk. Used by tests and by Drop (flush on exit).
+    Flush(Sender<()>),
 }
 
 pub struct LoadedHistory {
@@ -28,11 +43,50 @@ impl HistoryStore {
             )
         })?;
 
+        let path = session_dir.join("history.json");
+        let (writer_tx, writer_rx) = channel::<WriteMsg>();
+        let writer_path = path.clone();
+        let writer = std::thread::Builder::new()
+            .name("history-writer".into())
+            .spawn(move || {
+                while let Ok(msg) = writer_rx.recv() {
+                    // Drain everything currently queued: keep only the newest
+                    // payload (coalesce bursts so we don't write the same big
+                    // file N times) and remember a flush ack to answer last.
+                    let mut latest: Option<PersistedHistory> = None;
+                    let mut ack: Option<Sender<()>> = None;
+                    let mut next = Some(msg);
+                    while let Some(m) = next {
+                        match m {
+                            WriteMsg::Write(p) => latest = Some(p),
+                            WriteMsg::Flush(a) => ack = Some(a),
+                        }
+                        next = writer_rx.try_recv().ok();
+                    }
+                    if let Some(payload) = latest {
+                        match serde_json::to_string_pretty(&payload) {
+                            Ok(json) => {
+                                if let Err(e) = write_atomic(&writer_path, json.as_bytes()) {
+                                    eprintln!("[history] background write failed: {}", e);
+                                }
+                            }
+                            Err(e) => eprintln!("[history] serialize failed: {}", e),
+                        }
+                    }
+                    if let Some(ack) = ack {
+                        let _ = ack.send(());
+                    }
+                }
+            })
+            .map_err(|e| format!("failed to spawn history writer thread: {}", e))?;
+
         Ok(Self {
-            path: session_dir.join("history.json"),
+            path,
             // Force first write so the file appears immediately.
             last_len: usize::MAX,
             last_current_index: None,
+            writer_tx: Some(writer_tx),
+            _writer: Some(writer),
         })
     }
 
@@ -48,21 +102,63 @@ impl HistoryStore {
             return Ok(false);
         }
 
+        // Clone the history (cheap-ish memcpy) on the UI thread, then hand the
+        // expensive serialize + disk write to the background writer.
         let payload = history.to_persisted();
-        let json = serde_json::to_string_pretty(&payload)
-            .map_err(|e| format!("failed to serialize history: {}", e))?;
-        std::fs::write(&self.path, json).map_err(|e| {
-            format!(
-                "failed to write history file {}: {}",
-                self.path.display(),
-                e
-            )
-        })?;
+        if let Some(tx) = &self.writer_tx {
+            let _ = tx.send(WriteMsg::Write(payload));
+        }
 
         self.last_len = len;
         self.last_current_index = current_index;
         Ok(true)
     }
+
+    /// Block until every queued history write has hit disk. Called by Drop
+    /// (so the latest undo state survives app exit) and by tests.
+    pub fn flush(&self) {
+        if let Some(tx) = &self.writer_tx {
+            let (ack_tx, ack_rx) = channel();
+            if tx.send(WriteMsg::Flush(ack_tx)).is_ok() {
+                let _ = ack_rx.recv();
+            }
+        }
+    }
+}
+
+impl Drop for HistoryStore {
+    fn drop(&mut self) {
+        self.flush();
+        // Drop the sender so the worker's recv() returns Err and the loop ends,
+        // then join so the thread is gone before we return.
+        self.writer_tx = None;
+        if let Some(worker) = self._writer.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+// Write to a sibling temp file then rename, so a crash mid-write can never
+// leave a truncated history.json behind. Runs on the background writer thread.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let tmp = path.with_extension(format!("json.{}.tmp", nonce));
+    std::fs::write(&tmp, bytes)
+        .map_err(|e| format!("failed to write temp {}: {}", tmp.display(), e))?;
+    if let Err(rename_err) = std::fs::rename(&tmp, path) {
+        // Windows refuses rename-over-existing; remove then retry.
+        if path.exists() && std::fs::remove_file(path).is_ok() {
+            std::fs::rename(&tmp, path)
+                .map_err(|e| format!("failed to finalize {}: {}", path.display(), e))?;
+            return Ok(());
+        }
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("failed to rename into {}: {}", path.display(), rename_err));
+    }
+    Ok(())
 }
 
 pub fn load_latest_history() -> Result<Option<LoadedHistory>, String> {
@@ -232,6 +328,7 @@ mod tests {
         let history = sample_history();
 
         assert!(store.persist_if_changed(&history).unwrap());
+        store.flush();
         let json = std::fs::read_to_string(store.path()).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -253,6 +350,7 @@ mod tests {
         let mut store = HistoryStore::new_in_root(root.clone()).unwrap();
         let history = sample_history();
         assert!(store.persist_if_changed(&history).unwrap());
+        store.flush();
 
         let loaded = load_latest_history_from_root(&root).unwrap().unwrap();
         let mut restored = RecordingHistory::new(8);
