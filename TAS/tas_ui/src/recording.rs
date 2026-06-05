@@ -613,6 +613,12 @@ pub enum HistoryEntryKind {
 }
 
 pub struct HistoryEntry {
+    /// Stable, monotonic, never-reused id (the storage identity — NOT the
+    /// positional index). Assigned by `RecordingHistory` on push.
+    pub entry_id: u64,
+    /// Pinned entries are exempt from cap-eviction and never GC'd — durable
+    /// named checkpoints that survive across sessions.
+    pub pinned: bool,
     pub label: String,
     /// HH:MM:SS-of-day legacy display field. Kept for backward compat with
     /// existing persisted history files; new code should prefer
@@ -644,6 +650,8 @@ impl HistoryEntry {
         let end_tick = snapshot.recorded_count;
         let first_moving = detect_first_moving(snapshot.rec_coords.as_ref(), end_tick);
         Self {
+            entry_id: 0, // assigned by RecordingHistory on push
+            pinned: false,
             label,
             timestamp: now.format("%H:%M:%S").to_string(),
             created_at: now,
@@ -660,6 +668,8 @@ impl HistoryEntry {
     fn marker(label: String, kind: HistoryEntryKind) -> Self {
         let now = chrono::Local::now();
         Self {
+            entry_id: 0, // assigned by RecordingHistory on push
+            pinned: false,
             label,
             timestamp: now.format("%H:%M:%S").to_string(),
             created_at: now,
@@ -729,6 +739,12 @@ pub struct RecordingHistory {
     capacity: usize,
     entries: Vec<HistoryEntry>,
     current_index: Option<usize>,
+    /// Next stable entry id to hand out. Authoritative + monotonic; never
+    /// reused. Restored (and bumped past) on load.
+    next_entry_id: u64,
+    /// Bumped on every mutation (structural / metadata / cursor) so the app can
+    /// cheaply detect "history changed, re-persist" without diffing.
+    revision: u64,
 }
 
 impl RecordingHistory {
@@ -737,7 +753,29 @@ impl RecordingHistory {
             capacity: capacity.max(1),
             entries: Vec::with_capacity(capacity.max(1)),
             current_index: None,
+            next_entry_id: 1,
+            revision: 0,
         }
+    }
+
+    fn alloc_id(&mut self) -> u64 {
+        let id = self.next_entry_id;
+        self.next_entry_id = self.next_entry_id.checked_add(1).expect("entry_id overflow");
+        id
+    }
+
+    /// Monotonic change counter — compare across frames to know if a persist is
+    /// needed. Rename and pin bump this even though len/cursor are unchanged.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn bump(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    pub fn next_entry_id(&self) -> u64 {
+        self.next_entry_id
     }
 
     pub fn push_snapshot(&mut self, state: &TasSharedState, label: impl Into<String>) -> bool {
@@ -789,7 +827,8 @@ impl RecordingHistory {
             return;
         }
         let label = format!("Save: {}", short_file_label(path));
-        let marker = HistoryEntry::marker(label, HistoryEntryKind::SaveMarker);
+        let mut marker = HistoryEntry::marker(label, HistoryEntryKind::SaveMarker);
+        marker.entry_id = self.alloc_id();
         if let Some(current) = self.current_index {
             // Save belongs to the current visible state without changing selection.
             let insert_at = (current + 1).min(self.entries.len());
@@ -807,6 +846,7 @@ impl RecordingHistory {
             .rev()
             .find(|&i| self.entries[i].snapshot.is_some())?;
         self.current_index = Some(prev);
+        self.bump();
         self.entries[prev].snapshot.as_ref()
     }
 
@@ -815,6 +855,7 @@ impl RecordingHistory {
         let next =
             ((current + 1)..self.entries.len()).find(|&i| self.entries[i].snapshot.is_some())?;
         self.current_index = Some(next);
+        self.bump();
         self.entries[next].snapshot.as_ref()
     }
 
@@ -824,6 +865,7 @@ impl RecordingHistory {
         }
         self.entries[index].snapshot.as_ref()?;
         self.current_index = Some(index);
+        self.bump();
         self.entries[index].snapshot.as_ref()
     }
 
@@ -836,6 +878,115 @@ impl RecordingHistory {
     /// empty space to deselect.
     pub fn clear_selection(&mut self) {
         self.current_index = None;
+        self.bump();
+    }
+
+    // ===== v2 store bridge =====
+
+    /// Convert the in-memory history to the store's entry list (row order).
+    pub fn to_stored_entries(&self) -> Vec<crate::history_store_v2::StoredEntry> {
+        self.entries
+            .iter()
+            .map(|e| crate::history_store_v2::StoredEntry {
+                entry_id: e.entry_id,
+                name: e.label.clone(),
+                pinned: e.pinned,
+                kind: e.kind,
+                start_tick: e.start_tick,
+                end_tick: e.end_tick,
+                first_moving: e.first_moving,
+                created_at_iso: e.created_at.to_rfc3339(),
+                snapshot: e.snapshot.as_ref().map(RecordingSnapshot::to_persisted),
+            })
+            .collect()
+    }
+
+    /// The stable id of the current (selected) entry, if any.
+    pub fn current_entry_id(&self) -> Option<u64> {
+        self.current_index.map(|i| self.entries[i].entry_id)
+    }
+
+    pub fn set_pinned(&mut self, entry_id: u64, pinned: bool) -> bool {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            if e.pinned != pinned {
+                e.pinned = pinned;
+                self.bump();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn rename(&mut self, entry_id: u64, name: impl Into<String>) -> bool {
+        let name = name.into();
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            if e.label != name {
+                e.label = name;
+                self.bump();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_pinned(&self, entry_id: u64) -> bool {
+        self.entries
+            .iter()
+            .find(|e| e.entry_id == entry_id)
+            .map(|e| e.pinned)
+            .unwrap_or(false)
+    }
+
+    /// Rebuild the in-memory history from a v2-store load. Unavailable entries
+    /// (snapshot == None but kind expects one) come in inert (can't restore).
+    pub fn apply_loaded(
+        &mut self,
+        loaded: Vec<crate::history_store_v2::LoadedEntry>,
+        current_entry_id: Option<u64>,
+        next_entry_id_floor: u64,
+    ) {
+        let mut entries = Vec::with_capacity(loaded.len());
+        for le in loaded {
+            let snapshot = le
+                .snapshot
+                .and_then(|ps| RecordingSnapshot::from_persisted(ps).ok());
+            let created_at = chrono::DateTime::parse_from_rfc3339(&le.created_at_iso)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Local))
+                .unwrap_or_else(chrono::Local::now);
+            entries.push(HistoryEntry {
+                entry_id: le.entry_id,
+                pinned: le.pinned,
+                label: le.name,
+                timestamp: created_at.format("%H:%M:%S").to_string(),
+                created_at,
+                kind: le.kind,
+                start_tick: le.start_tick,
+                end_tick: le.end_tick,
+                first_moving: le.first_moving,
+                snapshot,
+            });
+        }
+        let max_id_plus_1 = entries.iter().map(|e| e.entry_id + 1).max().unwrap_or(1);
+        self.entries = entries;
+        self.next_entry_id = self
+            .next_entry_id
+            .max(next_entry_id_floor)
+            .max(max_id_plus_1);
+        self.current_index = current_entry_id
+            .and_then(|id| self.entries.iter().position(|e| e.entry_id == id))
+            .filter(|&i| self.entries[i].snapshot.is_some());
+        if self.current_index.is_none() {
+            self.current_index = self
+                .entries
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(idx, e)| e.snapshot.as_ref().map(|_| idx));
+        }
+        self.bump();
     }
 
     pub fn can_undo(&self) -> bool {
@@ -940,6 +1091,8 @@ impl RecordingHistory {
                 }
             }
             entries.push(HistoryEntry {
+                entry_id: self.alloc_id(),
+                pinned: false,
                 label: entry.label,
                 timestamp: entry.timestamp,
                 created_at,
@@ -966,10 +1119,31 @@ impl RecordingHistory {
         Ok(())
     }
 
+    /// Soft cap: `capacity` bounds the number of UNPINNED entries. Pinned
+    /// entries are never evicted, and the current entry is never evicted.
+    /// Evicts the oldest unpinned, non-current entry until the unpinned count
+    /// fits (so the effective total can exceed `capacity` if there are many
+    /// pins — pins win).
     fn enforce_capacity(&mut self) {
-        while self.entries.len() > self.capacity {
-            self.entries.remove(0);
-            self.current_index = self.current_index.and_then(|idx| idx.checked_sub(1));
+        loop {
+            let unpinned = self.entries.iter().filter(|e| !e.pinned).count();
+            if unpinned <= self.capacity {
+                break;
+            }
+            let cur = self.current_index;
+            let victim = self
+                .entries
+                .iter()
+                .enumerate()
+                .find(|(i, e)| !e.pinned && cur != Some(*i))
+                .map(|(i, _)| i);
+            let Some(victim) = victim else {
+                break; // only pinned and/or the current entry remain
+            };
+            self.entries.remove(victim);
+            self.current_index = self
+                .current_index
+                .map(|idx| if idx > victim { idx - 1 } else { idx });
         }
         if self.current_index.is_none() {
             self.current_index = self
@@ -993,12 +1167,14 @@ impl RecordingHistory {
         }
 
         let mut entry = HistoryEntry::from_snapshot(label, kind, snapshot);
+        entry.entry_id = self.alloc_id();
         if let Some((start_tick, end_tick)) = session {
             entry = entry.with_session(start_tick, end_tick);
         }
         self.entries.push(entry);
         self.current_index = Some(self.entries.len() - 1);
         self.enforce_capacity();
+        self.bump();
         true
     }
 }
@@ -1949,6 +2125,142 @@ mod tests {
             state.rec_coords[i] = [i as f32, 0.0, i as f32 * 0.5];
         }
         state
+    }
+
+    // ===== Phase 2a: entry_id, pin, soft cap, store bridge =====
+
+    #[test]
+    fn entry_ids_unique_and_monotonic() {
+        let mut h = RecordingHistory::new(16);
+        for i in 0..5 {
+            assert!(h.push_snapshot(&state_with_ticks(10 + i), format!("S{}", i)));
+        }
+        let ids: Vec<u64> = h.entries().iter().map(|e| e.entry_id).collect();
+        let mut uniq = ids.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), ids.len(), "ids unique");
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "ids monotonic");
+    }
+
+    #[test]
+    fn soft_cap_evicts_oldest_unpinned() {
+        let mut h = RecordingHistory::new(3);
+        for i in 0..5 {
+            h.push_snapshot(&state_with_ticks(10 + i), format!("S{}", i));
+        }
+        assert_eq!(h.len(), 3, "capped to 3 unpinned");
+        let labels: Vec<&str> = h.entries().iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, vec!["S2", "S3", "S4"], "oldest unpinned evicted");
+    }
+
+    #[test]
+    fn pinned_survive_eviction() {
+        let mut h = RecordingHistory::new(3);
+        h.push_snapshot(&state_with_ticks(10), "A");
+        let a_id = h.entries()[0].entry_id;
+        assert!(h.set_pinned(a_id, true));
+        for i in 0..5 {
+            h.push_snapshot(&state_with_ticks(20 + i), format!("U{}", i));
+        }
+        assert!(
+            h.entries().iter().any(|e| e.entry_id == a_id),
+            "pinned A survived"
+        );
+        assert_eq!(
+            h.entries().iter().filter(|e| !e.pinned).count(),
+            3,
+            "unpinned still capped"
+        );
+    }
+
+    #[test]
+    fn current_entry_never_evicted() {
+        let mut h = RecordingHistory::new(3);
+        for lbl in ["A", "B", "C"] {
+            h.push_snapshot(&state_with_ticks(10), lbl);
+        }
+        h.restore_index(0); // select the oldest
+        let a_id = h.entries()[0].entry_id;
+        h.capacity = 2; // tighten below the count
+        h.enforce_capacity();
+        assert!(
+            h.entries().iter().any(|e| e.entry_id == a_id),
+            "current (oldest) entry not evicted"
+        );
+    }
+
+    #[test]
+    fn all_pinned_over_cap_keeps_all() {
+        let mut h = RecordingHistory::new(4);
+        for i in 0..4 {
+            h.push_snapshot(&state_with_ticks(10), format!("P{}", i));
+        }
+        let ids: Vec<u64> = h.entries().iter().map(|e| e.entry_id).collect();
+        for id in &ids {
+            h.set_pinned(*id, true);
+        }
+        h.capacity = 2;
+        h.enforce_capacity();
+        assert_eq!(h.len(), 4, "all-pinned kept despite cap 2");
+    }
+
+    #[test]
+    fn rename_and_pin_bump_revision_only_on_change() {
+        let mut h = RecordingHistory::new(8);
+        h.push_snapshot(&state_with_ticks(5), "A");
+        let id = h.entries()[0].entry_id;
+        let r0 = h.revision();
+        assert!(h.rename(id, "A2"));
+        assert!(h.revision() > r0);
+        let r1 = h.revision();
+        assert!(h.set_pinned(id, true));
+        assert!(h.revision() > r1);
+        // no-op rename + pin must NOT bump
+        let r2 = h.revision();
+        h.rename(id, "A2");
+        h.set_pinned(id, true);
+        assert_eq!(h.revision(), r2, "no-op meta change doesn't bump");
+    }
+
+    #[test]
+    fn bridge_roundtrips_through_v2_store() {
+        use crate::history_store_v2::HistoryStoreV2;
+        let dir = std::env::temp_dir().join(format!(
+            "ssb_bridge_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+
+        let mut h = RecordingHistory::new(16);
+        h.push_snapshot(&state_with_ticks(5), "A");
+        h.push_snapshot(&state_with_ticks(7), "B");
+        h.push_save_marker(&state_with_ticks(7), Path::new("run.tasrec"));
+        let b_id = h.entries()[1].entry_id;
+        h.set_pinned(b_id, true);
+        h.rename(b_id, "B renamed");
+        h.restore_index(1);
+        let cur = h.current_entry_id();
+
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store
+            .persist(&h.to_stored_entries(), cur, h.next_entry_id())
+            .unwrap();
+
+        let (_s2, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let mut h2 = RecordingHistory::new(16);
+        h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
+
+        assert_eq!(h2.len(), h.len());
+        let b2 = h2.entries().iter().find(|e| e.entry_id == b_id).unwrap();
+        assert_eq!(b2.label, "B renamed");
+        assert!(b2.pinned);
+        assert_eq!(h2.current_entry_id(), cur);
+        assert!(h2.next_entry_id() > b_id, "next id continues past loaded max");
+        // snapshot content survives the round-trip
+        let a2 = h2.entries().iter().find(|e| e.label == "A").unwrap();
+        assert!(a2.can_restore());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
