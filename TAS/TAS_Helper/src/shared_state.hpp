@@ -167,6 +167,9 @@ struct TasSharedState {
     // Applied to playback_speed atomically at the splice so the resumed
     // recording doesn't fast-forward at the catch-up rate. 0 = unset.
     float    cont_resume_speed;
+
+    // -- CONT clock-backlog reset (cave2 sets at splice, cave5 consumes) --
+    uint32_t cont_reset_pending;
 };
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks

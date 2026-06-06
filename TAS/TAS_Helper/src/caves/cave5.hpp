@@ -105,28 +105,24 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             && s->force_fixed_tick == 0
             && s->playback_speed == 1.0f;
 
-        // CONT splice deceleration (Problem B part 2): in the final frames of a
-        // CONT catch-up replay, run at 1x so the catch-up's accumulated clock
-        // backlog (prev_time lags wall_time while tick_advance = native/speed)
-        // drains as NORMAL-dt PLAY ticks here, instead of bursting into the
-        // resumed REC right after the splice. cave5 owns tick_advance, so this
-        // can't be stomped by the UI re-asserting the catch-up speed each frame.
-        // Only the clamp + tick_advance use this; catchup_drain stays on the
-        // real speed so its huge-dt single-tick drain never fires mid-replay.
-        // Fixed decel window, calibrated for the 64x catch-up (the optimum).
-        // Scaling it with speed was tried and REVERTED: it made high speeds
-        // frame-exact too, but the larger decel cost more than the faster replay
-        // saved, so 128x landed ~700ms SLOWER than 64x (2521→3246ms) for zero
-        // benefit. Faster-than-64x AND frame-exact isn't reachable by decel —
-        // draining a speed-proportional backlog inherently costs real-time. 64x
-        // is the genuine sweet spot; going higher only helps if the backlog is
-        // eliminated outright (reset the game's clock accumulator at the splice).
-        const uint32_t CONT_DECEL_FRAMES = 96;
-        bool cont_decel =
-            s->continue_from_frame > 0
-            && s->mode == MODE_PLAY
-            && s->playback_pos + CONT_DECEL_FRAMES >= s->continue_from_frame;
-        float effective_speed = cont_decel ? 1.0f : s->playback_speed;
+        // CONT clock-backlog reset (Problem B — zero-cost, frame-exact at full
+        // speed). When cave2 flags a splice, advance the game's time accumulator
+        // to "now" so the resumed REC runs real-time from the splice frame, with
+        // NO end-of-replay deceleration. The accumulator is the clock object's
+        // +0x0C float, and at THIS hook site ctx.ebp IS that object (verified via
+        // CE: ebp=clock this, [ebp+0x0C]=seconds accumulator). raw demand
+        // (realTick) = elapsed*[0x46DB0C](=100) = (now-prev)/native, so
+        // realTick * native(0.01) = (now-prev) seconds → prev jumps to now. We
+        // use NATIVE (not the speed-scaled tick_advance) so it's
+        // speed-independent, and we do NOT process the backlog ticks (ctx.esi
+        // stays capped below), so there's no recorded burst and no huge-dt jump.
+        if (s->cont_reset_pending) {
+            if (ctx.ebp) {
+                float* prev_time = (float*)(uintptr_t)(ctx.ebp + 0x0C);
+                *prev_time += (float)realTick * g_nativeTickAdvance;
+            }
+            s->cont_reset_pending = 0;
+        }
 
         if (s->force_fixed_tick > 0) {
             // Deterministic mode: exact tick count per frame
@@ -155,7 +151,7 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             // catchup-drain branch above handles long pauses (> 50 ticks
             // accumulated) for 1× play, so this lower cap is only the
             // ceiling for "normal stutter recovery" at 1×.
-            if (effective_speed <= 1.0f && realTick > NATIVE_GAME_CLAMP_AT_1X) {
+            if (s->playback_speed <= 1.0f && realTick > NATIVE_GAME_CLAMP_AT_1X) {
                 realTick = NATIVE_GAME_CLAMP_AT_1X;
             }
 
@@ -170,8 +166,8 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // Skipped during catchup_drain — that path wrote a temporary large
         // value to tick_advance that the game must read next frame.
         if (g_tickAdvancePtr && !catchup_drain) {
-            if (s->mode != MODE_OFF && effective_speed > 0.0f && effective_speed != 1.0f) {
-                *g_tickAdvancePtr = g_nativeTickAdvance / effective_speed;
+            if (s->mode != MODE_OFF && s->playback_speed > 0.0f && s->playback_speed != 1.0f) {
+                *g_tickAdvancePtr = g_nativeTickAdvance / s->playback_speed;
             } else {
                 *g_tickAdvancePtr = g_nativeTickAdvance;
             }

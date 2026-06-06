@@ -1105,7 +1105,7 @@ mod tests {
         let mut next_id = 1u64;
 
         for _ in 0..200 {
-            let n = 3 + rng.below(6) as u64;
+            let n = 3 + rng.below(6);
             let ids: Vec<u64> = (0..n).map(|_| { let id = next_id; next_id += 1; id }).collect();
             let model: Vec<StoredEntry> =
                 ids.iter().map(|&id| entry(id, &format!("e{}", id), false, 2)).collect();
