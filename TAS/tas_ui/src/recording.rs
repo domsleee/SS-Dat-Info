@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 use tas_shared::{TasSharedState, TAS_MAX_TICKS};
 
@@ -250,6 +251,95 @@ impl RecoveryWriteJob {
         })?;
         atomic_replace_file(&tmp_metadata_path, &self.metadata_path)?;
         Ok(())
+    }
+}
+
+/// Serialized off-thread recovery-checkpoint writer. Replaces the old
+/// fire-and-forget `thread::spawn` per write, which had no ordering and could
+/// land AFTER `clear_pending()` — resurrecting a stale checkpoint into a
+/// duplicate "Recovered" entry on the next launch. Jobs are processed in
+/// submission order; within a coalesced batch only the newest job runs (older
+/// ones are superseded on disk anyway). `flush()` is a drain barrier: it blocks
+/// until every queued job has been written, so the caller can safely
+/// `clear_pending()` afterwards with no in-flight write able to recreate the
+/// files.
+pub struct RecoveryWriter {
+    tx: Option<Sender<RecoveryMsg>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+enum RecoveryMsg {
+    Write(RecoveryWriteJob),
+    Flush(Sender<()>),
+}
+
+impl RecoveryWriter {
+    pub fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<RecoveryMsg>();
+        let worker = std::thread::Builder::new()
+            .name("recovery-writer".into())
+            .spawn(move || {
+                while let Ok(msg) = rx.recv() {
+                    // Coalesce a burst: keep only the newest write (older
+                    // checkpoints are superseded), then answer any flushes.
+                    let mut latest: Option<RecoveryWriteJob> = None;
+                    let mut acks: Vec<Sender<()>> = Vec::new();
+                    let mut next = Some(msg);
+                    while let Some(m) = next {
+                        match m {
+                            RecoveryMsg::Write(job) => latest = Some(job),
+                            RecoveryMsg::Flush(ack) => acks.push(ack),
+                        }
+                        next = rx.try_recv().ok();
+                    }
+                    if let Some(job) = latest {
+                        if let Err(e) = job.write() {
+                            eprintln!("[recovery] checkpoint write failed: {}", e);
+                        }
+                    }
+                    for ack in acks {
+                        let _ = ack.send(());
+                    }
+                }
+            })
+            .ok();
+        Self {
+            tx: Some(tx),
+            worker,
+        }
+    }
+
+    pub fn submit(&self, job: RecoveryWriteJob) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(RecoveryMsg::Write(job));
+        }
+    }
+
+    /// Block until every queued checkpoint write has hit disk. Call this before
+    /// `RecoveryStore::clear_pending()` so no late write resurrects the files.
+    pub fn flush(&self) {
+        if let Some(tx) = &self.tx {
+            let (a, r) = std::sync::mpsc::channel();
+            if tx.send(RecoveryMsg::Flush(a)).is_ok() {
+                let _ = r.recv();
+            }
+        }
+    }
+}
+
+impl Default for RecoveryWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for RecoveryWriter {
+    fn drop(&mut self) {
+        self.flush();
+        self.tx = None;
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
+        }
     }
 }
 
@@ -544,9 +634,12 @@ impl RecordingSnapshot {
     }
 
     /// Capture state into this (already-allocated) snapshot. No new allocations.
+    /// `recorded_count` is clamped to `TAS_MAX_TICKS`: the source arrays are
+    /// fixed-size, so a corrupt/over-range count from shared memory must never
+    /// panic-slice this hot path (history + recovery snapshotting).
     fn capture_from(&mut self, state: &TasSharedState) {
-        let count = state.recorded_count as usize;
-        self.recorded_count = state.recorded_count;
+        let count = (state.recorded_count as usize).min(TAS_MAX_TICKS);
+        self.recorded_count = count as u32;
         self.input_log[..count].copy_from_slice(&state.input_log[..count]);
         self.rec_coords[..count].copy_from_slice(&state.rec_coords[..count]);
     }
@@ -571,28 +664,8 @@ impl RecordingSnapshot {
     }
 
     fn from_persisted(persisted: PersistedSnapshot) -> Result<Self, String> {
+        persisted.validate()?;
         let count = persisted.recorded_count as usize;
-        if count > TAS_MAX_TICKS {
-            return Err(format!(
-                "persisted snapshot too large: {} ticks (max {})",
-                count, TAS_MAX_TICKS
-            ));
-        }
-        if persisted.input_log.len() != count {
-            return Err(format!(
-                "persisted input_log length mismatch: expected {}, got {}",
-                count,
-                persisted.input_log.len()
-            ));
-        }
-        if persisted.rec_coords.len() != count {
-            return Err(format!(
-                "persisted rec_coords length mismatch: expected {}, got {}",
-                count,
-                persisted.rec_coords.len()
-            ));
-        }
-
         let mut snap = RecordingSnapshot::new_empty();
         snap.recorded_count = persisted.recorded_count;
         snap.input_log[..count].copy_from_slice(&persisted.input_log);
@@ -702,6 +775,38 @@ pub struct PersistedSnapshot {
     pub rec_coords: Vec<[f32; 3]>,
 }
 
+impl PersistedSnapshot {
+    /// Validate the structural invariants a snapshot blob must satisfy before
+    /// it can be restored. The v2 store calls this at load so a blob that
+    /// deserializes but is semantically bogus (e.g. tampered/forged
+    /// `recorded_count`) is treated as corrupt — NOT silently demoted to a
+    /// marker by the bridge's `from_persisted(..).ok()`.
+    pub fn validate(&self) -> Result<(), String> {
+        let count = self.recorded_count as usize;
+        if count > TAS_MAX_TICKS {
+            return Err(format!(
+                "persisted snapshot too large: {} ticks (max {})",
+                count, TAS_MAX_TICKS
+            ));
+        }
+        if self.input_log.len() != count {
+            return Err(format!(
+                "persisted input_log length mismatch: expected {}, got {}",
+                count,
+                self.input_log.len()
+            ));
+        }
+        if self.rec_coords.len() != count {
+            return Err(format!(
+                "persisted rec_coords length mismatch: expected {}, got {}",
+                count,
+                self.rec_coords.len()
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct PersistedHistoryEntry {
     pub label: String,
@@ -779,6 +884,17 @@ impl RecordingHistory {
 
     pub fn next_entry_id(&self) -> u64 {
         self.next_entry_id
+    }
+
+    /// Raise the next-id allocator to at least `floor`. Used on startup so an
+    /// EMPTY load (a valid empty manifest, or a corrupt manifest that preserved
+    /// blobs) still advances past any id that already exists on disk — otherwise
+    /// the next new entry restarts at 1 and collides with a preserved blob.
+    pub fn adopt_id_floor(&mut self, floor: u64) {
+        if floor > self.next_entry_id {
+            self.next_entry_id = floor;
+            self.bump();
+        }
     }
 
     pub fn push_snapshot(&mut self, state: &TasSharedState, label: impl Into<String>) -> bool {
@@ -1963,6 +2079,56 @@ mod tests {
         assert_eq!(pending.snapshot.recorded_count, 5);
         assert_eq!(pending.session.label, "Recorded 0:00.05");
 
+        store.clear_pending().unwrap();
+        assert!(store.load_pending().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #7: a `recorded_count` beyond the fixed buffer size (corrupt shared
+    /// memory / a misbehaving DLL) must clamp, not panic-slice the hot path.
+    #[test]
+    fn from_state_clamps_overlong_recorded_count() {
+        let mut state = zeroed_state();
+        state.recorded_count = TAS_MAX_TICKS as u32 + 50;
+        let snap = RecordingSnapshot::from_state(&state);
+        assert_eq!(snap.recorded_count as usize, TAS_MAX_TICKS, "clamped to max");
+    }
+
+    /// #2: `adopt_id_floor` raises the allocator (never lowers it), so an empty
+    /// load that nonetheless has a high stored next-id can't reissue old ids.
+    #[test]
+    fn adopt_id_floor_only_raises() {
+        let mut h = RecordingHistory::new(8);
+        h.adopt_id_floor(50);
+        assert_eq!(h.next_entry_id(), 50);
+        h.adopt_id_floor(10);
+        assert_eq!(h.next_entry_id(), 50, "floor never lowers the allocator");
+    }
+
+    /// #3: the serialized recovery writer's `flush()` is a real drain barrier —
+    /// after it returns the checkpoint is on disk, so a following `clear_pending`
+    /// can't race an in-flight write that would resurrect the files.
+    #[test]
+    fn recovery_writer_flush_drains_before_clear() {
+        let root = unique_temp_root("tas_ui_recovery_writer_drain");
+        let mut store = RecoveryStore::new_in_root(root.clone(), Duration::ZERO).unwrap();
+        let mut state = zeroed_state();
+        state.recorded_count = 3;
+        state.input_log[0] = 9;
+        let snap = RecordingSnapshot::from_state(&state);
+        let session = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 3).unwrap();
+        let job = store
+            .take_write_job(&snap, &[], &session, true)
+            .expect("job");
+
+        let writer = RecoveryWriter::new();
+        writer.submit(job);
+        writer.flush(); // blocks until the write lands
+
+        assert!(
+            store.load_pending().unwrap().is_some(),
+            "checkpoint durable once flush returns"
+        );
         store.clear_pending().unwrap();
         assert!(store.load_pending().unwrap().is_none());
         let _ = std::fs::remove_dir_all(root);

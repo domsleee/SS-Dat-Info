@@ -17,11 +17,35 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
 use std::thread::JoinHandle;
+use tas_shared::TAS_MAX_TICKS;
 
 const MAGIC: &str = "ssb-history";
 const SCHEMA: u32 = 1;
-const BLOB_FORMAT: u32 = 1;
+/// Legacy blob encoding: `bincode::serialize(PersistedSnapshot)`. Unbounded on
+/// read, so only decoded through a size-limited reader (kept for blobs already
+/// written to a user's store before the raw format existed).
+const BLOB_FORMAT_BINCODE_V1: u32 = 1;
+/// Current blob encoding: a tiny self-describing raw layout, bounds-checked
+/// before any allocation. See `serialize_raw_blob` / `parse_raw_blob`.
+const BLOB_FORMAT_RAW_V2: u32 = 2;
+const CURRENT_BLOB_FORMAT: u32 = BLOB_FORMAT_RAW_V2;
 const HASH_ALGO: &str = "crc32";
+
+/// Bytes per recorded tick in a raw blob: 1 input byte + 3 little-endian f32s.
+const BLOB_BYTES_PER_TICK: usize = 1 + 3 * 4;
+/// Hard upper bound on a snapshot blob: a full-length recording. Any file
+/// larger than this is rejected by metadata BEFORE it is read into memory, so a
+/// corrupt/forged blob can never OOM the loader.
+const MAX_SNAPSHOT_BYTES: u64 = (4 + TAS_MAX_TICKS * BLOB_BYTES_PER_TICK) as u64;
+/// Upper bound on `manifest.json`. Real manifests are pure metadata (tens of
+/// bytes per entry); even 100k entries is a few tens of MB. Anything past this
+/// is treated as unusable (and so does NOT trigger blob GC) rather than read
+/// into memory — a corrupt/forged manifest can't OOM the loader.
+const MAX_MANIFEST_BYTES: u64 = 256 * 1024 * 1024;
+
+fn blob_format_v1() -> u32 {
+    BLOB_FORMAT_BINCODE_V1
+}
 
 /// One entry the caller wants persisted. `snapshot == None` => a marker entry
 /// (e.g. SaveMarker) that carries no blob.
@@ -86,6 +110,12 @@ struct ManifestEntry {
     /// `None` for marker entries with no blob.
     size: Option<u64>,
     checksum: Option<u32>,
+    /// Encoding of this entry's blob. Per-entry (not global) so a store can
+    /// hold legacy bincode blobs and new raw blobs side by side — each one
+    /// self-describing. Absent on manifests written before the raw format
+    /// existed, where every blob was bincode → default to v1.
+    #[serde(default = "blob_format_v1")]
+    blob_format: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -103,6 +133,10 @@ struct Manifest {
 struct BlobInfo {
     size: u64,
     checksum: u32,
+    /// Encoding of the on-disk blob (so a reused/preserved legacy blob keeps
+    /// its `blob_format` in the rewritten manifest rather than being mislabeled
+    /// as the current raw format).
+    format: u32,
 }
 
 pub struct HistoryStoreV2 {
@@ -140,53 +174,48 @@ impl HistoryStoreV2 {
             stored_next = m.next_entry_id;
             persisted_current = m.current_entry_id;
             for me in &m.entries {
-                referenced.insert(me.entry_id);
                 max_manifest_id = max_manifest_id.max(me.entry_id);
+                // Only blob-bearing rows (checksum present) protect an
+                // `<id>.tasrec` from orphan GC. A marker row (checksum None)
+                // must NOT shield a stray blob at the same id — tracking
+                // "manifest row ids" instead of "blob ids" leaked such blobs.
+                if me.checksum.is_some() {
+                    referenced.insert(me.entry_id);
+                }
 
+                let blob_info = BlobInfo {
+                    size: me.size.unwrap_or(0),
+                    checksum: me.checksum.unwrap_or(0),
+                    format: me.blob_format,
+                };
                 let (snapshot, available) = match me.checksum {
                     None => (None, true), // marker entry, no blob expected
-                    Some(expected) => match read_blob(&dir, me.entry_id, expected) {
-                        Ok(snap) => {
-                            blobs.insert(
-                                me.entry_id,
-                                BlobInfo {
-                                    size: me.size.unwrap_or(0),
-                                    checksum: expected,
-                                },
-                            );
-                            (Some(snap), true)
+                    Some(expected) => {
+                        match read_blob(&dir, me.entry_id, expected, me.size, me.blob_format) {
+                            Ok(snap) => {
+                                blobs.insert(me.entry_id, blob_info);
+                                (Some(snap), true)
+                            }
+                            Err(BlobError::Missing) => {
+                                warnings.push(format!(
+                                    "history entry {} ('{}') blob missing — kept but unavailable",
+                                    me.entry_id, me.name
+                                ));
+                                unavailable.insert(me.entry_id, blob_info);
+                                (None, false)
+                            }
+                            Err(BlobError::Corrupt) => {
+                                // Quarantine so we don't re-hit it every launch.
+                                quarantine_blob(&dir, me.entry_id);
+                                warnings.push(format!(
+                                    "history entry {} ('{}') blob corrupt — quarantined, unavailable",
+                                    me.entry_id, me.name
+                                ));
+                                unavailable.insert(me.entry_id, blob_info);
+                                (None, false)
+                            }
                         }
-                        Err(BlobError::Missing) => {
-                            warnings.push(format!(
-                                "history entry {} ('{}') blob missing — kept but unavailable",
-                                me.entry_id, me.name
-                            ));
-                            unavailable.insert(
-                                me.entry_id,
-                                BlobInfo {
-                                    size: me.size.unwrap_or(0),
-                                    checksum: expected,
-                                },
-                            );
-                            (None, false)
-                        }
-                        Err(BlobError::Corrupt) => {
-                            // Quarantine so we don't re-hit it every launch.
-                            quarantine_blob(&dir, me.entry_id);
-                            warnings.push(format!(
-                                "history entry {} ('{}') blob corrupt — quarantined, unavailable",
-                                me.entry_id, me.name
-                            ));
-                            unavailable.insert(
-                                me.entry_id,
-                                BlobInfo {
-                                    size: me.size.unwrap_or(0),
-                                    checksum: expected,
-                                },
-                            );
-                            (None, false)
-                        }
-                    },
+                    }
                 };
 
                 entries.push(LoadedEntry {
@@ -266,26 +295,28 @@ impl HistoryStoreV2 {
         // 1. Write blobs for new snapshot-bearing ids (immutable, write-once).
         let mut manifest_entries = Vec::with_capacity(entries.len());
         for e in entries {
-            let (size, checksum) = match &e.snapshot {
+            let (size, checksum, blob_format) = match &e.snapshot {
                 None => {
                     // No bytes in hand. If this id is a snapshot entry whose
                     // blob is currently missing/corrupt, preserve its manifest
                     // blob reference (don't demote it to a marker) so it can
-                    // recover if the file reappears.
+                    // recover if the file reappears — keeping its original
+                    // encoding so a preserved legacy blob isn't mislabeled.
                     match self.unavailable.get(&e.entry_id) {
-                        Some(info) => (Some(info.size), Some(info.checksum)),
-                        None => (None, None),
+                        Some(info) => (Some(info.size), Some(info.checksum), info.format),
+                        None => (None, None, CURRENT_BLOB_FORMAT),
                     }
                 }
                 Some(snap) => {
-                    if let Some(info) = self.blobs.get(&e.entry_id) {
-                        (Some(info.size), Some(info.checksum))
+                    let info = if let Some(info) = self.blobs.get(&e.entry_id) {
+                        *info
                     } else {
                         let info = self.write_blob(e.entry_id, snap)?;
                         self.blobs.insert(e.entry_id, info);
                         outcome.blobs_written += 1;
-                        (Some(info.size), Some(info.checksum))
-                    }
+                        info
+                    };
+                    (Some(info.size), Some(info.checksum), info.format)
                 }
             };
             manifest_entries.push(ManifestEntry {
@@ -300,6 +331,7 @@ impl HistoryStoreV2 {
                 created_at_iso: e.created_at_iso.clone(),
                 size,
                 checksum,
+                blob_format,
             });
         }
 
@@ -307,7 +339,7 @@ impl HistoryStoreV2 {
         let manifest = Manifest {
             magic: MAGIC.to_string(),
             schema: SCHEMA,
-            blob_format: BLOB_FORMAT,
+            blob_format: CURRENT_BLOB_FORMAT,
             hash_algo: HASH_ALGO.to_string(),
             next_entry_id,
             current_entry_id,
@@ -332,13 +364,22 @@ impl HistoryStoreV2 {
             }
         }
 
-        self.referenced = desired_ids;
+        // Track only blob-bearing ids (those whose manifest row carries a
+        // checksum), so the GC keep-set never includes marker ids. Mirrors the
+        // load-time rule in `open_in`.
+        self.referenced = manifest
+            .entries
+            .iter()
+            .filter(|m| m.checksum.is_some())
+            .map(|m| m.entry_id)
+            .collect();
         Ok(outcome)
     }
 
     fn write_blob(&self, id: u64, snapshot: &PersistedSnapshot) -> Result<BlobInfo, String> {
-        let bytes = bincode::serialize(snapshot)
-            .map_err(|e| format!("failed to serialize blob {}: {}", id, e))?;
+        // New blobs use the bounded raw layout (never bincode). crc32 still
+        // guards accidental corruption.
+        let bytes = serialize_raw_blob(snapshot);
         let checksum = crc32fast::hash(&bytes);
         let size = bytes.len() as u64;
         let final_path = blob_path(&self.dir, id);
@@ -355,7 +396,11 @@ impl HistoryStoreV2 {
             let _ = std::fs::remove_file(&tmp);
             format!("failed to finalize blob {}: {}", final_path.display(), e)
         })?;
-        Ok(BlobInfo { size, checksum })
+        Ok(BlobInfo {
+            size,
+            checksum,
+            format: CURRENT_BLOB_FORMAT,
+        })
     }
 
     pub fn dir(&self) -> &Path {
@@ -418,7 +463,10 @@ enum WriteMsg {
         current_entry_id: Option<u64>,
         next_entry_id: u64,
     },
-    Flush(Sender<()>),
+    /// Drain barrier. The worker answers with the durability result of the most
+    /// recent persist (Ok only if the manifest actually committed). Callers gate
+    /// recovery-checkpoint clearing on this — never on mere enqueue.
+    Flush(Sender<Result<(), String>>),
 }
 
 impl HistoryWriter {
@@ -430,12 +478,16 @@ impl HistoryWriter {
             .name("history-v2-writer".into())
             .spawn(move || {
                 let mut store = store;
+                // Durability of the LATEST persist, carried across loop
+                // iterations so a flush that arrives in a later batch still
+                // reports a prior failure. `Ok` only after a committed manifest.
+                let mut last_result: Result<(), String> = Ok(());
                 while let Ok(msg) = rx.recv() {
                     // Coalesce: keep only the newest desired state (each job is
                     // the full set; the store diffs it against disk), and answer
-                    // the latest flush after writing.
+                    // every flush in the batch after writing.
                     let mut latest: Option<(Vec<StoredEntry>, Option<u64>, u64)> = None;
-                    let mut ack: Option<Sender<()>> = None;
+                    let mut acks: Vec<Sender<Result<(), String>>> = Vec::new();
                     let mut next = Some(msg);
                     while let Some(m) = next {
                         match m {
@@ -444,17 +496,21 @@ impl HistoryWriter {
                                 current_entry_id,
                                 next_entry_id,
                             } => latest = Some((entries, current_entry_id, next_entry_id)),
-                            WriteMsg::Flush(a) => ack = Some(a),
+                            WriteMsg::Flush(a) => acks.push(a),
                         }
                         next = rx.try_recv().ok();
                     }
                     if let Some((entries, current, next_id)) = latest {
-                        if let Err(e) = store.persist(&entries, current, next_id) {
-                            eprintln!("[history v2] persist failed: {}", e);
-                        }
+                        last_result = match store.persist(&entries, current, next_id) {
+                            Ok(_) => Ok(()),
+                            Err(e) => {
+                                eprintln!("[history v2] persist failed: {}", e);
+                                Err(e)
+                            }
+                        };
                     }
-                    if let Some(ack) = ack {
-                        let _ = ack.send(());
+                    for ack in acks {
+                        let _ = ack.send(last_result.clone());
                     }
                 }
             })
@@ -468,35 +524,47 @@ impl HistoryWriter {
         ))
     }
 
+    /// Enqueue a persist. Returns `true` if the job reached the worker; `false`
+    /// means the worker is gone (so the caller must NOT treat the revision as
+    /// persisted and should retry later).
     pub fn persist(
         &self,
         entries: Vec<StoredEntry>,
         current_entry_id: Option<u64>,
         next_entry_id: u64,
-    ) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(WriteMsg::Persist {
-                entries,
-                current_entry_id,
-                next_entry_id,
-            });
+    ) -> bool {
+        match &self.tx {
+            Some(tx) => tx
+                .send(WriteMsg::Persist {
+                    entries,
+                    current_entry_id,
+                    next_entry_id,
+                })
+                .is_ok(),
+            None => false,
         }
     }
 
-    /// Block until every queued write has hit disk.
-    pub fn flush(&self) {
-        if let Some(tx) = &self.tx {
-            let (a, r) = channel();
-            if tx.send(WriteMsg::Flush(a)).is_ok() {
-                let _ = r.recv();
-            }
+    /// Block until every queued write has hit disk, returning the durability
+    /// result of the most recent persist. `Ok(())` means the manifest actually
+    /// committed; `Err` means the latest persist failed (disk full / permission
+    /// / rename) — the caller must keep any recovery checkpoint in that case.
+    pub fn flush(&self) -> Result<(), String> {
+        let Some(tx) = &self.tx else {
+            return Ok(());
+        };
+        let (a, r) = channel();
+        if tx.send(WriteMsg::Flush(a)).is_err() {
+            return Err("history writer thread is gone".to_string());
         }
+        r.recv()
+            .unwrap_or_else(|_| Err("history writer dropped flush ack".to_string()))
     }
 }
 
 impl Drop for HistoryWriter {
     fn drop(&mut self) {
-        self.flush();
+        let _ = self.flush();
         self.tx = None;
         if let Some(w) = self.worker.take() {
             let _ = w.join();
@@ -513,13 +581,102 @@ fn blob_path(dir: &Path, id: u64) -> PathBuf {
     dir.join(format!("{}.tasrec", id))
 }
 
-fn read_blob(dir: &Path, id: u64, expected_checksum: u32) -> Result<PersistedSnapshot, BlobError> {
+fn read_blob(
+    dir: &Path,
+    id: u64,
+    expected_checksum: u32,
+    expected_size: Option<u64>,
+    blob_format: u32,
+) -> Result<PersistedSnapshot, BlobError> {
     let path = blob_path(dir, id);
+
+    // Bound BEFORE reading: reject by file metadata so a giant/forged blob can
+    // never be slurped into memory. A size that disagrees with the manifest is
+    // treated as corruption (tamper or truncation).
+    let meta = std::fs::metadata(&path).map_err(|_| BlobError::Missing)?;
+    let len = meta.len();
+    if len > MAX_SNAPSHOT_BYTES {
+        return Err(BlobError::Corrupt);
+    }
+    if let Some(sz) = expected_size {
+        if len != sz {
+            return Err(BlobError::Corrupt);
+        }
+    }
+
     let bytes = std::fs::read(&path).map_err(|_| BlobError::Missing)?;
     if crc32fast::hash(&bytes) != expected_checksum {
         return Err(BlobError::Corrupt);
     }
-    bincode::deserialize(&bytes).map_err(|_| BlobError::Corrupt)
+
+    let snapshot = match blob_format {
+        BLOB_FORMAT_RAW_V2 => parse_raw_blob(&bytes).ok_or(BlobError::Corrupt)?,
+        BLOB_FORMAT_BINCODE_V1 => parse_bincode_blob(&bytes).ok_or(BlobError::Corrupt)?,
+        _ => return Err(BlobError::Corrupt), // unknown encoding
+    };
+    // Reject semantically-invalid snapshots HERE (in the store) so the bridge's
+    // `from_persisted(..).ok()` never has to drop one — which would silently
+    // demote a present-but-bad blob to a marker on the next persist.
+    snapshot.validate().map_err(|_| BlobError::Corrupt)?;
+    Ok(snapshot)
+}
+
+/// Raw blob layout (`BLOB_FORMAT_RAW_V2`):
+/// `u32le recorded_count | input_log[count] | (f32le x,y,z)[count]`.
+fn serialize_raw_blob(snapshot: &PersistedSnapshot) -> Vec<u8> {
+    let count = snapshot.recorded_count as usize;
+    let mut out = Vec::with_capacity(4 + count * BLOB_BYTES_PER_TICK);
+    out.extend_from_slice(&snapshot.recorded_count.to_le_bytes());
+    out.extend_from_slice(&snapshot.input_log);
+    for c in &snapshot.rec_coords {
+        out.extend_from_slice(&c[0].to_le_bytes());
+        out.extend_from_slice(&c[1].to_le_bytes());
+        out.extend_from_slice(&c[2].to_le_bytes());
+    }
+    out
+}
+
+/// Parse a raw blob with every length/bound checked before allocation. Returns
+/// `None` on any inconsistency (caller maps to corrupt).
+fn parse_raw_blob(bytes: &[u8]) -> Option<PersistedSnapshot> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    let count = u32::from_le_bytes(bytes[0..4].try_into().ok()?) as usize;
+    if count > TAS_MAX_TICKS {
+        return None;
+    }
+    if bytes.len() != 4 + count * BLOB_BYTES_PER_TICK {
+        return None;
+    }
+    let input_end = 4 + count;
+    let input_log = bytes[4..input_end].to_vec();
+    let mut rec_coords = Vec::with_capacity(count);
+    for chunk in bytes[input_end..].chunks_exact(12) {
+        rec_coords.push([
+            f32::from_le_bytes(chunk[0..4].try_into().ok()?),
+            f32::from_le_bytes(chunk[4..8].try_into().ok()?),
+            f32::from_le_bytes(chunk[8..12].try_into().ok()?),
+        ]);
+    }
+    Some(PersistedSnapshot {
+        recorded_count: count as u32,
+        input_log,
+        rec_coords,
+    })
+}
+
+/// Decode a legacy bincode blob through a SIZE-LIMITED reader (matching the
+/// fixint encoding `bincode::serialize` produced), so a forged length prefix
+/// can't allocate-huge. Only used for blobs written before the raw format.
+fn parse_bincode_blob(bytes: &[u8]) -> Option<PersistedSnapshot> {
+    use bincode::Options;
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(MAX_SNAPSHOT_BYTES + 1024)
+        .allow_trailing_bytes()
+        .deserialize::<PersistedSnapshot>(bytes)
+        .ok()
 }
 
 fn quarantine_blob(dir: &Path, id: u64) {
@@ -552,6 +709,17 @@ fn read_manifest(dir: &Path, warnings: &mut Vec<String>) -> Option<Manifest> {
     if !path.exists() {
         return None;
     }
+    // Bound by metadata before reading: an oversized manifest is treated as
+    // unusable (no GC of blobs) rather than slurped into memory.
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > MAX_MANIFEST_BYTES {
+            warnings.push(format!(
+                "manifest too large ({} bytes) — ignored, blobs preserved",
+                meta.len()
+            ));
+            return None;
+        }
+    }
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) => {
@@ -566,9 +734,13 @@ fn read_manifest(dir: &Path, warnings: &mut Vec<String>) -> Option<Manifest> {
             return None;
         }
     };
+    // blob_format is a coarse top-level gate; the actual encoding is per-entry
+    // (`ManifestEntry::blob_format`), so accept any known top-level value and
+    // reject only the genuinely unknown/newer (forward-incompatible) ones.
     if manifest.magic != MAGIC
         || manifest.schema != SCHEMA
-        || manifest.blob_format != BLOB_FORMAT
+        || manifest.blob_format == 0
+        || manifest.blob_format > CURRENT_BLOB_FORMAT
         || manifest.hash_algo != HASH_ALGO
     {
         warnings.push(format!(
@@ -1107,5 +1279,164 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&v2);
+    }
+
+    /// Build a manifest referencing a single blob written by the test, so we can
+    /// forge legacy/invalid blobs the public `persist` path would never emit.
+    fn write_manifest_with_blob(
+        dir: &Path,
+        id: u64,
+        bytes: &[u8],
+        blob_format: u32,
+        size: Option<u64>,
+    ) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(blob_path(dir, id), bytes).unwrap();
+        let manifest = Manifest {
+            magic: MAGIC.to_string(),
+            schema: SCHEMA,
+            blob_format,
+            hash_algo: HASH_ALGO.to_string(),
+            next_entry_id: id + 1,
+            current_entry_id: Some(id),
+            entries: vec![ManifestEntry {
+                entry_id: id,
+                name: "A".to_string(),
+                user_name: None,
+                pinned: false,
+                kind: HistoryEntryKind::Snapshot,
+                start_tick: 0,
+                end_tick: 4,
+                first_moving: None,
+                created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
+                size: size.or(Some(bytes.len() as u64)),
+                checksum: Some(crc32fast::hash(bytes)),
+                blob_format,
+            }],
+        };
+        write_manifest_atomic(dir, &manifest).unwrap();
+    }
+
+    /// The migration guarantee: blobs written by the OLD bincode format (which
+    /// real user stores already contain) must still load, and must NOT be
+    /// rewritten on re-persist (immutable; their per-entry format is preserved).
+    #[test]
+    fn legacy_bincode_blob_loads_and_is_preserved() {
+        let dir = tmp_dir("legacyblob");
+        let ps = snap(4, 7);
+        let bytes = bincode::serialize(&ps).unwrap();
+        write_manifest_with_blob(&dir, 1, &bytes, BLOB_FORMAT_BINCODE_V1, None);
+
+        let (mut store, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        assert!(res.entries[0].available, "legacy bincode blob loads");
+        assert_eq!(res.entries[0].snapshot.as_ref().unwrap(), &ps);
+
+        // Re-persist with the loaded snapshot in hand: the store must REUSE the
+        // existing blob (immutable), not rewrite it as raw.
+        let before = std::fs::read(blob_path(&dir, 1)).unwrap();
+        let stored = StoredEntry {
+            entry_id: 1,
+            name: "A".to_string(),
+            user_name: None,
+            pinned: false,
+            kind: HistoryEntryKind::Snapshot,
+            start_tick: 0,
+            end_tick: 4,
+            first_moving: None,
+            created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
+            snapshot: res.entries[0].snapshot.clone(),
+        };
+        let o = store.persist(&[stored], Some(1), 2).unwrap();
+        assert_eq!(o.blobs_written, 0, "legacy blob reused, not rewritten");
+        assert_eq!(std::fs::read(blob_path(&dir, 1)).unwrap(), before, "blob bytes unchanged");
+
+        // And it still loads after the manifest was rewritten (format preserved).
+        let (_s, res2) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        assert_eq!(res2.entries[0].snapshot.as_ref().unwrap(), &ps);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A blob whose on-disk length disagrees with the manifest (tamper /
+    /// truncation / a forged-huge file) is rejected as corrupt by metadata —
+    /// it is never slurped into memory, so it cannot OOM the loader.
+    #[test]
+    fn blob_size_mismatch_rejected_without_reading() {
+        let dir = tmp_dir("sizemismatch");
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store.persist(&[entry(1, "A", false, 4)], Some(1), 2).unwrap();
+        // Grow the blob so its length no longer matches the manifest `size`.
+        let mut bytes = std::fs::read(blob_path(&dir, 1)).unwrap();
+        bytes.extend_from_slice(&[0u8; 32]);
+        std::fs::write(blob_path(&dir, 1), &bytes).unwrap();
+
+        let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        assert!(!res.entries[0].available, "size-mismatched blob is unavailable");
+        assert!(dir.join("1.tasrec.corrupt").exists(), "quarantined");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #8: a marker row (no blob) must NOT shield a stray `<id>.tasrec` from
+    /// orphan GC just because it shares the id.
+    #[test]
+    fn marker_row_does_not_protect_stray_blob() {
+        let dir = tmp_dir("markerstray");
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store.persist(&[marker(1, "saved")], None, 2).unwrap();
+        std::fs::write(blob_path(&dir, 1), b"stray").unwrap();
+        let (_s, _res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        assert!(
+            !blob_path(&dir, 1).exists(),
+            "stray blob at a marker id must be GC'd, not protected"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #5: a blob that DESERIALIZES but is semantically bogus (bincode succeeds,
+    /// but recorded_count disagrees with the vec lengths) must be rejected at
+    /// load as corrupt and kept unavailable — never silently demoted to a
+    /// marker on the next persist.
+    #[test]
+    fn invalid_bincode_blob_unavailable_not_demoted() {
+        let dir = tmp_dir("invalidbincode");
+        // recorded_count claims 5, but the buffers are empty → validate() fails.
+        let bad = PersistedSnapshot {
+            recorded_count: 5,
+            input_log: vec![],
+            rec_coords: vec![],
+        };
+        let bytes = bincode::serialize(&bad).unwrap();
+        write_manifest_with_blob(&dir, 1, &bytes, BLOB_FORMAT_BINCODE_V1, None);
+
+        let (mut store, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        assert!(!res.entries[0].available, "invalid snapshot rejected, not loaded");
+
+        // Bridge re-persists it with snapshot None (it couldn't build one): the
+        // entry must stay a missing-blob Snapshot, NOT become an available marker.
+        let none_entry = StoredEntry {
+            snapshot: None,
+            ..entry(1, "A", false, 5)
+        };
+        store.persist(&[none_entry], Some(1), 2).unwrap();
+        let (_s, res2) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        assert!(
+            !res2.entries[0].available,
+            "preserved as unavailable snapshot, not demoted to a marker"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// New blobs are the raw format (format 2), and round-trip bit-exactly
+    /// (f32 via to/from_le_bytes), so existing round-trip tests now exercise it.
+    #[test]
+    fn new_blobs_use_raw_format() {
+        let dir = tmp_dir("rawfmt");
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let e = entry(1, "A", false, 5);
+        store.persist(&[e.clone()], Some(1), 2).unwrap();
+        // Raw layout length is exactly 4 + count*(1 + 12).
+        let len = std::fs::metadata(blob_path(&dir, 1)).unwrap().len();
+        assert_eq!(len, (4 + 5 * BLOB_BYTES_PER_TICK) as u64);
+        assert_loads_as(&dir, &[e], Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
