@@ -5,10 +5,28 @@ use std::time::{Duration, Instant};
 use tas_shared::{TasSharedState, TAS_MAX_TICKS};
 
 const TAS_TICKS_PER_SECOND: u32 = 100;
-// Crash-recovery checkpoint cadence while recording. 250ms (4x/sec) was wild —
-// real tools autosave on the order of seconds-to-minutes (Blender 5min, Office
-// 10min). 1.5s loses at most ~1.5s of a run on a crash, at a fraction of the I/O.
-const DEFAULT_RECOVERY_DEBOUNCE_MS: u64 = 1500;
+// Crash-recovery checkpoint cadence while recording. Each checkpoint is a FULL
+// rewrite of the recording so far (~13 bytes/tick), so a fixed interval makes
+// total write volume ~quadratic in length. We instead save LESS often as the
+// run grows — a phase table that trades a little more max-loss-on-crash for
+// much less churn, hard-capped so a crash never loses more than the late
+// interval. (250ms/4x-sec was the original wild value; real tools autosave on
+// the order of seconds-to-minutes.)
+//
+// Phase     tick range        interval   max crash loss
+// early     0..12_000  (<2m)  1.5s       1.5s
+// mid       12_000..48_000    5s         5s
+// late      48_000..cap (8m+) 10s        10s
+// Worst case over a full ~11-min recording: ~170 writes / ~51 MiB (vs ~437 /
+// ~177 MiB at a flat 1.5s), with crash loss bounded at 10s.
+const RECOVERY_DEBOUNCE_EARLY_MS: u64 = 1_500;
+const RECOVERY_DEBOUNCE_MID_MS: u64 = 5_000;
+const RECOVERY_DEBOUNCE_LATE_MS: u64 = 10_000;
+const RECOVERY_PHASE_MID_TICKS: u32 = 12_000; // ~2 min at 100 ticks/sec
+const RECOVERY_PHASE_LATE_TICKS: u32 = 48_000; // ~8 min
+/// Early-phase interval; also the value the production `RecoveryStore::new`
+/// constructs with. A zero debounce (test-only) disables throttling entirely.
+const DEFAULT_RECOVERY_DEBOUNCE_MS: u64 = RECOVERY_DEBOUNCE_EARLY_MS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecordingSessionKind {
@@ -158,6 +176,22 @@ impl RecoveryStore {
         self.persist_snapshot_if_needed(&snapshot, segments, session, force)
     }
 
+    /// Minimum spacing between checkpoint writes at the given recording length.
+    /// Grows with length (see the phase-table constants) so a long run writes
+    /// less often, while a crash still loses at most one late-phase interval.
+    /// A zero base debounce (test-only) disables throttling entirely.
+    fn effective_debounce(&self, recorded_count: u32) -> Duration {
+        if self.debounce.is_zero() {
+            return Duration::ZERO;
+        }
+        let ms = match recorded_count {
+            0..RECOVERY_PHASE_MID_TICKS => RECOVERY_DEBOUNCE_EARLY_MS,
+            RECOVERY_PHASE_MID_TICKS..RECOVERY_PHASE_LATE_TICKS => RECOVERY_DEBOUNCE_MID_MS,
+            _ => RECOVERY_DEBOUNCE_LATE_MS,
+        };
+        Duration::from_millis(ms)
+    }
+
     /// Decide whether a checkpoint is due (throttle/dedup), and if so return a
     /// self-contained [`RecoveryWriteJob`]. The job's ~12ms disk write can then
     /// run OFF the UI thread (so STOP / REC don't hitch). The throttle state is
@@ -177,7 +211,7 @@ impl RecoveryStore {
                 return None;
             }
             if let Some(last_write_at) = self.last_write_at {
-                if last_write_at.elapsed() < self.debounce {
+                if last_write_at.elapsed() < self.effective_debounce(snapshot.recorded_count) {
                     return None;
                 }
             }
@@ -2083,6 +2117,33 @@ mod tests {
         state.recorded_count = TAS_MAX_TICKS as u32 + 50;
         let snap = RecordingSnapshot::from_state(&state);
         assert_eq!(snap.recorded_count as usize, TAS_MAX_TICKS, "clamped to max");
+    }
+
+    /// The checkpoint cadence stretches as the recording grows (early→mid→late),
+    /// so a long run writes less often — while a zero base debounce (test mode)
+    /// stays unthrottled.
+    #[test]
+    fn recovery_debounce_grows_with_length() {
+        let prod = RecoveryStore::new_in_root(
+            unique_temp_root("tas_ui_debounce_phases"),
+            Duration::from_millis(RECOVERY_DEBOUNCE_EARLY_MS),
+        )
+        .unwrap();
+        assert_eq!(prod.effective_debounce(0).as_millis(), 1_500);
+        assert_eq!(prod.effective_debounce(11_999).as_millis(), 1_500);
+        assert_eq!(prod.effective_debounce(12_000).as_millis(), 5_000);
+        assert_eq!(prod.effective_debounce(47_999).as_millis(), 5_000);
+        assert_eq!(prod.effective_debounce(48_000).as_millis(), 10_000);
+        assert_eq!(prod.effective_debounce(65_536).as_millis(), 10_000);
+
+        // Test-mode zero base stays unthrottled at every length.
+        let test = RecoveryStore::new_in_root(
+            unique_temp_root("tas_ui_debounce_zero"),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(test.effective_debounce(0).is_zero());
+        assert!(test.effective_debounce(60_000).is_zero());
     }
 
     /// #2: `adopt_id_floor` raises the allocator (never lowers it), so an empty
