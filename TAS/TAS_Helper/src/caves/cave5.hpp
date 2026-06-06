@@ -105,15 +105,20 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             && s->force_fixed_tick == 0
             && s->playback_speed == 1.0f;
 
-        // CONT no-backlog cap (Problem B fix): capture the RAW per-frame demand
-        // (before the clamp below mangles realTick) and whether we're in a CONT
-        // catch-up replay. Used by the tick_advance section to cap demand at the
-        // tick cap so prev_time tracks wall_time — no accumulated catch-up
-        // backlog to burst into the resumed REC at the splice (which is what made
-        // the resume land a few frames late). Replaces the old end-of-replay
-        // deceleration: capping demand fixes the backlog at the source instead.
-        int32_t raw_demand = realTick;
-        bool cont_replay = s->continue_from_frame > 0 && s->mode == MODE_PLAY;
+        // CONT splice deceleration (Problem B part 2): in the final frames of a
+        // CONT catch-up replay, run at 1x so the catch-up's accumulated clock
+        // backlog (prev_time lags wall_time while tick_advance = native/speed)
+        // drains as NORMAL-dt PLAY ticks here, instead of bursting into the
+        // resumed REC right after the splice. cave5 owns tick_advance, so this
+        // can't be stomped by the UI re-asserting the catch-up speed each frame.
+        // Only the clamp + tick_advance use this; catchup_drain stays on the
+        // real speed so its huge-dt single-tick drain never fires mid-replay.
+        const uint32_t CONT_DECEL_FRAMES = 96;
+        bool cont_decel =
+            s->continue_from_frame > 0
+            && s->mode == MODE_PLAY
+            && s->playback_pos + CONT_DECEL_FRAMES >= s->continue_from_frame;
+        float effective_speed = cont_decel ? 1.0f : s->playback_speed;
 
         if (s->force_fixed_tick > 0) {
             // Deterministic mode: exact tick count per frame
@@ -142,7 +147,7 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             // catchup-drain branch above handles long pauses (> 50 ticks
             // accumulated) for 1× play, so this lower cap is only the
             // ceiling for "normal stutter recovery" at 1×.
-            if (s->playback_speed <= 1.0f && realTick > NATIVE_GAME_CLAMP_AT_1X) {
+            if (effective_speed <= 1.0f && realTick > NATIVE_GAME_CLAMP_AT_1X) {
                 realTick = NATIVE_GAME_CLAMP_AT_1X;
             }
 
@@ -157,23 +162,8 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // Skipped during catchup_drain — that path wrote a temporary large
         // value to tick_advance that the game must read next frame.
         if (g_tickAdvancePtr && !catchup_drain) {
-            if (s->mode != MODE_OFF && s->playback_speed > 0.0f && s->playback_speed != 1.0f) {
-                float ta = g_nativeTickAdvance / s->playback_speed;
-                // CONT no-backlog cap (Problem B fix): during the catch-up
-                // replay, never let per-frame DEMAND exceed the tick cap. Above
-                // the cap the game clamps ticks/frame and prev_time falls behind
-                // wall_time — the catch-up backlog that bursts into the resumed
-                // REC at the splice (resume lands a few frames late). Scaling
-                // tick_advance up so next frame's demand lands at the cap keeps
-                // prev_time tracking wall (zero backlog) at the SAME throughput
-                // (cap-bound), so the resume is frame-exact with no end-of-replay
-                // deceleration. tick_advance is the scheduler divisor (ticks per
-                // frame), NOT the physics dt (native per tick — the catch-up is
-                // bit-exact), so this cannot drift.
-                if (cont_replay && raw_demand > CAVE5_PER_FRAME_TICK_CAP) {
-                    ta *= (float)raw_demand / (float)CAVE5_PER_FRAME_TICK_CAP;
-                }
-                *g_tickAdvancePtr = ta;
+            if (s->mode != MODE_OFF && effective_speed > 0.0f && effective_speed != 1.0f) {
+                *g_tickAdvancePtr = g_nativeTickAdvance / effective_speed;
             } else {
                 *g_tickAdvancePtr = g_nativeTickAdvance;
             }
