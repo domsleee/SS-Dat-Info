@@ -113,6 +113,14 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // can't be stomped by the UI re-asserting the catch-up speed each frame.
         // Only the clamp + tick_advance use this; catchup_drain stays on the
         // real speed so its huge-dt single-tick drain never fires mid-replay.
+        // Fixed decel window, calibrated for the 64x catch-up (the optimum).
+        // Scaling it with speed was tried and REVERTED: it made high speeds
+        // frame-exact too, but the larger decel cost more than the faster replay
+        // saved, so 128x landed ~700ms SLOWER than 64x (2521→3246ms) for zero
+        // benefit. Faster-than-64x AND frame-exact isn't reachable by decel —
+        // draining a speed-proportional backlog inherently costs real-time. 64x
+        // is the genuine sweet spot; going higher only helps if the backlog is
+        // eliminated outright (reset the game's clock accumulator at the splice).
         const uint32_t CONT_DECEL_FRAMES = 96;
         bool cont_decel =
             s->continue_from_frame > 0
