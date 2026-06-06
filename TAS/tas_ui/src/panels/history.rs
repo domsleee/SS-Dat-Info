@@ -14,6 +14,8 @@ pub enum HistoryAction {
 
 pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction> {
     let mut actions = Vec::new();
+    // Rows are clickable, not text — don't show the I-beam / allow text drag.
+    ui.style_mut().interaction.selectable_labels = false;
 
     if history.is_empty() {
         ui.colored_label(
@@ -29,6 +31,10 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
+        // Desktop: scroll with the wheel/scrollbar only. Without this, egui's
+        // touch-style "drag the content to scroll" fires when you press-and-hold
+        // a row (e.g. holding the pin while the screenshot tool grabs a drag).
+        .drag_to_scroll(false)
         .show(ui, |ui| {
             // Render order: sort by `created_at` descending with vec index
             // as a tie-breaker, so the displayed list is true reverse-
@@ -43,10 +49,13 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
             let mut visible: Vec<(usize, &HistoryEntry)> =
                 entries.iter().enumerate().collect();
             visible.sort_by(|(a_idx, a), (b_idx, b)| {
-                // (created_at desc, idx desc) — same-timestamp entries
-                // preserve push recency at the top.
+                // Newest day first; PINNED float to the top within their day;
+                // then newest-first, with push recency as the final tiebreak.
                 b.created_at
-                    .cmp(&a.created_at)
+                    .date_naive()
+                    .cmp(&a.created_at.date_naive())
+                    .then_with(|| b.pinned.cmp(&a.pinned))
+                    .then_with(|| b.created_at.cmp(&a.created_at))
                     .then_with(|| b_idx.cmp(a_idx))
             });
 
@@ -152,67 +161,84 @@ fn render_row(
         ui.visuals().text_color()
     };
 
-    // Push the current-row background ourselves via a Frame, so the row
-    // contents below can use horizontal layout without losing the
-    // selection visual that selectable_label would give us.
-    let mut frame = egui::Frame::none().inner_margin(egui::Margin::symmetric(4.0, 1.0));
+    // Current-row background spans the whole row (star + body). Pinned rows get
+    // a subtle gold tint so they read as "kept" even when not selected.
+    let mut frame = egui::Frame::none().inner_margin(egui::Margin::symmetric(2.0, 1.0));
     if is_current {
         frame = frame.fill(egui::Color32::from_rgba_unmultiplied(192, 132, 252, 38));
+    } else if entry.pinned {
+        frame = frame.fill(egui::Color32::from_rgba_unmultiplied(232, 184, 75, 12));
     }
 
-    let mut pin_clicked = false;
-    let outer = frame.show(ui, |ui| {
+    frame.show(ui, |ui| {
         ui.horizontal(|ui| {
-            // Time goes to the right edge via right_to_left layout, then
-            // the rest flows left-to-right back from there.
-            ui.with_layout(
+            ui.spacing_mut().item_spacing.x = 4.0;
+
+            // --- Pin star: its OWN column + generous hit box, fully separate
+            //     from the restore area so it can never trigger a restore. ---
+            // Real Label as the base so the glyph is ALWAYS drawn (a pure
+            // painter star vanished in some pressed/active states).
+            let (glyph, base_color) = if entry.pinned {
+                ("★", egui::Color32::from_rgb(232, 184, 75))
+            } else {
+                ("☆", egui::Color32::from_gray(125))
+            };
+            let star = ui.add_sized(
+                egui::vec2(22.0, 20.0),
+                egui::Label::new(egui::RichText::new(glyph).size(16.0).color(base_color))
+                    .sense(egui::Sense::click()),
+            );
+            // Hover/press overlay (additive — never hides the base glyph).
+            // Use contains_pointer (NOT hovered): egui's hovered() goes false
+            // while the button is held down, which made the highlight flicker
+            // off mid-press. Show a slightly stronger "pressed" state on hold.
+            let over = star.contains_pointer();
+            let down = star.is_pointer_button_down_on();
+            if over || down {
+                ui.painter().rect_filled(
+                    star.rect,
+                    3.0,
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, if down { 40 } else { 22 }),
+                );
+                let hc = if entry.pinned {
+                    egui::Color32::from_rgb(255, 210, 100)
+                } else {
+                    egui::Color32::from_gray(215)
+                };
+                ui.painter().text(
+                    star.rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    glyph,
+                    egui::FontId::proportional(if down { 15.0 } else { 16.0 }),
+                    hc,
+                );
+            }
+            let star = star
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(if entry.pinned { "Unpin" } else { "Pin (keep forever)" });
+            if star.clicked() {
+                actions.push(HistoryAction::SetPin(entry.entry_id, !entry.pinned));
+            }
+
+            // --- Restore body: the remaining row width. Time to the right,
+            //     ▶ / duration / context flowing from the left. ---
+            let body = ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
-                    // Clock time, dimmed — it's secondary to the duration
-                    // (and identical down a CONT-reroll cluster). Exact date
-                    // is in the row tooltip.
                     ui.label(
                         egui::RichText::new(&time_str)
                             .size(11.0)
-                            .color(egui::Color32::from_gray(85))
+                            .color(egui::Color32::from_gray(120))
                             .monospace(),
                     );
                     ui.with_layout(
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            // Pin star (always visible): gold ★ when pinned,
-                            // dim ☆ otherwise. Click toggles; pinned entries
-                            // are never cap-evicted. Its own click target so
-                            // it doesn't also trigger a row restore.
-                            let (glyph, color) = if entry.pinned {
-                                ("★", egui::Color32::from_rgb(232, 184, 75))
-                            } else {
-                                ("☆", egui::Color32::from_gray(90))
-                            };
-                            let star = ui
-                                .add(
-                                    egui::Label::new(egui::RichText::new(glyph).size(13.0).color(color))
-                                        .sense(egui::Sense::click()),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                .on_hover_text(if entry.pinned { "Unpin" } else { "Pin (keep forever)" });
-                            if star.clicked() {
-                                pin_clicked = true;
-                            }
-                            // Single icon (▶) for every row, colored by
-                            // kind. Using one Unicode glyph for everything
-                            // sidesteps egui's per-codepoint font fallback
-                            // (which made ● / 💾 / 📂 render at wildly
-                            // inconsistent sizes next to ▶). Color does
-                            // the discrimination: orange = REC/CONT, blue
-                            // = save, amber = load.
                             ui.label(
                                 egui::RichText::new("▶")
                                     .color(kind_color(entry.kind))
                                     .size(13.0),
                             );
-                            // Total — right-padded so 0:55 and 1:08 line
-                            // up vertically across rows.
                             if !parts.total.is_empty() {
                                 let mut rt = egui::RichText::new(format!("{:>7}", parts.total))
                                     .monospace()
@@ -223,8 +249,6 @@ fn render_row(
                                 }
                                 ui.label(rt);
                             }
-                            // Context (e.g. "from 0:52.00"). Truncates with
-                            // ellipsis if the panel is too narrow.
                             let mut ctx_rt = egui::RichText::new(&parts.context)
                                 .size(12.0)
                                 .color(row_color);
@@ -236,24 +260,19 @@ fn render_row(
                     );
                 },
             );
+
+            if restorable {
+                let r = body
+                    .response
+                    .interact(egui::Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(entry.created_at.format("%a %d %b %Y · %H:%M").to_string());
+                if r.clicked() {
+                    actions.push(HistoryAction::Restore(idx));
+                }
+            }
         });
     });
-
-    // Capture row-level click. The Frame's response is what we want; turn
-    // it into a click sensor so any pixel of the row works.
-    if pin_clicked {
-        // The star handled this click — pin/unpin, don't also restore.
-        actions.push(HistoryAction::SetPin(entry.entry_id, !entry.pinned));
-    } else if restorable {
-        let interact = outer
-            .response
-            .interact(egui::Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(entry.created_at.format("%a %d %b %Y · %H:%M").to_string());
-        if interact.clicked() {
-            actions.push(HistoryAction::Restore(idx));
-        }
-    }
 }
 
 fn kind_color(kind: HistoryEntryKind) -> egui::Color32 {
