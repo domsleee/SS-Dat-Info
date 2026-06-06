@@ -116,17 +116,35 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // use NATIVE (not the speed-scaled tick_advance) so it's
         // speed-independent, and we do NOT process the backlog ticks (ctx.esi
         // stays capped below), so there's no recorded burst and no huge-dt jump.
+        bool did_reset = false;
         if (s->cont_reset_pending) {
             if (ctx.ebp) {
                 float* prev_time = (float*)(uintptr_t)(ctx.ebp + 0x0C);
                 *prev_time += (float)realTick * g_nativeTickAdvance;
             }
             s->cont_reset_pending = 0;
+            did_reset = true;
+        }
+
+        // (a) Land the catch-up batch EXACTLY on the splice frame. cave5 sets the
+        // per-frame tick count; capping it to the ticks-until-splice makes the
+        // batch end on continue_from_frame so the PLAY→REC switch happens on the
+        // LAST tick of the batch — no leftover catch-up ticks spill into the
+        // resumed REC (that splice-frame remainder was most of the overshoot).
+        // Free: the batch was already ≤ cap; only the final replay frame shortens.
+        if (s->continue_from_frame > 0 && s->mode == MODE_PLAY
+            && s->playback_pos < s->continue_from_frame) {
+            int32_t remaining = (int32_t)(s->continue_from_frame - s->playback_pos);
+            if (realTick > remaining) realTick = remaining;
         }
 
         if (s->force_fixed_tick > 0) {
             // Deterministic mode: exact tick count per frame
             ctx.esi = s->force_fixed_tick;
+        } else if (did_reset) {
+            // Splice frame's backlog was just zeroed (prev → now); process a
+            // single resume tick so the first REC frame doesn't re-burst.
+            ctx.esi = 1;
         } else if (catchup_drain) {
             // Set tick_advance large enough that 1 tick drains the whole
             // wall-time gap (gap ≈ realTick * native because __ftol used
