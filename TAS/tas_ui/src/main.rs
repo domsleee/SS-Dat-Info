@@ -1956,11 +1956,13 @@ impl eframe::App for TasApp {
 
         // Process history panel restores
         if !history_actions.is_empty() {
-            if let Some(ref mut shared) = self.shared {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                for action in history_actions {
-                    match action {
-                        history::HistoryAction::Restore(idx) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            for action in history_actions {
+                match action {
+                    history::HistoryAction::Restore(idx) => {
+                        // Restoring writes into the live game buffer — needs a
+                        // connection. Pin/rename don't.
+                        if let Some(shared) = self.shared.as_mut() {
                             if let Some(snap) = self.history.restore_index(idx) {
                                 snap.restore_to(shared.state_mut());
                                 let label = self
@@ -1973,9 +1975,12 @@ impl eframe::App for TasApp {
                                     .push(format!("[{}] History restore: {}", ts, label));
                             }
                         }
-                        history::HistoryAction::ClearSelection => {
-                            self.history.clear_selection();
-                        }
+                    }
+                    history::HistoryAction::ClearSelection => {
+                        self.history.clear_selection();
+                    }
+                    history::HistoryAction::SetPin(id, pinned) => {
+                        self.history.set_pinned(id, pinned);
                     }
                 }
             }
