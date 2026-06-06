@@ -17,9 +17,10 @@ use crate::cont_reliability;
 const SPLICE_FRAME: u32 = 6200;
 const ITERATIONS: u32 = 12;
 const SPEED: f32 = 64.0;
-/// The resume must land within a few frames of the splice. Pre-fix this was
-/// tens-to-hundreds; the fix holds it at 0-1.
-const MAX_OVERSHOOT: u32 = 4;
+/// Frame-exact resume: the recording must start at exactly the splice frame.
+/// Pre-fix this was tens-to-hundreds; with the fix + a sub-tick splice poll it
+/// is 0. Allow 1 only for rare OS-timer jitter on the detection poll.
+const MAX_OVERSHOOT: u32 = 1;
 const RECORDING_REL: &str = "TAS/recordings/FE-10065.tasrec";
 
 pub fn run() -> bool {
