@@ -191,6 +191,15 @@ pub struct TasSharedState {
     // Log ring buffer (DLL writes, UI reads)
     pub log_write_seq: u32,
     pub log_ring: [TasLogEntry; TAS_LOG_RING_SIZE],
+
+    // CONT splice timing (DLL writes, harness/UI reads) — measures the
+    // "resume off by a few frames" skew (Problem B). `frame_count` is stamped
+    // when the CONT replay first advances and again at the PLAY→REC splice; the
+    // DELTA is the number of game-frames the catch-up replay took to consume
+    // the prefix. Its run-to-run spread is the yield jitter. (frame_count is
+    // free-running — never reset on F5 — so only the delta is meaningful.)
+    pub cont_replay_start_fc: u32,
+    pub cont_splice_fc: u32,
 }
 
 impl TasSharedState {
@@ -1535,7 +1544,9 @@ mod tests {
     #[test]
     fn size_of_tas_shared_state_pinned() {
         // Pin the total struct size so C++ and Rust sides stay in sync.
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_232);
+        // +8 bytes vs 1_647_232 for the two CONT splice-timing u32s appended
+        // after log_ring (input_log offset is unchanged — see the next test).
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_240);
     }
 
     #[test]

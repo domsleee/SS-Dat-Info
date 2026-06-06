@@ -155,6 +155,13 @@ struct TasSharedState {
     // -- Log ring buffer (DLL writes, UI reads) --
     volatile uint32_t log_write_seq;              // Next sequence number to write (monotonic)
     TasLogEntry       log_ring[TAS_LOG_RING_SIZE]; // Circular buffer of log entries
+
+    // -- CONT splice timing (DLL writes, harness/UI reads) --
+    // frame_count stamped at CONT replay start and at the PLAY->REC splice; the
+    // delta = game-frames the catch-up replay took (the "resume off by a few
+    // frames" measurement). Must stay last to match the Rust struct layout.
+    uint32_t cont_replay_start_fc;
+    uint32_t cont_splice_fc;
 };
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks

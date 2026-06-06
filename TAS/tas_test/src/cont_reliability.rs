@@ -50,6 +50,12 @@ pub struct ContCycleResult {
     pub replay_coverage_ok: bool,
     pub playback_pos_at_splice: u32,
     pub splice_recorded_count: u32,
+    /// DLL-stamped frame_count (Cycle-callback counter) at CONT replay start and
+    /// at the splice. The DELTA = game-frames the catch-up replay took to reach
+    /// the splice; its run-to-run spread is the "resume off by a few frames"
+    /// skew (Problem B). 0/0 if the DLL predates the stamps.
+    pub replay_start_fc: u32,
+    pub splice_fc: u32,
     pub max_drift_x: f64,
     pub max_drift_z: f64,
     pub max_drift_frame_x: usize,
@@ -157,6 +163,54 @@ impl ContReliabilityReport {
                 max,
                 rerolls_list.join(" ")
             );
+        }
+
+        // Problem B — resume TIMING (independent of the bucket lottery above):
+        // game-frames the catch-up replay took to reach the splice
+        // (cont_splice_fc - cont_replay_start_fc). The input index at the splice
+        // is always exactly splice_frame, so any run-to-run variation in this
+        // delta is the "resume off by a few frames" skew. Needs the DLL splice
+        // stamps; shows n/a against an older DLL (both counters 0).
+        let timed: Vec<u32> = self
+            .results
+            .iter()
+            .filter(|r| r.spliced && (r.splice_fc != 0 || r.replay_start_fc != 0))
+            .map(|r| r.splice_fc.saturating_sub(r.replay_start_fc))
+            .collect();
+        println!();
+        if timed.is_empty() {
+            println!(
+                "Resume timing (replay game-frames): n/a — DLL splice stamps absent (rebuild + deploy the DLL)"
+            );
+        } else {
+            let min = *timed.iter().min().unwrap();
+            let max = *timed.iter().max().unwrap();
+            let mean = timed.iter().sum::<u32>() as f64 / timed.len() as f64;
+            let per: Vec<String> = self
+                .results
+                .iter()
+                .map(|r| {
+                    if r.spliced && (r.splice_fc != 0 || r.replay_start_fc != 0) {
+                        r.splice_fc.saturating_sub(r.replay_start_fc).to_string()
+                    } else {
+                        "x".into()
+                    }
+                })
+                .collect();
+            println!(
+                "Resume timing (replay game-frames to splice): min {} | max {} | spread {} | mean {:.1} | per-cycle [{}]",
+                min, max, max - min, mean, per.join(" ")
+            );
+            if max != min {
+                println!(
+                    "  -> handover is NOT frame-stable: resume lands within a {}-frame window (Problem B reproduced)",
+                    max - min
+                );
+            } else {
+                println!(
+                    "  -> replay→splice is frame-stable; any few-frame skew is downstream (UI 64x→0.5x handover), not the replay"
+                );
+            }
         }
 
         println!();
@@ -561,11 +615,15 @@ pub fn run(
             let mut prefix_max_x = 0.0;
             let mut prefix_min_z = 0.0;
             let mut prefix_max_z = 0.0;
+            let mut replay_start_fc = 0;
+            let mut splice_fc = 0;
 
             if spliced {
                 let state = client.state();
                 mode_rec_after_splice = state.mode == TasMode::Rec as u32;
                 splice_recorded_count = state.recorded_count;
+                replay_start_fc = state.cont_replay_start_fc;
+                splice_fc = state.cont_splice_fc;
                 playback_pos_at_splice = state.playback_pos;
                 replay_coverage_ok = playback_pos_at_splice >= splice_frame;
                 let assessed_prefix = splice_frame.min(playback_pos_at_splice);
@@ -622,6 +680,8 @@ pub fn run(
                 replay_coverage_ok,
                 playback_pos_at_splice,
                 splice_recorded_count,
+                replay_start_fc,
+                splice_fc,
                 max_drift_x,
                 max_drift_z,
                 max_drift_frame_x,
