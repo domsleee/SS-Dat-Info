@@ -8,6 +8,8 @@ use crate::recording::{
 pub enum HistoryAction {
     Restore(usize),
     ClearSelection,
+    /// Toggle the pin on the entry with this stable id, to `pinned`.
+    SetPin(u64, bool),
 }
 
 pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction> {
@@ -158,6 +160,7 @@ fn render_row(
         frame = frame.fill(egui::Color32::from_rgba_unmultiplied(192, 132, 252, 38));
     }
 
+    let mut pin_clicked = false;
     let outer = frame.show(ui, |ui| {
         ui.horizontal(|ui| {
             // Time goes to the right edge via right_to_left layout, then
@@ -165,15 +168,37 @@ fn render_row(
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
+                    // Clock time, dimmed — it's secondary to the duration
+                    // (and identical down a CONT-reroll cluster). Exact date
+                    // is in the row tooltip.
                     ui.label(
                         egui::RichText::new(&time_str)
                             .size(11.0)
-                            .color(egui::Color32::from_gray(140))
+                            .color(egui::Color32::from_gray(85))
                             .monospace(),
                     );
                     ui.with_layout(
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
+                            // Pin star (always visible): gold ★ when pinned,
+                            // dim ☆ otherwise. Click toggles; pinned entries
+                            // are never cap-evicted. Its own click target so
+                            // it doesn't also trigger a row restore.
+                            let (glyph, color) = if entry.pinned {
+                                ("★", egui::Color32::from_rgb(232, 184, 75))
+                            } else {
+                                ("☆", egui::Color32::from_gray(90))
+                            };
+                            let star = ui
+                                .add(
+                                    egui::Label::new(egui::RichText::new(glyph).size(13.0).color(color))
+                                        .sense(egui::Sense::click()),
+                                )
+                                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                .on_hover_text(if entry.pinned { "Unpin" } else { "Pin (keep forever)" });
+                            if star.clicked() {
+                                pin_clicked = true;
+                            }
                             // Single icon (▶) for every row, colored by
                             // kind. Using one Unicode glyph for everything
                             // sidesteps egui's per-codepoint font fallback
@@ -216,11 +241,15 @@ fn render_row(
 
     // Capture row-level click. The Frame's response is what we want; turn
     // it into a click sensor so any pixel of the row works.
-    if restorable {
+    if pin_clicked {
+        // The star handled this click — pin/unpin, don't also restore.
+        actions.push(HistoryAction::SetPin(entry.entry_id, !entry.pinned));
+    } else if restorable {
         let interact = outer
             .response
             .interact(egui::Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(entry.created_at.format("%a %d %b %Y · %H:%M").to_string());
         if interact.clicked() {
             actions.push(HistoryAction::Restore(idx));
         }
