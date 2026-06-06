@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 use tas_shared::{TasSharedState, TAS_MAX_TICKS};
 
 const TAS_TICKS_PER_SECOND: u32 = 100;
-const DEFAULT_RECOVERY_DEBOUNCE_MS: u64 = 250;
+// Crash-recovery checkpoint cadence while recording. 250ms (4x/sec) was wild —
+// real tools autosave on the order of seconds-to-minutes (Blender 5min, Office
+// 10min). 1.5s loses at most ~1.5s of a run on a crash, at a fraction of the I/O.
+const DEFAULT_RECOVERY_DEBOUNCE_MS: u64 = 1500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecordingSessionKind {
@@ -2380,6 +2383,46 @@ mod tests {
             h2.entries().iter().find(|e| e.entry_id == id).unwrap().custom_name,
             None
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_checkpoint_becomes_pinned_history_entry() {
+        let dir = std::env::temp_dir().join(format!(
+            "ssb_recov_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let mut store = RecoveryStore::new_with(dir.clone(), Duration::from_millis(0)).unwrap();
+        let state = state_with_ticks(406); // a 4.06s in-progress recording
+        let snap = RecordingSnapshot::from_state(&state);
+        let session =
+            RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 406).unwrap();
+        store
+            .persist_snapshot_if_needed(&snap, &[], &session, true)
+            .unwrap();
+
+        // Mirror startup: load the checkpoint and recover it into history.
+        let cp = store.load_pending().unwrap().expect("checkpoint present");
+        let mut history = RecordingHistory::new(16);
+        assert!(history.push_snapshot_data_with_session(
+            cp.snapshot,
+            cp.session.label.clone(),
+            cp.session.start_tick,
+            cp.session.end_tick,
+        ));
+        let id = history.entries().last().unwrap().entry_id;
+        history.set_pinned(id, true);
+        history.rename(id, format!("Recovered · {}", cp.session.label));
+
+        let e = &history.entries()[0];
+        assert!(e.pinned, "recovered entry is pinned");
+        assert!(e.custom_name.as_deref().unwrap().starts_with("Recovered"));
+        assert!(e.can_restore(), "recovered snapshot is restorable");
+
+        // Clearing the checkpoint means it won't be recovered again.
+        store.clear_pending().unwrap();
+        assert!(store.load_pending().unwrap().is_none(), "checkpoint cleared");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
