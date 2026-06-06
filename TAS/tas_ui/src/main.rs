@@ -1963,8 +1963,11 @@ impl eframe::App for TasApp {
                         // Restoring writes into the live game buffer — needs a
                         // connection. Pin/rename don't.
                         if let Some(shared) = self.shared.as_mut() {
-                            if let Some(snap) = self.history.restore_index(idx) {
+                            let restored = self.history.restore_index(idx).map(|snap| {
                                 snap.restore_to(shared.state_mut());
+                                snap.recorded_count
+                            });
+                            if let Some(count) = restored {
                                 let label = self
                                     .history
                                     .entries()
@@ -1973,6 +1976,8 @@ impl eframe::App for TasApp {
                                     .unwrap_or_else(|| format!("Entry {}", idx + 1));
                                 self.log_lines
                                     .push(format!("[{}] History restore: {}", ts, label));
+                                // Fit the timeline to the whole loaded recording.
+                                self.timeline_view.fit(count);
                             }
                         }
                     }
@@ -1981,6 +1986,9 @@ impl eframe::App for TasApp {
                     }
                     history::HistoryAction::SetPin(id, pinned) => {
                         self.history.set_pinned(id, pinned);
+                    }
+                    history::HistoryAction::Rename(id, name) => {
+                        self.history.rename(id, name);
                     }
                 }
             }

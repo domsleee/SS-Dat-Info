@@ -619,6 +619,9 @@ pub struct HistoryEntry {
     /// Pinned entries are exempt from cap-eviction and never GC'd — durable
     /// named checkpoints that survive across sessions.
     pub pinned: bool,
+    /// User-given name (via rename). When set, it's shown instead of the
+    /// auto-generated `label`. `None` = use the auto label/duration.
+    pub custom_name: Option<String>,
     pub label: String,
     /// HH:MM:SS-of-day legacy display field. Kept for backward compat with
     /// existing persisted history files; new code should prefer
@@ -652,6 +655,7 @@ impl HistoryEntry {
         Self {
             entry_id: 0, // assigned by RecordingHistory on push
             pinned: false,
+            custom_name: None,
             label,
             timestamp: now.format("%H:%M:%S").to_string(),
             created_at: now,
@@ -670,6 +674,7 @@ impl HistoryEntry {
         Self {
             entry_id: 0, // assigned by RecordingHistory on push
             pinned: false,
+            custom_name: None,
             label,
             timestamp: now.format("%H:%M:%S").to_string(),
             created_at: now,
@@ -891,6 +896,7 @@ impl RecordingHistory {
             .map(|e| crate::history_store_v2::StoredEntry {
                 entry_id: e.entry_id,
                 name: e.label.clone(),
+                user_name: e.custom_name.clone(),
                 pinned: e.pinned,
                 kind: e.kind,
                 start_tick: e.start_tick,
@@ -928,11 +934,21 @@ impl RecordingHistory {
         found
     }
 
+    /// Set (or clear, if blank) the user-given name of an entry. Leaves the
+    /// auto `label` (and its duration) intact; the name is shown instead.
     pub fn rename(&mut self, entry_id: u64, name: impl Into<String>) -> bool {
         let name = name.into();
+        let new = {
+            let t = name.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        };
         if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
-            if e.label != name {
-                e.label = name;
+            if e.custom_name != new {
+                e.custom_name = new;
                 self.bump();
             }
             true
@@ -969,6 +985,7 @@ impl RecordingHistory {
             entries.push(HistoryEntry {
                 entry_id: le.entry_id,
                 pinned: le.pinned,
+                custom_name: le.user_name,
                 label: le.name,
                 timestamp: created_at.format("%H:%M:%S").to_string(),
                 created_at,
@@ -1099,6 +1116,7 @@ impl RecordingHistory {
             entries.push(HistoryEntry {
                 entry_id: self.alloc_id(),
                 pinned: false,
+                custom_name: None,
                 label: entry.label,
                 timestamp: entry.timestamp,
                 created_at,
@@ -2276,7 +2294,7 @@ mod tests {
 
         assert_eq!(h2.len(), h.len());
         let b2 = h2.entries().iter().find(|e| e.entry_id == b_id).unwrap();
-        assert_eq!(b2.label, "B renamed");
+        assert_eq!(b2.custom_name.as_deref(), Some("B renamed"));
         assert!(b2.pinned);
         assert_eq!(h2.current_entry_id(), cur);
         assert!(h2.next_entry_id() > b_id, "next id continues past loaded max");
@@ -2299,6 +2317,40 @@ mod tests {
         let r0 = h.revision();
         h.apply_persisted(persisted).unwrap();
         assert!(h.revision() > r0, "apply_persisted must bump revision");
+    }
+
+    #[test]
+    fn custom_name_roundtrips_and_clears() {
+        use crate::history_store_v2::HistoryStoreV2;
+        let dir = std::env::temp_dir().join(format!(
+            "ssb_name_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let mut h = RecordingHistory::new(16);
+        h.push_snapshot(&state_with_ticks(5), "Recorded 0:05");
+        let id = h.entries()[0].entry_id;
+        assert!(h.rename(id, "  my best run  ")); // trims whitespace
+
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store
+            .persist(&h.to_stored_entries(), h.current_entry_id(), h.next_entry_id())
+            .unwrap();
+        let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let mut h2 = RecordingHistory::new(16);
+        h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
+
+        let e = h2.entries().iter().find(|e| e.entry_id == id).unwrap();
+        assert_eq!(e.custom_name.as_deref(), Some("my best run"));
+        assert_eq!(e.label, "Recorded 0:05", "auto label preserved alongside name");
+
+        // Blank rename clears the custom name.
+        assert!(h2.rename(id, "   "));
+        assert_eq!(
+            h2.entries().iter().find(|e| e.entry_id == id).unwrap().custom_name,
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

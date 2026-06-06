@@ -10,6 +10,8 @@ pub enum HistoryAction {
     ClearSelection,
     /// Toggle the pin on the entry with this stable id, to `pinned`.
     SetPin(u64, bool),
+    /// Set the user-given name of the entry (blank clears it).
+    Rename(u64, String),
 }
 
 pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction> {
@@ -28,6 +30,11 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
     let current = history.current_index();
     let today = Local::now().date_naive();
     let yesterday = today.pred_opt();
+
+    // Inline-rename state (which entry is being edited + its text buffer),
+    // persisted in egui memory across frames.
+    let rename_key = egui::Id::new("history_rename_state");
+    let mut edit: Option<(u64, String)> = ui.data_mut(|d| d.get_temp(rename_key));
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -67,7 +74,7 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
                     last_date = Some(entry_date);
                 }
                 let is_current = current == Some(idx);
-                render_row(ui, entry, idx, is_current, &mut actions);
+                render_row(ui, entry, idx, is_current, &mut edit, &mut actions);
             }
 
             // Empty space below the last row acts as a "deselect" target:
@@ -86,6 +93,20 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
                 actions.push(HistoryAction::ClearSelection);
             }
         });
+
+    // F2 renames the currently-selected entry (Windows convention).
+    if edit.is_none() && ui.input(|i| i.key_pressed(egui::Key::F2)) {
+        if let Some(e) = current.and_then(|i| history.entries().get(i)) {
+            edit = Some((e.entry_id, e.custom_name.clone().unwrap_or_default()));
+            ui.memory_mut(|m| m.request_focus(egui::Id::new(("hist_rename", e.entry_id))));
+        }
+    }
+
+    // Persist (or clear) the inline-rename state for next frame.
+    ui.data_mut(|d| match &edit {
+        Some(e) => d.insert_temp(rename_key, e.clone()),
+        None => d.remove::<(u64, String)>(rename_key),
+    });
 
     actions
 }
@@ -143,6 +164,7 @@ fn render_row(
     entry: &HistoryEntry,
     idx: usize,
     is_current: bool,
+    edit: &mut Option<(u64, String)>,
     actions: &mut Vec<HistoryAction>,
 ) {
     let parts = parse_entry(entry);
@@ -220,17 +242,20 @@ fn render_row(
                 actions.push(HistoryAction::SetPin(entry.entry_id, !entry.pinned));
             }
 
-            // --- Restore body: the remaining row width. Time to the right,
-            //     ▶ / duration / context flowing from the left. ---
+            // --- Body: time (right), then ▶ + name/duration — or the rename
+            //     box if this row is being edited. ---
+            let editing = edit.as_ref().map_or(false, |(id, _)| *id == entry.entry_id);
             let body = ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
-                    ui.label(
-                        egui::RichText::new(&time_str)
-                            .size(11.0)
-                            .color(egui::Color32::from_gray(120))
-                            .monospace(),
-                    );
+                    if !editing {
+                        ui.label(
+                            egui::RichText::new(&time_str)
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(120))
+                                .monospace(),
+                        );
+                    }
                     ui.with_layout(
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
@@ -239,35 +264,94 @@ fn render_row(
                                     .color(kind_color(entry.kind))
                                     .size(13.0),
                             );
-                            if !parts.total.is_empty() {
-                                let mut rt = egui::RichText::new(format!("{:>7}", parts.total))
-                                    .monospace()
+                            if editing {
+                                let id = egui::Id::new(("hist_rename", entry.entry_id));
+                                let (done, esc, name) = {
+                                    let buf = &mut edit.as_mut().unwrap().1;
+                                    let te = ui.add(
+                                        egui::TextEdit::singleline(buf)
+                                            .id(id)
+                                            .desired_width(170.0)
+                                            .hint_text("name…"),
+                                    );
+                                    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                    (te.lost_focus(), esc, buf.clone())
+                                };
+                                // Enter or click-away commits; Esc cancels.
+                                if esc {
+                                    *edit = None;
+                                } else if done {
+                                    actions.push(HistoryAction::Rename(entry.entry_id, name));
+                                    *edit = None;
+                                }
+                            } else if let Some(name) = entry.custom_name.as_deref() {
+                                // Name leads. Neutral high-emphasis color +
+                                // bold weight — color (gold) is reserved for the
+                                // pin/keeper status, not for labels.
+                                ui.label(egui::RichText::new(name).size(13.0).strong());
+                                if !parts.total.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(parts.total.trim())
+                                            .monospace()
+                                            .size(11.0)
+                                            .color(egui::Color32::from_gray(120)),
+                                    );
+                                }
+                            } else {
+                                if !parts.total.is_empty() {
+                                    let mut rt = egui::RichText::new(format!("{:>7}", parts.total))
+                                        .monospace()
+                                        .size(12.0)
+                                        .color(row_color);
+                                    if parts.is_marker {
+                                        rt = rt.italics();
+                                    }
+                                    ui.label(rt);
+                                }
+                                let mut ctx_rt = egui::RichText::new(&parts.context)
                                     .size(12.0)
                                     .color(row_color);
                                 if parts.is_marker {
-                                    rt = rt.italics();
+                                    ctx_rt = ctx_rt.italics();
                                 }
-                                ui.label(rt);
+                                ui.add(egui::Label::new(ctx_rt).truncate());
                             }
-                            let mut ctx_rt = egui::RichText::new(&parts.context)
-                                .size(12.0)
-                                .color(row_color);
-                            if parts.is_marker {
-                                ctx_rt = ctx_rt.italics();
-                            }
-                            ui.add(egui::Label::new(ctx_rt).truncate());
                         },
                     );
                 },
             );
 
-            if restorable {
+            if !editing {
                 let r = body
                     .response
                     .interact(egui::Sense::click())
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text(entry.created_at.format("%a %d %b %Y · %H:%M").to_string());
-                if r.clicked() {
+                    .on_hover_text("Click to restore · right-click or F2 to rename");
+                let clicked = r.clicked();
+                // Right-click context menu — the discoverable rename path
+                // (double-click stays "restore/open", per convention).
+                r.context_menu(|ui| {
+                    if restorable && ui.button("▶  Restore").clicked() {
+                        actions.push(HistoryAction::Restore(idx));
+                        ui.close_menu();
+                    }
+                    let pin_label = if entry.pinned { "☆  Unpin" } else { "★  Pin" };
+                    if ui.button(pin_label).clicked() {
+                        actions.push(HistoryAction::SetPin(entry.entry_id, !entry.pinned));
+                        ui.close_menu();
+                    }
+                    if ui.button("✏  Rename…").clicked() {
+                        *edit = Some((
+                            entry.entry_id,
+                            entry.custom_name.clone().unwrap_or_default(),
+                        ));
+                        ui.memory_mut(|m| {
+                            m.request_focus(egui::Id::new(("hist_rename", entry.entry_id)))
+                        });
+                        ui.close_menu();
+                    }
+                });
+                if restorable && clicked {
                     actions.push(HistoryAction::Restore(idx));
                 }
             }

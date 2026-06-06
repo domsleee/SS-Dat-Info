@@ -29,6 +29,8 @@ const HASH_ALGO: &str = "crc32";
 pub struct StoredEntry {
     pub entry_id: u64,
     pub name: String,
+    /// User-given name (rename); `None` = use the auto `name`/duration.
+    pub user_name: Option<String>,
     pub pinned: bool,
     pub kind: HistoryEntryKind,
     pub start_tick: u32,
@@ -44,6 +46,7 @@ pub struct StoredEntry {
 pub struct LoadedEntry {
     pub entry_id: u64,
     pub name: String,
+    pub user_name: Option<String>,
     pub pinned: bool,
     pub kind: HistoryEntryKind,
     pub start_tick: u32,
@@ -72,6 +75,8 @@ pub struct PersistOutcome {
 struct ManifestEntry {
     entry_id: u64,
     name: String,
+    #[serde(default)]
+    user_name: Option<String>,
     pinned: bool,
     kind: HistoryEntryKind,
     start_tick: u32,
@@ -187,6 +192,7 @@ impl HistoryStoreV2 {
                 entries.push(LoadedEntry {
                     entry_id: me.entry_id,
                     name: me.name.clone(),
+                    user_name: me.user_name.clone(),
                     pinned: me.pinned,
                     kind: me.kind,
                     start_tick: me.start_tick,
@@ -285,6 +291,7 @@ impl HistoryStoreV2 {
             manifest_entries.push(ManifestEntry {
                 entry_id: e.entry_id,
                 name: e.name.clone(),
+                user_name: e.user_name.clone(),
                 pinned: e.pinned,
                 kind: e.kind,
                 start_tick: e.start_tick,
@@ -653,6 +660,7 @@ mod tests {
         StoredEntry {
             entry_id: id,
             name: name.to_string(),
+            user_name: None,
             pinned,
             kind: HistoryEntryKind::Snapshot,
             start_tick: 0,
@@ -667,6 +675,7 @@ mod tests {
         StoredEntry {
             entry_id: id,
             name: name.to_string(),
+            user_name: None,
             pinned: false,
             kind: HistoryEntryKind::SaveMarker,
             start_tick: 0,
