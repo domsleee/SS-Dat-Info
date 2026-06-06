@@ -2999,19 +2999,19 @@ mod tests {
     }
 
     /// The CONT catchup slider must allow speeds up to the
-    /// per-frame-overhead ceiling. Empirically 128× setting saves
-    /// ~200ms over 64× on a 5200-frame splice (one-shot reliability
-    /// drops 80%→65% but auto-reroll covers misses). If anyone ever
-    /// caps the slider below 128, power users on long recordings
-    /// would be silently throttled. Also locks the new default of
-    /// 64×, which strikes the reliability/wall-time balance.
+    /// per-frame-overhead ceiling. The catch-up saturates the game's 64
+    /// ticks/frame cap at ~77×+, so the slider's 128× headroom covers the
+    /// useful range; capping it lower would silently throttle long splices.
+    /// Also locks the default of 96× — full-speed (past cap saturation) and,
+    /// since the splice resume is now frame-exact at any speed, chosen for
+    /// bucket-lottery reliability over 128×.
     #[test]
     fn cont_catchup_settings_default_and_range() {
         use crate::settings::Settings;
         let s = Settings::default();
         assert!(
-            (s.cont_catchup_speed - 64.0).abs() < f32::EPSILON,
-            "Default catchup must be 64×, got {}",
+            (s.cont_catchup_speed - 96.0).abs() < f32::EPSILON,
+            "Default catchup must be 96×, got {}",
             s.cont_catchup_speed
         );
         // Verify a 128× setting round-trips through settings without
