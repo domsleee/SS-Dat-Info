@@ -2253,6 +2253,77 @@ mod tests {
     }
 
     #[test]
+    fn ids_never_reused_after_eviction_and_reload() {
+        use crate::history_store_v2::HistoryStoreV2;
+        let dir = std::env::temp_dir().join(format!(
+            "ssb_idreuse_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let mut h = RecordingHistory::new(3);
+        for i in 0..6 {
+            h.push_snapshot(&state_with_ticks(5), format!("S{}", i));
+        }
+        // cap 3 + 6 pushes ⇒ ids 1,2,3 were front-evicted; 4,5,6 remain.
+        let evicted = [1u64, 2, 3];
+        let next_before = h.next_entry_id();
+
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store
+            .persist(&h.to_stored_entries(), h.current_entry_id(), next_before)
+            .unwrap();
+        let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let mut h2 = RecordingHistory::new(3);
+        h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
+
+        // A new push after reload must get a FRESH id, never an evicted one —
+        // even though the evicted ids are now "gaps" below the surviving set.
+        h2.push_snapshot(&state_with_ticks(5), "new");
+        let new_id = h2.entries().iter().find(|e| e.label == "new").unwrap().entry_id;
+        assert!(new_id >= next_before, "id {} reused (next was {})", new_id, next_before);
+        assert!(!evicted.contains(&new_id), "id {} reused an EVICTED id", new_id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pinned_and_current_survive_lowered_cap_on_load() {
+        use crate::history_store_v2::HistoryStoreV2;
+        let dir = std::env::temp_dir().join(format!(
+            "ssb_pinload_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let mut h = RecordingHistory::new(10);
+        for i in 0..6 {
+            h.push_snapshot(&state_with_ticks(5), format!("S{}", i));
+        }
+        let pin_id = h.entries()[0].entry_id; // oldest — would normally evict first
+        assert!(h.set_pinned(pin_id, true));
+        h.restore_index(1);
+        let cur_id = h.current_entry_id();
+
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store
+            .persist(&h.to_stored_entries(), cur_id, h.next_entry_id())
+            .unwrap();
+        let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        // Load into a history with a cap FAR below the entry count.
+        let mut h2 = RecordingHistory::new(2);
+        h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
+
+        assert!(
+            h2.entries().iter().any(|e| e.entry_id == pin_id && e.pinned),
+            "pinned entry must survive a lowered cap on load"
+        );
+        assert_eq!(
+            h2.current_entry_id(),
+            cur_id,
+            "current entry must survive a lowered cap on load"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn all_pinned_over_cap_keeps_all() {
         let mut h = RecordingHistory::new(4);
         for i in 0..4 {
@@ -2318,7 +2389,13 @@ mod tests {
         assert_eq!(b2.custom_name.as_deref(), Some("B renamed"));
         assert!(b2.pinned);
         assert_eq!(h2.current_entry_id(), cur);
-        assert!(h2.next_entry_id() > b_id, "next id continues past loaded max");
+        let max_loaded_id = h2.entries().iter().map(|e| e.entry_id).max().unwrap();
+        assert!(
+            h2.next_entry_id() > max_loaded_id,
+            "next id ({}) must be past EVERY loaded id ({}), incl. the save marker",
+            h2.next_entry_id(),
+            max_loaded_id
+        );
         // snapshot content survives the round-trip
         let a2 = h2.entries().iter().find(|e| e.label == "A").unwrap();
         assert!(a2.can_restore());
@@ -2407,6 +2484,31 @@ mod tests {
         assert!(e.pinned, "recovered entry is pinned");
         assert!(e.custom_name.as_deref().unwrap().starts_with("Recovered"));
         assert!(e.can_restore(), "recovered snapshot is restorable");
+
+        // DURABILITY: the recovered entry must round-trip through the v2 store —
+        // recovery is pointless if it only lives in memory. (Startup persists +
+        // flushes before clearing the checkpoint; prove the persisted form here.)
+        let v2dir = std::env::temp_dir().join(format!(
+            "ssb_recov_v2_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let (mut hstore, _) =
+            crate::history_store_v2::HistoryStoreV2::open_in(v2dir.clone()).unwrap();
+        hstore
+            .persist(
+                &history.to_stored_entries(),
+                history.current_entry_id(),
+                history.next_entry_id(),
+            )
+            .unwrap();
+        let (_hs, hres) =
+            crate::history_store_v2::HistoryStoreV2::open_in(v2dir.clone()).unwrap();
+        let reloaded = &hres.entries[0];
+        assert!(reloaded.pinned, "recovered entry persisted as pinned");
+        assert!(reloaded.user_name.as_deref().unwrap().starts_with("Recovered"));
+        assert!(reloaded.snapshot.is_some(), "recovered snapshot persisted to disk");
+        let _ = std::fs::remove_dir_all(&v2dir);
 
         // Clearing the checkpoint means it won't be recovered again.
         store.clear_pending().unwrap();

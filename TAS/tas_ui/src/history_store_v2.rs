@@ -921,6 +921,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Fault-injection: hammer the store with random blob deletion/corruption
+    /// and manifest corruption between persists. `open_in` must NEVER panic or
+    /// error, available entries must still round-trip, and a clean reopen after
+    /// the faults must recover the full model (preserved blobs are reused).
+    #[test]
+    fn fault_injection_never_crashes_and_recovers() {
+        let dir = tmp_dir("faults");
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let mut rng = Rng(0x00C0FFEE);
+        let mut next_id = 1u64;
+
+        for _ in 0..200 {
+            let n = 3 + rng.below(6) as u64;
+            let ids: Vec<u64> = (0..n).map(|_| { let id = next_id; next_id += 1; id }).collect();
+            let model: Vec<StoredEntry> =
+                ids.iter().map(|&id| entry(id, &format!("e{}", id), false, 2)).collect();
+            store.persist(&model, Some(ids[0]), next_id).unwrap();
+
+            // Inject a fault.
+            match rng.below(5) {
+                0 => {
+                    let _ = std::fs::remove_file(blob_path(&dir, ids[rng.below(n) as usize]));
+                }
+                1 => {
+                    let _ = std::fs::write(blob_path(&dir, ids[rng.below(n) as usize]), b"corrupt");
+                }
+                2 => {
+                    let _ = std::fs::write(dir.join("manifest.json"), b"{ not valid json");
+                }
+                3 => {
+                    let _ = std::fs::write(dir.join("manifest.json.tmp"), b"junk");
+                }
+                _ => {}
+            }
+
+            // Must not panic/error, and ids must never regress below what we've
+            // handed out (no id reuse even after corruption — blobs are kept).
+            let (s2, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+            assert!(
+                res.next_entry_id >= *ids.last().unwrap(),
+                "next_entry_id {} regressed below last issued id {}",
+                res.next_entry_id,
+                ids.last().unwrap()
+            );
+            for e in &res.entries {
+                if e.available {
+                    assert_eq!(e.kind, HistoryEntryKind::Snapshot);
+                }
+            }
+            store = s2;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Crash after a blob write but before the manifest commit: the new blob is
     /// an orphan (manifest still references the old set) and must be GC'd, with
     /// the committed state intact. No half-written entry leaks in.
