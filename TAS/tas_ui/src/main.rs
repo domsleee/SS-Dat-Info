@@ -864,8 +864,18 @@ impl TasApp {
 
         // Reflect the speed the controller will assert into the live state now
         // so the UI updates immediately (the controller re-asserts it too).
+        // For CONT, also stage the RESUME speed so the DLL drops to it
+        // atomically at the splice (Problem B fix) — otherwise the resumed
+        // recording fast-forwards at the catch-up rate until the UI polls.
+        let cont_resume_speed = if command == TasCommand::ArmContinue {
+            self.cont_catchup_speed.unwrap_or(DEFAULT_PLAYBACK_SPEED)
+        } else {
+            0.0 // unset: DLL leaves the speed alone (PLAY/REC don't splice)
+        };
         if let Some(shared) = self.shared.as_mut() {
-            shared.state_mut().playback_speed = self.playback_speed;
+            let s = shared.state_mut();
+            s.playback_speed = self.playback_speed;
+            s.cont_resume_speed = cont_resume_speed;
         }
 
         // Hand the whole restart→arm(→judge→reroll) cycle to the shared
@@ -2040,7 +2050,21 @@ impl eframe::App for TasApp {
                 // F5 restart causes. (Gating this on an in-flight controller
                 // removed the continuous re-assertion and the catch-up replayed
                 // at the play speed instead of the multiplier.)
-                shared.state_mut().playback_speed = self.playback_speed;
+                //
+                // BUT: once the splice has fired (mode == REC) mid-catch-up, the
+                // DLL has already dropped playback_speed to the resume speed
+                // atomically. Assert THAT resume speed here — not the catch-up
+                // multiplier — so we don't stomp it back to e.g. 64x for the
+                // frame(s) before our mode-transition handler runs. This closes
+                // the post-splice overshoot (Problem B).
+                let catchup_active = self.cont_catchup_speed.is_some();
+                let mode = shared.state().mode;
+                let speed_to_assert = if catchup_active && mode == TasMode::Rec as u32 {
+                    self.cont_catchup_speed.unwrap_or(self.playback_speed)
+                } else {
+                    self.playback_speed
+                };
+                shared.state_mut().playback_speed = speed_to_assert;
 
                 ui.separator();
 

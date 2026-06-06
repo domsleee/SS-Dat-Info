@@ -162,6 +162,11 @@ struct TasSharedState {
     // frames" measurement). Must stay last to match the Rust struct layout.
     uint32_t cont_replay_start_fc;
     uint32_t cont_splice_fc;
+
+    // -- CONT resume speed (UI writes, DLL reads) --
+    // Applied to playback_speed atomically at the splice so the resumed
+    // recording doesn't fast-forward at the catch-up rate. 0 = unset.
+    float    cont_resume_speed;
 };
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks

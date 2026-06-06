@@ -200,6 +200,13 @@ pub struct TasSharedState {
     // free-running — never reset on F5 — so only the delta is meaningful.)
     pub cont_replay_start_fc: u32,
     pub cont_splice_fc: u32,
+
+    // CONT resume speed (UI writes, DLL reads). Staged before a CONT; the DLL
+    // applies it to `playback_speed` ATOMICALLY at the splice instant so the
+    // resumed recording never fast-forwards at the catch-up rate while the UI's
+    // poll-driven speed-restore lags behind (the Problem B fix). 0.0 = unset
+    // (DLL leaves the speed as-is — backward compatible).
+    pub cont_resume_speed: f32,
 }
 
 impl TasSharedState {
@@ -1544,8 +1551,11 @@ mod tests {
     #[test]
     fn size_of_tas_shared_state_pinned() {
         // Pin the total struct size so C++ and Rust sides stay in sync.
-        // +8 bytes vs 1_647_232 for the two CONT splice-timing u32s appended
-        // after log_ring (input_log offset is unchanged — see the next test).
+        // The struct is align-8 and originally carried 4 bytes of trailing
+        // padding. The three appended CONT fields (two u32 + one f32) land at
+        // offsets 1_647_228 / _232 / _236 — the first two grow the struct by 8
+        // and the f32 fills the remaining trailing pad, so the final size is
+        // 1_647_240 (= 1_647_232 + 8), NOT +12. input_log's offset is unchanged.
         assert_eq!(mem::size_of::<TasSharedState>(), 1_647_240);
     }
 

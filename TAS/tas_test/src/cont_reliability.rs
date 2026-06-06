@@ -213,6 +213,30 @@ impl ContReliabilityReport {
             }
         }
 
+        // Post-splice OVERSHOOT (the actual Problem B symptom): how far
+        // recorded_count had already run past the splice frame by the time it
+        // was read. Before the atomic-speed-drop fix this raced at the catch-up
+        // rate (tens-to-hundreds of frames); with cont_resume_speed staged, the
+        // DLL drops to 1x at the splice so it should collapse to ~0-2 frames.
+        let overshoots: Vec<u32> = self
+            .results
+            .iter()
+            .filter(|r| r.spliced)
+            .map(|r| r.splice_recorded_count.saturating_sub(self.splice_frame))
+            .collect();
+        if !overshoots.is_empty() {
+            let omin = *overshoots.iter().min().unwrap();
+            let omax = *overshoots.iter().max().unwrap();
+            let omean = overshoots.iter().sum::<u32>() as f64 / overshoots.len() as f64;
+            println!(
+                "Post-splice overshoot (rec_cnt − splice_frame): min {} | max {} | mean {:.1} | per-cycle [{}]",
+                omin,
+                omax,
+                omean,
+                overshoots.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(" ")
+            );
+        }
+
         println!();
         if self.all_pass() {
             println!(
@@ -589,6 +613,11 @@ pub fn run(
                 &baseline_rec_coords,
             );
             client.state_mut().playback_speed = speed;
+            // Stage a resume speed so the DLL drops to it atomically at the
+            // splice (Problem B fix). With this, the post-splice recorded_count
+            // overshoot (rec_cnt - splice_frame) should collapse from the ~64x
+            // poll-window to near-zero. 1.0 = a clean resume baseline.
+            client.state_mut().cont_resume_speed = 1.0;
             let splice_result = harness::restart_continue_and_splice_inprocess(
                 &mut client,
                 rec_start,

@@ -525,6 +525,15 @@ static void __declspec(noinline) Cave2_Logic() {
             // diagnostic for "resume yields a few frames early/late".
             s->cont_splice_fc = s->frame_count;
 
+            // Problem B fix: drop to the user's resume speed ATOMICALLY here, at
+            // the exact splice tick. Otherwise the recording keeps fast-
+            // forwarding at the catch-up rate (e.g. 64x) for the whole window
+            // until the UI polls, sees PLAY->REC, and restores the speed — a
+            // variable post-splice overshoot. Cave5 picks this up next tick.
+            if (s->cont_resume_speed > 0.0f) {
+                s->playback_speed = s->cont_resume_speed;
+            }
+
             // Record new segment boundary
             uint32_t segIdx = s->segment_count;
             if (segIdx < TAS_MAX_SEGMENTS) {
