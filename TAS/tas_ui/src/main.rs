@@ -421,6 +421,11 @@ struct TasApp {
     /// `command` slot is a single u32, so Stop and Restart can't be written on
     /// the same frame) plus the CONT bucket judge/reroll loop.
     cont_controller: Option<tas_shared::transport::TransportController>,
+    /// Carries the last CONT cycle's result (bucket attempts, how the bucket
+    /// was accepted) from controller-`Done` to the REC-start transition, where
+    /// the actual resume frame is known — so we can log one "resumed at frame X
+    /// after N bucket attempt(s) — <verdict>" summary.
+    cont_last_outcome: Option<(u32, tas_shared::transport::CompletedVia)>,
     /// Previous-frame pressed state for the four global-shortcut keys
     /// (F9, F10, F11, F12 in that order). Diffed against the current
     /// GetAsyncKeyState result to detect press edges. Updated every
@@ -582,6 +587,7 @@ impl TasApp {
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
             cont_controller: None,
+            cont_last_outcome: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
             last_frame_count: 0,
@@ -875,9 +881,14 @@ impl TasApp {
             max_retries: CONT_START_MATCH_MAX_RETRIES,
         };
         self.cont_controller = Some(tas_shared::transport::TransportController::new(cfg));
+        let resume_at = if command == TasCommand::ArmContinue {
+            format!(" @frame {}", continue_from_frame)
+        } else {
+            String::new()
+        };
         self.log_lines.push(format!(
-            "[{}] In-process restart → {:?} (speed {}x)",
-            ts, command, self.playback_speed
+            "[{}] In-process restart → {:?}{} (speed {}x)",
+            ts, command, resume_at, self.playback_speed
         ));
     }
 
@@ -934,7 +945,10 @@ impl TasApp {
                 std::thread::sleep(std::time::Duration::from_millis(suggested_delay_ms));
                 ctx.request_repaint();
             }
-            StepOutcome::Done { retries_used } => {
+            StepOutcome::Done {
+                retries_used,
+                completed_via,
+            } => {
                 if retries_used > 0 {
                     self.push_log(&format!(
                         "CONT bucket aligned after {} restart retr{}",
@@ -942,6 +956,9 @@ impl TasApp {
                         if retries_used == 1 { "y" } else { "ies" }
                     ));
                 }
+                // Stash for the resume summary emitted at the REC-start splice,
+                // where the actual resume frame is known. attempts = rerolls + 1.
+                self.cont_last_outcome = Some((retries_used + 1, completed_via));
                 self.cont_controller = None;
             }
             StepOutcome::Aborted { reason } => {
@@ -1150,6 +1167,36 @@ impl TasApp {
             start_tick,
             max_recorded_count: recorded_count.max(start_tick),
         });
+    }
+
+    /// Emit one diagnostic line at the CONT splice: where the recording
+    /// actually resumed (the requested splice tick), how many F5 bucket attempts
+    /// it took, and HOW the bucket was accepted. A `NoSignal` accept is flagged
+    /// loudly because it was not positively confirmed — the resume may be on a
+    /// near-miss bucket, which is the likely cause of an "off" resume.
+    fn log_cont_resume_summary(&mut self) {
+        use tas_shared::transport::CompletedVia;
+        let Some(session) = self.active_recording_session else {
+            return;
+        };
+        if session.kind != RecordingSessionKind::Continue {
+            return; // plain REC — no bucket/resume story to tell
+        }
+        let (attempts, via) = self.cont_last_outcome.take().unwrap_or((1, CompletedVia::Unjudged));
+        let verdict = match via {
+            CompletedVia::BucketMatched => "bucket matched",
+            CompletedVia::NoSignal => {
+                "⚠ bucket UNCONFIRMED (no-signal accept — resume may be on a near-miss bucket)"
+            }
+            CompletedVia::Unjudged => "bucket unjudged",
+        };
+        self.push_log(&format!(
+            "CONT resumed at frame {} after {} bucket attempt{} — {}",
+            session.start_tick,
+            attempts,
+            if attempts == 1 { "" } else { "s" },
+            verdict,
+        ));
     }
 
     fn persist_recovery_snapshot_if_needed(
@@ -1636,6 +1683,7 @@ impl eframe::App for TasApp {
                 // REC started
                 if current_mode == 1 {
                     self.start_recording_session(continue_from, recorded);
+                    self.log_cont_resume_summary();
                     self.clear_cont_catchup();
                     // Splice fired (or REC began) — the controller already
                     // cleared itself at bucket-accept, but be defensive.
@@ -2488,6 +2536,7 @@ mod tests {
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
             cont_controller: None,
+            cont_last_outcome: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
             last_frame_count: 0,
