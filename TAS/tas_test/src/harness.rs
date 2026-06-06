@@ -820,7 +820,11 @@ pub fn arm_continue(client: &mut TasSharedMemoryClient, frame: u32) {
 pub fn wait_continue_splice(client: &TasSharedMemoryClient, splice_frame: u32) -> bool {
     let start = Instant::now();
     loop {
-        thread::sleep(Duration::from_millis(20));
+        // Poll fast (< one 1x tick = 10ms) so the splice is detected within a
+        // tick of firing. At 20ms the post-splice "overshoot" read 0-2 purely
+        // because the resumed REC advanced 0-2 ticks at the resume speed before
+        // the poll caught it — a measurement artifact, not a real overshoot.
+        thread::sleep(Duration::from_millis(2));
         let s = client.state();
         if s.mode == TasMode::Rec as u32 {
             let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
