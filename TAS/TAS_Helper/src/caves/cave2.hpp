@@ -533,6 +533,11 @@ static void __declspec(noinline) Cave2_Logic() {
             if (s->cont_resume_speed > 0.0f) {
                 s->playback_speed = s->cont_resume_speed;
             }
+            // Signal cave5 to clear the catch-up clock backlog on its next tick
+            // (advance the game-time accumulator to "now" without processing the
+            // backlog ticks) so the resume is frame-exact at full speed — no
+            // end-of-replay deceleration needed.
+            s->cont_reset_pending = 1;
 
             // Record new segment boundary
             uint32_t segIdx = s->segment_count;

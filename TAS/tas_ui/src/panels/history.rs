@@ -244,7 +244,7 @@ fn render_row(
 
             // --- Body: time (right), then ▶ + name/duration — or the rename
             //     box if this row is being edited. ---
-            let editing = edit.as_ref().map_or(false, |(id, _)| *id == entry.entry_id);
+            let editing = edit.as_ref().is_some_and(|(id, _)| *id == entry.entry_id);
             let body = ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {

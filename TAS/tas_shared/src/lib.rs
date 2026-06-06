@@ -207,6 +207,14 @@ pub struct TasSharedState {
     // poll-driven speed-restore lags behind (the Problem B fix). 0.0 = unset
     // (DLL leaves the speed as-is — backward compatible).
     pub cont_resume_speed: f32,
+
+    // CONT clock-backlog reset (cave2 sets at the splice, cave5 consumes on the
+    // next tick). When set, cave5 advances the game-time accumulator
+    // (clockObj->+0x0C, reached via the hook's ebp) to "now" by adding
+    // raw_demand * native_tick_advance — clearing the catch-up backlog WITHOUT
+    // processing the backlog ticks, so the resume is frame-exact at full speed
+    // (no end-of-replay deceleration). 0 = idle.
+    pub cont_reset_pending: u32,
 }
 
 impl TasSharedState {
@@ -612,7 +620,7 @@ pub mod cont {
             let mut c = vec![[1.0, 2.0, 3.0]; 10];
             c[5] = [1.0, 2.0, 3.5];
             assert_eq!(detect_first_moving(&c, 10), Some(5));
-            assert_eq!(detect_first_moving(&vec![[1.0, 2.0, 3.0]; 10], 10), None);
+            assert_eq!(detect_first_moving(&[[1.0, 2.0, 3.0]; 10], 10), None);
             assert_eq!(detect_first_moving(&[], 0), None);
             // respects recorded_count bound
             let mut c2 = vec![[1.0, 2.0, 3.0]; 10];
@@ -1551,12 +1559,11 @@ mod tests {
     #[test]
     fn size_of_tas_shared_state_pinned() {
         // Pin the total struct size so C++ and Rust sides stay in sync.
-        // The struct is align-8 and originally carried 4 bytes of trailing
-        // padding. The three appended CONT fields (two u32 + one f32) land at
-        // offsets 1_647_228 / _232 / _236 — the first two grow the struct by 8
-        // and the f32 fills the remaining trailing pad, so the final size is
-        // 1_647_240 (= 1_647_232 + 8), NOT +12. input_log's offset is unchanged.
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_240);
+        // align-8 struct. CONT fields appended after log_ring at offsets
+        // 1_647_228 (cont_replay_start_fc), _232 (cont_splice_fc), _236
+        // (cont_resume_speed), _240 (cont_reset_pending); align-8 rounds the
+        // size up to 1_647_248. input_log's offset is unchanged (632).
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_248);
     }
 
     #[test]
