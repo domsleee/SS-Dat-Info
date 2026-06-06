@@ -363,6 +363,10 @@ struct TasApp {
     /// Soft cap (max unpinned entries) — from settings.
     history_cap: usize,
     recovery_store: Option<recording::RecoveryStore>,
+    /// Serialized off-thread writer for recovery checkpoints. Replaces detached
+    /// `thread::spawn` per write so a late write can't land after `clear_pending`
+    /// and resurrect a stale checkpoint into a duplicate "Recovered" entry.
+    recovery_writer: recording::RecoveryWriter,
     log_lines: Vec<String>,
     /// Append-only on-disk mirror of `log_lines`. Lives under
     /// `~/.ssb-inspector/{session}/tas_ui.log` (same session dir as the
@@ -455,6 +459,15 @@ impl TasApp {
         let history_writer = match history_store_v2::HistoryWriter::open(history_dir.clone()) {
             Ok((writer, load)) => {
                 if load.entries.is_empty() {
+                    // Even with NO entries, honor the store's computed
+                    // next_entry_id and surface its warnings. A valid empty
+                    // manifest, or a corrupt manifest that preserved blobs,
+                    // yields a high floor; without adopting it the next new
+                    // entry restarts at id 1 and collides with a preserved blob.
+                    history.adopt_id_floor(load.next_entry_id);
+                    for w in &load.warnings {
+                        history_notices.push(format!("History: {}", w));
+                    }
                     // Possibly fresh — migrate legacy history.json once. No-ops
                     // if a v2 manifest already exists or there's no legacy data.
                     match history_store_v2::migrate_legacy(&history_dir) {
@@ -538,6 +551,7 @@ impl TasApp {
             last_persisted_revision: 0,
             history_cap,
             recovery_store,
+            recovery_writer: recording::RecoveryWriter::new(),
             log_lines: Vec::new(),
             log_file,
             log_lines_persisted: 0,
@@ -597,14 +611,11 @@ impl TasApp {
         app.persist_history_if_needed();
 
         // Recovery-as-history: only AFTER the recovered entry is durably in the
-        // v2 store do we clear the checkpoint — so a crash can't lose it.
+        // v2 store do we clear the checkpoint — so a crash can't lose it. The
+        // clear is gated on a CONFIRMED persist: if the flush reports the write
+        // failed, keep the checkpoint so the next launch recovers it again.
         if recovered_checkpoint {
-            if let Some(writer) = app.history_writer.as_ref() {
-                writer.flush();
-            }
-            if let Some(store) = app.recovery_store.as_mut() {
-                let _ = store.clear_pending();
-            }
+            app.clear_recovery_after_durable_persist();
         }
 
         app
@@ -976,6 +987,39 @@ impl TasApp {
         }
     }
 
+    /// Clear the crash-recovery checkpoint, but ONLY after the history it
+    /// represents is durably committed. Mirrors the startup recovery ordering:
+    /// persist → flush (which now reports the real durability result) → clear.
+    /// If the flush says the manifest write failed, the checkpoint is KEPT so
+    /// the recording is recovered on the next launch instead of lost. The
+    /// recovery writer is drained first so no in-flight write can recreate the
+    /// checkpoint files after we delete them.
+    fn clear_recovery_after_durable_persist(&mut self) {
+        self.persist_history_if_needed();
+        let durable = match self.history_writer.as_ref() {
+            Some(writer) => match writer.flush() {
+                Ok(()) => true,
+                Err(e) => {
+                    self.log_lines.push(format!(
+                        "[history] persist failed — keeping recovery checkpoint: {}",
+                        e
+                    ));
+                    false
+                }
+            },
+            // No store at all: nothing can be made durable, so clear anyway to
+            // avoid recovering the same checkpoint into a duplicate every launch.
+            None => true,
+        };
+        // Drain in-flight recovery writes BEFORE clearing the files.
+        self.recovery_writer.flush();
+        if durable {
+            if let Some(store) = self.recovery_store.as_mut() {
+                let _ = store.clear_pending();
+            }
+        }
+    }
+
     fn persist_history_if_needed(&mut self) {
         let revision = self.history.revision();
         if revision == self.last_persisted_revision {
@@ -989,7 +1033,12 @@ impl TasApp {
         let entries = self.history.to_stored_entries();
         let current = self.history.current_entry_id();
         let next = self.history.next_entry_id();
-        writer.persist(entries, current, next);
+        // Only mark the revision persisted if the job actually reached the
+        // worker. If the writer thread is gone, leave the revision dirty so a
+        // later frame retries instead of silently dropping the change.
+        if !writer.persist(entries, current, next) {
+            return;
+        }
         self.last_persisted_revision = revision;
         let dt = _t.elapsed();
         if dt.as_millis() > 30 {
@@ -1120,9 +1169,10 @@ impl TasApp {
             None => None,
         };
         if let Some(job) = job {
-            std::thread::spawn(move || {
-                let _ = job.write();
-            });
+            // Submit to the single serialized writer (ordered + flushable),
+            // NOT a detached thread — a detached write could complete after a
+            // later `clear_pending()` and resurrect the checkpoint.
+            self.recovery_writer.submit(job);
         }
     }
 
@@ -1177,16 +1227,9 @@ impl TasApp {
         let _ = (snapshot, session_context);
         // Make the recording DURABLE in history BEFORE clearing the recovery
         // checkpoint — otherwise a crash between "pushed to in-memory history"
-        // and "background writer flushed" would lose it (checkpoint gone, blob
-        // not on disk). Mirror the startup recovery ordering: persist + flush,
-        // THEN clear. A leftover checkpoint always means unfinalized/crashed work.
-        self.persist_history_if_needed();
-        if let Some(writer) = self.history_writer.as_ref() {
-            writer.flush();
-        }
-        if let Some(store) = self.recovery_store.as_mut() {
-            let _ = store.clear_pending();
-        }
+        // and "background writer committed" would lose it (checkpoint gone,
+        // blob not on disk). The clear is gated on a CONFIRMED persist.
+        self.clear_recovery_after_durable_persist();
     }
 
     /// Check if the game process is still alive by monitoring frame_count advancement.
@@ -1530,7 +1573,7 @@ impl eframe::App for TasApp {
         s.save();
         // Make sure the latest history is flushed to disk before we exit.
         if let Some(writer) = self.history_writer.as_ref() {
-            writer.flush();
+            let _ = writer.flush();
         }
     }
 
@@ -2409,6 +2452,7 @@ mod tests {
             pico: PicoState::new(),
             history: RecordingHistory::new(64),
             history_writer: None,
+            recovery_writer: recording::RecoveryWriter::new(),
             last_persisted_revision: 0,
             history_cap: 64,
             recovery_store: None,
