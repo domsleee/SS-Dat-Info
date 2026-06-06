@@ -929,6 +929,27 @@ pub fn restart_continue_and_splice_inprocess_loop(
     })
 }
 
+/// Mimic tas_ui's per-frame controller cadence: after a Wait/Reroll the app
+/// returns to its egui render loop and only sends the *next* command (e.g. the
+/// Arm) on the following frame — inserting a vsync-limited, load-jittered render
+/// frame between the settle and the Arm. The harness normally loops immediately
+/// (no yield). Set CONT_YIELD_MS=N to inject a base-N + rand(0..N) ms delay here
+/// and test whether that post-settle render gap is what tanks real-world
+/// first-try vs the harness. Default 0 = off (no-op).
+fn cont_yield_render_frame() {
+    let base: u64 = match std::env::var("CONT_YIELD_MS").ok().and_then(|s| s.parse().ok()) {
+        Some(n) if n > 0 => n,
+        _ => return,
+    };
+    // Cheap jitter from the clock's sub-ms nanos — emulates variable render load.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let jitter = (nanos as u64) % (base + 1);
+    thread::sleep(Duration::from_millis(base + jitter));
+}
+
 /// In-process CONT splice via the SHARED transport controller
 /// (`tas_shared::transport`) — the exact restart/arm/reroll state machine tas_ui
 /// drives. The harness just steps the controller in a poll loop and applies its
@@ -996,12 +1017,22 @@ pub fn restart_continue_and_splice_inprocess(
                     client.send_command(TasCommand::Stop);
                     return None;
                 }
-                thread::sleep(Duration::from_millis(5));
+                // Poll cadence for the InProgress phases (restart-done detection
+                // + bucket judge). Default 5ms. Tunable via CONT_POLL_MS to
+                // emulate tas_ui's vsync-limited (~16ms) stepping — the
+                // experiment that tests whether step quantization is what makes
+                // real-world first-try (19%) far worse than the harness (~67%).
+                let poll_ms: u64 = std::env::var("CONT_POLL_MS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(5);
+                thread::sleep(Duration::from_millis(poll_ms));
             }
             StepOutcome::Wait { ms } => {
                 // Fixed Stop→Restart settle — sleep exactly this long so the
                 // Restart fires at a consistent F5 phase.
                 thread::sleep(Duration::from_millis(ms));
+                cont_yield_render_frame();
             }
             StepOutcome::Reroll {
                 attempt,
@@ -1017,6 +1048,7 @@ pub fn restart_continue_and_splice_inprocess(
                 // jitter the wall clock so the next F5 lands at a new phase.
                 dismiss_save_dialog();
                 thread::sleep(Duration::from_millis(suggested_delay_ms));
+                cont_yield_render_frame();
                 attempt_deadline = Instant::now() + per_attempt;
             }
             StepOutcome::Done { retries_used, .. } => {

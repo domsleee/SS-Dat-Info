@@ -932,68 +932,89 @@ impl TasApp {
             return;
         }
         use tas_shared::transport::StepOutcome;
-        // Borrow the controller and the client (disjoint fields) for one step.
-        let outcome = match (self.cont_controller.as_mut(), self.shared.as_mut()) {
-            (Some(c), Some(p)) => c.step(p),
-            _ => {
-                // Lost the shared-memory connection — drop the cycle.
-                self.cont_controller = None;
-                return;
-            }
-        };
-        match outcome {
-            StepOutcome::InProgress => {
-                // Force an immediate repaint so the cycle keeps advancing at full
-                // rate even when tas_ui is in the background (a throttled
-                // request_repaint_after gets coalesced when unfocused, which
-                // starved the speed re-assertion and slowed F5 phase variation).
-                ctx.request_repaint();
-            }
-            StepOutcome::Wait { ms } => {
-                // Fixed Stop→Restart settle — sleep exactly this long (brief,
-                // like the legacy two-step) so the Restart fires at a consistent
-                // F5 phase, then advance.
-                std::thread::sleep(std::time::Duration::from_millis(ms));
-                ctx.request_repaint();
-            }
-            StepOutcome::Reroll {
-                attempt,
-                suggested_delay_ms,
-                observed,
-                expected,
-            } => {
-                self.push_log(&format!(
-                    "CONT bucket reroll {}/{} (observed first-moving={:?} expected={:?})",
-                    attempt, CONT_START_MATCH_MAX_RETRIES, observed, expected
-                ));
-                // Vary the wall clock so the next F5 lands at a different
-                // accumulator-modulo-tick phase. Blocking sleep here is precise
-                // (a non-blocking timer was imprecise → poorer bucket coverage →
-                // far more rerolls).
-                std::thread::sleep(std::time::Duration::from_millis(suggested_delay_ms));
-                ctx.request_repaint();
-            }
-            StepOutcome::Done {
-                retries_used,
-                completed_via,
-            } => {
-                if retries_used > 0 {
-                    self.push_log(&format!(
-                        "CONT bucket aligned after {} restart retr{}",
-                        retries_used,
-                        if retries_used == 1 { "y" } else { "ies" }
-                    ));
+        // Drive the controller with harness-grade timing precision.
+        //
+        // THE BUG this loop fixes: the old code did exactly ONE step() per egui
+        // frame and returned. After a Wait{ARM_SETTLE_MS} that means the Arm
+        // command only went out on the NEXT repaint — a vsync-limited, load-
+        // jittered ~16ms render frame landing BETWEEN the settle and the Arm.
+        // That scatters the F5 spawn-clock phase and was measured (cont-
+        // reliability, CONT_YIELD_MS mimic) to crater first-try from ~65% to 0%
+        // (real-world logs: 19%). The tas_test harness loops immediately after a
+        // settle with no render frame in between — which is why it sees 65–93%.
+        //
+        // So: handle Wait/Reroll inline and `continue` WITHOUT yielding to render
+        // (the post-settle command — Restart/Arm — fires immediately, phase
+        // intact). Only the InProgress polling phases (restart-done wait, bucket
+        // judge) yield to render, and only after a short bounded spin so the
+        // restart-done DETECTION isn't quantized to vsync either. The spin budget
+        // keeps the UI responsive (~25 fps) during the multi-second replay.
+        let spin_until = std::time::Instant::now() + std::time::Duration::from_millis(40);
+        loop {
+            let outcome = match (self.cont_controller.as_mut(), self.shared.as_mut()) {
+                (Some(c), Some(p)) => c.step(p),
+                _ => {
+                    // Lost the shared-memory connection — drop the cycle.
+                    self.cont_controller = None;
+                    return;
                 }
-                // Stash for the resume summary emitted at the REC-start splice,
-                // where the actual resume frame is known. attempts = rerolls + 1.
-                self.cont_last_outcome = Some((retries_used + 1, completed_via));
-                self.cont_controller = None;
-            }
-            StepOutcome::Aborted { reason } => {
-                self.push_log(&format!("CONT aborted: {}", reason));
-                self.clear_cont_catchup();
-                // also clears cont_controller
-                self.reset_continue_runtime_state();
+            };
+            match outcome {
+                StepOutcome::InProgress => {
+                    // Safe to yield here: restart-done polling / bucket judging
+                    // don't set the F5 arm phase. Spin tightly for a bounded
+                    // budget (so detection stays ~3ms, not vsync-quantized), then
+                    // hand control back to the render loop and resume next frame.
+                    if std::time::Instant::now() >= spin_until {
+                        ctx.request_repaint();
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(3));
+                }
+                StepOutcome::Wait { ms } => {
+                    // Fixed Stop→Restart / arm settle. Sleep exactly this long so
+                    // the next command fires at a consistent F5 phase, then loop
+                    // IMMEDIATELY (no render frame between settle and command).
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                }
+                StepOutcome::Reroll {
+                    attempt,
+                    suggested_delay_ms,
+                    observed,
+                    expected,
+                } => {
+                    self.push_log(&format!(
+                        "CONT bucket reroll {}/{} (observed first-moving={:?} expected={:?})",
+                        attempt, CONT_START_MATCH_MAX_RETRIES, observed, expected
+                    ));
+                    // Vary the wall clock so the next F5 lands at a different
+                    // accumulator-modulo-tick phase, then loop immediately.
+                    std::thread::sleep(std::time::Duration::from_millis(suggested_delay_ms));
+                }
+                StepOutcome::Done {
+                    retries_used,
+                    completed_via,
+                } => {
+                    if retries_used > 0 {
+                        self.push_log(&format!(
+                            "CONT bucket aligned after {} restart retr{}",
+                            retries_used,
+                            if retries_used == 1 { "y" } else { "ies" }
+                        ));
+                    }
+                    // Stash for the resume summary emitted at the REC-start splice,
+                    // where the actual resume frame is known. attempts = rerolls + 1.
+                    self.cont_last_outcome = Some((retries_used + 1, completed_via));
+                    self.cont_controller = None;
+                    return;
+                }
+                StepOutcome::Aborted { reason } => {
+                    self.push_log(&format!("CONT aborted: {}", reason));
+                    self.clear_cont_catchup();
+                    // also clears cont_controller
+                    self.reset_continue_runtime_state();
+                    return;
+                }
             }
         }
     }
