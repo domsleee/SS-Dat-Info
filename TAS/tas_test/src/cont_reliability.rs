@@ -43,6 +43,9 @@ impl BaselineInputProfile {
 pub struct ContCycleResult {
     pub iteration: u32,
     pub spliced: bool,
+    /// F5 rerolls the bucket lottery needed before it landed (0 = first try).
+    /// This is the "bucket repeats too often" signal, per iteration.
+    pub rerolls: u32,
     pub mode_rec_after_splice: bool,
     pub replay_coverage_ok: bool,
     pub playback_pos_at_splice: u32,
@@ -132,6 +135,30 @@ impl ContReliabilityReport {
                 r.max_drift_z,
             );
         }
+
+        // Problem A — the F5 bucket lottery (independent of resume timing):
+        // how many rerolls each splice needed to land the recording's bucket.
+        let spliced: Vec<&ContCycleResult> = self.results.iter().filter(|r| r.spliced).collect();
+        if !spliced.is_empty() {
+            let total: u32 = spliced.iter().map(|r| r.rerolls).sum();
+            let max = spliced.iter().map(|r| r.rerolls).max().unwrap_or(0);
+            let first_try = spliced.iter().filter(|r| r.rerolls == 0).count();
+            let rerolls_list: Vec<String> = self
+                .results
+                .iter()
+                .map(|r| if r.spliced { r.rerolls.to_string() } else { "x".into() })
+                .collect();
+            println!();
+            println!(
+                "Bucket lottery (rerolls): first-try {}/{} | mean {:.1} | worst {} | per-cycle [{}]",
+                first_try,
+                spliced.len(),
+                total as f64 / spliced.len() as f64,
+                max,
+                rerolls_list.join(" ")
+            );
+        }
+
         println!();
         if self.all_pass() {
             println!(
@@ -508,13 +535,16 @@ pub fn run(
                 &baseline_rec_coords,
             );
             client.state_mut().playback_speed = speed;
-            let spliced = harness::restart_continue_and_splice_inprocess(
+            let splice_result = harness::restart_continue_and_splice_inprocess(
                 &mut client,
                 rec_start,
                 splice_frame,
                 CONT_RESTART_RETRIES,
-            )
-            .is_some();
+            );
+            let spliced = splice_result.is_some();
+            // Reroll count: how many times the F5 bucket lottery missed before
+            // landing (0 = first try). Surfaced per-iteration + aggregated.
+            let rerolls = splice_result.unwrap_or(0);
             let mut mode_rec_after_splice = false;
             let mut replay_coverage_ok = false;
             let mut playback_pos_at_splice = 0;
@@ -587,6 +617,7 @@ pub fn run(
             results.push(ContCycleResult {
                 iteration: i,
                 spliced,
+                rerolls,
                 mode_rec_after_splice,
                 replay_coverage_ok,
                 playback_pos_at_splice,
