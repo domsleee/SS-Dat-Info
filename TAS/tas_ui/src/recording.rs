@@ -101,16 +101,8 @@ struct RecoveryMetadata {
 }
 
 pub struct RecoveryCheckpoint {
-    pub saved_at: String,
     pub session: RecoverySessionContext,
     pub snapshot: RecordingSnapshot,
-    pub segments: Vec<Segment>,
-}
-
-impl RecoveryCheckpoint {
-    pub fn label(&self) -> &str {
-        &self.session.label
-    }
 }
 
 pub struct RecoveryStore {
@@ -151,6 +143,9 @@ impl RecoveryStore {
         &self.root
     }
 
+    // Synchronous checkpoint write. Production uses the off-thread take_write_job
+    // path; these sync wrappers are exercised by the recovery-store tests.
+    #[allow(dead_code)]
     pub fn persist_if_needed(
         &mut self,
         state: &TasSharedState,
@@ -197,6 +192,7 @@ impl RecoveryStore {
         })
     }
 
+    #[allow(dead_code)]
     pub fn persist_snapshot_if_needed(
         &mut self,
         snapshot: &RecordingSnapshot,
@@ -274,7 +270,7 @@ impl RecoveryStore {
             .map_err(|e| format!("failed to parse recovery metadata: {}", e))?;
 
         let mut state = tas_shared::zeroed_boxed();
-        let (_, segments) = RecordingFile::load(&mut state, &self.recording_path).map_err(|e| {
+        let _ = RecordingFile::load(&mut state, &self.recording_path).map_err(|e| {
             format!(
                 "failed to load recovery recording {}: {}",
                 self.recording_path.display(),
@@ -287,10 +283,8 @@ impl RecoveryStore {
         }
 
         Ok(Some(RecoveryCheckpoint {
-            saved_at: metadata.saved_at,
             session: metadata.session,
             snapshot: RecordingSnapshot::from_state(&state),
-            segments,
         }))
     }
 
@@ -626,9 +620,10 @@ pub struct HistoryEntry {
     /// auto-generated `label`. `None` = use the auto label/duration.
     pub custom_name: Option<String>,
     pub label: String,
-    /// HH:MM:SS-of-day legacy display field. Kept for backward compat with
-    /// existing persisted history files; new code should prefer
-    /// `created_at` for any logic that needs a real date.
+    /// HH:MM:SS-of-day legacy display field. Kept for backward compat with the
+    /// legacy persisted format (read on migration, written by `to_persisted`);
+    /// production display logic uses `created_at`.
+    #[allow(dead_code)]
     pub timestamp: String,
     /// Full local-tz creation time. Used for date grouping in the panel.
     /// For legacy entries that were persisted without this field, the
@@ -971,17 +966,6 @@ impl RecordingHistory {
         }
     }
 
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    pub fn is_pinned(&self, entry_id: u64) -> bool {
-        self.entries
-            .iter()
-            .find(|e| e.entry_id == entry_id)
-            .map(|e| e.pinned)
-            .unwrap_or(false)
-    }
 
     /// Rebuild the in-memory history from a v2-store load. Unavailable entries
     /// (snapshot == None but kind expects one) come in inert (can't restore).
@@ -1030,10 +1014,13 @@ impl RecordingHistory {
         self.bump();
     }
 
+    // can_undo/can_redo are predicate helpers exercised by the history tests.
+    #[allow(dead_code)]
     pub fn can_undo(&self) -> bool {
         self.undo_depth() > 0
     }
 
+    #[allow(dead_code)]
     pub fn can_redo(&self) -> bool {
         self.redo_depth() > 0
     }
@@ -1068,6 +1055,9 @@ impl RecordingHistory {
         &self.entries
     }
 
+    // Writes the legacy JSON format. Production only READS it (on migration);
+    // the write side is exercised by tests + the serialize benchmark.
+    #[allow(dead_code)]
     pub fn to_persisted(&self) -> PersistedHistory {
         let entries = self
             .entries
@@ -1972,8 +1962,6 @@ mod tests {
         let pending = store.load_pending().unwrap().expect("expected checkpoint");
         assert_eq!(pending.snapshot.recorded_count, 5);
         assert_eq!(pending.session.label, "Recorded 0:00.05");
-        assert_eq!(pending.segments.len(), 1);
-        assert_eq!(pending.segments[0].end_tick, 5);
 
         store.clear_pending().unwrap();
         assert!(store.load_pending().unwrap().is_none());

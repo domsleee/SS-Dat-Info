@@ -436,13 +436,6 @@ struct TasApp {
     // One-shot: force dark title bar on first frame
     #[cfg(windows)]
     dark_title_bar_set: bool,
-    /// One-shot guard for the TAS_UI_AUTOSHOT env-triggered startup
-    /// screenshot. Set true after the first request goes out.
-    auto_screenshot_taken: bool,
-    /// Wall-clock launch time, used to schedule the AUTOSHOT screenshot
-    /// reliably (egui's `input.time` doesn't advance when nothing
-    /// changes — using Instant gives a real elapsed measurement).
-    launched_at: std::time::Instant,
 }
 
 impl TasApp {
@@ -582,8 +575,6 @@ impl TasApp {
             last_health_check: std::time::Instant::now(),
             #[cfg(windows)]
             dark_title_bar_set: false,
-            auto_screenshot_taken: false,
-            launched_at: std::time::Instant::now(),
         };
 
         // Auto-detect Pico on startup
@@ -2452,8 +2443,6 @@ mod tests {
             last_health_check: std::time::Instant::now(),
             #[cfg(windows)]
             dark_title_bar_set: false,
-            auto_screenshot_taken: false,
-            launched_at: std::time::Instant::now(),
         }
     }
 
