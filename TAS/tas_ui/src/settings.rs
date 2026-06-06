@@ -43,7 +43,14 @@ impl Default for Settings {
             // allows up to 128× for power users; at 128 we're close
             // to the per-frame overhead ceiling so going higher is
             // diminishing returns.
-            cont_catchup_speed: 64.0,
+            // 96× is the sweet spot: the catch-up saturates the game's 64
+            // ticks/frame cap at ~77×+, so 96× is full-speed, and the splice
+            // resume is now frame-exact at any speed (cave5 prev_time reset), so
+            // there's no precision reason to stay at 64×. 96× over 128× because
+            // the F5 bucket lottery rerolls a little more at 128× (each miss is a
+            // ~1s restart), and 96× keeps better one-shot reliability for ~the
+            // same catch-up time.
+            cont_catchup_speed: 96.0,
             history_cap: 500,
         }
     }
@@ -65,13 +72,14 @@ impl Settings {
             Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
             Err(_) => Self::default(),
         };
-        // Migrate the stale 20.0 catch-up default. Pre-cave5 the slider
-        // capped at 20×; users who never touched it have that value
-        // persisted, but the effective game cap is now 64×. Bump those
-        // specific values up — anything else (30, 40, 100, etc.) is a
-        // deliberate user choice and we leave it alone.
-        if (settings.cont_catchup_speed - 20.0).abs() < f32::EPSILON {
-            settings.cont_catchup_speed = 64.0;
+        // Migrate stale catch-up defaults to the current 96× default. 20× was
+        // the pre-cave5 slider cap; 64× was the prior default before the
+        // frame-exact resume fix made higher speeds safe. Bump those exact
+        // values — anything else (30, 40, 100, 128, etc.) is a deliberate user
+        // choice and we leave it alone.
+        let s = settings.cont_catchup_speed;
+        if (s - 20.0).abs() < f32::EPSILON || (s - 64.0).abs() < f32::EPSILON {
+            settings.cont_catchup_speed = 96.0;
         }
         settings
     }

@@ -1,38 +1,35 @@
 //! FE-10065 CONT reliability + resume-timing regression.
 //!
-//! Pins the user's real case: load `TAS/recordings/FE-10065.tasrec`, CONT-splice
-//! at frame 6200 with 64x catch-up, 12 iterations. Passes only if EVERY splice
-//! is zero-drift AND the post-splice overshoot stays tiny.
+//! Pins the user's real case: load `TAS/recordings/FE-10065.tasrec` and CONT-
+//! splice at frame 6200. Runs at MULTIPLE catch-up speeds (64× and 128×) and
+//! passes only if EVERY splice is zero-drift AND the resume is frame-exact
+//! (post-splice overshoot ≤ 1) AND the catch-up stays fast.
 //!
-//! The overshoot assertion is the Problem B guard: it caught (and now locks in
-//! the fix for) "resume lands a few frames past the splice". Without the fix
-//! (atomic resume-speed drop at the splice + near-splice catch-up deceleration)
-//! the resumed REC fast-forwards at the catch-up rate for a variable window
-//! (rec_cnt was 6209..6322); with it, rec_cnt is 6200..6201.
+//! The overshoot assertion is the Problem B guard. The fix (cave5: land the
+//! catch-up batch exactly on the splice + reset the game clock accumulator to
+//! "now" on the resume frame) is speed-INDEPENDENT, so we assert it at a high
+//! speed (128×) too — that's the regression that would catch the resume drifting
+//! at speed. Without the fix the resumed REC fast-forwards a variable window
+//! (rec_cnt was 6209..6322); with it, rec_cnt == 6200.
 
 use std::path::PathBuf;
 
 use crate::cont_reliability;
 
 const SPLICE_FRAME: u32 = 6200;
-const ITERATIONS: u32 = 12;
-const SPEED: f32 = 64.0;
-/// Frame-exact resume: the recording must start at exactly the splice frame.
-/// Pre-fix this was tens-to-hundreds; with the fix + a sub-tick splice poll it
-/// is 0. Allow 1 only for rare OS-timer jitter on the detection poll.
+const ITERATIONS: u32 = 8;
+/// Catch-up speeds to validate. 64× = baseline; 128× exercises the
+/// speed-independence of the frame-exact resume fix.
+const SPEEDS: &[f32] = &[64.0, 128.0];
+/// Frame-exact resume: the recording must start at the splice frame. With the
+/// fix + a sub-tick splice poll this is 0; allow 1 for rare OS-timer jitter.
 const MAX_OVERSHOOT: u32 = 1;
-/// Perf guard on time-to-resume (restart→splice). Clean 64x catch-up is
-/// ~1.3-1.5s; this loose bound (best case over the run) only trips on a real
-/// regression (e.g. the catch-up speed scaling breaking back to ~1x).
+/// Perf guard on best-case time-to-resume (restart→splice). Only trips on a real
+/// catch-up regression (e.g. speed scaling breaking back toward 1×).
 const MAX_RESUME_MS: f64 = 3000.0;
 const RECORDING_REL: &str = "TAS/recordings/FE-10065.tasrec";
 
 pub fn run() -> bool {
-    println!(
-        "=== FE-10065 CONT reliability + resume timing (splice={} ×{} at {}× catch-up) ===\n",
-        SPLICE_FRAME, ITERATIONS, SPEED
-    );
-
     // Resolve the recording relative to the workspace (tas_test runs from
     // TAS/target/release/).
     let exe_dir = std::env::current_exe()
@@ -53,11 +50,34 @@ pub fn run() -> bool {
     };
     println!("  Using recording: {}", path);
 
+    let mut all_ok = true;
+    for &speed in SPEEDS {
+        all_ok &= run_at(&path, speed);
+    }
+    println!();
+    if all_ok {
+        println!(
+            "*** FE-10065 CONT PASSED at all speeds {:?}: zero-drift + frame-exact resume ***",
+            SPEEDS
+        );
+    } else {
+        println!("*** FE-10065 CONT FAILED (see per-speed lines above) ***");
+    }
+    all_ok
+}
+
+/// One catch-up speed: zero-drift + frame-exact (overshoot ≤ MAX_OVERSHOOT) +
+/// perf bound. Returns whether all three held.
+fn run_at(path: &str, speed: f32) -> bool {
+    println!(
+        "\n=== FE-10065 CONT (splice={} ×{} at {}× catch-up) ===",
+        SPLICE_FRAME, ITERATIONS, speed
+    );
     let report = cont_reliability::run(
         ITERATIONS,
-        SPEED,
+        speed,
         SPLICE_FRAME,
-        Some(&path),
+        Some(path),
         cont_reliability::BaselineInputProfile::Taps,
         None,
     );
@@ -70,40 +90,34 @@ pub fn run() -> bool {
         .map(|r| r.splice_recorded_count.saturating_sub(SPLICE_FRAME))
         .max()
         .unwrap_or(u32::MAX);
-    let timing_ok = max_overshoot <= MAX_OVERSHOOT;
-
-    // Best-case (clean, no-reroll) time to resume — the perf guard.
     let min_resume_ms = report
         .results
         .iter()
         .filter(|r| r.spliced)
         .map(|r| r.resume_ms)
         .fold(f64::INFINITY, f64::min);
+    let timing_ok = max_overshoot <= MAX_OVERSHOOT;
     let perf_ok = min_resume_ms <= MAX_RESUME_MS;
 
-    println!();
     if clean && timing_ok && perf_ok {
         println!(
-            "*** FE-10065 CONT PASSED: {}/{} splices zero-drift, resume within {} frame(s) of splice, \
-             best resume {:.0} ms ***",
-            ITERATIONS, ITERATIONS, max_overshoot, min_resume_ms
+            "  {}× PASSED: zero-drift, resume within {} frame(s), best resume {:.0} ms",
+            speed, max_overshoot, min_resume_ms
         );
     } else {
-        if !perf_ok {
-            println!(
-                "*** FE-10065 CONT FAILED: best time-to-resume {:.0} ms > {:.0} ms (catch-up perf \
-                 regression) ***",
-                min_resume_ms, MAX_RESUME_MS
-            );
-        }
         if !clean {
-            println!("*** FE-10065 CONT FAILED: one or more splices drifted / didn't splice ***");
+            println!("  {}× FAILED: a splice drifted / didn't splice", speed);
         }
         if !timing_ok {
             println!(
-                "*** FE-10065 CONT FAILED: resume overshoot {} > {} frames (Problem B regression — \
-                 is the fixed DLL deployed?) ***",
-                max_overshoot, MAX_OVERSHOOT
+                "  {}× FAILED: resume overshoot {} > {} (Problem B regression — fixed DLL deployed?)",
+                speed, max_overshoot, MAX_OVERSHOOT
+            );
+        }
+        if !perf_ok {
+            println!(
+                "  {}× FAILED: best time-to-resume {:.0} ms > {:.0} ms (catch-up perf regression)",
+                speed, min_resume_ms, MAX_RESUME_MS
             );
         }
     }
