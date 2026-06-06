@@ -396,34 +396,25 @@ fn temp_path_for(path: &Path) -> PathBuf {
     path.with_file_name(format!("{}.{}.tmp", name, nonce))
 }
 
+/// Atomically replace `final_path` with `temp_path`. `std::fs::rename` performs
+/// an atomic replace of an EXISTING destination (MoveFileExW with
+/// MOVEFILE_REPLACE_EXISTING on Windows; `rename(2)` on Unix) — the destination
+/// is always old-or-new, never missing. This mirrors the v2 store's manifest
+/// publish (proven in production, replacing `manifest.json` every persist).
+///
+/// The previous remove-then-rename fallback opened a crash window where the
+/// destination was briefly absent — exactly the wrong property for a
+/// crash-recovery file — so it is gone. On failure the temp is cleaned up.
 fn atomic_replace_file(temp_path: &Path, final_path: &Path) -> Result<(), String> {
-    if let Err(rename_err) = std::fs::rename(temp_path, final_path) {
-        if final_path.exists() {
-            std::fs::remove_file(final_path).map_err(|e| {
-                format!(
-                    "failed to replace {} after rename failure ({}): {}",
-                    final_path.display(),
-                    rename_err,
-                    e
-                )
-            })?;
-            std::fs::rename(temp_path, final_path).map_err(|e| {
-                format!(
-                    "failed to finalize replacement {}: {}",
-                    final_path.display(),
-                    e
-                )
-            })?;
-            return Ok(());
-        }
-        return Err(format!(
-            "failed to move {} to {}: {}",
-            temp_path.display(),
+    std::fs::rename(temp_path, final_path).map_err(|e| {
+        let _ = std::fs::remove_file(temp_path);
+        format!(
+            "failed to replace {} with {}: {}",
             final_path.display(),
-            rename_err
-        ));
-    }
-    Ok(())
+            temp_path.display(),
+            e
+        )
+    })
 }
 
 fn remove_if_exists(path: &Path) -> Result<(), String> {
