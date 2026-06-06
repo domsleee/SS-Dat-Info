@@ -1175,9 +1175,15 @@ impl TasApp {
                 .push(format!("[perf] history.push_snapshot: {}ms", dt.as_millis()));
         }
         let _ = (snapshot, session_context);
-        // The recording is now safely in history — clear the crash-recovery
-        // checkpoint. A leftover checkpoint therefore always means "unfinalized
-        // / crashed work", which the next launch recovers into history.
+        // Make the recording DURABLE in history BEFORE clearing the recovery
+        // checkpoint — otherwise a crash between "pushed to in-memory history"
+        // and "background writer flushed" would lose it (checkpoint gone, blob
+        // not on disk). Mirror the startup recovery ordering: persist + flush,
+        // THEN clear. A leftover checkpoint always means unfinalized/crashed work.
+        self.persist_history_if_needed();
+        if let Some(writer) = self.history_writer.as_ref() {
+            writer.flush();
+        }
         if let Some(store) = self.recovery_store.as_mut() {
             let _ = store.clear_pending();
         }
