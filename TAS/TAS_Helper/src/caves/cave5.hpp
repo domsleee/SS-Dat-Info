@@ -105,6 +105,21 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             && s->force_fixed_tick == 0
             && s->playback_speed == 1.0f;
 
+        // CONT splice deceleration (Problem B part 2): in the final frames of a
+        // CONT catch-up replay, run at 1x so the catch-up's accumulated clock
+        // backlog (prev_time lags wall_time while tick_advance = native/speed)
+        // drains as NORMAL-dt PLAY ticks here, instead of bursting into the
+        // resumed REC right after the splice. cave5 owns tick_advance, so this
+        // can't be stomped by the UI re-asserting the catch-up speed each frame.
+        // Only the clamp + tick_advance use this; catchup_drain stays on the
+        // real speed so its huge-dt single-tick drain never fires mid-replay.
+        const uint32_t CONT_DECEL_FRAMES = 96;
+        bool cont_decel =
+            s->continue_from_frame > 0
+            && s->mode == MODE_PLAY
+            && s->playback_pos + CONT_DECEL_FRAMES >= s->continue_from_frame;
+        float effective_speed = cont_decel ? 1.0f : s->playback_speed;
+
         if (s->force_fixed_tick > 0) {
             // Deterministic mode: exact tick count per frame
             ctx.esi = s->force_fixed_tick;
@@ -132,7 +147,7 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             // catchup-drain branch above handles long pauses (> 50 ticks
             // accumulated) for 1× play, so this lower cap is only the
             // ceiling for "normal stutter recovery" at 1×.
-            if (s->playback_speed <= 1.0f && realTick > NATIVE_GAME_CLAMP_AT_1X) {
+            if (effective_speed <= 1.0f && realTick > NATIVE_GAME_CLAMP_AT_1X) {
                 realTick = NATIVE_GAME_CLAMP_AT_1X;
             }
 
@@ -147,8 +162,8 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // Skipped during catchup_drain — that path wrote a temporary large
         // value to tick_advance that the game must read next frame.
         if (g_tickAdvancePtr && !catchup_drain) {
-            if (s->mode != MODE_OFF && s->playback_speed > 0.0f && s->playback_speed != 1.0f) {
-                *g_tickAdvancePtr = g_nativeTickAdvance / s->playback_speed;
+            if (s->mode != MODE_OFF && effective_speed > 0.0f && effective_speed != 1.0f) {
+                *g_tickAdvancePtr = g_nativeTickAdvance / effective_speed;
             } else {
                 *g_tickAdvancePtr = g_nativeTickAdvance;
             }
