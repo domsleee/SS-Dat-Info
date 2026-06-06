@@ -481,6 +481,13 @@ static void __declspec(noinline) Cave2_Logic() {
     } else if (s->mode == MODE_PLAY) {
         uint32_t pos = s->playback_pos;
 
+        // CONT replay starting (first replay tick): stamp frame_count so the
+        // harness can measure how many game-frames the catch-up replay takes to
+        // reach the splice (the "resume off by a few frames" skew).
+        if (pos == 0 && s->continue_from_frame > 0) {
+            s->cont_replay_start_fc = s->frame_count;
+        }
+
         if (pos >= s->recorded_count) {
             s->mode = MODE_OFF;
             g_cave2_logParam = pos;
@@ -512,6 +519,11 @@ static void __declspec(noinline) Cave2_Logic() {
         if (s->continue_from_frame > 0 && s->playback_pos >= s->continue_from_frame) {
             uint32_t splice_pos = s->playback_pos;
             s->recorded_count = splice_pos;
+
+            // Stamp the splice instant. (cont_splice_fc - cont_replay_start_fc)
+            // is the game-frames the replay took to reach the splice — the
+            // diagnostic for "resume yields a few frames early/late".
+            s->cont_splice_fc = s->frame_count;
 
             // Record new segment boundary
             uint32_t segIdx = s->segment_count;
