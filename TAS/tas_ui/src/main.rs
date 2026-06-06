@@ -309,7 +309,7 @@ use pico::PicoState;
 use recording::{RecordingHistory, RecordingSessionKind};
 
 const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
-const PLAYBACK_SPEED_PRESETS: [f32; 3] = [0.5, 1.0, 2.0];
+const PLAYBACK_SPEED_PRESETS: [f32; 4] = [0.25, 0.5, 1.0, 2.0];
 // Shared with the cont-reliability harness via tas_shared::cont — the bucket
 // headroom now lives inside judge_cont_bucket (one source of truth).
 const CONT_START_MATCH_MAX_RETRIES: u32 = tas_shared::cont::START_MATCH_MAX_RETRIES;
@@ -383,6 +383,10 @@ struct TasApp {
     /// Input edit (new full event list, commit-undo flag) produced by the
     /// timeline this frame, applied to `input_log` at the start of the next.
     pending_input_edit: Option<(Vec<input_script::InputEvent>, bool, String)>,
+    /// Latch: a pending edit arrived while a run was active, so we issued one
+    /// auto-STOP and are now waiting for mode→Off to apply it. Prevents
+    /// re-sending STOP (and re-logging) every frame while the game settles.
+    pending_edit_autostop: bool,
     /// Path + last-seen mtime of the `.tas` file opened in an external
     /// editor; polled each frame for reload-on-save.
     script_watch: Option<(std::path::PathBuf, std::time::SystemTime)>,
@@ -563,6 +567,7 @@ impl TasApp {
             timeline_view: timeline::TimelineView::default(),
             timeline_edit: timeline::TimelineEdit::default(),
             pending_input_edit: None,
+            pending_edit_autostop: false,
             script_watch: None,
             continue_from_frame: 0,
             continue_from_text: "0".to_string(),
@@ -1082,19 +1087,43 @@ impl TasApp {
     /// frame, before rendering, so the central panel's `state` borrow never
     /// overlaps the `state_mut` write here.
     fn apply_pending_input_edit(&mut self) {
-        let Some((events, commit, label)) = self.pending_input_edit.take() else {
-            return;
-        };
-        let Some(shared) = self.shared.as_mut() else {
-            return;
-        };
-        // Only edit while stopped — never mutate the buffer the game is
-        // actively replaying or recording.
-        if shared.state().mode != TasMode::Off as u32 {
-            self.log_lines
-                .push("[script] edit ignored — stop playback/record first".into());
+        // Peek without consuming — if a run is active we keep the edit queued
+        // and apply it once the game stops.
+        if self.pending_input_edit.is_none() {
             return;
         }
+        let mode = match self.shared.as_ref() {
+            Some(shared) => shared.state().mode,
+            None => {
+                // No shared memory to write into — drop the queued edit.
+                self.pending_input_edit = None;
+                self.pending_edit_autostop = false;
+                return;
+            }
+        };
+        // Never mutate the buffer the game is actively replaying/recording.
+        // Instead of dropping the edit, auto-STOP the run and keep the edit
+        // queued; it applies on the frame mode returns to Off. We issue STOP
+        // only once (latched) so we don't spam the command slot while the
+        // game settles.
+        if mode != TasMode::Off as u32 {
+            if !self.pending_edit_autostop {
+                self.pending_edit_autostop = true;
+                self.log_lines
+                    .push("[script] stopping run to apply edit…".into());
+                self.send_action_command(TasCommand::Stop, "auto");
+            }
+            return;
+        }
+        self.pending_edit_autostop = false;
+        let (events, commit, label) = match self.pending_input_edit.take() {
+            Some(e) => e,
+            None => return,
+        };
+        let shared = match self.shared.as_mut() {
+            Some(shared) => shared,
+            None => return,
+        };
         let total = shared.state().recorded_count;
         input_script::apply_events_to_log(&mut shared.state_mut().input_log, total, &events);
         if commit {
@@ -2536,6 +2565,7 @@ mod tests {
             timeline_view: timeline::TimelineView::default(),
             timeline_edit: timeline::TimelineEdit::default(),
             pending_input_edit: None,
+            pending_edit_autostop: false,
             script_watch: None,
             continue_from_frame: 0,
             continue_from_text: "0".to_string(),
@@ -2747,16 +2777,18 @@ mod tests {
 
     #[test]
     fn playback_speed_normalizer_keeps_valid_presets() {
+        assert!((normalize_playback_speed(0.25) - 0.25).abs() < 0.001);
         assert!((normalize_playback_speed(0.5) - 0.5).abs() < 0.001);
         assert!((normalize_playback_speed(2.0) - 2.0).abs() < 0.001);
     }
 
     #[test]
     fn playback_speed_normalizer_resets_dropped_presets() {
-        // 0.25x and 4x were preset buttons in the old picker. After the
-        // narrow-transport trim they're no longer valid presets — any
-        // persisted setting at those values should fall back to 1x.
-        assert!((normalize_playback_speed(0.25) - 1.0).abs() < 0.001);
+        // 0.01x, 0.05x and 4x are not preset buttons — any persisted setting
+        // at those values should fall back to 1x. (0.25x is a valid preset,
+        // covered by playback_speed_normalizer_keeps_valid_presets.)
+        assert!((normalize_playback_speed(0.01) - 1.0).abs() < 0.001);
+        assert!((normalize_playback_speed(0.05) - 1.0).abs() < 0.001);
         assert!((normalize_playback_speed(4.0) - 1.0).abs() < 0.001);
     }
 
