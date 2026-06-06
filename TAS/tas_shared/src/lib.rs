@@ -856,9 +856,28 @@ pub mod transport {
             expected: Option<u32>,
         },
         /// Terminal success: armed (and, for CONT, landed the bucket).
-        Done { retries_used: u32 },
+        /// `completed_via` says HOW the bucket was accepted — a `NoSignal` accept
+        /// was NOT positively confirmed and may be a near-miss bucket.
+        Done {
+            retries_used: u32,
+            completed_via: CompletedVia,
+        },
         /// Terminal failure: gave up after exhausting retries.
         Aborted { reason: String },
+    }
+
+    /// How a CONT/PLAY cycle reached `Done` — diagnostic for "did it resume on
+    /// the right bucket?".
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CompletedVia {
+        /// The bucket fingerprint positively matched the recording. Trustworthy.
+        BucketMatched,
+        /// Accepted with no movement signal to judge against — the resumed state
+        /// could be from a near-miss bucket. Prime suspect for a "wrong" resume.
+        NoSignal,
+        /// Nothing to judge (plain PLAY/REC with no fingerprint) or the splice
+        /// had already fired before judging.
+        Unjudged,
     }
 
     /// Drives one restart→arm(→judge→reroll) cycle to a terminal outcome.
@@ -866,6 +885,7 @@ pub mod transport {
         cfg: ArmConfig,
         phase: Phase,
         retries_remaining: u32,
+        completed_via: CompletedVia,
     }
 
     impl TransportController {
@@ -875,6 +895,7 @@ pub mod transport {
                 cfg,
                 phase: Phase::Start,
                 retries_remaining,
+                completed_via: CompletedVia::Unjudged,
             }
         }
 
@@ -948,20 +969,14 @@ pub mod transport {
                         self.phase = Phase::JudgeBucket;
                         StepOutcome::InProgress
                     } else {
-                        self.phase = Phase::Done;
-                        StepOutcome::Done {
-                            retries_used: self.retries_used(),
-                        }
+                        self.finish(CompletedVia::Unjudged)
                     }
                 }
                 Phase::JudgeBucket => {
                     let mode = port.mode();
                     if mode == rec {
                         // Splice already fired (PLAY→REC) — bucket accepted.
-                        self.phase = Phase::Done;
-                        return StepOutcome::Done {
-                            retries_used: self.retries_used(),
-                        };
+                        return self.finish(CompletedVia::Unjudged);
                     }
                     if mode != play {
                         return StepOutcome::InProgress;
@@ -973,12 +988,7 @@ pub mod transport {
                     let target = match self.cfg.target {
                         Some(t) => t,
                         // CONT with no fingerprint can't be judged — accept.
-                        None => {
-                            self.phase = Phase::Done;
-                            return StepOutcome::Done {
-                                retries_used: self.retries_used(),
-                            };
-                        }
+                        None => return self.finish(CompletedVia::Unjudged),
                     };
                     let verdict = judge_cont_bucket(
                         port.play_coords(),
@@ -990,12 +1000,10 @@ pub mod transport {
                     );
                     match verdict {
                         BucketVerdict::KeepWaiting => StepOutcome::InProgress,
-                        BucketVerdict::Match | BucketVerdict::NoSignal => {
-                            self.phase = Phase::Done;
-                            StepOutcome::Done {
-                                retries_used: self.retries_used(),
-                            }
-                        }
+                        BucketVerdict::Match => self.finish(CompletedVia::BucketMatched),
+                        // Accepted but NOT positively confirmed — flag it so the
+                        // UI can warn that the resume may be on a near-miss bucket.
+                        BucketVerdict::NoSignal => self.finish(CompletedVia::NoSignal),
                         BucketVerdict::WrongBucket { observed } => self.reroll(
                             port,
                             format!(
@@ -1011,10 +1019,21 @@ pub mod transport {
                 }
                 Phase::Done => StepOutcome::Done {
                     retries_used: self.retries_used(),
+                    completed_via: self.completed_via,
                 },
                 Phase::Aborted => StepOutcome::Aborted {
                     reason: "CONT aborted".to_string(),
                 },
+            }
+        }
+
+        /// Record how the cycle completed and emit the terminal `Done`.
+        fn finish(&mut self, via: CompletedVia) -> StepOutcome {
+            self.completed_via = via;
+            self.phase = Phase::Done;
+            StepOutcome::Done {
+                retries_used: self.retries_used(),
+                completed_via: via,
             }
         }
 
@@ -1137,7 +1156,13 @@ pub mod transport {
             p.restart_state = 2;
             // RestartWaitDone → arm settle wait, then ArmSettle → ArmRec.
             assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: ARM_SETTLE_MS });
-            assert_eq!(c.step(&mut p), StepOutcome::Done { retries_used: 0 });
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 0,
+                    completed_via: CompletedVia::Unjudged
+                }
+            );
             assert_eq!(
                 p.commands,
                 vec![TasCommand::Stop, TasCommand::Restart, TasCommand::ArmRec]
@@ -1161,7 +1186,13 @@ pub mod transport {
             assert_eq!(p.commands, vec![TasCommand::Stop, TasCommand::Restart]);
             p.restart_state = 2;
             assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: ARM_SETTLE_MS });
-            assert_eq!(c.step(&mut p), StepOutcome::Done { retries_used: 0 });
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 0,
+                    completed_via: CompletedVia::Unjudged
+                }
+            );
             assert_eq!(
                 p.commands,
                 vec![TasCommand::Stop, TasCommand::Restart, TasCommand::ArmPlay]
@@ -1217,8 +1248,44 @@ pub mod transport {
             p.play_coords = coords;
             p.playback_pos = 320;
 
-            assert_eq!(c.step(&mut p), StepOutcome::Done { retries_used: 0 });
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 0,
+                    completed_via: CompletedVia::BucketMatched
+                }
+            );
             assert!(c.is_terminal());
+        }
+
+        #[test]
+        fn cont_no_signal_accept_is_flagged() {
+            // Target has no first-moving frame (recording never moved, or it was
+            // undetected): the bucket can't be positively judged, so it's
+            // accepted as NoSignal — which the UI surfaces as an unconfirmed
+            // resume (the likely cause of a "wrong-frame" resume).
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: None,
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Continue, Some(target), 30));
+            p.rec_coords = vec![[1.0f32, 2.0, 3.0]; 400];
+            p.recorded_count = 400;
+            drive_to_judge(&mut c, &mut p);
+            // start bits match, but there is no movement to discriminate buckets.
+            p.play_coords = vec![[1.0f32, 2.0, 3.0]; 400];
+            p.playback_pos = 320;
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 0,
+                    completed_via: CompletedVia::NoSignal
+                }
+            );
         }
 
         #[test]
@@ -1256,7 +1323,13 @@ pub mod transport {
             p.play_coords = right;
             p.playback_pos = 320;
 
-            assert_eq!(c.step(&mut p), StepOutcome::Done { retries_used: 1 });
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 1,
+                    completed_via: CompletedVia::BucketMatched
+                }
+            );
             assert!(!p.restart_while_not_off, "Restart sent while mode != OFF!");
         }
 

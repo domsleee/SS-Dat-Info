@@ -1015,7 +1015,7 @@ pub fn restart_continue_and_splice_inprocess(
                 thread::sleep(Duration::from_millis(suggested_delay_ms));
                 attempt_deadline = Instant::now() + per_attempt;
             }
-            StepOutcome::Done { retries_used } => {
+            StepOutcome::Done { retries_used, .. } => {
                 if retries_used > 0 {
                     println!(
                         "  CONT bucket accepted (shared controller) after {} reroll(s)",
