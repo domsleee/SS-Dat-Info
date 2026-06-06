@@ -29,6 +29,7 @@ mod patterns;
 mod catchup_speed;
 mod escape_speedup;
 mod fe_cont_reliability;
+mod fe10065_cont;
 mod fe_cont_stress;
 mod pause_resume;
 mod play_pace;
@@ -196,6 +197,14 @@ fn main() {
             // cont-reliability for the specific recording the user cares
             // about; passes only if all 5/5 splices are zero-drift.
             let ok = fe_cont_reliability::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "fe10065-cont" => {
+            // CONT splice against TAS/recordings/FE-10065.tasrec at frame 6200,
+            // 12 iterations at 64x. Pinned to the user's real case; passes only
+            // if all splices are zero-drift AND the resume lands within a few
+            // frames of the splice (the Problem B resume-timing guard).
+            let ok = fe10065_cont::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
         "stop-play-flake" => {
