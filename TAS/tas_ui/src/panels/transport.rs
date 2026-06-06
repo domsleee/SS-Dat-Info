@@ -187,29 +187,31 @@ pub fn show(
 
         ui.separator();
 
-        // Playback speed (disabled during CONT catch-up to avoid state conflicts).
-        // "Speed:" label removed — the `Nx` buttons are self-evident.
-        // Trimmed to 0.5/1/2 (the everyday-use presets); 0.25 and 4x
-        // were rarely touched and ate ~60 px of transport width.
+        // Playback speed. The Nx preset buttons stay VISIBLE during CONT
+        // catch-up (just disabled) so the chosen play speed is never hidden —
+        // the catch-up caption sits beside them, not in place of them.
+        // 0.01x is the slow-mo preset for frame-picking; 0.5/1/2 are everyday.
+        // (0.25 and 4x were dropped — rarely touched, ate transport width.)
+        for &spd in &[0.25f32, 0.5, 1.0, 2.0] {
+            let label = format!("{}x", spd);
+            let btn = egui::Button::new(&label);
+            let btn = if (*playback_speed - spd).abs() < 0.005 {
+                btn.fill(egui::Color32::from_rgb(70, 70, 120))
+            } else {
+                btn
+            };
+            // During catch-up self.playback_speed is hijacked to the catch-up
+            // multiplier, so disable edits to avoid clobbering it mid-splice.
+            if ui.add_enabled(!is_off && !catchup_active, btn).clicked() {
+                *playback_speed = spd;
+                actions.push(Action::Log(format!("Playback speed: {}x", spd)));
+            }
+        }
         if catchup_active {
             ui.label(
-                egui::RichText::new(format!("Catching up at {}x...", *cont_catchup_speed))
+                egui::RichText::new(format!("catching up {}x…", *cont_catchup_speed))
                     .color(egui::Color32::from_rgb(200, 160, 60)),
             );
-        } else {
-            for &spd in &[0.5f32, 1.0, 2.0] {
-                let label = format!("{}x", spd);
-                let btn = egui::Button::new(&label);
-                let btn = if (*playback_speed - spd).abs() < 0.01 {
-                    btn.fill(egui::Color32::from_rgb(70, 70, 120))
-                } else {
-                    btn
-                };
-                if ui.add_enabled(!is_off, btn).clicked() {
-                    *playback_speed = spd;
-                    actions.push(Action::Log(format!("Playback speed: {}x", spd)));
-                }
-            }
         }
     });
 
