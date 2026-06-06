@@ -10,6 +10,11 @@ pub enum Action {
     Redo,
     StepOne,
     SetContinueFrame(u32),
+    /// Set the CONT resume speed *while catch-up is in flight*. During catch-up
+    /// `playback_speed` is the catch-up multiplier, so the speed buttons can't
+    /// write it directly — they emit this instead, and main.rs restages the
+    /// resume speed (and shared `cont_resume_speed`) the splice will drop to.
+    SetResumeSpeed(f32),
     Log(String),
 }
 
@@ -33,6 +38,7 @@ pub fn show(
     history: &RecordingHistory,
     state: &TasSharedState,
     catchup_active: bool,
+    resume_speed: f32,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
 
@@ -192,19 +198,28 @@ pub fn show(
         // the catch-up caption sits beside them, not in place of them.
         // 0.01x is the slow-mo preset for frame-picking; 0.5/1/2 are everyday.
         // (0.25 and 4x were dropped — rarely touched, ate transport width.)
+        // During catch-up the buttons set the RESUME speed (what playback drops
+        // to at the splice), so highlight against that; otherwise the live play
+        // speed. The buttons stay enabled during catch-up — editing the resume
+        // speed mid-catch-up is exactly when you want it.
+        let selected = if catchup_active { resume_speed } else { *playback_speed };
         for &spd in &[0.25f32, 0.5, 1.0, 2.0] {
             let label = format!("{}x", spd);
             let btn = egui::Button::new(&label);
-            let btn = if (*playback_speed - spd).abs() < 0.005 {
+            let btn = if (selected - spd).abs() < 0.005 {
                 btn.fill(egui::Color32::from_rgb(70, 70, 120))
             } else {
                 btn
             };
-            // During catch-up self.playback_speed is hijacked to the catch-up
-            // multiplier, so disable edits to avoid clobbering it mid-splice.
-            if ui.add_enabled(!is_off && !catchup_active, btn).clicked() {
-                *playback_speed = spd;
-                actions.push(Action::Log(format!("Playback speed: {}x", spd)));
+            if ui.add_enabled(!is_off, btn).clicked() {
+                if catchup_active {
+                    // playback_speed is the catch-up multiplier here — don't
+                    // touch it; restage the resume speed via main.rs.
+                    actions.push(Action::SetResumeSpeed(spd));
+                } else {
+                    *playback_speed = spd;
+                    actions.push(Action::Log(format!("Playback speed: {}x", spd)));
+                }
             }
         }
         if catchup_active {

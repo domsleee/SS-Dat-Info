@@ -773,6 +773,19 @@ impl TasApp {
                     shared.state_mut().continue_from_frame = frame;
                 }
             }
+            transport::Action::SetResumeSpeed(spd) => {
+                // Catch-up in flight: keep the saved resume speed and the staged
+                // shared cont_resume_speed in sync so the splice (cave2 reads
+                // cont_resume_speed) drops to the speed the user just picked.
+                // playback_speed stays the catch-up multiplier; clear_cont_catchup
+                // restores playback_speed from cont_catchup_speed at the splice.
+                self.cont_catchup_speed = Some(spd);
+                if let Some(shared) = self.shared.as_mut() {
+                    shared.state_mut().cont_resume_speed = spd;
+                }
+                self.log_lines
+                    .push(format!("[{}] Resume speed: {}x", ts, spd));
+            }
             transport::Action::StepOne => {
                 self.log_lines
                     .push(format!("[{}] Step one frame (requires DLL support)", ts));
@@ -2042,6 +2055,10 @@ impl eframe::App for TasApp {
             let cmds = if let Some(ref mut shared) = self.shared {
                 let mode = shared.state().mode_enum();
                 let recorded = shared.state().recorded_count;
+                // During catch-up the resume speed lives in cont_catchup_speed
+                // (playback_speed is the catch-up multiplier); otherwise it's
+                // just the live play speed. The buttons highlight/edit this.
+                let resume_speed = self.cont_catchup_speed.unwrap_or(self.playback_speed);
 
                 transport::show(
                     ui,
@@ -2055,6 +2072,7 @@ impl eframe::App for TasApp {
                     &self.history,
                     shared.state(),
                     self.cont_catchup_speed.is_some(),
+                    resume_speed,
                 )
             } else {
                 Vec::new()
