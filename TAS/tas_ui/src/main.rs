@@ -104,39 +104,6 @@ fn compute_global_key_edges(now: [bool; 4], prev: &mut [bool; 4]) -> [bool; 4] {
     edges
 }
 
-/// Format a recovery checkpoint's `saved_at` field for compact UI
-/// display. The persisted value is an RFC 3339 ISO timestamp with
-/// nanoseconds and offset (e.g. `2026-05-23T18:00:19.843268500+10:00`);
-/// for a user-facing banner we want something humans can read at a
-/// glance — relative if recent, absolute otherwise. Falls back to the
-/// raw string if the input doesn't parse, so we never lose information.
-fn format_recovery_saved_at(iso: &str) -> String {
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(iso) else {
-        return iso.to_string();
-    };
-    let saved = parsed.with_timezone(&chrono::Local);
-    let now = chrono::Local::now();
-    let delta = now.signed_duration_since(saved);
-    if delta.num_minutes() < 60 && delta.num_seconds() >= 0 {
-        return format!("{}m ago", delta.num_minutes().max(1));
-    }
-    if saved.date_naive() == now.date_naive() {
-        return format!("today {}", saved.format("%H:%M"));
-    }
-    if Some(saved.date_naive()) == now.date_naive().pred_opt() {
-        return format!("yesterday {}", saved.format("%H:%M"));
-    }
-    // Avoid chrono's `%-d` (POSIX no-pad day) — unsupported on Windows
-    // strftime and would render the literal `-d`. Use chrono::Datelike
-    // to build the day-month string manually.
-    use chrono::Datelike;
-    let month = match saved.month() {
-        1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr", 5 => "May", 6 => "Jun",
-        7 => "Jul", 8 => "Aug", 9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
-        _ => "???",
-    };
-    format!("{} {} {}", saved.day(), month, saved.format("%H:%M"))
-}
 
 /// Encode an `egui::ColorImage` (RGBA premultiplied, top-to-bottom) as
 /// a PNG file. Used by the F8 screenshot path so an external caller
@@ -396,7 +363,6 @@ struct TasApp {
     /// Soft cap (max unpinned entries) — from settings.
     history_cap: usize,
     recovery_store: Option<recording::RecoveryStore>,
-    pending_recovery: Option<recording::RecoveryCheckpoint>,
     log_lines: Vec<String>,
     /// Append-only on-disk mirror of `log_lines`. Lives under
     /// `~/.ssb-inspector/{session}/tas_ui.log` (same session dir as the
@@ -527,23 +493,46 @@ impl TasApp {
                 None
             }
         };
-        let mut recovery_store = recording::RecoveryStore::new().ok();
+        let recovery_store = recording::RecoveryStore::new().ok();
         let recovery_store_notice = recovery_store
             .as_ref()
-            .map(|store| format!("Crash recovery checkpoints: {}", store.root().display()));
-        let mut recovery_load_notice = None;
-        let pending_recovery = if let Some(store) = recovery_store.as_ref() {
+            .map(|store| format!("Crash recovery: {}", store.root().display()));
+        // Recovery-as-history (no banner): an existing checkpoint means an
+        // unsaved recording that never reached history (STOP clears it), i.e.
+        // the app crashed/closed mid-recording. Bring it back as a PINNED entry.
+        // We persist + flush the history BEFORE clearing the checkpoint (done
+        // after `app` is built) so a crash can never lose it — at worst a
+        // duplicate on the next launch.
+        let mut recovered_checkpoint = false;
+        let mut recovery_notice = None;
+        if let Some(store) = recovery_store.as_ref() {
             match store.load_pending() {
-                Ok(checkpoint) => checkpoint,
+                Ok(Some(cp)) => {
+                    let session_label = cp.session.label.clone();
+                    let (start, end) = (cp.session.start_tick, cp.session.end_tick);
+                    if history.push_snapshot_data_with_session(
+                        cp.snapshot,
+                        session_label.clone(),
+                        start,
+                        end,
+                    ) {
+                        if let Some(id) = history.entries().last().map(|e| e.entry_id) {
+                            history.set_pinned(id, true);
+                            history.rename(id, format!("Recovered · {}", session_label));
+                        }
+                        recovered_checkpoint = true;
+                        recovery_notice = Some(format!(
+                            "Recovered an unsaved recording ({}) → pinned in history",
+                            session_label
+                        ));
+                    }
+                }
+                Ok(None) => {}
                 Err(err) => {
-                    recovery_store = None;
-                    recovery_load_notice = Some(format!("Crash recovery disabled: {}", err));
-                    None
+                    recovery_notice = Some(format!("Crash recovery check failed: {}", err))
                 }
             }
-        } else {
-            None
-        };
+        }
         let log_file = open_session_log_file(&history_dir);
         let mut app = Self {
             shared,
@@ -556,7 +545,6 @@ impl TasApp {
             last_persisted_revision: 0,
             history_cap,
             recovery_store,
-            pending_recovery,
             log_lines: Vec::new(),
             log_file,
             log_lines_persisted: 0,
@@ -612,17 +600,21 @@ impl TasApp {
         if let Some(msg) = recovery_store_notice {
             app.push_log(&msg);
         }
-        if let Some(msg) = recovery_load_notice {
+        if let Some(msg) = recovery_notice {
             app.push_log(&msg);
         }
-        if let Some(recovery) = app.pending_recovery.as_ref() {
-            app.push_log(&format!(
-                "Recovery available: {} (saved {})",
-                recovery.label(),
-                recovery.saved_at
-            ));
-        }
         app.persist_history_if_needed();
+
+        // Recovery-as-history: only AFTER the recovered entry is durably in the
+        // v2 store do we clear the checkpoint — so a crash can't lose it.
+        if recovered_checkpoint {
+            if let Some(writer) = app.history_writer.as_ref() {
+                writer.flush();
+            }
+            if let Some(store) = app.recovery_store.as_mut() {
+                let _ = store.clear_pending();
+            }
+        }
 
         app
     }
@@ -1126,19 +1118,6 @@ impl TasApp {
         session: &recording::RecoverySessionContext,
         force: bool,
     ) {
-        // While a previous session's recovery banner is still on screen,
-        // refuse to overwrite the on-disk checkpoint. Without this guard,
-        // pressing REC after launch silently destroys the pending
-        // recovery data (the new session's incremental writes clobber
-        // recovery_checkpoint.{json,tasrec} within ~250 ms). The user
-        // must Restore or Discard the banner before checkpointing
-        // resumes — trade-off is that an uncleared banner blocks new
-        // checkpoints, so we trade "easy crash recovery of the current
-        // session" for "the pending recovery is sacred".
-        if self.pending_recovery.is_some() {
-            return;
-        }
-
         // Decide on the UI thread (throttle), but run the ~12ms checkpoint disk
         // write OFF it — otherwise STOP (which forces a write on REC-stop) and
         // REC (a write every 250ms debounce) hitch on disk I/O. Best-effort: a
@@ -1204,53 +1183,13 @@ impl TasApp {
             self.log_lines
                 .push(format!("[perf] history.push_snapshot: {}ms", dt.as_millis()));
         }
-        self.persist_recovery_snapshot_if_needed(snapshot, &session_context, true);
-    }
-
-    fn restore_pending_recovery(&mut self) {
-        let Some(recovery) = self.pending_recovery.take() else {
-            return;
-        };
-
-        if let Some(ref mut shared) = self.shared {
-            let recovery_label = recovery.label().to_string();
-            let session_start = recovery.session.start_tick;
-            let session_end = recovery.session.end_tick;
-            recovery.snapshot.restore_to(shared.state_mut());
-            self.segment_tracker.restore_from(recovery.segments);
-            self.continue_from_frame = shared.state().recorded_count;
-            self.continue_from_text = self.continue_from_frame.to_string();
-            let snapshot = recording::RecordingSnapshot::from_state(shared.state());
-            let _ = self.history.push_snapshot_data_with_session(
-                snapshot,
-                recovery_label.clone(),
-                session_start,
-                session_end,
-            );
-            self.push_log(&format!("Restored crash recovery: {}", recovery_label));
-
-            if let Some(store) = self.recovery_store.as_mut() {
-                if let Err(err) = store.clear_pending() {
-                    self.recovery_store = None;
-                    self.push_log(&format!("Crash recovery disabled: {}", err));
-                }
-            }
-        } else {
-            self.push_log("Crash recovery restore requires an active game connection.");
-            self.pending_recovery = Some(recovery);
-        }
-    }
-
-    fn discard_pending_recovery(&mut self) {
-        self.pending_recovery = None;
+        let _ = (snapshot, session_context);
+        // The recording is now safely in history — clear the crash-recovery
+        // checkpoint. A leftover checkpoint therefore always means "unfinalized
+        // / crashed work", which the next launch recovers into history.
         if let Some(store) = self.recovery_store.as_mut() {
-            if let Err(err) = store.clear_pending() {
-                self.recovery_store = None;
-                self.push_log(&format!("Crash recovery disabled: {}", err));
-                return;
-            }
+            let _ = store.clear_pending();
         }
-        self.push_log("Discarded pending crash recovery checkpoint.");
     }
 
     /// Check if the game process is still alive by monitoring frame_count advancement.
@@ -1687,8 +1626,6 @@ impl eframe::App for TasApp {
         // which window the user was in.
         let mut shortcut_actions = self.handle_shortcuts(ctx);
         shortcut_actions.extend(self.poll_global_shortcuts());
-        let mut restore_pending_recovery = false;
-        let mut discard_pending_recovery = false;
 
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -1721,21 +1658,6 @@ impl eframe::App for TasApp {
                                     self.queue_restart_then(TasCommand::ArmPlay, &ts);
                                 }
                             }
-                        }
-                    }
-                    if let Some(recovery) = self.pending_recovery.as_ref() {
-                        ui.separator();
-                        ui.label(
-                            egui::RichText::new(format!("Crash recovery: {}", recovery.label()))
-                                .small(),
-                        );
-                        if ui.button("Restore Crash Recovery").clicked() {
-                            ui.close_menu();
-                            restore_pending_recovery = true;
-                        }
-                        if ui.button("Discard Crash Recovery").clicked() {
-                            ui.close_menu();
-                            discard_pending_recovery = true;
                         }
                     }
                     ui.separator();
@@ -1781,15 +1703,6 @@ impl eframe::App for TasApp {
                 });
             });
         });
-
-        if restore_pending_recovery {
-            self.restore_pending_recovery();
-            restore_pending_recovery = false;
-        }
-        if discard_pending_recovery {
-            self.discard_pending_recovery();
-            discard_pending_recovery = false;
-        }
 
         // Bottom log panel (hidden by default, toggle via View menu).
         // Declared FIRST so it sits at the very bottom of the window;
@@ -1924,43 +1837,6 @@ impl eframe::App for TasApp {
                         }
                     });
 
-                    // Compact recovery banner — single-row hint + two
-                    // small buttons. Detail goes to a hover-tooltip
-                    // instead of taking a whole row.
-                    if let Some(recovery) = self.pending_recovery.as_ref() {
-                        let saved_label = format_recovery_saved_at(&recovery.saved_at);
-                        ui.add_space(4.0);
-                        egui::Frame::none()
-                            .fill(egui::Color32::from_rgba_unmultiplied(245, 196, 84, 32))
-                            .inner_margin(egui::Margin::symmetric(6.0, 4.0))
-                            .rounding(3.0)
-                            .show(ui, |ui| {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "⚠ Recovery from {}",
-                                            saved_label,
-                                        ))
-                                        .size(11.0)
-                                        .color(egui::Color32::from_rgb(245, 196, 84)),
-                                    )
-                                    .on_hover_text(recovery.label().to_string());
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if ui.small_button("Discard").clicked() {
-                                                discard_pending_recovery = true;
-                                            }
-                                            if ui.small_button("Restore").clicked() {
-                                                restore_pending_recovery = true;
-                                            }
-                                        },
-                                    );
-                                });
-                            });
-                    }
-
-                    ui.separator();
                     history_actions = history::show(ui, &self.history);
                 });
         }
@@ -1976,13 +1852,6 @@ impl eframe::App for TasApp {
                     }
                 }
             }
-        }
-
-        if restore_pending_recovery {
-            self.restore_pending_recovery();
-        }
-        if discard_pending_recovery {
-            self.discard_pending_recovery();
         }
 
         // Process history panel restores
@@ -2546,7 +2415,6 @@ mod tests {
             last_persisted_revision: 0,
             history_cap: 64,
             recovery_store: None,
-            pending_recovery: None,
             log_lines: Vec::new(),
             log_file: None,
             log_lines_persisted: 0,
