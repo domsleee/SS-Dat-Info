@@ -46,6 +46,9 @@ pub struct ContCycleResult {
     /// F5 rerolls the bucket lottery needed before it landed (0 = first try).
     /// This is the "bucket repeats too often" signal, per iteration.
     pub rerolls: u32,
+    /// Wall-clock ms from initiating the CONT (restart) to the splice — the
+    /// "time to resume" the user waits through. Includes any rerolls.
+    pub resume_ms: f64,
     pub mode_rec_after_splice: bool,
     pub replay_coverage_ok: bool,
     pub playback_pos_at_splice: u32,
@@ -234,6 +237,19 @@ impl ContReliabilityReport {
                 omax,
                 omean,
                 overshoots.iter().map(|o| o.to_string()).collect::<Vec<_>>().join(" ")
+            );
+        }
+
+        // Time to resume (restart→splice wall-clock) — the wait after pressing
+        // CONT. min is the clean no-reroll catch-up; max includes reroll cycles.
+        let resume_times: Vec<f64> = self.results.iter().filter(|r| r.spliced).map(|r| r.resume_ms).collect();
+        if !resume_times.is_empty() {
+            let rmin = resume_times.iter().cloned().fold(f64::INFINITY, f64::min);
+            let rmax = resume_times.iter().cloned().fold(0.0_f64, f64::max);
+            let rmean = resume_times.iter().sum::<f64>() / resume_times.len() as f64;
+            println!(
+                "Time to resume (restart→splice): min {:.0} ms | mean {:.0} ms | max {:.0} ms",
+                rmin, rmean, rmax
             );
         }
 
@@ -618,12 +634,17 @@ pub fn run(
             // overshoot (rec_cnt - splice_frame) should collapse from the ~64x
             // poll-window to near-zero. 1.0 = a clean resume baseline.
             client.state_mut().cont_resume_speed = 1.0;
+            // Time to resume: wall-clock from initiating the CONT (restart) to
+            // the PLAY→REC splice. This is what the user waits through after
+            // pressing CONT. Includes any F5 rerolls (reported separately).
+            let resume_t0 = std::time::Instant::now();
             let splice_result = harness::restart_continue_and_splice_inprocess(
                 &mut client,
                 rec_start,
                 splice_frame,
                 CONT_RESTART_RETRIES,
             );
+            let resume_ms = resume_t0.elapsed().as_secs_f64() * 1000.0;
             let spliced = splice_result.is_some();
             // Reroll count: how many times the F5 bucket lottery missed before
             // landing (0 = first try). Surfaced per-iteration + aggregated.
@@ -705,6 +726,7 @@ pub fn run(
                 iteration: i,
                 spliced,
                 rerolls,
+                resume_ms,
                 mode_rec_after_splice,
                 replay_coverage_ok,
                 playback_pos_at_splice,

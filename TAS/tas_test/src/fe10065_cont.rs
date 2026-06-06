@@ -21,6 +21,10 @@ const SPEED: f32 = 64.0;
 /// Pre-fix this was tens-to-hundreds; with the fix + a sub-tick splice poll it
 /// is 0. Allow 1 only for rare OS-timer jitter on the detection poll.
 const MAX_OVERSHOOT: u32 = 1;
+/// Perf guard on time-to-resume (restart→splice). Clean 64x catch-up is
+/// ~1.3-1.5s; this loose bound (best case over the run) only trips on a real
+/// regression (e.g. the catch-up speed scaling breaking back to ~1x).
+const MAX_RESUME_MS: f64 = 3000.0;
 const RECORDING_REL: &str = "TAS/recordings/FE-10065.tasrec";
 
 pub fn run() -> bool {
@@ -68,13 +72,30 @@ pub fn run() -> bool {
         .unwrap_or(u32::MAX);
     let timing_ok = max_overshoot <= MAX_OVERSHOOT;
 
+    // Best-case (clean, no-reroll) time to resume — the perf guard.
+    let min_resume_ms = report
+        .results
+        .iter()
+        .filter(|r| r.spliced)
+        .map(|r| r.resume_ms)
+        .fold(f64::INFINITY, f64::min);
+    let perf_ok = min_resume_ms <= MAX_RESUME_MS;
+
     println!();
-    if clean && timing_ok {
+    if clean && timing_ok && perf_ok {
         println!(
-            "*** FE-10065 CONT PASSED: {}/{} splices zero-drift, resume within {} frame(s) of splice ***",
-            ITERATIONS, ITERATIONS, max_overshoot
+            "*** FE-10065 CONT PASSED: {}/{} splices zero-drift, resume within {} frame(s) of splice, \
+             best resume {:.0} ms ***",
+            ITERATIONS, ITERATIONS, max_overshoot, min_resume_ms
         );
     } else {
+        if !perf_ok {
+            println!(
+                "*** FE-10065 CONT FAILED: best time-to-resume {:.0} ms > {:.0} ms (catch-up perf \
+                 regression) ***",
+                min_resume_ms, MAX_RESUME_MS
+            );
+        }
         if !clean {
             println!("*** FE-10065 CONT FAILED: one or more splices drifted / didn't splice ***");
         }
@@ -86,5 +107,5 @@ pub fn run() -> bool {
             );
         }
     }
-    clean && timing_ok
+    clean && timing_ok && perf_ok
 }
