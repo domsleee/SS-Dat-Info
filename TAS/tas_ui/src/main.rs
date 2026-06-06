@@ -1158,10 +1158,12 @@ impl TasApp {
         session: &recording::RecoverySessionContext,
         force: bool,
     ) {
-        // Decide on the UI thread (throttle), but run the ~12ms checkpoint disk
-        // write OFF it — otherwise STOP (which forces a write on REC-stop) and
-        // REC (a write every 250ms debounce) hitch on disk I/O. Best-effort: a
-        // failed background write just means a slightly staler recovery file.
+        // Decide on the UI thread (throttle to one write per ~1.5s of recording
+        // GROWTH — see DEFAULT_RECOVERY_DEBOUNCE_MS), but run the disk write OFF
+        // it via the serialized RecoveryWriter so REC never hitches. STOP no
+        // longer forces a recovery write: finalize routes the finished recording
+        // into durable history instead, then clears the checkpoint. Best-effort:
+        // a failed background write just means a slightly staler recovery file.
         let job = match self.recovery_store.as_mut() {
             Some(store) => {
                 store.take_write_job(snapshot, &self.segment_tracker.segments, session, force)
