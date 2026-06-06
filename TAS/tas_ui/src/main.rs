@@ -1851,6 +1851,37 @@ impl eframe::App for TasApp {
                             pico::show_panel(ui, &mut self.pico, &mut self.log_lines);
                         }
                     }
+                    // History settings — available even when disconnected.
+                    if self.show_config {
+                        egui::CollapsingHeader::new("History")
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("Undo cap:");
+                                    let mut cap = self.history_cap as u32;
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut cap)
+                                                .range(10..=2000)
+                                                .speed(2.0),
+                                        )
+                                        .on_hover_text(
+                                            "Max UNPINNED entries kept. Pinned + current \
+                                             entries are always kept, so the total can exceed this.",
+                                        )
+                                        .changed()
+                                    {
+                                        self.history_cap = cap.max(1) as usize;
+                                        self.history.set_capacity(self.history_cap);
+                                    }
+                                });
+                                ui.label(
+                                    egui::RichText::new("pinned + current always kept")
+                                        .size(10.0)
+                                        .weak(),
+                                );
+                            });
+                    }
                 });
         } // left_panel_visible
 

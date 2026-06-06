@@ -957,6 +957,21 @@ impl RecordingHistory {
         }
     }
 
+    /// Change the soft cap (max unpinned entries) and trim immediately. Used
+    /// by the config-panel setting.
+    pub fn set_capacity(&mut self, capacity: usize) {
+        let cap = capacity.max(1);
+        if cap != self.capacity {
+            self.capacity = cap;
+            self.enforce_capacity();
+            self.bump();
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     pub fn is_pinned(&self, entry_id: u64) -> bool {
         self.entries
             .iter()
@@ -2228,6 +2243,21 @@ mod tests {
         assert!(
             h.entries().iter().any(|e| e.entry_id == a_id),
             "current (oldest) entry not evicted"
+        );
+    }
+
+    #[test]
+    fn set_capacity_trims_immediately() {
+        let mut h = RecordingHistory::new(10);
+        for i in 0..6 {
+            h.push_snapshot(&state_with_ticks(5), format!("S{}", i));
+        }
+        assert_eq!(h.len(), 6);
+        h.set_capacity(3);
+        assert_eq!(
+            h.entries().iter().filter(|e| !e.pinned).count(),
+            3,
+            "lowering the cap trims unpinned immediately"
         );
     }
 
