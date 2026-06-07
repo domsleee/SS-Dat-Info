@@ -18,9 +18,10 @@ use crate::cont_reliability;
 
 const SPLICE_FRAME: u32 = 6200;
 const ITERATIONS: u32 = 8;
-/// Catch-up speeds to validate. 64× = baseline; 128× exercises the
-/// speed-independence of the frame-exact resume fix.
-const SPEEDS: &[f32] = &[64.0, 128.0];
+/// Catch-up speeds to validate. 64× = baseline; 256× is the current default
+/// (≈ the game's ~80× physics ceiling) and exercises the speed-independence of
+/// the frame-exact resume fix at the top of the usable range.
+const SPEEDS: &[f32] = &[64.0, 256.0];
 /// Frame-exact resume: the recording must start at the splice frame. With the
 /// fix + a sub-tick splice poll this is 0; allow 1 for rare OS-timer jitter.
 const MAX_OVERSHOOT: u32 = 1;

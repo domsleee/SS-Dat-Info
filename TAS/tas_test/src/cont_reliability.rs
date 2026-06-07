@@ -637,6 +637,13 @@ pub fn run(
             // Time to resume: wall-clock from initiating the CONT (restart) to
             // the PLAY→REC splice. This is what the user waits through after
             // pressing CONT. Includes any F5 rerolls (reported separately).
+            // Catch-up throughput probe: reset hook perf counters so we can read
+            // cave2.calls (= physics ticks) vs cave5.calls (= render frames) over
+            // the whole CONT cycle. Their ratio = ticks per render frame (is the
+            // game hitting the CAVE5_PER_FRAME_TICK_CAP=64?), and cave5.calls/sec
+            // = render FPS during catch-up. This is the experiment for "why 64 —
+            // is catch-up render-bound or compute-bound?".
+            client.reset_hook_perf_counters();
             let resume_t0 = std::time::Instant::now();
             let splice_result = harness::restart_continue_and_splice_inprocess(
                 &mut client,
@@ -645,6 +652,26 @@ pub fn run(
                 CONT_RESTART_RETRIES,
             );
             let resume_ms = resume_t0.elapsed().as_secs_f64() * 1000.0;
+            {
+                let st = client.state();
+                let ticks = st.perf_cave2.calls;
+                let render_frames = st.perf_cave5.calls;
+                let cave2_cyc = if st.perf_cave2.calls > 0 {
+                    st.perf_cave2.cycles_total / st.perf_cave2.calls
+                } else { 0 };
+                let cave5_cyc = if st.perf_cave5.calls > 0 {
+                    st.perf_cave5.cycles_total / st.perf_cave5.calls
+                } else { 0 };
+                let secs = resume_ms / 1000.0;
+                let render_fps = if secs > 0.0 { render_frames as f64 / secs } else { 0.0 };
+                let ticks_per_frame = if render_frames > 0 {
+                    ticks as f64 / render_frames as f64
+                } else { 0.0 };
+                println!(
+                    "  PERF: ticks(cave2)={} render_frames(cave5)={} | ticks/frame={:.1} (cap={}) | render_fps={:.0} | hook_cyc cave2={} cave5={}",
+                    ticks, render_frames, ticks_per_frame, 64, render_fps, cave2_cyc, cave5_cyc
+                );
+            }
             let spliced = splice_result.is_some();
             // Reroll count: how many times the F5 bucket lottery missed before
             // landing (0 = first try). Surfaced per-iteration + aggregated.
