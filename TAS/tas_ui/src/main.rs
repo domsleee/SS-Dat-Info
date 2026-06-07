@@ -1,3 +1,4 @@
+mod game_level;
 mod history_store;
 mod history_store_v2;
 mod level;
@@ -409,6 +410,8 @@ struct TasApp {
     /// Current track shown in the game-state chip ("Forest Easy"), read from the
     /// game's memory while in-game. None when in the menu / not yet detected.
     game_level: Option<String>,
+    /// Scans the game's memory for the current track (throttled, cached).
+    level_reader: game_level::LevelReader,
     log_read_cursor: u32,
 
     // Cached max drift (incremental scan instead of per-frame O(n))
@@ -593,6 +596,7 @@ impl TasApp {
             last_mode: 0,
             cont_catchup_speed: None,
             game_level: None,
+            level_reader: game_level::LevelReader::default(),
             cont_catchup_multiplier: settings.cont_catchup_speed,
             log_read_cursor: 0,
             cached_max_drift_x: 0.0,
@@ -2096,6 +2100,11 @@ impl eframe::App for TasApp {
                 // just the live play speed. The buttons highlight/edit this.
                 let resume_speed = self.cont_catchup_speed.unwrap_or(self.playback_speed);
 
+                // Refresh the current-track label (throttled scan of the game's
+                // memory; cleared when back in the menu).
+                let in_game = shared.state().game_in_game != 0;
+                self.game_level = self.level_reader.poll(in_game).map(|s| s.to_string());
+
                 transport::show(
                     ui,
                     mode,
@@ -2637,6 +2646,7 @@ mod tests {
             last_mode: 0,
             cont_catchup_speed: None,
             game_level: None,
+            level_reader: game_level::LevelReader::default(),
             cont_catchup_multiplier: 12.0,
             log_read_cursor: 0,
             cached_max_drift_x: 0.0,
