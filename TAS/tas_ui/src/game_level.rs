@@ -121,8 +121,19 @@ fn title_case(s: &str) -> String {
     }
 }
 
+/// Diagnostics for one scan pass (perf measurement).
+#[derive(Default, Debug)]
+#[allow(dead_code)]
+struct ScanStats {
+    regions: u32,         // VirtualQueryEx iterations
+    private_regions: u32, // private committed readable regions actually read
+    bytes: usize,         // bytes ReadProcessMemory'd
+    matches: u32,         // "/tracks/" matches tallied
+}
+
 /// Scan the process heap and return the majority track label, if found.
-fn scan_process(pid: u32) -> Option<String> {
+/// `stats` (optional) is filled with diagnostics for perf measurement.
+fn scan_process(pid: u32, mut stats: Option<&mut ScanStats>) -> Option<String> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
         if h.is_null() {
@@ -143,6 +154,9 @@ fn scan_process(pid: u32) -> Option<String> {
             if got == 0 {
                 break;
             }
+            if let Some(s) = stats.as_deref_mut() {
+                s.regions += 1;
+            }
             let next = mbi.base_address.wrapping_add(mbi.region_size);
             // Only private (heap) committed pages — the level path strings live
             // there. Skips the module images + mapped files (~tens of MB), so we
@@ -152,6 +166,9 @@ fn scan_process(pid: u32) -> Option<String> {
                 && (mbi.protect & PAGE_GUARD) == 0
                 && (mbi.protect & PAGE_NOACCESS) == 0;
             if readable && mbi.region_size > 0 {
+                if let Some(s) = stats.as_deref_mut() {
+                    s.private_regions += 1;
+                }
                 let mut off = 0;
                 while off < mbi.region_size {
                     let chunk = (mbi.region_size - off).min(buf.len());
@@ -160,6 +177,9 @@ fn scan_process(pid: u32) -> Option<String> {
                         != 0
                         && read > 0
                     {
+                        if let Some(s) = stats.as_deref_mut() {
+                            s.bytes += read;
+                        }
                         for b in &mut buf[..read] {
                             b.make_ascii_lowercase();
                         }
@@ -174,6 +194,9 @@ fn scan_process(pid: u32) -> Option<String> {
             addr = next;
         }
         CloseHandle(h);
+        if let Some(s) = stats.as_deref_mut() {
+            s.matches = total;
+        }
         tally_to_label(&tally)
     }
 }
@@ -223,7 +246,7 @@ impl LevelReader {
                 self.last_scan = Some(Instant::now());
                 let (tx, rx) = mpsc::channel();
                 thread::spawn(move || {
-                    let result = crate::find_supreme_pid().and_then(scan_process);
+                    let result = crate::find_supreme_pid().and_then(|pid| scan_process(pid, None));
                     let _ = tx.send(result);
                 });
                 self.pending = Some(rx);
@@ -272,5 +295,33 @@ mod tests {
     #[test]
     fn empty_tally_is_none() {
         assert_eq!(tally_to_label(&[0u32; 9]), None);
+    }
+
+    /// Live perf measurement — needs Supreme.exe running and in a level.
+    /// `cargo test -p tas_ui bench_scan_live -- --ignored --nocapture`
+    #[test]
+    #[ignore = "live: requires the game running in a level"]
+    fn bench_scan_live() {
+        let t_pid = Instant::now();
+        let pid = crate::find_supreme_pid().expect("Supreme.exe not running");
+        eprintln!("find_supreme_pid: {} us", t_pid.elapsed().as_micros());
+        let _ = scan_process(pid, None); // warm-up
+        let mut times = Vec::new();
+        for i in 0..12 {
+            let mut st = ScanStats::default();
+            let t0 = Instant::now();
+            let label = scan_process(pid, Some(&mut st));
+            let us = t0.elapsed().as_micros();
+            times.push(us);
+            eprintln!(
+                "run {:2}: {:>7} us  regions={} private={} bytes={} ({} MiB) matches={} -> {:?}",
+                i, us, st.regions, st.private_regions, st.bytes, st.bytes >> 20, st.matches, label
+            );
+        }
+        times.sort_unstable();
+        eprintln!(
+            "min={} median={} max={} us  (n={})",
+            times[0], times[times.len() / 2], times[times.len() - 1], times.len()
+        );
     }
 }
