@@ -1443,19 +1443,21 @@ pub fn recordings_dir() -> PathBuf {
 /// Default save name. The `<level>-<time>` convention (e.g. `FE-5876`) needs the
 /// level id + finish time from the game (pending the game-awareness RE); until
 /// then we default to a timestamp so saves still land somewhere sensible.
-fn default_recording_name() -> String {
-    format!("{}.tasrec", chrono::Local::now().format("%Y-%m-%d_%H%M%S"))
-}
-
 pub fn save_dialog_with_segments(
     state: &TasSharedState,
     segments: &[Segment],
     log: &mut Vec<String>,
 ) -> Option<PathBuf> {
+    // Default name: `<level>-<time>` (e.g. FE-5876). Level detection isn't
+    // published from the DLL yet, so `level` is None for now → the name is
+    // time-only (`5876.tasrec`) and becomes `FE-5876.tasrec` once the current
+    // track path is exposed. Time is the in-race duration (gate→end) in cs.
+    let race_cs = crate::level::race_centiseconds(&state.rec_coords, state.recorded_count);
+    let default_name = crate::level::default_recording_name(None, race_cs);
     if let Some(path) = rfd::FileDialog::new()
         .set_title("Save TAS Recording")
         .set_directory(recordings_dir())
-        .set_file_name(default_recording_name())
+        .set_file_name(default_name)
         .add_filter("TAS Recording", &["tasrec"])
         .save_file()
     {
