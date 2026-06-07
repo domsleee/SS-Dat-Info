@@ -61,7 +61,7 @@ fn category_marker(category: &str) -> Option<&'static str> {
 pub fn parse_level_code(path: &str) -> Option<String> {
     // Split on either separator, drop empties.
     let segs: Vec<&str> = path
-        .split(|c| c == '/' || c == '\\')
+        .split(['/', '\\'])
         .filter(|s| !s.is_empty())
         .collect();
     // Find the "Levels" anchor; area/category/difficulty are the next three.
