@@ -370,6 +370,15 @@ fn main() {
             let ok = cont_hijack::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
+        "gamestate" => {
+            // Validate the game_in_game exposure: revive (in-game) + inject, then
+            // print state a few times (game_in_game should read 1 in-game).
+            let client = harness::ensure_game_running();
+            for _ in 0..6 {
+                harness::print_status(&client);
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
         "cont-reliability" => {
             let mut iterations = 10u32;
             let mut speed = 12.0f32;

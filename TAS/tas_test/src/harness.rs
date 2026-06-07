@@ -612,10 +612,11 @@ pub fn print_status(client: &TasSharedMemoryClient) {
         s.inject_mode, s.force_fixed_tick, s.force_direct
     );
     println!(
-        "State: mode={} recorded={} playback_pos={}",
+        "State: mode={} recorded={} playback_pos={} game_in_game={}",
         s.mode_str(),
         s.recorded_count,
-        s.playback_pos
+        s.playback_pos,
+        s.game_in_game
     );
 }
 
