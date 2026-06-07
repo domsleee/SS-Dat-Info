@@ -1,5 +1,7 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 7; // Phase 7: game_in_game field (DLL must populate it)
+pub const TAS_SHARED_VERSION: u32 = 6; // game_in_game fills tail padding (sizeof unchanged), so
+                                       // it stays v6-compatible with the deployed DLL. Re-bump to 7
+                                       // at the next real struct/size change (Codex's fail-fast note).
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;

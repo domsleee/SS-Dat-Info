@@ -39,19 +39,31 @@ pub fn show(
     state: &TasSharedState,
     catchup_active: bool,
     resume_speed: f32,
+    game_level: Option<&str>,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
 
     ui.horizontal(|ui| {
         // Game-state chip (1.1 awareness): the DLL publishes exe+0x8895C into
-        // game_in_game each frame — 0 = main menu, 1 = in a race/level.
-        let (g_txt, g_col) = if state.game_in_game != 0 {
-            ("\u{1F3AE} game", egui::Color32::from_rgb(90, 200, 120))
+        // game_in_game each frame — 0 = main menu, 1 = in a race/level. When
+        // we know the track (from the game-memory level reader) it's appended:
+        // "In Game (Forest Easy)".
+        let in_game = state.game_in_game != 0;
+        let g_txt = if in_game {
+            match game_level {
+                Some(lvl) if !lvl.is_empty() => format!("\u{1F3AE} In Game ({})", lvl),
+                _ => "\u{1F3AE} In Game".to_string(),
+            }
         } else {
-            ("\u{2630} menu", egui::Color32::from_gray(130))
+            "\u{2630} In Menu".to_string()
+        };
+        let g_col = if in_game {
+            egui::Color32::from_rgb(90, 200, 120)
+        } else {
+            egui::Color32::from_gray(150)
         };
         ui.label(egui::RichText::new(g_txt).color(g_col).size(12.0))
-            .on_hover_text("Game state — in a race/level vs the main menu");
+            .on_hover_text("Game state — in a race/level (with the current track) vs the main menu");
         ui.separator();
 
         let is_off = mode == TasMode::Off;

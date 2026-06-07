@@ -406,6 +406,9 @@ struct TasApp {
     last_mode: u32,
     cont_catchup_speed: Option<f32>, // saved speed to restore after CONT catch-up
     cont_catchup_multiplier: f32,    // configurable CONT catch-up speed (default 12x)
+    /// Current track shown in the game-state chip ("Forest Easy"), read from the
+    /// game's memory while in-game. None when in the menu / not yet detected.
+    game_level: Option<String>,
     log_read_cursor: u32,
 
     // Cached max drift (incremental scan instead of per-frame O(n))
@@ -589,6 +592,7 @@ impl TasApp {
             pending_continue_start_tick: None,
             last_mode: 0,
             cont_catchup_speed: None,
+            game_level: None,
             cont_catchup_multiplier: settings.cont_catchup_speed,
             log_read_cursor: 0,
             cached_max_drift_x: 0.0,
@@ -2105,6 +2109,7 @@ impl eframe::App for TasApp {
                     shared.state(),
                     self.cont_catchup_speed.is_some(),
                     resume_speed,
+                    self.game_level.as_deref(),
                 )
             } else {
                 Vec::new()
@@ -2631,6 +2636,7 @@ mod tests {
             pending_continue_start_tick: None,
             last_mode: 0,
             cont_catchup_speed: None,
+            game_level: None,
             cont_catchup_multiplier: 12.0,
             log_read_cursor: 0,
             cached_max_drift_x: 0.0,

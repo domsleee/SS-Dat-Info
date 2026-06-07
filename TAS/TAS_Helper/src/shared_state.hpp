@@ -6,7 +6,8 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 7;  // Phase 7: game_in_game field (DLL must populate it)
+constexpr uint32_t TAS_SHARED_VERSION = 6;  // game_in_game fills tail padding (sizeof unchanged) — stays
+                                            // v6-compatible. Re-bump to 7 at the next real size change.
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
