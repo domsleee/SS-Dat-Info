@@ -41,6 +41,7 @@ mod replay;
 mod restart_probe;
 mod snapshot_probe;
 mod snapshot_cont;
+mod cont_hijack;
 mod save_reload;
 mod stop_play_flake;
 mod speed;
@@ -361,6 +362,12 @@ fn main() {
             // (one-time F5 lottery), then RESTORE it instead of F5 for every
             // replay → zero rerolls (bucket lottery eliminated).
             let ok = snapshot_cont::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "cont-hijack" => {
+            // Bug #2 regression: a continue_from_frame set during a plain PLAY
+            // must NOT hijack the replay into REC (g_cave2_contArmed gate).
+            let ok = cont_hijack::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
         "cont-reliability" => {

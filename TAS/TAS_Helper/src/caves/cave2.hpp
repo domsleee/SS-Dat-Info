@@ -241,6 +241,14 @@ static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, boo
 static volatile uint32_t g_cave2_pendingLog = 0;  // 0=none, 1=REC, 2=PLAY, 3=STOP, 4=playback_done
 static volatile uint32_t g_cave2_logParam = 0;
 
+// Splice gate: 1 only between a SUCCESSFUL CMD_ARM_CONTINUE and its splice
+// (or any stop/re-arm). The PLAY handler's splice check requires this flag,
+// so a `continue_from_frame` that appears in shared memory by any other
+// route (UI bug, stray writer, stale value) can NEVER convert a plain
+// replay into REC. Deliberately a cave2-private static, not a shared-state
+// field — external processes must not be able to set it.
+static volatile uint32_t g_cave2_contArmed = 0;
+
 // Handle command transitions
 // WARNING: NO Log/format/float calls — runs inside SafetyHookMid (x87 FPU not saved).
 static void ProcessCommand(TasSharedState* s) {
@@ -268,6 +276,7 @@ static void ProcessCommand(TasSharedState* s) {
             s->segment_boundaries[0].frame = 0;
             s->segment_boundaries[0].input_log_offset = 0;
             s->mode = MODE_REC;
+            g_cave2_contArmed = 0;
             g_cave2_pendingLog = 1;
             break;
 
@@ -289,6 +298,7 @@ static void ProcessCommand(TasSharedState* s) {
             // subsequent plain PLAY silently hijacks itself into a CONT at
             // the stale frame and truncates/overwrites the recording.
             s->continue_from_frame = 0;
+            g_cave2_contArmed = 0;
 
             // No position forcing — F5 matching must happen naturally.
             // Position forcing (even velocity-preserving) creates physics state
@@ -305,6 +315,8 @@ static void ProcessCommand(TasSharedState* s) {
             if (s->continue_from_frame == 0 || s->continue_from_frame > s->recorded_count) {
                 LogRing(s, LOG_ERROR, "ARM_CONTINUE: invalid splice point");
                 s->mode = MODE_OFF;
+                s->continue_from_frame = 0;  // refused — don't leave a stale marker armed
+                g_cave2_contArmed = 0;
                 g_cave2_pendingLog = 3;  // "stopped"
                 break;
             }
@@ -322,6 +334,8 @@ static void ProcessCommand(TasSharedState* s) {
                 LogRing(s, LOG_ERROR,
                     "ARM_CONTINUE: refused — game is REC/PLAY; CONT requires a fresh restart first");
                 s->mode = MODE_OFF;
+                s->continue_from_frame = 0;  // refused — don't leave a stale marker armed
+                g_cave2_contArmed = 0;
                 g_cave2_pendingLog = 3;  // "stopped"
                 break;
             }
@@ -335,12 +349,19 @@ static void ProcessCommand(TasSharedState* s) {
             s->bb3b10_block_count = 0;
             // Segment tracking: keep existing segment_count, we'll add one at splice
             s->mode = MODE_PLAY;  // Start as PLAY, will auto-switch in PLAY handler
+            g_cave2_contArmed = 1;  // the ONLY place the splice gate opens
             g_cave2_pendingLog = 5;
             break;
 
         case CMD_STOP:
             s->mode = MODE_OFF;
             s->cave2_injecting = 0;
+            // Defense-in-depth: a CONT that was stopped before its splice fired
+            // must not leave a live splice marker behind. Every armer re-writes
+            // the marker immediately before CMD_ARM_CONTINUE, so clearing here
+            // can't break a legitimate cycle.
+            s->continue_from_frame = 0;
+            g_cave2_contArmed = 0;
             g_cave2_pendingLog = 3;
             break;
 
@@ -551,6 +572,7 @@ static void __declspec(noinline) Cave2_Logic() {
 
         if (pos >= s->recorded_count) {
             s->mode = MODE_OFF;
+            g_cave2_contArmed = 0;  // hygiene — an armed CONT always splices before here
             g_cave2_logParam = pos;
             g_cave2_pendingLog = 4;
             return;
@@ -577,7 +599,12 @@ static void __declspec(noinline) Cave2_Logic() {
         // Continue Record: auto-switch to REC AFTER processing the splice frame.
         // This ensures the splice frame gets normal PLAY processing (input injection
         // + coordinate capture), maintaining symmetry with the final PLAY phase.
-        if (s->continue_from_frame > 0 && s->playback_pos >= s->continue_from_frame) {
+        // Gated on g_cave2_contArmed: only a PLAY entered via CMD_ARM_CONTINUE may
+        // splice. A marker that lands in shared memory by any other route (stray
+        // writer mid-replay, stale value, UI setting continue_from during PLAY)
+        // must never hijack a plain replay into REC.
+        if (g_cave2_contArmed && s->continue_from_frame > 0
+                && s->playback_pos >= s->continue_from_frame) {
             uint32_t splice_pos = s->playback_pos;
             s->recorded_count = splice_pos;
 
@@ -612,6 +639,7 @@ static void __declspec(noinline) Cave2_Logic() {
 
             s->mode = MODE_REC;
             s->continue_from_frame = 0;  // Clear splice marker
+            g_cave2_contArmed = 0;       // splice consumed — close the gate
             g_cave2_logParam = splice_pos;
             g_cave2_pendingLog = 6;
         }
