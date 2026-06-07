@@ -92,10 +92,12 @@ pub(crate) fn load_latest_history_from_root(
 /// logs, screenshots). Resolution order:
 ///   1. `SSB_INSPECT_DATA_DIR` env override (tests / custom setups).
 ///   2. **Per-game folder** — when tas_ui is deployed at
-///      `<game>/Display_Config_Resources/TAS/tas_ui.exe`, data lives in
-///      `<game>/Display_Config_Resources/tas` (sibling of `TAS`). This keeps
-///      each game install's recordings/history separate, since different builds
-///      ship different tracks.
+///      `<game>/Display_Config_Resources/TAS/tas_ui.exe`, data lives in a
+///      `data/` subfolder next to the exe (`…/TAS/data`). Keeping it a level
+///      below the binaries avoids the case-insensitive `tas`/`TAS` collision on
+///      Windows and keeps data out of the deploy/binary folder, while each game
+///      install's recordings/history stay separate (different builds ship
+///      different tracks).
 ///   3. `~/.ssb-inspector` — dev / un-deployed fallback.
 pub fn default_history_root_dir() -> PathBuf {
     if let Some(over) = std::env::var_os("SSB_INSPECT_DATA_DIR") {
@@ -109,9 +111,12 @@ pub fn default_history_root_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".ssb-inspector"))
 }
 
-/// `<game>/Display_Config_Resources/tas` when the running exe is deployed inside
-/// a `Display_Config_Resources/TAS` folder; `None` otherwise (e.g. a dev build
-/// under `target/release`, so it doesn't write a stray `tas` dir there).
+/// `<game>/Display_Config_Resources/TAS/data` when the running exe is deployed
+/// inside a `Display_Config_Resources/TAS` folder; `None` otherwise (e.g. a dev
+/// build under `target/release`, so it doesn't write a stray `data` dir there).
+/// The `Display_Config_Resources` parent check is the deployment guard; the data
+/// itself goes in a `data/` subfolder of the exe dir (not a `tas` sibling, which
+/// collides with `TAS` on case-insensitive Windows).
 fn game_data_root_from_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?; // …/Display_Config_Resources/TAS
@@ -121,7 +126,7 @@ fn game_data_root_from_exe() -> Option<PathBuf> {
         .to_str()?
         .eq_ignore_ascii_case("Display_Config_Resources")
     {
-        Some(parent.join("tas"))
+        Some(exe_dir.join("data"))
     } else {
         None
     }
