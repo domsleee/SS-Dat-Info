@@ -23,6 +23,7 @@ type Handle = *mut c_void;
 const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
 const PROCESS_VM_READ: u32 = 0x0010;
 const MEM_COMMIT: u32 = 0x1000;
+const MEM_PRIVATE: u32 = 0x2_0000;
 const PAGE_GUARD: u32 = 0x100;
 const PAGE_NOACCESS: u32 = 0x01;
 
@@ -141,7 +142,11 @@ fn scan_process(pid: u32) -> Option<String> {
                 break;
             }
             let next = mbi.base_address.wrapping_add(mbi.region_size);
+            // Only private (heap) committed pages — the level path strings live
+            // there. Skips the module images + mapped files (~tens of MB), so we
+            // touch far less memory before the early-exit.
             let readable = mbi.state == MEM_COMMIT
+                && mbi.type_ == MEM_PRIVATE
                 && (mbi.protect & PAGE_GUARD) == 0
                 && (mbi.protect & PAGE_NOACCESS) == 0;
             if readable && mbi.region_size > 0 {
