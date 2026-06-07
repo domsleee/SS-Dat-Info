@@ -772,11 +772,16 @@ impl TasApp {
                 }
             }
             transport::Action::SetContinueFrame(frame) => {
+                // Stage the splice frame UI-side ONLY. Writing it straight into
+                // shared memory here armed cave2's per-frame splice check while
+                // the game could still be in PLAY (the CONT/From: controls are
+                // live during PLAY): if the playhead was at/past the frame, the
+                // replay flipped to REC mid-watch and truncated recorded_count.
+                // The TransportController is the only shared-memory writer now —
+                // it asserts the marker at arm time, and cave2's g_cave2_contArmed
+                // gate refuses any splice that wasn't a genuine ARM_CONTINUE.
                 self.continue_from_frame = frame;
                 self.continue_from_text = frame.to_string();
-                if let Some(shared) = self.shared.as_mut() {
-                    shared.state_mut().continue_from_frame = frame;
-                }
             }
             transport::Action::SetResumeSpeed(spd) => {
                 // Catch-up in flight: keep the saved resume speed and the staged
