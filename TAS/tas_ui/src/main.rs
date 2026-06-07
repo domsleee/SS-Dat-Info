@@ -533,7 +533,12 @@ impl TasApp {
                     ) {
                         if let Some(id) = history.entries().last().map(|e| e.entry_id) {
                             history.set_pinned(id, true);
-                            history.rename(id, format!("Recovered · {}", session_label));
+                            // Mark recovery with a compact ⟲ glyph and let the
+                            // panel render the duration via the normal parsed
+                            // format (total + dimmed "from …"), instead of dumping
+                            // the whole verbose "Recovered · Continued from …,
+                            // total …" string into the name.
+                            history.rename(id, "⟲".to_string());
                         }
                         recovered_checkpoint = true;
                         recovery_notice = Some(format!(

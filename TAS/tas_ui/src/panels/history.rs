@@ -259,8 +259,17 @@ fn render_row(
                     ui.with_layout(
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
+                            // A recovered entry is just a normal CONT entry that
+                            // was auto-pinned after a crash — it renders through
+                            // the SAME path as any entry (total + "from …"); the
+                            // only difference is a ⟲ leading glyph instead of ▶.
+                            // (Detected from the legacy "Recovered · …" name or the
+                            // new "⟲" marker, so old histories normalize too.)
+                            let recovered = entry.custom_name.as_deref().is_some_and(|n| {
+                                n == "⟲" || n.starts_with("Recovered ·")
+                            });
                             ui.label(
-                                egui::RichText::new("▶")
+                                egui::RichText::new(if recovered { "⟲" } else { "▶" })
                                     .color(kind_color(entry.kind))
                                     .size(13.0),
                             );
@@ -284,10 +293,11 @@ fn render_row(
                                     actions.push(HistoryAction::Rename(entry.entry_id, name));
                                     *edit = None;
                                 }
-                            } else if let Some(name) = entry.custom_name.as_deref() {
-                                // Name leads. Neutral high-emphasis color +
-                                // bold weight — color (gold) is reserved for the
-                                // pin/keeper status, not for labels.
+                            } else if let Some(name) =
+                                entry.custom_name.as_deref().filter(|_| !recovered)
+                            {
+                                // Genuine user-typed name. Name leads + the total
+                                // (color gold is reserved for pin status).
                                 ui.label(egui::RichText::new(name).size(13.0).strong());
                                 if !parts.total.is_empty() {
                                     ui.label(
