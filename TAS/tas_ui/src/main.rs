@@ -1,5 +1,6 @@
 mod history_store;
 mod history_store_v2;
+mod level;
 mod panels;
 mod pico;
 mod recording;
