@@ -39,6 +39,8 @@ mod regression;
 mod reliability;
 mod replay;
 mod restart_probe;
+mod snapshot_probe;
+mod snapshot_cont;
 mod save_reload;
 mod stop_play_flake;
 mod speed;
@@ -345,6 +347,20 @@ fn main() {
             // -> first motion) to tell whether the short first-moving is a
             // truncated countdown or an arm-timing offset.
             let ok = restart_probe::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "snapshot-probe" => {
+            // PROTOTYPE: validate in-DLL writable-memory snapshot/restore as the
+            // instant-CONT mechanism (libTAS/TMInterface design). Go/no-go for
+            // the state-snapshot project.
+            let ok = snapshot_probe::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "snapshot-cont" => {
+            // PROTOTYPE: snapshot-based CONT — establish a frame-0 spawn snapshot
+            // (one-time F5 lottery), then RESTORE it instead of F5 for every
+            // replay → zero rerolls (bucket lottery eliminated).
+            let ok = snapshot_cont::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
         "cont-reliability" => {

@@ -14,6 +14,13 @@ pub enum TasCommand {
     Stop = 3,
     ArmContinue = 4,
     Restart = 5,
+    /// PROTOTYPE: capture a writable-memory snapshot at the current frame.
+    Snapshot = 6,
+    /// PROTOTYPE: restore the last snapshot (instant CONT rewind).
+    Restore = 7,
+    /// PROTOTYPE: arm a snapshot at the next PLAY frame-0 (the spawn) — captures
+    /// without disturbing the arm timing that selects the bucket.
+    SnapshotAtSpawn = 8,
 }
 
 #[repr(u32)]

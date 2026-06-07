@@ -5,6 +5,7 @@
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
 #include "../external/safetyhook.hpp"
+#include "snapshot.hpp"
 
 // Cave 2: Supreme::Cycle hook (SG+0x13FE40)
 // Main REC/PLAY engine. Fires every render frame during gameplay.
@@ -349,6 +350,45 @@ static void ProcessCommand(TasSharedState* s) {
             s->restart_frames_held = 0;
             g_cave2_pendingLog = 7;  // "restart initiated"
             break;
+
+        case CMD_SNAPSHOT: {
+            // PROTOTYPE: capture writable memory at this frame boundary.
+            // bytes -> snapshot_size, microseconds -> snapshot_flags (reused).
+            uint64_t us = 0;
+            uint32_t bytes = SnapshotCapture(s, &us);
+            s->snapshot_flags = (uint32_t)us;
+            // Record the player coords (raw bits) at the snapshot instant for the
+            // frame-exact rewind proof at restore time.
+            g_snapPlayerValid = SnapReadPlayerBits(s, g_snapPlayerBits);
+            SnapTrajStart(1); // record traj A for the next N frames
+            g_cave2_logParam = bytes;
+            g_cave2_pendingLog = 9;  // "snapshot captured"
+            break;
+        }
+
+        case CMD_SNAPSHOT_AT_SPAWN:
+            // Arm a capture at the next PLAY frame-0 — see the MODE_PLAY handler.
+            g_snapAtSpawn = true;
+            break;
+
+        case CMD_RESTORE: {
+            // PROTOTYPE: restore the last snapshot (instant rewind) + clock reset.
+            uint64_t us = 0;
+            uint32_t bytes = SnapshotRestore(s, &us);
+            // Frame-exact proof: re-read the player coords NOW (same hook call,
+            // zero frames advanced) and compare bit-for-bit to the snapshot.
+            uint32_t match = SnapshotRevertMatch(s); // 0..3, or 0xFF if no ptr
+            s->snapshot_size = bytes;
+            s->snapshot_flags = (uint32_t)us;
+            s->snapshot_buffer_capacity = match; // probe reads: 3 = bit-exact revert
+            // Region accounting for the long-window diagnostic: high16=skipped,
+            // low16=faulted (regions that changed shape since the snapshot).
+            s->snapshot_buffer_ptr = (g_snapLastSkipped << 16) | (g_snapLastFaulted & 0xFFFF);
+            SnapTrajStart(2); // record traj B for the next N frames, then compare
+            g_cave2_logParam = match;
+            g_cave2_pendingLog = 10; // "snapshot restored"
+            break;
+        }
     }
 
     s->command = CMD_IDLE;
@@ -369,6 +409,8 @@ static void FlushPendingLog() {
         case 6: Log(std::format("Cave 2: spliced to REC at frame {}", param)); break;
         case 7: Log("Cave 2: in-process F5 restart initiated"); break;
         case 8: Log("Cave 2: F5 released, restart complete"); break;
+        case 9: Log(std::format("Cave 2: [snap] captured {} bytes", param)); break;
+        case 10: Log(std::format("Cave 2: [snap] restored; player revert match {}/3 (3=bit-exact)", param)); break;
     }
 }
 
@@ -425,6 +467,10 @@ static void __declspec(noinline) Cave2_Logic() {
     }
 
     ProcessCommand(s);
+
+    // PROTOTYPE: record the post-snapshot / post-restore player trajectory for
+    // the frame-exact determinism check (no-op unless a snapshot/restore armed it).
+    SnapTrajTick(s);
 
     // In-process F5 restart state machine (runs regardless of mode)
     if (s->restart_state == 1) {
@@ -486,6 +532,21 @@ static void __declspec(noinline) Cave2_Logic() {
         // reach the splice (the "resume off by a few frames" skew).
         if (pos == 0 && s->continue_from_frame > 0) {
             s->cont_replay_start_fc = s->frame_count;
+        }
+
+        // PROTOTYPE: snapshot the exact spawn at frame-0 of the replay (armed via
+        // CMD_SNAPSHOT_AT_SPAWN). Captured BEFORE this frame's input is injected,
+        // so it's the pure spawn the replay starts from — restoring it later
+        // reproduces this bucket bit-exactly (no F5 lottery). Done here (not from
+        // the harness) so the arm timing that picks the bucket isn't disturbed by
+        // the ~200ms capture.
+        if (pos == 0 && g_snapAtSpawn) {
+            uint64_t us = 0;
+            uint32_t bytes = SnapshotCapture(s, &us);
+            g_snapPlayerValid = SnapReadPlayerBits(s, g_snapPlayerBits);
+            s->snapshot_size = bytes;
+            s->snapshot_flags = (uint32_t)us;
+            g_snapAtSpawn = false;
         }
 
         if (pos >= s->recorded_count) {
