@@ -20,6 +20,9 @@ enum TasCommand : uint32_t {
     CMD_STOP         = 3,
     CMD_ARM_CONTINUE = 4,  // PLAY 0..continue_from_frame, then auto-switch to REC
     CMD_RESTART      = 5,  // In-process F5 restart (no Pico/focus needed)
+    CMD_SNAPSHOT     = 6,  // PROTOTYPE: capture writable memory snapshot at this frame
+    CMD_RESTORE      = 7,  // PROTOTYPE: restore the last snapshot (instant rewind)
+    CMD_SNAPSHOT_AT_SPAWN = 8, // PROTOTYPE: arm a snapshot at the next PLAY frame-0 (spawn)
 };
 
 // Modes (DLL -> UI)
