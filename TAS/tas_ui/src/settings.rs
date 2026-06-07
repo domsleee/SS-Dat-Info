@@ -32,25 +32,19 @@ impl Default for Settings {
             show_log: false,
             show_trajectory: false,
             playback_speed: 1.0,
-            // Cave5 patches the game's tick clamp from 0x14 (20) to 0x40
-            // (64) at install time, lifting effective catch-up from ~12×
-            // to ~57× (measured). The catchup-speed setting controls
-            // tick_advance scaling — at 64× setting the game's frame
-            // loop spends less time per tick, so frame rate (and
-            // playback throughput) goes up. 64× one-shot reliability
-            // is ~80% on real recordings (vs 65% at 128×), and the
-            // auto-reroll handles the misses transparently. Slider
-            // allows up to 128× for power users; at 128 we're close
-            // to the per-frame overhead ceiling so going higher is
-            // diminishing returns.
-            // 96× is the sweet spot: the catch-up saturates the game's 64
-            // ticks/frame cap at ~77×+, so 96× is full-speed, and the splice
-            // resume is now frame-exact at any speed (cave5 prev_time reset), so
-            // there's no precision reason to stay at 64×. 96× over 128× because
-            // the F5 bucket lottery rerolls a little more at 128× (each miss is a
-            // ~1s restart), and 96× keeps better one-shot reliability for ~the
-            // same catch-up time.
-            cont_catchup_speed: 96.0,
+            // CONT catch-up speed (tick_advance scaling). The catch-up replay is
+            // PHYSICS-COMPUTE-bound, not cap- or render-bound: measured sweep on
+            // FE-10065@6200 shows effective rate asymptotes to a hard ~80× ceiling
+            // (~8000 ticks/sec, ~125µs/tick) — 96×→66×, 192×→77×, 384×→80×. So the
+            // setting saturates; 256× captures ~all of it (~80× effective, ~17%
+            // faster replay than 96×) with reliability + zero-drift + frame-exact
+            // resume fully preserved (12/12 clean, first-try 9/12 at 256× — no
+            // regression vs 96×). Past ~256× is pure diminishing returns. The F5
+            // bucket lottery is set at RESTART, not replay speed, so higher catch-up
+            // doesn't cost reliability. (Rendering-suppression was tried and proven
+            // useless; the cave5 64 tick/frame cap is never even reached — the game
+            // runs only ~20 ticks/frame.)
+            cont_catchup_speed: 256.0,
             history_cap: 500,
         }
     }
@@ -72,14 +66,17 @@ impl Settings {
             Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
             Err(_) => Self::default(),
         };
-        // Migrate stale catch-up defaults to the current 96× default. 20× was
-        // the pre-cave5 slider cap; 64× was the prior default before the
-        // frame-exact resume fix made higher speeds safe. Bump those exact
-        // values — anything else (30, 40, 100, 128, etc.) is a deliberate user
-        // choice and we leave it alone.
+        // Migrate stale catch-up defaults to the current 256× default. 20× was
+        // the pre-cave5 slider cap; 64× and 96× were prior defaults before the
+        // physics-ceiling sweep showed 256× is ~all the achievable speed (~80×
+        // effective) with no reliability cost. Bump those exact values — anything
+        // else (30, 40, 100, 128, etc.) is a deliberate user choice, left alone.
         let s = settings.cont_catchup_speed;
-        if (s - 20.0).abs() < f32::EPSILON || (s - 64.0).abs() < f32::EPSILON {
-            settings.cont_catchup_speed = 96.0;
+        if (s - 20.0).abs() < f32::EPSILON
+            || (s - 64.0).abs() < f32::EPSILON
+            || (s - 96.0).abs() < f32::EPSILON
+        {
+            settings.cont_catchup_speed = 256.0;
         }
         settings
     }

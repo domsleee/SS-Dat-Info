@@ -164,11 +164,11 @@ pub fn show(
         }
         ui.add(
             egui::DragValue::new(cont_catchup_speed)
-                .range(1.0..=128.0)
+                .range(1.0..=384.0)
                 .prefix("catch \u{00D7}")
-                .speed(0.5),
+                .speed(1.0),
         )
-        .on_hover_text("CONT catch-up speed. Default 64× = ~1.1s for a 5200-frame splice with 80% one-shot. 128× saves ~200ms but one-shot drops to ~65% (auto-reroll handles misses).");
+        .on_hover_text("CONT catch-up replay speed. Default 256× ≈ the game's physics ceiling (~80× effective, ~0.78s replay; reliability + zero-drift preserved). The replay is physics-compute-bound, so past ~256× there's no gain. The F5 restart (~1s) is separate and unaffected.");
 
         ui.separator();
 

@@ -3081,17 +3081,17 @@ mod tests {
         use crate::settings::Settings;
         let s = Settings::default();
         assert!(
-            (s.cont_catchup_speed - 96.0).abs() < f32::EPSILON,
-            "Default catchup must be 96×, got {}",
+            (s.cont_catchup_speed - 256.0).abs() < f32::EPSILON,
+            "Default catchup must be 256×, got {}",
             s.cont_catchup_speed
         );
-        // Verify a 128× setting round-trips through settings without
-        // clamping or rounding.
+        // Verify a 384× setting round-trips through settings without
+        // clamping or rounding (the slider max / top of the usable range).
         let mut s = Settings::default();
-        s.cont_catchup_speed = 128.0;
+        s.cont_catchup_speed = 384.0;
         assert!(
-            (s.cont_catchup_speed - 128.0).abs() < f32::EPSILON,
-            "Settings must allow 128× catchup for power users"
+            (s.cont_catchup_speed - 384.0).abs() < f32::EPSILON,
+            "Settings must allow 384× catchup for power users"
         );
     }
 
