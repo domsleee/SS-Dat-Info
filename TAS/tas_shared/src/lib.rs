@@ -222,6 +222,11 @@ pub struct TasSharedState {
     // processing the backlog ticks, so the resume is frame-exact at full speed
     // (no end-of-replay deceleration). 0 = idle.
     pub cont_reset_pending: u32,
+
+    /// Game-state awareness: 0 = main menu, 1 = in-game (race/level). DLL writes
+    /// it each frame from `Supreme.exe + 0x8895C` (RE'd). Fills the tail padding,
+    /// so `size_of` is unchanged (still 1_647_248).
+    pub game_in_game: u32,
 }
 
 impl TasSharedState {

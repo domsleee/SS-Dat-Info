@@ -444,6 +444,12 @@ static void __declspec(noinline) Cave2_Logic() {
 
     s->frame_count++;
 
+    // Game-state awareness: publish exe+0x8895C (0=menu, 1=in-game) so the UI
+    // knows the state. Integer read — FPU-safe.
+    if (addr->is_in_game) {
+        s->game_in_game = *(volatile uint32_t*)addr->is_in_game;
+    }
+
     if (s->replay_ptr) {
         uint32_t playerPtr = SafeReadPtr(s->replay_ptr + GameAddresses::REPLAY_PLAYER_OFFSET);
         s->player_ptr = playerPtr;
