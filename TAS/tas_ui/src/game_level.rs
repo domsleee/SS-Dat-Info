@@ -16,6 +16,8 @@
 #![cfg(windows)]
 
 use std::ffi::c_void;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::{Duration, Instant};
 
 type Handle = *mut c_void;
@@ -176,35 +178,55 @@ fn scan_process(pid: u32) -> Option<String> {
     }
 }
 
-/// Stateful track reader: caches the detected label and only rescans when
-/// in-game without a known track (throttled), clearing it back in the menu.
+/// Stateful track reader. The heap scan (~200 ms) runs on a **background
+/// thread** so it never touches the UI frame time — poll() just kicks off a
+/// worker when needed and picks up the result when it's ready. Caches the label
+/// and only rescans when in-game without a known track (throttled); cleared back
+/// in the menu.
 #[derive(Default)]
 pub struct LevelReader {
     label: Option<String>,
     last_scan: Option<Instant>,
+    pending: Option<Receiver<Option<String>>>,
 }
 
 impl LevelReader {
     /// Call each frame with the live `game_in_game` flag. Returns the current
     /// track label (`Some("Forest Easy")`) or `None` (menu / not yet detected).
+    /// Never blocks: the scan happens on a worker thread.
     pub fn poll(&mut self, in_game: bool) -> Option<&str> {
         if !in_game {
             self.label = None;
             self.last_scan = None;
+            self.pending = None;
             return None;
         }
-        if self.label.is_none() {
+        // Collect a finished background scan, if any.
+        if let Some(rx) = &self.pending {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.label = result;
+                    self.pending = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.pending = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        // Kick off a new scan if we still don't know the track and none is in
+        // flight (throttled).
+        if self.label.is_none() && self.pending.is_none() {
             let due = self
                 .last_scan
                 .map(|t| t.elapsed() >= RESCAN_INTERVAL)
                 .unwrap_or(true);
             if due {
                 self.last_scan = Some(Instant::now());
-                if let Some(pid) = crate::find_supreme_pid() {
-                    if let Some(label) = scan_process(pid) {
-                        self.label = Some(label);
-                    }
-                }
+                let (tx, rx) = mpsc::channel();
+                thread::spawn(move || {
+                    let result = crate::find_supreme_pid().and_then(scan_process);
+                    let _ = tx.send(result);
+                });
+                self.pending = Some(rx);
             }
         }
         self.label.as_deref()
