@@ -135,7 +135,7 @@ pub struct RecoveryStore {
 
 impl RecoveryStore {
     pub fn new() -> Result<Self, String> {
-        let root = default_history_root_dir().join("recovery");
+        let root = crate::history_store::default_history_root_dir().join("recovery");
         Self::new_with(root, Duration::from_millis(DEFAULT_RECOVERY_DEBOUNCE_MS))
     }
 
@@ -456,25 +456,6 @@ fn remove_if_exists(path: &Path) -> Result<(), String> {
         return Ok(());
     }
     std::fs::remove_file(path).map_err(|e| format!("failed to remove {}: {}", path.display(), e))
-}
-
-fn default_history_root_dir() -> PathBuf {
-    user_home_dir()
-        .map(|home| home.join(".ssb-inspector"))
-        .unwrap_or_else(|| PathBuf::from(".ssb-inspector"))
-}
-
-fn user_home_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-        .or_else(|| {
-            let drive = std::env::var_os("HOMEDRIVE")?;
-            let path = std::env::var_os("HOMEPATH")?;
-            let mut buf = PathBuf::from(drive);
-            buf.push(path);
-            Some(buf)
-        })
 }
 
 /// A segment boundary within a multi-segment recording.
@@ -1435,7 +1416,7 @@ pub fn save_dialog(state: &TasSharedState, log: &mut Vec<String>) -> Option<Path
 /// `<data_root>` is the game folder when deployed (see
 /// `default_history_root_dir`), so each game install's recordings stay separate.
 pub fn recordings_dir() -> PathBuf {
-    let dir = default_history_root_dir().join("recordings");
+    let dir = crate::history_store::default_history_root_dir().join("recordings");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
