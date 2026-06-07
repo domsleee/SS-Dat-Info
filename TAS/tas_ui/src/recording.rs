@@ -1431,6 +1431,22 @@ pub fn save_dialog(state: &TasSharedState, log: &mut Vec<String>) -> Option<Path
     save_dialog_with_segments(state, &[], log)
 }
 
+/// Per-game recordings folder: `<data_root>/recordings` (created on demand).
+/// `<data_root>` is the game folder when deployed (see
+/// `default_history_root_dir`), so each game install's recordings stay separate.
+pub fn recordings_dir() -> PathBuf {
+    let dir = default_history_root_dir().join("recordings");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Default save name. The `<level>-<time>` convention (e.g. `FE-5876`) needs the
+/// level id + finish time from the game (pending the game-awareness RE); until
+/// then we default to a timestamp so saves still land somewhere sensible.
+fn default_recording_name() -> String {
+    format!("{}.tasrec", chrono::Local::now().format("%Y-%m-%d_%H%M%S"))
+}
+
 pub fn save_dialog_with_segments(
     state: &TasSharedState,
     segments: &[Segment],
@@ -1438,6 +1454,8 @@ pub fn save_dialog_with_segments(
 ) -> Option<PathBuf> {
     if let Some(path) = rfd::FileDialog::new()
         .set_title("Save TAS Recording")
+        .set_directory(recordings_dir())
+        .set_file_name(default_recording_name())
         .add_filter("TAS Recording", &["tasrec"])
         .save_file()
     {
@@ -1463,6 +1481,7 @@ pub fn load_dialog(
 ) -> Option<PathBuf> {
     if let Some(path) = rfd::FileDialog::new()
         .set_title("Load TAS Recording")
+        .set_directory(recordings_dir())
         .add_filter("TAS Recording", &["tasrec"])
         .pick_file()
     {

@@ -260,7 +260,7 @@ fn load_preview_state() -> Box<tas_shared::TasSharedState> {
 }
 
 fn newest_history_json() -> Option<std::path::PathBuf> {
-    let root = std::path::PathBuf::from(std::env::var("USERPROFILE").ok()?).join(".ssb-inspector");
+    let root = history_store::default_history_root_dir();
     let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
     for entry in std::fs::read_dir(&root).ok()?.flatten() {
         let p = entry.path().join("history.json");

@@ -88,10 +88,43 @@ pub(crate) fn load_latest_history_from_root(
     Ok(Some(LoadedHistory { path, history }))
 }
 
+/// Root directory for all per-install TAS data (history, recovery, recordings,
+/// logs, screenshots). Resolution order:
+///   1. `SSB_INSPECT_DATA_DIR` env override (tests / custom setups).
+///   2. **Per-game folder** — when tas_ui is deployed at
+///      `<game>/Display_Config_Resources/TAS/tas_ui.exe`, data lives in
+///      `<game>/Display_Config_Resources/tas` (sibling of `TAS`). This keeps
+///      each game install's recordings/history separate, since different builds
+///      ship different tracks.
+///   3. `~/.ssb-inspector` — dev / un-deployed fallback.
 pub fn default_history_root_dir() -> PathBuf {
+    if let Some(over) = std::env::var_os("SSB_INSPECT_DATA_DIR") {
+        return PathBuf::from(over);
+    }
+    if let Some(dir) = game_data_root_from_exe() {
+        return dir;
+    }
     user_home_dir()
         .map(|home| home.join(".ssb-inspector"))
         .unwrap_or_else(|| PathBuf::from(".ssb-inspector"))
+}
+
+/// `<game>/Display_Config_Resources/tas` when the running exe is deployed inside
+/// a `Display_Config_Resources/TAS` folder; `None` otherwise (e.g. a dev build
+/// under `target/release`, so it doesn't write a stray `tas` dir there).
+fn game_data_root_from_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?; // …/Display_Config_Resources/TAS
+    let parent = exe_dir.parent()?; // …/Display_Config_Resources
+    if parent
+        .file_name()?
+        .to_str()?
+        .eq_ignore_ascii_case("Display_Config_Resources")
+    {
+        Some(parent.join("tas"))
+    } else {
+        None
+    }
 }
 
 fn user_home_dir() -> Option<PathBuf> {
