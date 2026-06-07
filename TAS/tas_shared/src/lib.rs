@@ -1,5 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 6; // Phase 6: hook performance counters
+pub const TAS_SHARED_VERSION: u32 = 7; // Phase 7: game_in_game field (DLL must populate it)
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
