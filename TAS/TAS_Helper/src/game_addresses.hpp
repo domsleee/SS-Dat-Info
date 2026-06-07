@@ -14,6 +14,7 @@ struct GameAddresses {
 
     // Supreme.exe offsets
     std::uint8_t* cave5_site = nullptr;     // exe+0x25C81: after ftol+mov esi,eax (tick override)
+    std::uint8_t* is_in_game = nullptr;     // exe+0x8895C: 0=main menu, 1=in-game (race/level)
 
     // Supreme_Game.dll offsets
     std::uint8_t* cave2_site = nullptr;     // SG+0x13FE40: Supreme::Cycle
@@ -94,6 +95,7 @@ struct GameAddresses {
 
         // Supreme.exe offsets
         cave5_site = exeBase + 0x25C81;
+        is_in_game = exeBase + 0x8895C;  // 0=menu, 1=in-game (RE'd via menu↔game diff)
 
         // Supreme_Game.dll offsets
         cave2_site = sgBase + 0x13FE40;

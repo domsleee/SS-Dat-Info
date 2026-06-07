@@ -173,6 +173,12 @@ struct TasSharedState {
 
     // -- CONT clock-backlog reset (cave2 sets at splice, cave5 consumes) --
     uint32_t cont_reset_pending;
+
+    // -- Game-state awareness (DLL writes each frame from exe+0x8895C) --
+    // 0 = main menu, 1 = in-game (in a race/level). Lets the UI know the game
+    // state and lets cave5 avoid touching ticks in the menu. Fills the tail
+    // padding so sizeof is unchanged (1_647_248).
+    uint32_t game_in_game;
 };
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks
