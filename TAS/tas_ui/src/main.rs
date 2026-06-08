@@ -1,4 +1,3 @@
-mod game_level;
 mod history_store;
 mod history_store_v2;
 mod level;
@@ -11,6 +10,24 @@ use eframe::egui;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
+
+/// Map the DLL's `level_id` (area*3 + difficulty, or u32::MAX = unknown) to a
+/// display name for the game-state chip. The DLL detects the track in-process
+/// (see TAS_Helper `level_scan.hpp`) so the UI just reads the index.
+fn level_name_from_id(id: u32) -> Option<&'static str> {
+    const NAMES: [&str; 9] = [
+        "Forest Easy",
+        "Forest Medium",
+        "Forest Hard",
+        "Alpine Easy",
+        "Alpine Medium",
+        "Alpine Hard",
+        "Village Easy",
+        "Village Medium",
+        "Village Hard",
+    ];
+    NAMES.get(id as usize).copied()
+}
 
 /// Find Supreme.exe's PID by enumerating processes. Returns None if not
 /// running. Used by the global-shortcut poll to gate "F-key fired while
@@ -407,11 +424,6 @@ struct TasApp {
     last_mode: u32,
     cont_catchup_speed: Option<f32>, // saved speed to restore after CONT catch-up
     cont_catchup_multiplier: f32,    // configurable CONT catch-up speed (default 12x)
-    /// Current track shown in the game-state chip ("Forest Easy"), read from the
-    /// game's memory while in-game. None when in the menu / not yet detected.
-    game_level: Option<String>,
-    /// Scans the game's memory for the current track (throttled, cached).
-    level_reader: game_level::LevelReader,
     log_read_cursor: u32,
 
     // Cached max drift (incremental scan instead of per-frame O(n))
@@ -595,8 +607,6 @@ impl TasApp {
             pending_continue_start_tick: None,
             last_mode: 0,
             cont_catchup_speed: None,
-            game_level: None,
-            level_reader: game_level::LevelReader::default(),
             cont_catchup_multiplier: settings.cont_catchup_speed,
             log_read_cursor: 0,
             cached_max_drift_x: 0.0,
@@ -2100,10 +2110,9 @@ impl eframe::App for TasApp {
                 // just the live play speed. The buttons highlight/edit this.
                 let resume_speed = self.cont_catchup_speed.unwrap_or(self.playback_speed);
 
-                // Refresh the current-track label (throttled scan of the game's
-                // memory; cleared when back in the menu).
-                let in_game = shared.state().game_in_game != 0;
-                self.game_level = self.level_reader.poll(in_game).map(|s| s.to_string());
+                // Current track: the DLL detects it in-process and publishes the
+                // index into shared `level_id` (no RPM scan from the UI).
+                let game_level = level_name_from_id(shared.state().level_id);
 
                 transport::show(
                     ui,
@@ -2118,7 +2127,7 @@ impl eframe::App for TasApp {
                     shared.state(),
                     self.cont_catchup_speed.is_some(),
                     resume_speed,
-                    self.game_level.as_deref(),
+                    game_level,
                 )
             } else {
                 Vec::new()
@@ -2645,8 +2654,6 @@ mod tests {
             pending_continue_start_tick: None,
             last_mode: 0,
             cont_catchup_speed: None,
-            game_level: None,
-            level_reader: game_level::LevelReader::default(),
             cont_catchup_multiplier: 12.0,
             log_read_cursor: 0,
             cached_max_drift_x: 0.0,

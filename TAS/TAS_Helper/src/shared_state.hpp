@@ -6,8 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 6;  // game_in_game fills tail padding (sizeof unchanged) — stays
-                                            // v6-compatible. Re-bump to 7 at the next real size change.
+constexpr uint32_t TAS_SHARED_VERSION = 7;  // +level_id (in-process track detection)
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
@@ -177,9 +176,14 @@ struct TasSharedState {
 
     // -- Game-state awareness (DLL writes each frame from exe+0x8895C) --
     // 0 = main menu, 1 = in-game (in a race/level). Lets the UI know the game
-    // state and lets cave5 avoid touching ticks in the menu. Fills the tail
-    // padding so sizeof is unchanged (1_647_248).
+    // state and lets cave5 avoid touching ticks in the menu.
     uint32_t game_in_game;
+
+    // -- Current track (DLL background thread writes; UI reads) --
+    // In-process heap scan, majority-voted: 0..8 = area*3 + difficulty
+    // (area 0=Forest,1=Alpine,2=Village; diff 0=Easy,1=Medium,2=Hard).
+    // 0xFFFFFFFF = unknown / menu. See level_scan.hpp.
+    uint32_t level_id;
 };
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks
@@ -257,6 +261,7 @@ public:
         state->force_direct = 2;        // BB3B10 direct calls
         state->use_rec_msg_args = 1;   // proven zero-drift config
         state->playback_speed = 1.0f;  // normal speed
+        state->level_id = 0xFFFFFFFFu;  // unknown until the scan thread runs
         return true;
     }
 

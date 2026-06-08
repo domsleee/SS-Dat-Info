@@ -1,5 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 6; // game_in_game fills tail padding (sizeof unchanged), so
+pub const TAS_SHARED_VERSION: u32 = 7; // +level_id (in-process track detection)
                                        // it stays v6-compatible with the deployed DLL. Re-bump to 7
                                        // at the next real struct/size change (Codex's fail-fast note).
 pub const TAS_MAX_TICKS: usize = 65536;
@@ -226,9 +226,14 @@ pub struct TasSharedState {
     pub cont_reset_pending: u32,
 
     /// Game-state awareness: 0 = main menu, 1 = in-game (race/level). DLL writes
-    /// it each frame from `Supreme.exe + 0x8895C` (RE'd). Fills the tail padding,
-    /// so `size_of` is unchanged (still 1_647_248).
+    /// it each frame from `Supreme.exe + 0x8895C` (RE'd).
     pub game_in_game: u32,
+
+    /// Current track, detected by the DLL's in-process heap scan (majority-vote):
+    /// `0..8 = area*3 + difficulty` (area 0=Forest,1=Alpine,2=Village; diff
+    /// 0=Easy,1=Medium,2=Hard). `u32::MAX` = unknown / menu. See the DLL's
+    /// `level_scan.hpp`.
+    pub level_id: u32,
 }
 
 impl TasSharedState {
@@ -1573,11 +1578,9 @@ mod tests {
     #[test]
     fn size_of_tas_shared_state_pinned() {
         // Pin the total struct size so C++ and Rust sides stay in sync.
-        // align-8 struct. CONT fields appended after log_ring at offsets
-        // 1_647_228 (cont_replay_start_fc), _232 (cont_splice_fc), _236
-        // (cont_resume_speed), _240 (cont_reset_pending); align-8 rounds the
-        // size up to 1_647_248. input_log's offset is unchanged (632).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_248);
+        // align-8 struct. Tail: cont_reset_pending, then game_in_game (u32) and
+        // level_id (u32) — the two together add 8 bytes over the old 1_647_248.
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_256);
     }
 
     #[test]
