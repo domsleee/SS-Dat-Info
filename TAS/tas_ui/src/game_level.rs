@@ -31,6 +31,10 @@ const PAGE_NOACCESS: u32 = 0x01;
 
 // Supreme.exe is 32-bit (non-ASLR); the heap we care about sits under 2 GB.
 const SCAN_MAX_ADDR: usize = 0x7FFF_0000;
+// Path strings live in the small-block heap (measured: all match regions ≤1.4 MB).
+// Skip regions bigger than this — they're texture/geometry/sound buffers with no
+// paths — so we read ~10 MB instead of ~100 MB. 3× margin over the observed max.
+const MAX_SCAN_REGION: usize = 4 << 20;
 // Stop once we've gathered enough evidence — matches are dense once a level is up.
 const ENOUGH_MATCHES: u32 = 40;
 const RESCAN_INTERVAL: Duration = Duration::from_millis(750);
@@ -63,39 +67,49 @@ extern "system" {
 const AREAS: [&str; 3] = ["forest", "alpine", "village"];
 const DIFFS: [&str; 3] = ["easy", "medium", "hard"];
 
-/// Count `"<area>/tracks/<diff>"` occurrences in `hay` (already lowercased),
+/// Count `"<area>/Tracks/<diff>"` path occurrences in raw (NOT lowercased) `hay`,
 /// accumulating into `tally` indexed `[area*3 + diff]`. Returns matches added.
+///
+/// Perf: anchors on `"racks/"` — the always-lowercase core of both `Tracks/` and
+/// `tracks/` — via a SIMD substring search (`memchr::memmem`), then case-folds
+/// only the short area/difficulty segments at each hit. This avoids lowercasing
+/// the whole 100+ MiB heap (the old hot path) and the naive byte-by-byte scan.
 fn tally_paths(hay: &[u8], tally: &mut [u32; 9]) -> u32 {
-    let needle = b"/tracks/";
     let mut added = 0;
-    let mut i = 0;
-    while i + needle.len() < hay.len() {
-        if &hay[i..i + needle.len()] == needle {
-            // area = the path segment ending just before this "/tracks/"
-            let area_end = i;
-            let area_start = hay[..area_end]
-                .iter()
-                .rposition(|&b| b == b'/' || b == b'\\')
-                .map(|p| p + 1)
-                .unwrap_or(0);
-            let area = &hay[area_start..area_end];
-            let after = i + needle.len();
-            let diff_end = hay[after..]
-                .iter()
-                .position(|&b| b == b'/' || b == b'\\')
-                .map(|p| after + p)
-                .unwrap_or(hay.len());
-            let diff = &hay[after..diff_end];
-            if let (Some(ai), Some(di)) = (
-                AREAS.iter().position(|a| a.as_bytes() == area),
-                DIFFS.iter().position(|d| d.as_bytes() == diff),
-            ) {
-                tally[ai * 3 + di] += 1;
-                added += 1;
-            }
-            i = after;
-        } else {
-            i += 1;
+    for r in memchr::memmem::find_iter(hay, b"racks/") {
+        // `r` is the start of "racks/"; the full component is "/<T|t>racks/".
+        if r < 2 {
+            continue;
+        }
+        let t = hay[r - 1];
+        if (t != b'T' && t != b't') || (hay[r - 2] != b'/' && hay[r - 2] != b'\\') {
+            continue;
+        }
+        // area = the segment before the '/' that precedes "Tracks"
+        let area_end = r - 2;
+        let area_start = hay[..area_end]
+            .iter()
+            .rposition(|&b| b == b'/' || b == b'\\')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let area = &hay[area_start..area_end];
+        // difficulty = the segment after "racks/"
+        let after = r + 6;
+        if after > hay.len() {
+            continue;
+        }
+        let diff_end = hay[after..]
+            .iter()
+            .position(|&b| b == b'/' || b == b'\\')
+            .map(|p| after + p)
+            .unwrap_or(hay.len());
+        let diff = &hay[after..diff_end];
+        if let (Some(ai), Some(di)) = (
+            AREAS.iter().position(|a| area.eq_ignore_ascii_case(a.as_bytes())),
+            DIFFS.iter().position(|d| diff.eq_ignore_ascii_case(d.as_bytes())),
+        ) {
+            tally[ai * 3 + di] += 1;
+            added += 1;
         }
     }
     added
@@ -125,10 +139,11 @@ fn title_case(s: &str) -> String {
 #[derive(Default, Debug)]
 #[allow(dead_code)]
 struct ScanStats {
-    regions: u32,         // VirtualQueryEx iterations
-    private_regions: u32, // private committed readable regions actually read
-    bytes: usize,         // bytes ReadProcessMemory'd
-    matches: u32,         // "/tracks/" matches tallied
+    regions: u32,            // VirtualQueryEx iterations
+    private_regions: u32,    // private committed readable regions actually read
+    bytes: usize,            // bytes ReadProcessMemory'd
+    matches: u32,            // "/tracks/" matches tallied
+    max_match_region: usize, // largest region size that contained a match
 }
 
 /// Scan the process heap and return the majority track label, if found.
@@ -163,6 +178,7 @@ fn scan_process(pid: u32, mut stats: Option<&mut ScanStats>) -> Option<String> {
             // touch far less memory before the early-exit.
             let readable = mbi.state == MEM_COMMIT
                 && mbi.type_ == MEM_PRIVATE
+                && mbi.region_size <= MAX_SCAN_REGION
                 && (mbi.protect & PAGE_GUARD) == 0
                 && (mbi.protect & PAGE_NOACCESS) == 0;
             if readable && mbi.region_size > 0 {
@@ -180,10 +196,13 @@ fn scan_process(pid: u32, mut stats: Option<&mut ScanStats>) -> Option<String> {
                         if let Some(s) = stats.as_deref_mut() {
                             s.bytes += read;
                         }
-                        for b in &mut buf[..read] {
-                            b.make_ascii_lowercase();
+                        let added = tally_paths(&buf[..read], &mut tally);
+                        total += added;
+                        if added > 0 {
+                            if let Some(s) = stats.as_deref_mut() {
+                                s.max_match_region = s.max_match_region.max(mbi.region_size);
+                            }
                         }
-                        total += tally_paths(&buf[..read], &mut tally);
                     }
                     off += chunk;
                 }
@@ -194,7 +213,7 @@ fn scan_process(pid: u32, mut stats: Option<&mut ScanStats>) -> Option<String> {
             addr = next;
         }
         CloseHandle(h);
-        if let Some(s) = stats.as_deref_mut() {
+        if let Some(s) = stats {
             s.matches = total;
         }
         tally_to_label(&tally)
@@ -314,8 +333,8 @@ mod tests {
             let us = t0.elapsed().as_micros();
             times.push(us);
             eprintln!(
-                "run {:2}: {:>7} us  regions={} private={} bytes={} ({} MiB) matches={} -> {:?}",
-                i, us, st.regions, st.private_regions, st.bytes, st.bytes >> 20, st.matches, label
+                "run {:2}: {:>7} us  bytes={} ({} MiB) matches={} maxMatchRegion={} KiB -> {:?}",
+                i, us, st.bytes, st.bytes >> 20, st.matches, st.max_match_region >> 10, label
             );
         }
         times.sort_unstable();

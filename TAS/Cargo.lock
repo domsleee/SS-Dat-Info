@@ -3067,6 +3067,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_plot",
+ "memchr",
  "png 0.17.16",
  "rfd",
  "serde",
