@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include "shared_state.hpp"
@@ -22,7 +23,8 @@
 //   0xFFFFFFFF = unknown / in the menu.
 namespace levelscan {
 
-inline volatile bool g_stop = false;
+inline std::atomic<bool> g_stop{ false };
+inline HANDLE g_thread = nullptr;
 
 static const char* AREAS[3] = { "forest", "alpine", "village" };
 static const char* DIFFS[3] = { "easy", "medium", "hard" };
@@ -115,8 +117,11 @@ static DWORD WINAPI threadProc(LPVOID param) {
         }
         // Re-scan periodically: game_in_game stays 1 across the post-race
         // submenus, so the 0->1 edge alone would miss track changes within a
-        // session. ~1.5 s keeps the chip fresh at negligible cost.
-        Sleep(1500);
+        // session. ~1.5 s keeps the chip fresh at negligible cost. Sleep in
+        // short slices so Stop() can join promptly (else detach waits ~1.5s).
+        for (int i = 0; i < 15 && !g_stop.load(std::memory_order_relaxed); i++) {
+            Sleep(100);
+        }
     }
     return 0;
 }
@@ -125,11 +130,21 @@ static DWORD WINAPI threadProc(LPVOID param) {
 inline void Start(TasSharedState* s) {
     if (!s) return;
     s->level_id = 0xFFFFFFFFu;
-    g_stop = false;
-    HANDLE h = CreateThread(nullptr, 0, threadProc, s, 0, nullptr);
-    if (h) CloseHandle(h);
+    g_stop.store(false, std::memory_order_relaxed);
+    g_thread = CreateThread(nullptr, 0, threadProc, s, 0, nullptr);
 }
 
-inline void Stop() { g_stop = true; }
+// Signal the worker and JOIN it before the caller tears down shared memory.
+// Without the join the worker could write s->level_id through a pointer that
+// DLL_PROCESS_DETACH has already unmapped (use-after-free), or resume into the
+// unloading DLL's code. Bounded wait so a wedged scan can't hang detach.
+inline void Stop() {
+    g_stop.store(true, std::memory_order_relaxed);
+    if (g_thread) {
+        WaitForSingleObject(g_thread, 3000);
+        CloseHandle(g_thread);
+        g_thread = nullptr;
+    }
+}
 
 } // namespace levelscan
