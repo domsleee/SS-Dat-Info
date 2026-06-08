@@ -8,6 +8,7 @@
 #include "caves/cave1c.hpp"
 #include "caves/cave1d.hpp"
 #include "caves/cave5.hpp"
+#include "level_scan.hpp"
 
 static TasSharedMemory g_sharedMem;
 static GameAddresses g_addr;
@@ -56,12 +57,17 @@ void run() {
         Log("WARNING: Gate hooks failed - input blocking won't work correctly");
     }
 
+    // Background thread: detect the current track via an in-process heap scan.
+    levelscan::Start(state);
+    Log("  Level scan thread: started");
+
     Log("=== TAS_Helper.dll ready (Phase 2) ===");
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_DETACH) {
         Log("TAS_Helper.dll unloading");
+        levelscan::Stop();
         g_sharedMem.Destroy();
         return TRUE;
     }
