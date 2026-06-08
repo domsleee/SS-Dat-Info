@@ -1,5 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 7; // +level_id (in-process track detection)
+pub const TAS_SHARED_VERSION: u32 = 8; // +race_time_cs/race_start_ts (HUD timer)
                                        // it stays v6-compatible with the deployed DLL. Re-bump to 7
                                        // at the next real struct/size change (Codex's fail-fast note).
 pub const TAS_MAX_TICKS: usize = 65536;
@@ -234,6 +234,16 @@ pub struct TasSharedState {
     /// 0=Easy,1=Medium,2=Hard). `u32::MAX` = unknown / menu. See the DLL's
     /// `level_scan.hpp`.
     pub level_id: u32,
+
+    /// On-screen player race time in centiseconds, read by the DLL from the HUD
+    /// text line (SR_UIT `Append_Text`). Exact + map-agnostic. `u32::MAX` = not
+    /// racing / unknown.
+    pub race_time_cs: u32,
+
+    /// The 16-bit game clock value captured at the gate cross (= clock −
+    /// race_time); constant during a run; the F5 spawn-lottery metric.
+    /// `u32::MAX` = unknown.
+    pub race_start_ts: u32,
 }
 
 impl TasSharedState {
@@ -1578,9 +1588,10 @@ mod tests {
     #[test]
     fn size_of_tas_shared_state_pinned() {
         // Pin the total struct size so C++ and Rust sides stay in sync.
-        // align-8 struct. Tail: cont_reset_pending, then game_in_game (u32) and
-        // level_id (u32) — the two together add 8 bytes over the old 1_647_248.
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_256);
+        // align-8 struct. Tail: cont_reset_pending, then game_in_game (u32),
+        // level_id (u32), race_time_cs (u32), race_start_ts (u32). The last two
+        // add 8 bytes over the v7 1_647_256.
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_264);
     }
 
     #[test]

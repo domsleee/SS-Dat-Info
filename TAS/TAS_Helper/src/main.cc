@@ -8,6 +8,7 @@
 #include "caves/cave1c.hpp"
 #include "caves/cave1d.hpp"
 #include "caves/cave5.hpp"
+#include "caves/race_timer.hpp"
 #include "level_scan.hpp"
 
 static TasSharedMemory g_sharedMem;
@@ -61,12 +62,17 @@ void run() {
     levelscan::Start(state);
     Log("  Level scan thread: started");
 
+    // Race timer: read the exact on-screen race time (HUD/SR_UIT) → shared state.
+    racetimer::Install(g_addr, state);
+    Log("  Race timer: started");
+
     Log("=== TAS_Helper.dll ready (Phase 2) ===");
 }
 
 BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_DETACH) {
         Log("TAS_Helper.dll unloading");
+        racetimer::Stop();
         levelscan::Stop();
         g_sharedMem.Destroy();
         return TRUE;
