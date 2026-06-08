@@ -66,6 +66,24 @@ pub fn show(
             .on_hover_text("Game state — in a race/level (with the current track) vs the main menu");
         ui.separator();
 
+        // Race timer chip: the DLL reads the EXACT on-screen player time from
+        // the HUD (SR_UIT Append_Text) and publishes race_time_cs + race_start_ts
+        // (the gate clock value = F5 spawn-lottery metric).
+        if state.race_time_cs != u32::MAX {
+            let cs = state.race_time_cs;
+            let t = format!("\u{23F1} {:01}:{:02}.{:02}", cs / 6000, (cs % 6000) / 100, cs % 100);
+            ui.label(
+                egui::RichText::new(t)
+                    .color(egui::Color32::from_rgb(235, 205, 90))
+                    .size(12.0),
+            )
+            .on_hover_text(format!(
+                "Exact race time (from the HUD). start_ts={} — the gate clock value (F5 spawn-lottery metric)",
+                state.race_start_ts
+            ));
+            ui.separator();
+        }
+
         let is_off = mode == TasMode::Off;
         let is_rec = mode == TasMode::Rec;
         let is_play = mode == TasMode::Play;

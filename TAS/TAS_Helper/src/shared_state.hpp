@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 7;  // +level_id (in-process track detection)
+constexpr uint32_t TAS_SHARED_VERSION = 8;  // +race_time_cs/race_start_ts (HUD timer)
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
@@ -184,6 +184,15 @@ struct TasSharedState {
     // (area 0=Forest,1=Alpine,2=Village; diff 0=Easy,1=Medium,2=Hard).
     // 0xFFFFFFFF = unknown / menu. See level_scan.hpp.
     uint32_t level_id;
+
+    // -- Race timer (DLL reads the HUD time line via SR_UIT Append_Text) --
+    // race_time_cs  = the on-screen player race time in centiseconds (exact,
+    //                 map-agnostic). 0xFFFFFFFF = not racing / unknown.
+    // race_start_ts = the 16-bit game clock value captured at the gate cross
+    //                 (= clock - race_time); constant during a run; the F5
+    //                 spawn-lottery metric. 0xFFFFFFFF = unknown.
+    uint32_t race_time_cs;
+    uint32_t race_start_ts;
 };
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks
@@ -262,6 +271,8 @@ public:
         state->use_rec_msg_args = 1;   // proven zero-drift config
         state->playback_speed = 1.0f;  // normal speed
         state->level_id = 0xFFFFFFFFu;  // unknown until the scan thread runs
+        state->race_time_cs = 0xFFFFFFFFu;
+        state->race_start_ts = 0xFFFFFFFFu;
         return true;
     }
 
