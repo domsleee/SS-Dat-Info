@@ -59,12 +59,26 @@ void run() {
     }
 
     // Background thread: detect the current track via an in-process heap scan.
-    levelscan::Start(state);
-    Log("  Level scan thread: started");
+    // Gated by TAS_NO_LEVELSCAN=1 to A/B whether the scan thread perturbs
+    // replay determinism.
+    char nls[8] = {};
+    if (GetEnvironmentVariableA("TAS_NO_LEVELSCAN", nls, sizeof(nls)) > 0 && nls[0] == '1') {
+        Log("  Level scan thread: SKIPPED (TAS_NO_LEVELSCAN=1)");
+    } else {
+        levelscan::Start(state);
+        Log("  Level scan thread: started");
+    }
 
     // Race timer: read the exact on-screen race time (HUD/SR_UIT) → shared state.
-    racetimer::Install(g_addr, state);
-    Log("  Race timer: started");
+    // Gated by TAS_NO_RACETIMER=1 so we can A/B whether its per-tick hooks
+    // perturb replay determinism (the bucket lottery is sub-tick sensitive).
+    char nrt[8] = {};
+    if (GetEnvironmentVariableA("TAS_NO_RACETIMER", nrt, sizeof(nrt)) > 0 && nrt[0] == '1') {
+        Log("  Race timer: SKIPPED (TAS_NO_RACETIMER=1)");
+    } else {
+        racetimer::Install(g_addr, state);
+        Log("  Race timer: started");
+    }
 
     Log("=== TAS_Helper.dll ready (Phase 2) ===");
 }
