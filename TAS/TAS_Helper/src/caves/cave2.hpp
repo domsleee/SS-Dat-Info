@@ -179,10 +179,14 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
         t.hi = s->test_arg4_override;
         s->arg4_source = ARG4_SOURCE_OVERRIDE;
     } else if (GetKernelTimeNow(addr, &t)) {
-        // Use the full live {lo, hi} — exactly the stamp a real keypress
-        // would carry right now. Both the F5 injection and steering use this
-        // same clock, so injected events are always in-window and in-order
-        // for the observer's event-time gate.
+        // Floor the lo dword: the stamp stays in-window for the observer's
+        // event-time gate (hi is what the gate checks — proven live), but a
+        // FLOORED stamp is DETERMINISTIC for every event in the same ~7-min
+        // hi-window, where the live lo differs between a REC and its replay.
+        // The bit-exact zero-drift era injected a constant stamp; keeping the
+        // stamp constant-per-window preserves that determinism in case the
+        // game uses the stamp beyond the gate (sub-tick input timing).
+        t.lo = 0;
         s->arg4_source = ARG4_SOURCE_TIME_CURRENT;
     } else {
         t.lo = 0;
@@ -309,6 +313,7 @@ static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, boo
         // a reboot turned the constant into a future stamp).
         KernelTime ft = { 0, GameAddresses::BB3B10_ARG4 };
         GetKernelTimeNow(addr, &ft);
+        ft.lo = 0;  // floored like the steering stamp (see CallBB3B10OnTransitions)
         bb3b10(thisPtr, GameAddresses::BB3B10_F5, pressed ? 1 : 0,
                ft.lo, ft.hi);
         s->cave2_injecting = 0;
