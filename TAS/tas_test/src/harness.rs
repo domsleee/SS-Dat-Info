@@ -618,6 +618,11 @@ pub fn print_status(client: &TasSharedMemoryClient) {
         s.playback_pos,
         s.game_in_game
     );
+    println!(
+        "Ptrs: replay={:#010x} player={:#010x} level_id={:#x} race_time_cs={:#x} pos=({:.2},{:.2},{:.2})",
+        s.replay_ptr, s.player_ptr, s.level_id, s.race_time_cs,
+        s.player_x, s.player_y, s.player_z
+    );
 }
 
 /// Read current live player position from shared state.

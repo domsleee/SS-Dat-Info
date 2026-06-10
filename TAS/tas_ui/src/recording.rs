@@ -721,6 +721,10 @@ pub struct HistoryEntry {
     /// — the "race-start" landmark. `None` for legacy entries, markers,
     /// and snapshots with no detected movement.
     pub first_moving: Option<u32>,
+    /// Level code (e.g. "FE") the entry was created on, from the DLL's live
+    /// level_id at push time. `None` for legacy entries or when the level was
+    /// unknown (menu). Used by the panel's per-level filter.
+    pub level: Option<String>,
     snapshot: Option<RecordingSnapshot>,
 }
 
@@ -742,6 +746,7 @@ impl HistoryEntry {
             start_tick: 0,
             end_tick,
             first_moving,
+            level: None, // stamped from live_level by RecordingHistory on push
             snapshot: Some(snapshot),
         }
     }
@@ -759,6 +764,7 @@ impl HistoryEntry {
             start_tick: 0,
             end_tick: 0,
             first_moving: None,
+            level: None, // stamped from live_level by RecordingHistory on push
             snapshot: None,
         }
     }
@@ -839,6 +845,10 @@ pub struct PersistedHistoryEntry {
     /// from rec_coords[0]. Legacy entries default to None.
     #[serde(default)]
     pub first_moving: Option<u32>,
+    /// Level code (e.g. "FE") the entry was created on. Legacy entries
+    /// default to None (always shown by the per-level filter).
+    #[serde(default)]
+    pub level: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -859,6 +869,10 @@ pub struct RecordingHistory {
     /// Bumped on every mutation (structural / metadata / cursor) so the app can
     /// cheaply detect "history changed, re-persist" without diffing.
     revision: u64,
+    /// Current level code (e.g. "FE") from the DLL's live level_id; the app
+    /// refreshes it every frame. Stamped onto each entry at push time so the
+    /// panel can filter history per level. None = unknown/menu.
+    live_level: Option<String>,
 }
 
 impl RecordingHistory {
@@ -869,7 +883,21 @@ impl RecordingHistory {
             current_index: None,
             next_entry_id: 1,
             revision: 0,
+            live_level: None,
         }
+    }
+
+    /// Refresh the level code stamped onto subsequently pushed entries.
+    /// Not a history mutation — does not bump the revision.
+    pub fn set_live_level(&mut self, level: Option<&str>) {
+        if self.live_level.as_deref() != level {
+            self.live_level = level.map(str::to_owned);
+        }
+    }
+
+    /// The level code new entries are currently stamped with (None = unknown).
+    pub fn live_level(&self) -> Option<&str> {
+        self.live_level.as_deref()
     }
 
     fn alloc_id(&mut self) -> u64 {
@@ -954,6 +982,7 @@ impl RecordingHistory {
         let label = format!("Save: {}", short_file_label(path));
         let mut marker = HistoryEntry::marker(label, HistoryEntryKind::SaveMarker);
         marker.entry_id = self.alloc_id();
+        marker.level = self.live_level.clone();
         if let Some(current) = self.current_index {
             // Save belongs to the current visible state without changing selection.
             let insert_at = (current + 1).min(self.entries.len());
@@ -1022,6 +1051,7 @@ impl RecordingHistory {
                 start_tick: e.start_tick,
                 end_tick: e.end_tick,
                 first_moving: e.first_moving,
+                level: e.level.clone(),
                 created_at_iso: e.created_at.to_rfc3339(),
                 snapshot: e.snapshot.as_ref().map(RecordingSnapshot::to_persisted),
             })
@@ -1117,6 +1147,7 @@ impl RecordingHistory {
                 start_tick: le.start_tick,
                 end_tick: le.end_tick,
                 first_moving: le.first_moving,
+                level: le.level,
                 snapshot,
             });
         }
@@ -1193,6 +1224,7 @@ impl RecordingHistory {
                 start_tick: entry.start_tick,
                 end_tick: entry.end_tick,
                 first_moving: entry.first_moving,
+                level: entry.level.clone(),
             })
             .collect();
 
@@ -1254,6 +1286,7 @@ impl RecordingHistory {
                 start_tick: entry.start_tick,
                 end_tick,
                 first_moving: entry.first_moving,
+                level: entry.level,
                 snapshot,
             });
         }
@@ -1339,6 +1372,7 @@ impl RecordingHistory {
 
         let mut entry = HistoryEntry::from_snapshot(label, kind, snapshot);
         entry.entry_id = self.alloc_id();
+        entry.level = self.live_level.clone();
         if let Some((start_tick, end_tick)) = session {
             entry = entry.with_session(start_tick, end_tick);
         }
@@ -1429,12 +1463,13 @@ pub fn save_dialog_with_segments(
     segments: &[Segment],
     log: &mut Vec<String>,
 ) -> Option<PathBuf> {
-    // Default name: `<level>-<time>` (e.g. FE-5876). Level detection isn't
-    // published from the DLL yet, so `level` is None for now → the name is
-    // time-only (`5876.tasrec`) and becomes `FE-5876.tasrec` once the current
-    // track path is exposed. Time is the in-race duration (gate→end) in cs.
+    // Default name: `<level>-<time>` (e.g. FE-5876). Level comes from the
+    // DLL's live level_id (heap scan); when at the menu / unknown it's None
+    // and the name degrades to time-only. Time is the in-race duration
+    // (gate→end) in cs.
     let race_cs = crate::level::race_centiseconds(&state.rec_coords, state.recorded_count);
-    let default_name = crate::level::default_recording_name(None, race_cs);
+    let level = crate::level::level_code_from_id(state.level_id);
+    let default_name = crate::level::default_recording_name(level, race_cs);
     if let Some(path) = rfd::FileDialog::new()
         .set_title("Save TAS Recording")
         .set_directory(recordings_dir())
@@ -1831,6 +1866,7 @@ mod tests {
                 start_tick: 0,
                 end_tick: 2,
                 first_moving: None,
+                level: None,
             }],
         };
 
