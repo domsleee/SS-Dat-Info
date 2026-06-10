@@ -47,7 +47,19 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
     if (s && !s->cave2_injecting && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
         g_bb3b10Arg4 = a3;
     }
-    if (s && s->mode != MODE_OFF && !s->cave2_injecting) {
+    // ESC passthrough: cave1c's REC/PLAY block exists to keep GAMEPLAY input
+    // symmetric between REC and PLAY (cave2 owns the DI buffer + BB3B10).
+    // ESC is not a gameplay key — the boarder never reads it — but blocking
+    // it made the pause menu unreachable during REC ("Escape key does not
+    // work with record"). Let the real handler process it; a1 is the Win32 VK
+    // (the dispatcher forwards wParam — see the Translate RE).
+    //
+    // Pause passthrough: when Supreme::Cycle hasn't ticked recently the game
+    // is paused (pause menu / dialog / static menu) — the sim isn't running,
+    // so blocking buys no REC/PLAY symmetry and only makes the pause menu
+    // (and a stuck-mode session) unnavigable. Pass everything through.
+    bool gamePaused = (GetTickCount() - g_lastCycleMs) > 250;
+    if (s && s->mode != MODE_OFF && !s->cave2_injecting && a1 != VK_ESCAPE && !gamePaused) {
         s->handler_block_count++;
         PerfSample(s->perf_cave1c_down, __rdtsc() - t0);
         return;
@@ -93,7 +105,9 @@ void __fastcall Cave1C_UpDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, 
     if (s && !s->cave2_injecting && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
         g_bb3b10Arg4 = a3;
     }
-    if (s && s->mode != MODE_OFF && !s->cave2_injecting) {
+    // ESC + pause passthrough — keep down/up symmetric (see DownDetour).
+    bool gamePaused = (GetTickCount() - g_lastCycleMs) > 250;
+    if (s && s->mode != MODE_OFF && !s->cave2_injecting && a1 != VK_ESCAPE && !gamePaused) {
         s->handler_block_count++;
         PerfSample(s->perf_cave1c_up, __rdtsc() - t0);
         return;

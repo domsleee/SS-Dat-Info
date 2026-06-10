@@ -149,6 +149,13 @@ inline volatile uint32_t g_bb3b10Arg4 = GameAddresses::BB3B10_ARG4;
 // Reset at ARM_REC / ARM_PLAY (see ProcessCommand).
 inline volatile uint32_t g_diagInjectLogged = 0;
 
+// GetTickCount() stamped on every Supreme::Cycle tick. The message-pump-driven
+// hooks (cave1c) use it to detect "the game is PAUSED / at a non-ticking
+// screen" (pause menu, dialogs, static main menu): when the cycle hasn't
+// ticked recently, the input gate passes ALL keys through so the user can
+// operate the pause menu / dialogs even while a TAS mode is armed.
+inline volatile uint32_t g_lastCycleMs = 0;
+
 // Helper: get the current Kernel::Time from the game's own clock.
 // SEH-protected; returns false if the export is unresolved or the call faults.
 // The callee is x87-balanced (verified by disasm) and we already run game code
@@ -351,6 +358,16 @@ static void LogRootDiag(TasSharedState* s, const char* stage) {
 static volatile uint32_t g_cave2_pendingLog = 0;  // 0=none, 1=REC, 2=PLAY, 3=STOP, 4=playback_done
 static volatile uint32_t g_cave2_logParam = 0;
 
+// Root player pointer ([SG+1D5450]) captured at ARM time. The root object is
+// STABLE across in-process F5 restarts (RDIAG-proven: same pointer through
+// restart-cmd/f5-released) but is reallocated when the level itself is torn
+// down — quitting to the menu, the menu's attract demo loading a level, or
+// switching tracks. A TAS mode left armed across that boundary then drives
+// the WRONG context: REC records the menu demo, the scaled playback_speed
+// fast-forwards the menu video, and the cave1c gate eats all native keys.
+// Cave2 auto-stops the session when the live root no longer matches.
+inline volatile uint32_t g_armedRoot = 0;
+
 // Splice gate: 1 only between a SUCCESSFUL CMD_ARM_CONTINUE and its splice
 // (or any stop/re-arm). The PLAY handler's splice check requires this flag,
 // so a `continue_from_frame` that appears in shared memory by any other
@@ -386,6 +403,7 @@ static void ProcessCommand(TasSharedState* s) {
             s->segment_boundaries[0].frame = 0;
             s->segment_boundaries[0].input_log_offset = 0;
             s->mode = MODE_REC;
+            g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
             g_cave2_contArmed = 0;
             g_diagInjectLogged = 0;
             g_cave2_pendingLog = 1;
@@ -419,6 +437,7 @@ static void ProcessCommand(TasSharedState* s) {
             // is from wherever F5 actually spawned. This causes drift with steering.
 
             s->mode = MODE_PLAY;
+            g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
             g_diagInjectLogged = 0;
             g_cave2_pendingLog = 2;
             break;
@@ -463,6 +482,7 @@ static void ProcessCommand(TasSharedState* s) {
             s->bb3b10_block_count = 0;
             // Segment tracking: keep existing segment_count, we'll add one at splice
             s->mode = MODE_PLAY;  // Start as PLAY, will auto-switch in PLAY handler
+            g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
             g_cave2_contArmed = 1;  // the ONLY place the splice gate opens
             g_cave2_pendingLog = 5;
             break;
@@ -563,6 +583,7 @@ static void __declspec(noinline) Cave2_Logic() {
     if (!s || !addr) return;
 
     s->frame_count++;
+    g_lastCycleMs = GetTickCount();  // pause detector heartbeat (see cave1c)
 
     // Game-state awareness: publish exe+0x8895C (0=menu, 1=in-game) so the UI
     // knows the state. Integer read — FPU-safe.
@@ -639,6 +660,28 @@ static void __declspec(noinline) Cave2_Logic() {
     }
 
     if (s->mode == MODE_OFF) return;
+
+    // Auto-stop when the LEVEL is swapped out under an armed TAS mode. The
+    // root object survives F5 restarts (same pointer — RDIAG-proven) but is
+    // reallocated on quit-to-menu / the menu demo loading / track switches.
+    // Without this, a session left armed across that boundary records the
+    // menu demo, fast-forwards the menu video at the scaled playback_speed,
+    // and eats every native key via the cave1c gate. root==0 (mid-teardown)
+    // is NOT a trigger — restarts pass through that transiently.
+    {
+        uint32_t curRoot = SafeReadPtr((uint32_t)addr->player_base);
+        if (curRoot && g_armedRoot && curRoot != g_armedRoot) {
+            s->mode = MODE_OFF;
+            s->cave2_injecting = 0;
+            s->continue_from_frame = 0;
+            g_cave2_contArmed = 0;
+            g_armedRoot = 0;
+            LogRing(s, LOG_WARN,
+                "TAS auto-stopped: level context changed (left the race / menu demo loaded)");
+            g_cave2_pendingLog = 3;  // "stopped"
+            return;
+        }
+    }
 
     uint32_t kbobj = GetKeyboardObject(addr);
     if (!kbobj) return;
