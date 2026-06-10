@@ -39,51 +39,14 @@ pub fn show(
     state: &TasSharedState,
     catchup_active: bool,
     resume_speed: f32,
-    game_level: Option<&str>,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
 
     ui.horizontal(|ui| {
-        // Game-state chip (1.1 awareness): the DLL publishes exe+0x8895C into
-        // game_in_game each frame — 0 = main menu, 1 = in a race/level. When
-        // we know the track (from the game-memory level reader) it's appended:
-        // "In Game (Forest Easy)".
-        let in_game = state.game_in_game != 0;
-        let g_txt = if in_game {
-            match game_level {
-                Some(lvl) if !lvl.is_empty() => format!("\u{1F3AE} In Game ({})", lvl),
-                _ => "\u{1F3AE} In Game".to_string(),
-            }
-        } else {
-            "\u{2630} In Menu".to_string()
-        };
-        let g_col = if in_game {
-            egui::Color32::from_rgb(90, 200, 120)
-        } else {
-            egui::Color32::from_gray(150)
-        };
-        ui.label(egui::RichText::new(g_txt).color(g_col).size(12.0))
-            .on_hover_text("Game state — in a race/level (with the current track) vs the main menu");
-        ui.separator();
-
-        // Race timer chip: the DLL reads the EXACT on-screen player time from
-        // the HUD (SR_UIT Append_Text) and publishes race_time_cs + race_start_ts
-        // (the gate clock value = F5 spawn-lottery metric).
-        if state.race_time_cs != u32::MAX {
-            let cs = state.race_time_cs;
-            let t = format!("\u{23F1} {:01}:{:02}.{:02}", cs / 6000, (cs % 6000) / 100, cs % 100);
-            ui.label(
-                egui::RichText::new(t)
-                    .color(egui::Color32::from_rgb(235, 205, 90))
-                    .size(12.0),
-            )
-            .on_hover_text(format!(
-                "Exact race time (from the HUD). start_ts={} — the gate clock value (F5 spawn-lottery metric)",
-                state.race_start_ts
-            ));
-            ui.separator();
-        }
-
+        // NOTE: the game-state ("In Game (Forest Easy)") and race-timer chips
+        // used to live here, which made the row's width DYNAMIC — every
+        // state change shifted the buttons. They moved into the status card
+        // (main.rs) where variable-width text doesn't displace controls.
         let is_off = mode == TasMode::Off;
         let is_rec = mode == TasMode::Rec;
         let is_play = mode == TasMode::Play;
@@ -170,6 +133,16 @@ pub fn show(
             // up to ~600k floats it's cheap enough (< 1ms at the worst
             // case) and avoids us caching anything across frames.
             let first_moving = detect_first_moving(&state.rec_coords, recorded);
+            // The race timer starts at the START-LINE cross, not at first
+            // motion (the line is 0.5–3s past the gate). Anchor the in-game
+            // time on the line when the track is known; fall back to
+            // first_moving for unknown levels / runs that never cross.
+            let timer_anchor = crate::start_line::start_cross_tick(
+                &state.rec_coords,
+                recorded,
+                crate::level::level_code_from_id(state.level_id),
+            )
+            .or(first_moving);
             ui.vertical(|ui| {
                 let response = ui.add_sized(
                     [72.0, 22.0],
@@ -187,7 +160,7 @@ pub fn show(
                 let sub_text = if past_end {
                     format!("past end · {}", recorded)
                 } else {
-                    let offset = first_moving.unwrap_or(0);
+                    let offset = timer_anchor.unwrap_or(0);
                     format_recording_duration((*continue_from).saturating_sub(offset))
                 };
                 let color = if past_end {
@@ -203,13 +176,8 @@ pub fn show(
                 );
             });
         }
-        ui.add(
-            egui::DragValue::new(cont_catchup_speed)
-                .range(1.0..=384.0)
-                .prefix("catch \u{00D7}")
-                .speed(1.0),
-        )
-        .on_hover_text("CONT catch-up replay speed. Default 256× ≈ the game's physics ceiling (~80× effective, ~0.78s replay; reliability + zero-drift preserved). The replay is physics-compute-bound, so past ~256× there's no gain. The F5 restart (~1s) is separate and unaffected.");
+        // The "catch ×N" editor moved to File > Settings (horizontal space);
+        // the live value still shows in the CONT button's tooltip above.
 
         ui.separator();
 

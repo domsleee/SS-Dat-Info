@@ -5,6 +5,7 @@ mod panels;
 mod pico;
 mod recording;
 mod settings;
+mod start_line;
 
 use eframe::egui;
 #[cfg(windows)]
@@ -1863,6 +1864,28 @@ impl eframe::App for TasApp {
                             );
                         }
                     }
+                    ui.separator();
+                    // Settings — moved out of the transport row to save
+                    // horizontal space there.
+                    ui.label(
+                        egui::RichText::new("Settings")
+                            .small()
+                            .color(egui::Color32::from_gray(140)),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("CONT catch-up");
+                        ui.add(
+                            egui::DragValue::new(&mut self.cont_catchup_multiplier)
+                                .range(1.0..=384.0)
+                                .prefix("\u{00D7}")
+                                .speed(1.0),
+                        )
+                        .on_hover_text(
+                            "CONT catch-up replay speed. ~256× ≈ the game's physics \
+                             ceiling (~80× effective); the F5 restart is separate and \
+                             unaffected.",
+                        );
+                    });
                 });
                 ui.menu_button("View", |ui| {
                     // Everyday toggles, grouped under "Panels". The
@@ -2110,10 +2133,6 @@ impl eframe::App for TasApp {
                 // just the live play speed. The buttons highlight/edit this.
                 let resume_speed = self.cont_catchup_speed.unwrap_or(self.playback_speed);
 
-                // Current track: the DLL detects it in-process and publishes the
-                // index into shared `level_id` (no RPM scan from the UI).
-                let game_level = level_name_from_id(shared.state().level_id);
-
                 // Stamp new history entries with the level they're made on
                 // (per-level history filter).
                 self.history
@@ -2132,7 +2151,6 @@ impl eframe::App for TasApp {
                     shared.state(),
                     self.cont_catchup_speed.is_some(),
                     resume_speed,
-                    game_level,
                 )
             } else {
                 Vec::new()
@@ -2205,10 +2223,56 @@ impl eframe::App for TasApp {
                 let vz = state.velocity_z as f64;
                 let speed_kmh = (vx * vx + vy * vy + vz * vz).sqrt() * 360.0;
                 egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.colored_label(
-                        mode_color,
-                        egui::RichText::new(headline.clone()).strong().size(16.0),
-                    );
+                    // Mode headline + game context on ONE line: the game-state
+                    // chip used to sit in the transport row, where its
+                    // variable width shifted the buttons around. Here in the
+                    // status card ("the card with OFF in it") it can grow
+                    // freely.
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            mode_color,
+                            egui::RichText::new(headline.clone()).strong().size(16.0),
+                        );
+                        let in_game = state.game_in_game != 0;
+                        let card_level = level_name_from_id(state.level_id);
+                        let (g_txt, g_col) = if in_game {
+                            (
+                                match card_level {
+                                    Some(lvl) if !lvl.is_empty() => {
+                                        format!("\u{1F3AE} In Game ({})", lvl)
+                                    }
+                                    _ => "\u{1F3AE} In Game".to_string(),
+                                },
+                                egui::Color32::from_rgb(90, 200, 120),
+                            )
+                        } else {
+                            ("\u{2630} In Menu".to_string(), egui::Color32::from_gray(150))
+                        };
+                        ui.label(egui::RichText::new(g_txt).color(g_col).size(12.0))
+                            .on_hover_text(
+                                "Game state — in a race/level (with the current track) \
+                                 vs the main menu",
+                            );
+                        if state.race_time_cs != u32::MAX {
+                            let cs = state.race_time_cs;
+                            let t = format!(
+                                "\u{23F1} {:01}:{:02}.{:02}",
+                                cs / 6000,
+                                (cs % 6000) / 100,
+                                cs % 100
+                            );
+                            ui.label(
+                                egui::RichText::new(t)
+                                    .color(egui::Color32::from_rgb(235, 205, 90))
+                                    .size(12.0),
+                            )
+                            .on_hover_text(format!(
+                                "Exact race time (from the HUD). start_ts={} — the gate \
+                                 clock value (F5 spawn-lottery metric)",
+                                state.race_start_ts
+                            ));
+                        }
+                    });
                     ui.label(format!(
                         "Pos: ({:.1}, {:.1}, {:.1})    Speed: {:.1} km/h",
                         state.player_x, state.player_y, state.player_z, speed_kmh
