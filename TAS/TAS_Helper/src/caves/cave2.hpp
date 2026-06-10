@@ -327,6 +327,26 @@ static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, boo
     }
 }
 
+// Release every input the TAS session injected: zero the DI buffer + action
+// states and notify the observer that held keys went UP (live Time stamp).
+// MUST run on every TAS→OFF transition — without it a key held by the replay
+// at STOP stays "down" in the game's input state and the boarder keeps
+// steering until the user taps the key (the stuck-input class). Resolves the
+// kbobj fresh, so after an auto-stop (level swapped) it clears the NEW
+// level's state — release events for keys the new observer never saw pressed
+// are no-ops, same as a real keyUp without a down.
+static void ReleaseTasInput(TasSharedState* s, GameAddresses* addr) {
+    uint8_t held = (uint8_t)s->prev_mask;
+    s->prev_mask = 0;
+    uint32_t kbobj = GetKeyboardObject(addr);
+    if (!kbobj) return;
+    WriteDIBuffer(GetDIBuffer(kbobj), 0);
+    WriteActionState(kbobj, 0);
+    if (held) {
+        CallBB3B10OnTransitions(s, addr, kbobj, 0, held);
+    }
+}
+
 // Deferred log messages — set in callback, logged outside callback
 // Restart/root diagnostics (RDIAG): the visible-steering-dies-after-REC bug
 // tracks to the game's root player pointer ([SG+1D5450]) dangling across the
@@ -490,6 +510,7 @@ static void ProcessCommand(TasSharedState* s) {
         case CMD_STOP:
             s->mode = MODE_OFF;
             s->cave2_injecting = 0;
+            ReleaseTasInput(s, g_cave2Addr);  // un-stick keys held by the session
             // Defense-in-depth: a CONT that was stopped before its splice fired
             // must not leave a live splice marker behind. Every armer re-writes
             // the marker immediately before CMD_ARM_CONTINUE, so clearing here
@@ -673,6 +694,7 @@ static void __declspec(noinline) Cave2_Logic() {
         if (curRoot && g_armedRoot && curRoot != g_armedRoot) {
             s->mode = MODE_OFF;
             s->cave2_injecting = 0;
+            ReleaseTasInput(s, addr);  // clears the NEW level's input state
             s->continue_from_frame = 0;
             g_cave2_contArmed = 0;
             g_armedRoot = 0;
@@ -749,6 +771,7 @@ static void __declspec(noinline) Cave2_Logic() {
 
         if (pos >= s->recorded_count) {
             s->mode = MODE_OFF;
+            ReleaseTasInput(s, addr);  // replay done — un-stick its held keys
             g_cave2_contArmed = 0;  // hygiene — an armed CONT always splices before here
             g_cave2_logParam = pos;
             g_cave2_pendingLog = 4;
