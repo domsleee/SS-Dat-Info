@@ -1064,6 +1064,27 @@ pub fn restart_continue_and_splice_inprocess(
                                 div, p[0], p[1], p[2], r[0], r[1], r[2],
                                 (p[0]-r[0]).abs(), (p[1]-r[1]).abs(), (p[2]-r[2]).abs()
                             );
+                            // Drift profile across the judge window: does this
+                            // bucket CONVERGE after the settle (good — the 80%
+                            // bucket) or keep GROWING (bad — a real near-miss)?
+                            let fm = expected_first_moving.unwrap_or(0) as usize;
+                            let end = (fm + 72)
+                                .min(s.playback_pos as usize)
+                                .min(s.play_coords.len())
+                                .min(s.rec_coords.len());
+                            let mut profile = String::from("    profile:");
+                            let mut k = fm.saturating_sub(8);
+                            while k < end {
+                                let p = s.play_coords[k];
+                                let r = s.rec_coords[k];
+                                let d = (p[0] - r[0])
+                                    .abs()
+                                    .max((p[1] - r[1]).abs())
+                                    .max((p[2] - r[2]).abs());
+                                profile.push_str(&format!(" {}:{:.4}", k, d));
+                                k += 8;
+                            }
+                            println!("{}", profile);
                         }
                     }
                 }

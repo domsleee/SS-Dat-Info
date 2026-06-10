@@ -1,7 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 8; // +race_time_cs/race_start_ts (HUD timer)
-                                       // it stays v6-compatible with the deployed DLL. Re-bump to 7
-                                       // at the next real struct/size change (Codex's fail-fast note).
+pub const TAS_SHARED_VERSION: u32 = 9; // +clock_pin_enabled/clock_pin_phase (F5 bucket pin)
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
@@ -244,6 +242,17 @@ pub struct TasSharedState {
     /// race_time); constant during a run; the F5 spawn-lottery metric.
     /// `u32::MAX` = unknown.
     pub race_start_ts: u32,
+
+    /// Clock-phase pin config: 0 = natural wall-clock tick scheduling (the F5
+    /// bucket lottery), nonzero = cave5 pins the OFF-mode in-game tick pattern
+    /// to a canonical [1,1,0] cycle whose phase resets at each in-process
+    /// restart — every restart replays the same spawn-settle schedule, so the
+    /// F5 bucket is machine/fps/OS-independent. DLL defaults this ON.
+    pub clock_pin_enabled: u32,
+
+    /// Clock-phase pin internal state: current position in the [1,1,0] cycle.
+    /// DLL-written; reset by CMD_RESTART.
+    pub clock_pin_phase: u32,
 }
 
 impl TasSharedState {
@@ -571,53 +580,51 @@ pub mod cont {
         WrongBucket { observed: Option<u32> },
     }
 
-    /// Frames PAST the recording's first-moving frame that the replay must
-    /// reproduce for the bucket to be accepted. The first-moving frame alone is
-    /// a coarse fingerprint — two F5 buckets can share a first-moving frame yet
-    /// have slightly different physics, so matching only the frame number lets a
-    /// near-miss bucket through and the continue resumes a few frames off.
-    /// Requiring the trajectory to stay together out to first_moving + this
-    /// window rejects those: a wrong bucket diverges within a few frames of
-    /// leaving spawn.
+    /// Frames PAST the recording's first-moving frame the judge waits for before
+    /// deciding, so the blowup guard has trajectory to look at.
     pub const BUCKET_MATCH_WINDOW: u32 = 64;
 
-    /// Per-axis position tolerance (game units) for the bucket-match window.
+    /// Per-axis BLOWUP guard (game units) over the judge window.
     ///
-    /// We do NOT compare bit-for-bit here, and that is the whole point: the
-    /// per-frame physics carries an irreducible float lottery
-    /// (precision-sensitive `__ftol`, OpenGL timing) that wiggles the low bits,
-    /// so the previous bit-exact gate rejected even the correct bucket — every
-    /// reroll failed, CONT stopped landing.
+    /// This is deliberately GENEROUS, not a tracking tolerance. The judge's real
+    /// bucket criterion is the first-moving FRAME (below) — that is the
+    /// fingerprint the proven-in-the-field CONT used when it landed ~80% within
+    /// a few rerolls. Measured drift profiles show that even an
+    /// accepted-and-working bucket is NOT trajectory-tight in the window: the
+    /// replay departs spawn with a sub-tick phase skew, blips ~0.035-0.2 during
+    /// the settle, and the user's 4500+ logged successful catch-ups carried that
+    /// blip as their whole-run drift ceiling. Earlier attempts to demand
+    /// per-frame closeness here (bit-exact, then 0.01/0.02 epsilons) rejected
+    /// exactly those working buckets and made CONT "never land".
     ///
-    /// The threshold is the geometric center of two MEASURED populations. When a
-    /// reroll lands the recording's EXACT spawn bucket, the replay tracks it FLAT
-    /// across the whole window — the lateral axis to ~6e-5, the fast-settling
-    /// axis to ~0.003 (that float noise). A near-miss
-    /// bucket (departs spawn a tick off-phase) instead tracks closely for a
-    /// while then DIVERGES, growing ~0.01/frame and reaching ~0.035 at one tick,
-    /// 0.3+ for a fully wrong bucket. So the discriminator is flat-vs-growing,
-    /// and √(0.003·0.035) ≈ 0.01 gives ~3x margin on BOTH sides: it clears the
-    /// exact bucket's noise yet a growing near-miss still crosses it within a
-    /// frame or two (and blows past it well before the window ends, so it can
-    /// never sneak the full window). Widening epsilon does NOT help land a
-    /// stale-recording bucket — it only moves the breakpoint a frame. The spawn
-    /// fingerprint (frame 0) is still matched bit-exactly: the pre-movement
-    /// state IS deterministic and is the true bucket identity.
-    pub const BUCKET_MATCH_EPSILON: f32 = 0.01;
+    /// So the window check only rejects the catastrophic impostor: a bucket
+    /// whose trajectory leaves the recording by more than this within the
+    /// window (the logged disasters ran 0.5+, 1.4, 6, even 2265 = off-map).
+    /// Working buckets max out around ~0.42 in the window; disasters start
+    /// ~0.5+ — the guard sits at the gap's top edge.
+    pub const BUCKET_MATCH_EPSILON: f32 = 0.5;
 
-    /// Judge a CONT replay's F5 bucket. The replay's spawn bits must match the
-    /// recording's start (bit-exact — the spawn state is deterministic and is the
-    /// true bucket identity), and the replay must then track the recording within
-    /// `BUCKET_MATCH_EPSILON` per axis out to
-    /// `expected_first_moving + BUCKET_MATCH_WINDOW` — not just share the
-    /// first-moving frame. So only the correct bucket is accepted; a
-    /// same-first-moving-but-different-physics bucket (the closest dangerous one
-    /// departs spawn a tick off-phase and diverges past ~0.035 within the window,
-    /// growing from there) is rejected as `WrongBucket`, while the right bucket's
-    /// irreducible ~6e-5 per-frame float noise is tolerated. Pure
-    /// function over the shared-memory snapshot so tas_ui and the harness share
-    /// one source of truth. `observed` in WrongBucket is the first frame that
-    /// diverged beyond tolerance.
+    /// Judge a CONT replay's F5 bucket — the criterion that was reliable in the
+    /// field (~80% land rate within a few rerolls):
+    ///
+    /// 1. Spawn (frame 0) bits must equal the recording's start EXACTLY — the
+    ///    pre-movement state is deterministic and is the true bucket identity.
+    /// 2. The replay's FIRST-MOVING FRAME must equal the recording's. This is
+    ///    the bucket fingerprint; rerolling until it matches is the lottery.
+    /// 3. Blowup guard: the trajectory must stay within `BUCKET_MATCH_EPSILON`
+    ///    (generous, 0.5) of the recording out to
+    ///    `expected_first_moving + BUCKET_MATCH_WINDOW`. This does NOT demand
+    ///    tight tracking (a working bucket legitimately blips ~0.035-0.4 during
+    ///    the spawn settle); it only rejects the rare catastrophic impostor
+    ///    that shares the first-moving frame yet veers off-trajectory (logged
+    ///    disasters: 0.5+ .. 2265).
+    ///
+    /// History: matching the trajectory per-frame instead (bit-exact in
+    /// 047f99c, then small epsilons) rejected the very buckets that worked —
+    /// CONT went from "3-4 retries" to "never lands". Pure function over the
+    /// shared-memory snapshot so tas_ui and the harness share one source of
+    /// truth. `observed` in WrongBucket is the replay's first-moving frame on a
+    /// fingerprint mismatch, or the divergence frame if the blowup guard fired.
     pub fn judge_cont_bucket(
         play_coords: &[[f32; 3]],
         rec_coords: &[[f32; 3]],
@@ -638,16 +645,21 @@ pub mod cont {
             Some(f) => f,
             None => return BucketVerdict::NoSignal,
         };
-        // Need to see far enough past first-moving to discriminate the bucket.
+        // Need to see far enough past first-moving to apply the blowup guard.
         let needed = expected_fm + BUCKET_MATCH_WINDOW;
         if playback_pos < needed {
             return BucketVerdict::KeepWaiting;
         }
-        // The replay must track the recording within BUCKET_MATCH_EPSILON up to
-        // the window. The first frame that diverges beyond tolerance (one moves
-        // while the other is stationary, or the trajectories split) marks a wrong
-        // bucket. We tolerate the right bucket's irreducible float noise (~6e-5)
-        // but reject a near-miss bucket (~0.035 within the window, growing).
+        // The bucket fingerprint: the replay must leave spawn on the SAME frame
+        // the recording did.
+        let observed_fm = detect_first_moving(play_coords, playback_pos);
+        if observed_fm != Some(expected_fm) {
+            return BucketVerdict::WrongBucket {
+                observed: observed_fm,
+            };
+        }
+        // Blowup guard: reject only a catastrophic off-trajectory impostor.
+        // Working buckets blip up to ~0.4 in the window (settle skew) — allowed.
         let end = (needed as usize)
             .min(play_coords.len())
             .min(rec_coords.len())
@@ -745,15 +757,18 @@ pub mod cont {
 
         #[test]
         fn judge_tolerates_right_bucket_float_noise() {
-            // THE REGRESSION CASE: the right bucket reproduces the recording but
-            // with the environment's irreducible per-frame float noise (~6e-5).
-            // Bit-exact matching rejected this (0% CONT success); epsilon accepts
-            // it. Wrong buckets (0.3+ divergence) are still rejected.
+            // THE REGRESSION CASE: a working bucket reproduces the recording's
+            // first-moving frame but NOT its trajectory to the bit — irreducible
+            // float noise (~6e-5) plus a settle blip up to ~0.4 (sub-tick phase
+            // skew; the field-proven CONT accepted these for 4500+ successful
+            // catch-ups). Bit-exact/small-epsilon matching rejected them (0%
+            // CONT success). Only a catastrophic off-trajectory impostor (0.5+)
+            // is rejected.
             let mut rec = vec![[100.0_f32, 200.0, 300.0]; 400];
             for f in 250..400 {
                 rec[f] = [100.0 + (f as f32) * 0.5, 200.0, 300.0];
             }
-            // Right bucket: same trajectory + tiny noise on every moving frame.
+            // Working bucket: same first-moving frame, tiny noise everywhere.
             let mut noisy = rec.clone();
             for f in 250..400 {
                 noisy[f][0] += 0.00006;
@@ -763,12 +778,29 @@ pub mod cont {
                 judge_cont_bucket(&noisy, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250)),
                 BucketVerdict::Match
             );
-            // Wrong bucket: gross divergence just past spawn — still rejected.
+            // Working bucket with a settle blip (0.4 transient) — still accepted;
+            // this is the bucket that landed 80% of real CONTs.
+            let mut blip = rec.clone();
+            blip[252][0] += 0.4;
+            assert_eq!(
+                judge_cont_bucket(&blip, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250)),
+                BucketVerdict::Match
+            );
+            // Catastrophic impostor: same first-moving frame but veers off the
+            // recording past the blowup guard — rejected.
             let mut wrong = rec.clone();
-            wrong[252][0] += 0.4;
+            wrong[252][0] += 0.7;
             assert_eq!(
                 judge_cont_bucket(&wrong, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250)),
                 BucketVerdict::WrongBucket { observed: Some(252) }
+            );
+            // Wrong fingerprint: departs spawn a frame early — rejected with the
+            // replay's first-moving frame reported.
+            let mut early = rec.clone();
+            early[249] = [100.5, 200.0, 300.0];
+            assert_eq!(
+                judge_cont_bucket(&early, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250)),
+                BucketVerdict::WrongBucket { observed: Some(249) }
             );
         }
 
@@ -1648,10 +1680,10 @@ mod tests {
     #[test]
     fn size_of_tas_shared_state_pinned() {
         // Pin the total struct size so C++ and Rust sides stay in sync.
-        // align-8 struct. Tail: cont_reset_pending, then game_in_game (u32),
-        // level_id (u32), race_time_cs (u32), race_start_ts (u32). The last two
-        // add 8 bytes over the v7 1_647_256.
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_264);
+        // align-8 struct. Tail: cont_reset_pending, game_in_game, level_id,
+        // race_time_cs, race_start_ts, then clock_pin_enabled +
+        // clock_pin_phase (v9, +8 bytes over the v8 1_647_264).
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_272);
     }
 
     #[test]

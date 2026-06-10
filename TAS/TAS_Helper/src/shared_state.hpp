@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 8;  // +race_time_cs/race_start_ts (HUD timer)
+constexpr uint32_t TAS_SHARED_VERSION = 9;  // +clock_pin_ticks/clock_pin_remaining (F5 bucket pin)
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
@@ -193,6 +193,25 @@ struct TasSharedState {
     //                 spawn-lottery metric. 0xFFFFFFFF = unknown.
     uint32_t race_time_cs;
     uint32_t race_start_ts;
+
+    // -- Clock-phase pin (config: UI/harness; cave2 resets phase; cave5 runs) --
+    // The F5 "bucket lottery" is the per-frame tick-count PATTERN during the
+    // spawn settle: naturally it depends on the wall-clock phase at restart
+    // and the render frame rate, so the spawn microstate at the first-moving
+    // frame shifts whenever the machine's timing fingerprint shifts (fps, OS
+    // updates, background load) — that is what killed cross-session CONT on
+    // 2026-06-09. The pin replaces the wall-clock schedule with a CANONICAL
+    // repeating pattern [1,1,0] ticks/frame (~native pacing at ~150 fps)
+    // whenever the game is in OFF mode, in-game, at 1x — which is exactly
+    // where the settle runs (REC/PLAY arm only after the settle), so live
+    // steering and catch-up speed are untouched. The pattern phase is reset
+    // by CMD_RESTART, so every in-process restart replays the same schedule
+    // -> the same bucket (modulo reload frame-count variance), on any
+    // machine/fps/OS state.
+    // clock_pin_enabled: config, 0 = pin off (natural lottery), nonzero = on.
+    // clock_pin_phase:   status/internal, position in the [1,1,0] cycle.
+    uint32_t clock_pin_enabled;
+    volatile uint32_t clock_pin_phase;
 };
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks
@@ -273,6 +292,17 @@ public:
         state->level_id = 0xFFFFFFFFu;  // unknown until the scan thread runs
         state->race_time_cs = 0xFFFFFFFFu;
         state->race_start_ts = 0xFFFFFFFFu;
+        // Clock-phase pin OFF by default. The v1 pin froze the game during
+        // level reloads; v2 (passthrough when behind) still coincided with an
+        // sr.dll renderer crash at a pinned restart (2026-06-10 14:21,
+        // c0000005 @ sr.dll+0x13568) — suspected 0-tick frames at reload
+        // boundaries the renderer doesn't tolerate. Opt in via shared memory
+        // (write 1) for pin experiments; do not default-enable until the
+        // reload-boundary interaction is understood and the pin is
+        // re-validated through full REC/PLAY/CONT cycles INCLUDING the
+        // save-dialog and menu paths.
+        state->clock_pin_enabled = 0;
+        state->clock_pin_phase = 0;
         return true;
     }
 

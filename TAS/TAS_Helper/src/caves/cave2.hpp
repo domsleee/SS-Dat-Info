@@ -37,6 +37,12 @@ inline TasSharedState* g_cave2State = nullptr;
 inline GameAddresses* g_cave2Addr = nullptr;
 static SafetyHookMid cave2Hook{};
 
+// Hand-rolled hex for hook-context RDIAG logs (no CRT/format in a hook).
+static inline void DiagHexU32(char* dst, uint32_t v) {
+    static const char H[] = "0123456789ABCDEF";
+    for (int i = 0; i < 8; ++i) dst[i] = H[(v >> ((7 - i) * 4)) & 0xF];
+}
+
 // BB3B10 function type: __thiscall with 4 stack args
 typedef void(__thiscall* BB3B10Fn)(void* thisPtr, uint32_t keyIndex, uint32_t pressed,
                                     uint32_t unk, uint32_t arg4);
@@ -127,6 +133,29 @@ static void WriteActionState(uint32_t kbobj, uint8_t mask) {
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// BB3B10's 4th argument is NOT a constant: it drifts with game/session state
+// (live-captured 0x96 on 2026-06-03, observed 0x8F on 2026-06-10), and the
+// game silently DISCARDS injected calls whose arg4 doesn't match — the same
+// silent-steering-no-op failure mode as the original 0x588 bug. So we
+// self-calibrate: cave1d updates this from every REAL BB3B10 call it passes
+// through (menu keys, F5, any keypress), and all injection sites use the
+// captured value. Falls back to the last-known-good constant until the first
+// real call is seen.
+inline volatile uint32_t g_bb3b10Arg4 = GameAddresses::BB3B10_ARG4;
+
+// RDIAG: one-shot guard so we log only the FIRST injection's arg4 per arm.
+// Reset at ARM_REC / ARM_PLAY (see ProcessCommand).
+inline volatile uint32_t g_diagInjectLogged = 0;
+
+// Set by cave1c/cave1d the moment a REAL handler call updates g_bb3b10Arg4 to a
+// new value while recording/playing. The injected arg4 is dynamic and only
+// learnable from a real keypress, so the very first injected transition can
+// race ahead of calibration and be silently dropped (the "dead until warmup"
+// bug). When this fires, cave2 re-asserts the currently-held input with the
+// now-correct arg4 on its next tick, so the dropped press lands within a frame
+// — deterministically, no warmup. Cleared by cave2 after the re-inject.
+inline volatile uint32_t g_arg4Recalibrated = 0;
+
 // Helper: call BB3B10 for each changed bit (transitions only)
 static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
                                      uint32_t kbobj, uint8_t mask, uint8_t transitions) {
@@ -135,32 +164,44 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
     auto bb3b10 = (BB3B10Fn)(addr->bb3b10);
     void* thisPtr = (void*)(kbobj + GameAddresses::BB3B10_THIS_OFFSET);
 
+    // RDIAG: log the arg4 value the FIRST injection uses per arm — shows
+    // whether REC injects with the live race value (0x01) or the stale
+    // default (0x96 → silently discarded → cold steering dead).
+    if (!g_diagInjectLogged) {
+        g_diagInjectLogged = 1;
+        char buf[48]; int p = 0;
+        auto put = [&](const char* t){ while (*t && p < 36) buf[p++] = *t++; };
+        put("RDIAG inject m="); DiagHexU32(buf + p, s->mode); p += 8;
+        put(" a4="); DiagHexU32(buf + p, g_bb3b10Arg4); p += 8; buf[p] = '\0';
+        LogRing(s, LOG_INFO, buf);
+    }
+
     // Set cave2_injecting so Cave 1C/1D pass through
     s->cave2_injecting = 1;
 
     if (transitions & INPUT_LEFT) {
         bb3b10(thisPtr, GameAddresses::BB3B10_LEFT, (mask & INPUT_LEFT) ? 1 : 0,
-               0, GameAddresses::BB3B10_ARG4);
+               0, g_bb3b10Arg4);
     }
     if (transitions & INPUT_RIGHT) {
         bb3b10(thisPtr, GameAddresses::BB3B10_RIGHT, (mask & INPUT_RIGHT) ? 1 : 0,
-               0, GameAddresses::BB3B10_ARG4);
+               0, g_bb3b10Arg4);
     }
     if (transitions & INPUT_UP) {
         bb3b10(thisPtr, GameAddresses::BB3B10_UP, (mask & INPUT_UP) ? 1 : 0,
-               0, GameAddresses::BB3B10_ARG4);
+               0, g_bb3b10Arg4);
     }
     if (transitions & INPUT_DOWN) {
         bb3b10(thisPtr, GameAddresses::BB3B10_DOWN, (mask & INPUT_DOWN) ? 1 : 0,
-               0, GameAddresses::BB3B10_ARG4);
+               0, g_bb3b10Arg4);
     }
     if (transitions & INPUT_JUMP) {
         bb3b10(thisPtr, GameAddresses::BB3B10_JUMP, (mask & INPUT_JUMP) ? 1 : 0,
-               0, GameAddresses::BB3B10_ARG4);
+               0, g_bb3b10Arg4);
     }
     if (transitions & INPUT_SHIFT) {
         bb3b10(thisPtr, GameAddresses::BB3B10_SHIFT, (mask & INPUT_SHIFT) ? 1 : 0,
-               0, GameAddresses::BB3B10_ARG4);
+               0, g_bb3b10Arg4);
     }
 
     s->cave2_injecting = 0;
@@ -232,14 +273,53 @@ static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, boo
         void* thisPtr = (void*)(kbobj + GameAddresses::BB3B10_THIS_OFFSET);
         s->cave2_injecting = 1;
         bb3b10(thisPtr, GameAddresses::BB3B10_F5, pressed ? 1 : 0,
-               0, GameAddresses::BB3B10_ARG4);
+               0, g_bb3b10Arg4);
         s->cave2_injecting = 0;
     }
 }
 
 // Deferred log messages — set in callback, logged outside callback
+// Restart/root diagnostics (RDIAG): the visible-steering-dies-after-REC bug
+// tracks to the game's root player pointer ([SG+1D5450]) dangling across the
+// in-process restart. These hook-safe ring logs capture the root, a vtable
+// readability probe, and the resolved keyboard object at each restart stage so
+// one repro shows exactly where the chain breaks. No CRT formatting (hook
+// context) — hand-rolled hex.
+static uint32_t g_diagRootAtRestartCmd = 0;
+
+static void LogRootDiag(TasSharedState* s, const char* stage) {
+    auto* addr = g_cave2Addr;
+    if (!s || !addr) return;
+    uint32_t root = SafeReadPtr((uint32_t)addr->player_base);
+    uint32_t vt   = root ? SafeReadPtr(root) : 0;   // 0 = root dangles
+    uint32_t kb   = root ? SafeReadPtr(root + GameAddresses::KEYBOARD_OBJ_OFFSET) : 0;
+    char buf[112];
+    int p = 0;
+    auto put = [&](const char* t) { while (*t && p < 100) buf[p++] = *t++; };
+    put("RDIAG ");
+    put(stage);
+    put(" root=");  DiagHexU32(buf + p, root); p += 8;
+    put(" vt=");    DiagHexU32(buf + p, vt);   p += 8;
+    put(" kb=");    DiagHexU32(buf + p, kb);   p += 8;
+    put(" prev=");  DiagHexU32(buf + p, g_diagRootAtRestartCmd); p += 8;
+    buf[p] = '\0';
+    LogRing(s, LOG_INFO, buf);
+}
+
 static volatile uint32_t g_cave2_pendingLog = 0;  // 0=none, 1=REC, 2=PLAY, 3=STOP, 4=playback_done
 static volatile uint32_t g_cave2_logParam = 0;
+
+// Auto-calibration pulse. arg4 is dynamic and only learnable from a REAL
+// handler call; arming REC/PLAY we may hold a stale (menu-context) value, and
+// whether the handler fires again during REC is unreliable. So before
+// recording/replaying we spend a few OFF-mode ticks toggling a throwaway key
+// into the DI buffer — the game dispatches its real keyDown handler (+3940),
+// which cave1c calibrates g_bb3b10Arg4 from, picking up the current race-context
+// value. Runs in the post-restart countdown where the boarder can't move, so
+// the pulse is invisible and unrecorded. Then we enter the staged mode.
+static volatile uint32_t g_calibPhase = 0;       // OFF ticks remaining (0 = idle)
+static volatile uint32_t g_calibThenMode = 0;    // MODE_REC / MODE_PLAY to enter after
+static constexpr uint32_t CALIB_TICKS = 8;
 
 // Splice gate: 1 only between a SUCCESSFUL CMD_ARM_CONTINUE and its splice
 // (or any stop/re-arm). The PLAY handler's splice check requires this flag,
@@ -275,9 +355,13 @@ static void ProcessCommand(TasSharedState* s) {
             memset(s->segment_boundaries, 0, sizeof(s->segment_boundaries));
             s->segment_boundaries[0].frame = 0;
             s->segment_boundaries[0].input_log_offset = 0;
-            s->mode = MODE_REC;
+            // Calibrate arg4 in OFF first, THEN flip to REC (see g_calibPhase).
+            s->mode = MODE_OFF;
+            g_calibThenMode = MODE_REC;
+            g_calibPhase = CALIB_TICKS;
             g_cave2_contArmed = 0;
-            g_cave2_pendingLog = 1;
+            g_diagInjectLogged = 0;
+            LogRootDiag(s, "arm-rec");
             break;
 
         case CMD_ARM_PLAY:
@@ -299,6 +383,7 @@ static void ProcessCommand(TasSharedState* s) {
             // the stale frame and truncates/overwrites the recording.
             s->continue_from_frame = 0;
             g_cave2_contArmed = 0;
+            LogRootDiag(s, "arm-play");
 
             // No position forcing — F5 matching must happen naturally.
             // Position forcing (even velocity-preserving) creates physics state
@@ -369,6 +454,12 @@ static void ProcessCommand(TasSharedState* s) {
             // Begin in-process F5 restart sequence
             s->restart_state = 1;
             s->restart_frames_held = 0;
+            // Clock-phase pin: restart the canonical [1,1,0] tick cycle here so
+            // every in-process restart replays the same settle schedule (the
+            // F5 bucket). See cave5's pin block.
+            s->clock_pin_phase = 0;
+            g_diagRootAtRestartCmd = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
+            LogRootDiag(s, "restart-cmd");
             g_cave2_pendingLog = 7;  // "restart initiated"
             break;
 
@@ -512,9 +603,37 @@ static void __declspec(noinline) Cave2_Logic() {
                 // Release F5 after holding long enough
                 InjectF5(s, addr, kbobj, false);
                 s->restart_state = 2;  // Done
+                LogRootDiag(s, "f5-released");
                 g_cave2_pendingLog = 8;
             }
         }
+    }
+
+    // Auto-calibration pulse (OFF, post-arm): force the game's real keyDown
+    // handler to fire so cave1c calibrates the dynamic arg4 to the current race
+    // context BEFORE we record/replay. Toggle a throwaway key in the DI buffer;
+    // the game dispatches +3940 on the edge → cave1c (OFF, not injecting) reads
+    // the live a3. The boarder can't move during the post-restart countdown, so
+    // this is invisible. When the window closes, clear the key and enter the
+    // staged mode (the recording/replay starts clean here, AFTER calibration).
+    if (g_calibPhase > 0) {
+        uint32_t ckb = GetKeyboardObject(addr);
+        if (ckb) {
+            uint32_t cbuf = GetDIBuffer(ckb);
+            uint8_t cmask = (g_calibPhase & 1) ? (uint8_t)INPUT_LEFT : (uint8_t)0;
+            WriteDIBuffer(cbuf, cmask);
+        }
+        g_calibPhase--;
+        if (g_calibPhase == 0) {
+            uint32_t ckb2 = GetKeyboardObject(addr);
+            if (ckb2) WriteDIBuffer(GetDIBuffer(ckb2), 0);  // clear the calib key
+            s->prev_mask = 0;
+            s->mode = g_calibThenMode;
+            g_arg4Recalibrated = 1;  // re-assert held input on the first real tick
+            g_cave2_pendingLog = (g_calibThenMode == MODE_REC) ? 1 : 5;
+            g_calibThenMode = 0;
+        }
+        return;  // hold off normal REC/PLAY processing until calibrated
     }
 
     if (s->mode == MODE_OFF) return;
@@ -535,6 +654,14 @@ static void __declspec(noinline) Cave2_Logic() {
         uint8_t mask = SampleGAKS();
         uint8_t transitions = mask ^ (uint8_t)s->prev_mask;
 
+        // arg4 just got (re)calibrated from a real keypress: re-assert every
+        // currently-held key so a first-press dropped under the stale value
+        // lands now with the correct arg4 (kills the "dead until warmup" race).
+        if (g_arg4Recalibrated) {
+            transitions |= mask;
+            g_arg4Recalibrated = 0;
+        }
+
         uint32_t buffer = GetDIBuffer(kbobj);
         WriteDIBuffer(buffer, mask);
 
@@ -550,6 +677,13 @@ static void __declspec(noinline) Cave2_Logic() {
         CapturePlayerCoords(s, index, true);
 
         s->recorded_count = index + 1;
+
+        // RDIAG: periodic root/kbobj probe during REC — shows whether the
+        // chain the input writes go through still matches the live session
+        // (the steering-dies-after-REC investigation).
+        if ((index & 0xFF) == 0) {
+            LogRootDiag(s, "rec");
+        }
 
     } else if (s->mode == MODE_PLAY) {
         uint32_t pos = s->playback_pos;
@@ -592,6 +726,14 @@ static void __declspec(noinline) Cave2_Logic() {
         WriteActionState(kbobj, mask);
 
         uint8_t transitions = mask ^ (uint8_t)s->prev_mask;
+        // Re-assert held keys when arg4 was just (re)calibrated — same
+        // first-press race fix as the REC path (replay/CONT steering dropped
+        // under a stale arg4 = the deterministic "goes straight at first input"
+        // divergence).
+        if (g_arg4Recalibrated) {
+            transitions |= mask;
+            g_arg4Recalibrated = 0;
+        }
         if (s->force_direct == 2 && transitions) {
             CallBB3B10OnTransitions(s, addr, kbobj, mask, transitions);
         }

@@ -46,6 +46,20 @@ deploy: tas stop_game
     Copy-Item .\TAS\target\release\tas_test.exe $dest\ -Force; \
     Write-Host "Deployed TAS to $dest"
 
+# Launch the game (direct exe, NO scripted navigation — scripted nav can land
+# the engine in its demo/attract state) and a fresh tas_ui AFTER it. Order
+# matters: the DLL maps shared memory at game start; tas_ui must connect to
+# the new instance, never reuse a stale one.
+relaunch:
+    Start-Process -FilePath '{{supreme_folder}}\Supreme.exe' -WorkingDirectory '{{supreme_folder}}'; \
+    Start-Sleep -Seconds 4; \
+    $dest = '{{supreme_folder}}\Display_Config_Resources\TAS'; \
+    Start-Process -FilePath "$dest\tas_ui.exe" -WorkingDirectory $dest; \
+    Write-Host "Relaunched game + tas_ui (navigate into the race manually)"
+
+# One-shot: build, stop, deploy, relaunch — the only deploy flow to use.
+deploy_run: deploy relaunch
+
 deploy_display_config: display_config stop_game
     Copy-Item .\Display_Config\output\Display_Config.exe '{{supreme_folder}}\' -Force; \
     $dest = '{{supreme_folder}}\Display_Config_Resources'; \
