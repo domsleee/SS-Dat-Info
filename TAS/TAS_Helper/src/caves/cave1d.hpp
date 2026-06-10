@@ -46,8 +46,17 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
         }
 
         // Block during REC mode 6: Cave 2 will call BB3B10 directly on
-        // transitions for symmetric timing between REC and PLAY.
-        if (s->mode == MODE_REC && s->inject_mode == 6) {
+        // transitions for symmetric timing between REC and PLAY. Exempt:
+        //  - ESC (ki 0x48): not a gameplay key; the PAUSE MENU subscribes to
+        //    its broadcast — blocking it made ESC dead during REC even with
+        //    the cave1c handler passthrough in place.
+        //  - while PAUSED (cycle heartbeat stale): the sim isn't running, so
+        //    there's no REC/PLAY symmetry to protect, and the pause menu's
+        //    OWN navigation (arrows/enter) is observer-driven — without this
+        //    the menu opens but can't be operated during REC.
+        bool gamePaused = (GetTickCount() - g_lastCycleMs) > 250;
+        if (s->mode == MODE_REC && s->inject_mode == 6
+            && keyIndex != GameAddresses::BB3B10_ESC && !gamePaused) {
             s->bb3b10_block_count++;
             PerfSample(s->perf_cave1d, __rdtsc() - t0);
             return;

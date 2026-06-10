@@ -66,6 +66,10 @@ struct GameAddresses {
     static constexpr uint32_t BB3B10_JUMP  = 0x27;
     static constexpr uint32_t BB3B10_SHIFT = 0x24;
     static constexpr uint32_t BB3B10_F5    = 0x58;
+    // ESC's game Key_Code (live-captured via RDIAG: VK 0x1B → ki 0x48). The
+    // pause menu listens for it through the BB3B10 observer broadcast, so the
+    // REC-mode observer block must exempt it (ESC-during-REC fix).
+    static constexpr uint32_t BB3B10_ESC   = 0x48;
 
     // Pointer chain: root = [SG+1D5450], kbobj = [root+530], buffer = [kbobj+30]
     static constexpr uint32_t ROOT_PTR_OFFSET = 0x1D5450;
