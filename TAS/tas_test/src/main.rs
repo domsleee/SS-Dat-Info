@@ -43,6 +43,7 @@ mod snapshot_probe;
 mod snapshot_cont;
 mod cont_hijack;
 mod save_reload;
+mod steer_impact;
 mod stop_play_flake;
 mod speed;
 mod speed_reset;
@@ -120,6 +121,13 @@ fn main() {
             // first 1000 frames replay with zero drift across the pause
             // boundary.
             let ok = pause_resume::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "steer-impact" => {
+            // Injected steering must move the player (BB3B10 arg4 / inject-path
+            // guard). Focus-free + warmup-free → fails on stale arg4, passes
+            // once arg4 is sourced live from game memory.
+            let ok = steer_impact::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
         "rec-start" => {

@@ -39,21 +39,13 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
     // Cave 2 writes the buffer and calls BB3B10 directly in both modes.
     // Only pass through when cave2_injecting=1 (Cave 2's own BB3B10 calls)
     // or when mode is IDLE.
-    // Self-calibrate BB3B10's dynamic 4th argument from EVERY real handler
-    // call — the handler forwards its own a3 verbatim as arg4 (verified by
-    // disassembly at HMG+3973 and live probe: a3==arg4, observed 0x96 → 0x8F
-    // → 0x04 across contexts). Injected calls with a stale arg4 are silently
-    // discarded by the input observer (the "steering dead during REC" bug),
-    // so we keep the live value fresh even from keypresses we BLOCK during
-    // REC/PLAY: the press that gets blocked is the same press whose sampled
-    // transition cave2 injects a tick later.
-    if (s && !s->cave2_injecting) {
-        if (a3 != g_bb3b10Arg4) {
-            g_bb3b10Arg4 = a3;
-            // If we recalibrated mid-REC/PLAY, tell cave2 to re-assert the held
-            // input so a first-press dropped under the stale value lands now.
-            if (s->mode != MODE_OFF) g_arg4Recalibrated = 1;
-        }
+    // Fallback calibration: a3 is the hi dword of the Kernel::Time the event
+    // was stamped with (the handler forwards its Time args verbatim to
+    // BB3B10). Injection normally stamps with Kernel::Time::Current() and
+    // never reads this; the observed value only backs up injection if that
+    // export ever fails to resolve.
+    if (s && !s->cave2_injecting && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
+        g_bb3b10Arg4 = a3;
     }
     if (s && s->mode != MODE_OFF && !s->cave2_injecting) {
         s->handler_block_count++;
@@ -70,14 +62,20 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
         uint32_t cur = ((uint32_t)(uintptr_t)ecx) ^ (a1 << 1);
         if (cur != g_lastRealHandlerThis) {
             g_lastRealHandlerThis = cur;
-            char buf[96];
+            char buf[112];
             int p = 0;
-            auto put = [&](const char* t) { while (*t && p < 84) buf[p++] = *t++; };
+            auto put = [&](const char* t) { while (*t && p < 100) buf[p++] = *t++; };
             put("RDIAG real-h this=");
             DiagHexU32(buf + p, (uint32_t)(uintptr_t)ecx); p += 8;
             put(" a1=");  DiagHexU32(buf + p, a1); p += 8;
             put(" a2=");  DiagHexU32(buf + p, a2); p += 8;
             put(" a3=");  DiagHexU32(buf + p, a3); p += 8;
+            // The CALLER of +3940 — disassembling around this return address
+            // shows where a3 (the dynamic arg4 counter) is LOADED from, which
+            // is the memory location cave2 should read live instead of
+            // calibrating from keypresses.
+            put(" ret=");
+            DiagHexU32(buf + p, (uint32_t)(uintptr_t)_ReturnAddress()); p += 8;
             buf[p] = '\0';
             LogRing(s, LOG_INFO, buf);
         }
@@ -91,8 +89,8 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
 void __fastcall Cave1C_UpDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
     uint64_t t0 = __rdtsc();
     auto* s = g_cave1cState;
-    // Keep the dynamic arg4 fresh from real keyUp calls too (see DownDetour).
-    if (s && !s->cave2_injecting) {
+    // Keep the fallback arg4 fresh from real keyUp calls too (see DownDetour).
+    if (s && !s->cave2_injecting && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
         g_bb3b10Arg4 = a3;
     }
     if (s && s->mode != MODE_OFF && !s->cave2_injecting) {

@@ -1,5 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 9; // +clock_pin_enabled/clock_pin_phase (F5 bucket pin)
+pub const TAS_SHARED_VERSION: u32 = 11; // +arg4_source (Kernel::Time injection diagnostics)
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
@@ -253,7 +253,26 @@ pub struct TasSharedState {
     /// Clock-phase pin internal state: current position in the [1,1,0] cycle.
     /// DLL-written; reset by CMD_RESTART.
     pub clock_pin_phase: u32,
+
+    /// Test hook: when nonzero, the DLL suppresses ALL BB3B10 arg4 calibration
+    /// and injects this exact value as the event Time.hi (arg4). The
+    /// steer-impact regression test sets this to isolate the inject path —
+    /// injected steering then lands only if the event Time is correct without
+    /// a keypress. 0 = normal (live Kernel::Time::Current stamp).
+    pub test_arg4_override: u32,
+
+    /// DLL-written at each injection batch: where the injected event's Time
+    /// stamp came from. 0 = no injection yet, 1 = Kernel::Time::Current (the
+    /// proper, focus-independent path), 2 = keypress-calibrated fallback,
+    /// 3 = test_arg4_override forced. steer-impact asserts 1 in its live
+    /// phase so the proper mechanism can't silently regress to the fallback.
+    pub arg4_source: u32,
 }
+
+pub const ARG4_SOURCE_NONE: u32 = 0;
+pub const ARG4_SOURCE_TIME_CURRENT: u32 = 1;
+pub const ARG4_SOURCE_CALIBRATED: u32 = 2;
+pub const ARG4_SOURCE_OVERRIDE: u32 = 3;
 
 impl TasSharedState {
     pub fn mode_enum(&self) -> TasMode {
@@ -1680,10 +1699,11 @@ mod tests {
     #[test]
     fn size_of_tas_shared_state_pinned() {
         // Pin the total struct size so C++ and Rust sides stay in sync.
-        // align-8 struct. Tail: cont_reset_pending, game_in_game, level_id,
-        // race_time_cs, race_start_ts, then clock_pin_enabled +
-        // clock_pin_phase (v9, +8 bytes over the v8 1_647_264).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_272);
+        // align-8 struct. Tail: ..., clock_pin_enabled, clock_pin_phase,
+        // test_arg4_override (v10, filled the v9 trailing pad), then
+        // arg4_source (v11) — starts a new 8-byte slot, so the total grows
+        // from 1_647_272 to 1_647_280 (4 bytes field + 4 bytes pad).
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_280);
     }
 
     #[test]
