@@ -722,13 +722,16 @@ where
             continue;
         }
 
-        // Frame-0 position matched. Verify the next few frames also match the
-        // recording — same position + same inputs MUST produce same trajectory
-        // under deterministic physics. If rotation/velocity at the match
-        // moment is wrong, recorded inputs steer the snowboarder onto a
-        // divergent trajectory immediately. This catches mid-run recording
-        // rotation mismatches without needing a separate rotation_matrix
-        // field in the recording metadata.
+        // Frame-0 position matched. Verify the next few frames also track the
+        // recording — same position + same inputs produce the same trajectory
+        // under deterministic physics, MODULO the irreducible per-frame float
+        // noise (the game wiggles low bits each tick via __ftol/OpenGL). So we
+        // match within BUCKET_MATCH_EPSILON, NOT bit-for-bit: a bit-exact gate
+        // here rejected the correct bucket over a ~0.003 wiggle (observed:
+        // bit-identical through 320 frames, then dz=0.0029 at 321) and made
+        // refresh/CONT never land. This catches a wrong-rotation/velocity bucket
+        // (which diverges fast, well past epsilon) without that false reject.
+        let eps = tas_shared::cont::BUCKET_MATCH_EPSILON;
         let frames_available = s
             .playback_pos
             .min(s.recorded_count)
@@ -740,9 +743,9 @@ where
         for i in 1..frames_available as usize {
             let p = s.play_coords[i];
             let r = s.rec_coords[i];
-            if p[0].to_bits() != r[0].to_bits()
-                || p[1].to_bits() != r[1].to_bits()
-                || p[2].to_bits() != r[2].to_bits()
+            if (p[0] - r[0]).abs() > eps
+                || (p[1] - r[1]).abs() > eps
+                || (p[2] - r[2]).abs() > eps
             {
                 traj_ok = false;
                 diverge_frame = i as u32;
@@ -1045,6 +1048,25 @@ pub fn restart_continue_and_splice_inprocess(
                     "  Retry {}/{}: CONT bucket reroll  observed first-moving={:?} expected={:?}",
                     attempt, max_retries, observed, expected
                 );
+                // DIAGNOSTIC (CONT_DIAG=1): dump the actual play-vs-rec coords at
+                // the divergence frame so we can see whether this is an
+                // off-by-a-frame near-miss bucket (one moving, one stationary →
+                // large diff) or the right bucket diverging by tiny float noise.
+                if std::env::var("CONT_DIAG").is_ok() {
+                    if let Some(div) = observed {
+                        let s = client.state();
+                        let i = div as usize;
+                        if i < s.play_coords.len() && i < s.rec_coords.len() {
+                            let p = s.play_coords[i];
+                            let r = s.rec_coords[i];
+                            println!(
+                                "    div@{}: play=({:.6},{:.6},{:.6}) rec=({:.6},{:.6},{:.6}) |dx|={:.6} |dy|={:.6} |dz|={:.6}",
+                                div, p[0], p[1], p[2], r[0], r[1], r[2],
+                                (p[0]-r[0]).abs(), (p[1]-r[1]).abs(), (p[2]-r[2]).abs()
+                            );
+                        }
+                    }
+                }
                 // Clear any save dialog that re-appeared after the Stop, then
                 // jitter the wall clock so the next F5 lands at a new phase.
                 dismiss_save_dialog();
