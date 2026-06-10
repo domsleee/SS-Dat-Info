@@ -390,8 +390,12 @@ static void ProcessCommand(TasSharedState* s) {
             // inconsistency: position says rc0 but terrain/rotation/angular state
             // is from wherever F5 actually spawned. This causes drift with steering.
 
-            s->mode = MODE_PLAY;
-            g_cave2_pendingLog = 2;
+            // Calibrate arg4 in OFF before replay so the recording's steering
+            // injections aren't discarded under a stale value (the likely cause
+            // of replays "going straight at the first steering input" = drift).
+            s->mode = MODE_OFF;
+            g_calibThenMode = MODE_PLAY;
+            g_calibPhase = CALIB_TICKS;
             break;
 
         case CMD_ARM_CONTINUE:
@@ -617,20 +621,33 @@ static void __declspec(noinline) Cave2_Logic() {
     // this is invisible. When the window closes, clear the key and enter the
     // staged mode (the recording/replay starts clean here, AFTER calibration).
     if (g_calibPhase > 0) {
-        uint32_t ckb = GetKeyboardObject(addr);
-        if (ckb) {
-            uint32_t cbuf = GetDIBuffer(ckb);
-            uint8_t cmask = (g_calibPhase & 1) ? (uint8_t)INPUT_LEFT : (uint8_t)0;
-            WriteDIBuffer(cbuf, cmask);
+        // A real OS key event is the ONLY thing that makes the game dispatch
+        // its keyDown handler (+3940) — writing the DI buffer in memory does
+        // not. So synthesize a brief LEFT press via keybd_event: DirectInput
+        // delivers it, the game calls +3940 in-race, cave1c reads the live
+        // race-context a3 and calibrates g_bb3b10Arg4. Boarder is locked in the
+        // post-restart countdown, so the keypress is invisible and unrecorded.
+        // Only synthesize the calib keypress when OUR game window is the
+        // foreground (else DirectInput won't deliver it and we'd just fire a
+        // stray LEFT into whatever IS focused, e.g. tas_ui). When unfocused we
+        // skip the keypress and fall back to the user's own in-race keypress
+        // calibrating (sticky via live calibration) — no harm done.
+        DWORD fgPid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &fgPid);
+        bool gameFocused = (fgPid == GetCurrentProcessId());
+        if (gameFocused) {
+            if (g_calibPhase == CALIB_TICKS) {
+                keybd_event(VK_LEFT, 0, 0, 0);             // press
+            } else if (g_calibPhase == 2) {
+                keybd_event(VK_LEFT, 0, KEYEVENTF_KEYUP, 0); // release
+            }
         }
         g_calibPhase--;
         if (g_calibPhase == 0) {
-            uint32_t ckb2 = GetKeyboardObject(addr);
-            if (ckb2) WriteDIBuffer(GetDIBuffer(ckb2), 0);  // clear the calib key
             s->prev_mask = 0;
             s->mode = g_calibThenMode;
             g_arg4Recalibrated = 1;  // re-assert held input on the first real tick
-            g_cave2_pendingLog = (g_calibThenMode == MODE_REC) ? 1 : 5;
+            g_cave2_pendingLog = (g_calibThenMode == MODE_REC) ? 1 : 2;
             g_calibThenMode = 0;
         }
         return;  // hold off normal REC/PLAY processing until calibrated
