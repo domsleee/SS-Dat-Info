@@ -569,11 +569,19 @@ pub fn run(
             } else {
                 println!("--- Baseline REC build (single pass) ---");
                 client.state_mut().playback_speed = 1.0;
+                // Focus BEFORE the restart, not between restart and arm: the
+                // CONT replay cycles arm immediately after their restart (no
+                // focus call — see harness::run_cont_cycle), so any wall time
+                // spent here between restart and ARM_REC shifts the baseline's
+                // first-moving index under every replay's (a focus switch is
+                // ~300ms ≈ 30 ticks) and the bucket judge then rerolls forever
+                // with a systematic offset. Focus-first keeps restart→arm
+                // identical in both paths regardless of who held focus.
+                harness::focus_game();
                 if !harness::restart_and_stabilize_inprocess(&mut client) {
                     eprintln!("ERROR: Game not alive for baseline REC (in-process restart)");
                     std::process::exit(1);
                 }
-                harness::focus_game();
                 harness::arm_rec(&mut client);
                 let baseline_steps =
                     build_baseline_steps(splice_frame, baseline_profile, tap_ticks);
