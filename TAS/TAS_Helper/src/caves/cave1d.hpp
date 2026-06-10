@@ -31,12 +31,11 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
     if (s) {
         s->bb3b10_call_count++;
 
-        // Self-calibrate the dynamic arg4 from EVERY real BB3B10 call we see
-        // (this is the value the observer validates; a stale one is silently
-        // dropped). Belt-and-braces alongside cave1c's handler calibration.
-        if (!s->cave2_injecting && arg4 != g_bb3b10Arg4) {
+        // Fallback calibration from real BB3B10 calls (arg4 = Time.hi of the
+        // event stamp). Injection normally uses Kernel::Time::Current() and
+        // never reads this; belt-and-braces alongside cave1c's calibration.
+        if (!s->cave2_injecting && !s->test_arg4_override && arg4 != g_bb3b10Arg4) {
             g_bb3b10Arg4 = arg4;
-            if (s->mode != MODE_OFF) g_arg4Recalibrated = 1;
         }
 
         // Allow through if Cave 2 is actively injecting

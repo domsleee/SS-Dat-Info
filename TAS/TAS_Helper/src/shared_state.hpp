@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 9;  // +clock_pin_ticks/clock_pin_remaining (F5 bucket pin)
+constexpr uint32_t TAS_SHARED_VERSION = 11; // +arg4_source (Kernel::Time injection diagnostics)
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
@@ -40,6 +40,14 @@ enum TasInputBit : uint8_t {
     INPUT_DOWN  = 0x08,  // bit 3
     INPUT_JUMP  = 0x10,  // bit 4
     INPUT_SHIFT = 0x20,  // bit 5
+};
+
+// Where the injected BB3B10 Time stamp came from (TasSharedState::arg4_source)
+enum TasArg4Source : uint32_t {
+    ARG4_SOURCE_NONE         = 0,  // no injection yet
+    ARG4_SOURCE_TIME_CURRENT = 1,  // Kernel::Time::Current() — the proper path
+    ARG4_SOURCE_CALIBRATED   = 2,  // fallback: Time.hi observed from real keypresses
+    ARG4_SOURCE_OVERRIDE     = 3,  // test_arg4_override forced (steer-impact test)
 };
 
 // Log severity levels
@@ -212,6 +220,23 @@ struct TasSharedState {
     // clock_pin_phase:   status/internal, position in the [1,1,0] cycle.
     uint32_t clock_pin_enabled;
     volatile uint32_t clock_pin_phase;
+
+    // -- Test hook: force the injected BB3B10 arg4 (config) --
+    // 0 = normal (inject the live Kernel::Time::Current() stamp). Nonzero =
+    // inject this EXACT value as Time.hi (lo=0) and suppress all calibration.
+    // The steer-impact regression test drives it in two phases: a
+    // deliberately-wrong value (injection must be silently discarded →
+    // boarder goes straight) then 0 (live time stamp → boarder turns). That
+    // contrast proves the event Time is load-bearing and guards the whole
+    // inject path from regressing.
+    uint32_t test_arg4_override;
+
+    // -- Injection Time-stamp source (DLL writes at each injection batch) --
+    // TasArg4Source: 1 = Kernel::Time::Current (the proper, focus-independent
+    // path), 2 = keypress-calibrated fallback, 3 = test override. The
+    // steer-impact test asserts 1 so the proper mechanism can't silently
+    // regress to the fallback.
+    uint32_t arg4_source;
 };
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks
@@ -303,6 +328,8 @@ public:
         // save-dialog and menu paths.
         state->clock_pin_enabled = 0;
         state->clock_pin_phase = 0;
+        state->test_arg4_override = 0;
+        state->arg4_source = ARG4_SOURCE_NONE;
         return true;
     }
 

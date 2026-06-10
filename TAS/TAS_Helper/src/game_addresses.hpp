@@ -6,11 +6,31 @@
 // Game module bases and resolved addresses.
 // All offsets from reverse engineering documented in tasks/tas.md.
 
+// Housemarque Kernel::Time — a 64-bit timestamp ({lo, hi} dwords; ~QPC-derived
+// machine-uptime units). The input pipeline stamps every key event with the
+// Time at message-pump dispatch: Win32_Driver::Translate(tagMSG&, Kernel::Time)
+// → keyDown/keyUp (+3940/+3980) → BB3B10(keyIndex, pressed, Time.lo, Time.hi).
+// The observer discards events whose Time predates the current race context —
+// the "dynamic arg4" that silently killed stale injected input.
+struct KernelTime { uint32_t lo; uint32_t hi; };
+
+// ?Current@Time@Kernel@Housemarque@@SI?AV123@XZ — static __fastcall, returns
+// the Time by value through a hidden return slot passed in ecx (verified by
+// disasm: `mov esi, ecx; ... mov [esi], eax; mov [esi+4], edx; mov eax, esi`).
+using KernelTimeCurrentFn = KernelTime*(__fastcall*)(KernelTime* out, void* edx_unused);
+
 struct GameAddresses {
     // Module bases
     HMODULE exe = nullptr;   // Supreme.exe
     HMODULE sg = nullptr;    // Supreme_Game.dll
     HMODULE hmg = nullptr;   // HMG_Cetsup_Win32.dll
+    HMODULE kernel = nullptr; // HMG_Kernel.dll
+
+    // HMG_Kernel.dll: Kernel::Time::Current() — the game's own clock. Used to
+    // stamp injected BB3B10 input events with a genuinely-current timestamp
+    // (exactly what a real keypress carries), so injection is never discarded
+    // as stale. nullptr = export missing (fall back to calibrated arg4).
+    KernelTimeCurrentFn time_current = nullptr;
 
     // Supreme.exe offsets
     std::uint8_t* cave5_site = nullptr;     // exe+0x25C81: after ftol+mov esi,eax (tick override)
@@ -84,10 +104,22 @@ struct GameAddresses {
         exe = GetModuleHandleA(nullptr);  // Supreme.exe (main executable)
         sg = GetModuleHandleA("Supreme_Game.dll");
         hmg = GetModuleHandleA("HMG_Cetsup_Win32.dll");
+        kernel = GetModuleHandleA("HMG_Kernel.dll");
 
         if (!exe) { Log("ERROR: Supreme.exe not found"); return false; }
         if (!sg) { Log("ERROR: Supreme_Game.dll not loaded"); return false; }
         if (!hmg) { Log("ERROR: HMG_Cetsup_Win32.dll not loaded"); return false; }
+
+        // Kernel::Time::Current — non-fatal if missing (injection falls back
+        // to the keypress-calibrated arg4), but it should always resolve.
+        if (kernel) {
+            time_current = (KernelTimeCurrentFn)GetProcAddress(
+                kernel, "?Current@Time@Kernel@Housemarque@@SI?AV123@XZ");
+        }
+        if (!time_current) {
+            Log("WARNING: Kernel::Time::Current not resolved — injected input "
+                "falls back to calibrated arg4");
+        }
 
         auto exeBase = (std::uint8_t*)exe;
         auto sgBase = (std::uint8_t*)sg;
@@ -119,6 +151,7 @@ struct GameAddresses {
         Log(std::format("BB3B10 (+3B10): {:p}", (void*)bb3b10));
         Log(std::format("Player base ptr: {:p}", (void*)player_base));
         Log(std::format("VK table: {:p}", (void*)vk_table));
+        Log(std::format("Kernel::Time::Current: {:p}", (void*)time_current));
 
         return true;
     }
