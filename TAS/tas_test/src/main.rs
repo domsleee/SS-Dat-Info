@@ -43,6 +43,7 @@ mod snapshot_probe;
 mod snapshot_cont;
 mod cont_hijack;
 mod save_reload;
+mod rec_repro;
 mod steer_impact;
 mod stop_play_flake;
 mod speed;
@@ -128,6 +129,12 @@ fn main() {
             // guard). Focus-free + warmup-free → fails on stale arg4, passes
             // once arg4 is sourced live from game memory.
             let ok = steer_impact::run();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        "rec-repro" => {
+            // REC-vs-REC reproducibility: the same driven input recorded twice
+            // must yield the same transitions (scuffing catcher).
+            let ok = rec_repro::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
         "rec-start" => {
