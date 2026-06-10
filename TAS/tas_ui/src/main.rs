@@ -426,6 +426,11 @@ struct TasApp {
     cont_catchup_speed: Option<f32>, // saved speed to restore after CONT catch-up
     cont_catchup_multiplier: f32,    // configurable CONT catch-up speed (default 12x)
     log_read_cursor: u32,
+    /// Finish-line watcher (1.7): scan cursor into rec_coords during REC so
+    /// each frame only examines new ticks, and the tick the run crossed the
+    /// finish (drives the auto-stop + the 🏁 marker; reset when REC starts).
+    finish_scan_cursor: u32,
+    finished_at_tick: Option<u32>,
 
     // Cached max drift (incremental scan instead of per-frame O(n))
     cached_max_drift_x: f32,
@@ -610,6 +615,8 @@ impl TasApp {
             cont_catchup_speed: None,
             cont_catchup_multiplier: settings.cont_catchup_speed,
             log_read_cursor: 0,
+            finish_scan_cursor: 0,
+            finished_at_tick: None,
             cached_max_drift_x: 0.0,
             cached_max_drift_z: 0.0,
             last_drift_scan_count: 0,
@@ -1791,6 +1798,11 @@ impl eframe::App for TasApp {
                     // Splice fired (or REC began) — the controller already
                     // cleared itself at bucket-accept, but be defensive.
                     self.cont_controller = None;
+                    // Fresh finish-line watch for this session. A CONT splice
+                    // resumes mid-run, so start the scan at the resume tick —
+                    // the prefix was already checked when it was recorded.
+                    self.finish_scan_cursor = continue_from.max(1);
+                    self.finished_at_tick = None;
                 }
                 // REC stopped (mode went from REC to OFF)
                 if self.last_mode == 1 && current_mode == 0 {
@@ -1807,6 +1819,36 @@ impl eframe::App for TasApp {
             }
             if current_mode == 1 {
                 self.update_recording_recovery_progress(&state_snapshot);
+
+                // Finish-line watch (1.7): when the recording crosses the
+                // track's finish line, stop REC — the race is over, the timer
+                // froze at the line; recording the run-out is never wanted.
+                // Incremental: only the ticks since the last frame are
+                // scanned.
+                if self.finished_at_tick.is_none() {
+                    let cross = self.shared.as_ref().and_then(|shared| {
+                        let s = shared.state();
+                        crate::start_line::finish_cross_tick(
+                            &s.rec_coords,
+                            recorded,
+                            crate::level::level_code_from_id(s.level_id),
+                            self.finish_scan_cursor,
+                        )
+                    });
+                    self.finish_scan_cursor = recorded.max(1);
+                    if let Some(tick) = cross {
+                        self.finished_at_tick = Some(tick);
+                        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                        self.log_lines.push(format!(
+                            "[{}] \u{1F3C1} Finish line crossed at tick {} — recording stopped",
+                            ts, tick
+                        ));
+                        self.apply_transport_action(
+                            transport::Action::Send(TasCommand::Stop),
+                            &ts,
+                        );
+                    }
+                }
             }
         }
 
@@ -2233,6 +2275,15 @@ impl eframe::App for TasApp {
                             mode_color,
                             egui::RichText::new(headline.clone()).strong().size(16.0),
                         );
+                        // Finish flag: the last recording ended by crossing
+                        // the finish line (auto-stopped at that tick).
+                        if let Some(t) = self.finished_at_tick {
+                            ui.label(egui::RichText::new("\u{1F3C1}").size(16.0))
+                                .on_hover_text(format!(
+                                    "Recording crossed the finish line at tick {} and was auto-stopped",
+                                    t
+                                ));
+                        }
                         let in_game = state.game_in_game != 0;
                         let card_level = level_name_from_id(state.level_id);
                         let (g_txt, g_col) = if in_game {
@@ -2704,6 +2755,8 @@ mod tests {
             log_lines: Vec::new(),
             log_file: None,
             log_lines_persisted: 0,
+            finish_scan_cursor: 0,
+            finished_at_tick: None,
             timeline_view: timeline::TimelineView::default(),
             timeline_edit: timeline::TimelineEdit::default(),
             pending_input_edit: None,
