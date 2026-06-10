@@ -138,7 +138,49 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             if (realTick > remaining) realTick = remaining;
         }
 
-        if (s->force_fixed_tick > 0) {
+        // Clock-phase pin: canonical [1,1,0] ticks-per-frame whenever the game
+        // is idling in OFF mode, in-game, at 1x — exactly the regime where the
+        // post-restart spawn settle runs (REC/PLAY only arm after the settle).
+        // The settle's per-frame tick pattern IS the F5 bucket lottery: pinning
+        // it to a fixed cycle (phase reset by CMD_RESTART) makes every restart
+        // land the same bucket regardless of wall-clock phase, render fps, or
+        // OS timing changes. [1,1,0] ~= 100 ticks/sec at ~150 fps, so idle
+        // pacing stays ~native. prev_time is corrected by the difference
+        // between the natural and emitted tick counts so the game's time
+        // accumulator stays glued to wall time (no stall/burst on regime
+        // exit). Skipped when the drain/reset paths fire (they own the
+        // accumulator this frame).
+        bool pinned = false;
+        if (s->clock_pin_enabled && !did_reset && !catchup_drain
+            && s->mode == MODE_OFF && s->game_in_game
+            && s->playback_speed == 1.0f && s->force_fixed_tick == 0
+            && ctx.ebp) {
+            int32_t natural = realTick;
+            if (natural < 0) natural = 0;
+            if (natural > CAVE5_PER_FRAME_TICK_CAP) natural = CAVE5_PER_FRAME_TICK_CAP;
+            if (natural > 2) {
+                // The game is behind real time (level reload, slow frames,
+                // fps below ~50). Pinning here would freeze it in slow motion
+                // — the fixed pattern emits at most 2 ticks per 3 frames and
+                // the wall-glue correction erases the backlog it needs to
+                // catch up on. Let the native clamp path below drain the
+                // backlog like the unpatched game, and restart the canonical
+                // cycle at the next caught-up frame.
+                s->clock_pin_phase = 0;
+            } else {
+                uint32_t phase = s->clock_pin_phase;
+                int32_t emit = (phase % 3u == 2u) ? 0 : 1;
+                s->clock_pin_phase = (phase + 1u) % 3u;
+                float* prev_time = (float*)(uintptr_t)(ctx.ebp + 0x0C);
+                *prev_time += (float)(natural - emit) * g_nativeTickAdvance;
+                ctx.esi = (uintptr_t)emit;
+                pinned = true;
+            }
+        }
+
+        if (pinned) {
+            // tick handling complete for this frame
+        } else if (s->force_fixed_tick > 0) {
             // Deterministic mode: exact tick count per frame
             ctx.esi = s->force_fixed_tick;
         } else if (did_reset) {

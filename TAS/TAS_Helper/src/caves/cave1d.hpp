@@ -31,6 +31,14 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
     if (s) {
         s->bb3b10_call_count++;
 
+        // Self-calibrate the dynamic arg4 from EVERY real BB3B10 call we see
+        // (this is the value the observer validates; a stale one is silently
+        // dropped). Belt-and-braces alongside cave1c's handler calibration.
+        if (!s->cave2_injecting && arg4 != g_bb3b10Arg4) {
+            g_bb3b10Arg4 = arg4;
+            if (s->mode != MODE_OFF) g_arg4Recalibrated = 1;
+        }
+
         // Allow through if Cave 2 is actively injecting
         if (s->cave2_injecting) {
             cave1dInline.thiscall<void>(ecx, keyIndex, pressed, unk, arg4);
@@ -44,6 +52,30 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
             s->bb3b10_block_count++;
             PerfSample(s->perf_cave1d, __rdtsc() - t0);
             return;
+        }
+    }
+
+    // RDIAG: on OFF-mode REAL BB3B10 calls (the game's own input path), log the
+    // full call signature (this, keyIndex, pressed, arg4) whenever the
+    // (this,keyIndex) pair changes — the apples-to-apples diff against cave2's
+    // injected calls (kbobj+0x18, BB3B10_LEFT/RIGHT 0x3A/0x3B, arg4 0x96) for
+    // the steering-dies-after-REC investigation.
+    if (s && s->mode == MODE_OFF) {
+        // (calibration handled above, all-modes); this block is RDIAG only.
+        static volatile uint32_t lastRealSig = 0;
+        uint32_t cur = ((uint32_t)(uintptr_t)ecx) ^ (keyIndex << 1);
+        if (cur != lastRealSig) {
+            lastRealSig = cur;
+            char buf[80];
+            int p = 0;
+            auto put = [&](const char* t) { while (*t && p < 68) buf[p++] = *t++; };
+            put("RDIAG real-bb this=");
+            DiagHexU32(buf + p, (uint32_t)(uintptr_t)ecx); p += 8;
+            put(" ki=");  DiagHexU32(buf + p, keyIndex); p += 8;
+            put(" pr=");  DiagHexU32(buf + p, pressed);  p += 8;
+            put(" a4=");  DiagHexU32(buf + p, arg4);     p += 8;
+            buf[p] = '\0';
+            LogRing(s, LOG_INFO, buf);
         }
     }
 
