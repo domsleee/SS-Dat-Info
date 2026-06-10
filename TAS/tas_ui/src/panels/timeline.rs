@@ -20,6 +20,12 @@ const ROW_ACTIONS: &[&str] = &["left", "right", "up", "down", "jump", "shift"];
 /// stops the brush handle from collapsing to nothing.
 const MIN_WINDOW: u32 = 60;
 
+/// Default window for a fresh view (ticks = 10ms, so 1500 ≈ 15s). Fitting the
+/// WHOLE recording by default renders multi-minute runs as unreadable slivers
+/// ("the default zoom is way too small"); open at a workable zoom instead and
+/// let Fit/scroll widen it.
+const DEFAULT_WINDOW: u32 = 1500;
+
 /// Shortest input a drag/box edit will produce (ticks).
 const MIN_LEN: u32 = 1;
 
@@ -52,7 +58,13 @@ impl TimelineView {
             self.end = 0;
             return;
         }
-        if self.end == 0 || self.end > total {
+        if self.end == 0 {
+            // Fresh view: open at a readable zoom, not whole-recording fit.
+            self.start = 0;
+            self.end = total.min(DEFAULT_WINDOW);
+            return;
+        }
+        if self.end > total {
             self.end = total;
         }
         if self.start >= self.end {
@@ -661,21 +673,31 @@ fn brush(
             view.pan(dt, total);
         }
     }
+    // Brush handles track the ABSOLUTE cursor position, not the drag delta.
+    // With deltas, a drag that runs past the brush edge keeps clamping — and
+    // the instant the cursor reverses, the window resizes again even though
+    // the cursor is far outside the brush ("drag left past the window, move
+    // right → it zooms in immediately"). Mapping the handle to the cursor's
+    // tick means nothing happens until the cursor re-crosses the handle.
     let l_resp = ui
         .interact(lh, id.with("lh"), egui::Sense::drag())
         .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
     if l_resp.dragged() {
-        let dt = (l_resp.drag_delta().x / ppt).round() as i32;
-        let ns = (view.start as i32 + dt).clamp(0, view.end as i32 - MIN_WINDOW as i32);
-        view.start = ns.max(0) as u32;
+        if let Some(p) = l_resp.interact_pointer_pos() {
+            let t = ((p.x - inner_left) / ppt).round() as i32;
+            let ns = t.clamp(0, view.end as i32 - MIN_WINDOW as i32);
+            view.start = ns.max(0) as u32;
+        }
     }
     let r_resp = ui
         .interact(rh, id.with("rh"), egui::Sense::drag())
         .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
     if r_resp.dragged() {
-        let dt = (r_resp.drag_delta().x / ppt).round() as i32;
-        let ne = (view.end as i32 + dt).clamp(view.start as i32 + MIN_WINDOW as i32, total as i32);
-        view.end = ne as u32;
+        if let Some(p) = r_resp.interact_pointer_pos() {
+            let t = ((p.x - inner_left) / ppt).round() as i32;
+            let ne = t.clamp(view.start as i32 + MIN_WINDOW as i32, total as i32);
+            view.end = ne as u32;
+        }
     }
 }
 
@@ -791,6 +813,19 @@ mod tests {
         let mut v = TimelineView::default();
         v.clamp(500);
         assert_eq!(v, TimelineView { start: 0, end: 500 });
+    }
+
+    #[test]
+    fn view_clamp_uninit_opens_at_default_zoom_for_long_recordings() {
+        let mut v = TimelineView::default();
+        v.clamp(60_000);
+        assert_eq!(
+            v,
+            TimelineView {
+                start: 0,
+                end: DEFAULT_WINDOW
+            }
+        );
     }
 
     #[test]

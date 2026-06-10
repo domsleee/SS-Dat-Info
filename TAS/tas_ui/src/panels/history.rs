@@ -31,6 +31,25 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
     let today = Local::now().date_naive();
     let yesterday = today.pred_opt();
 
+    // Per-level filter: when the game is on a known track, default to showing
+    // only that track's entries. Entries with no level tag (legacy, or made
+    // at the menu) are always shown — hiding them would "lose" pre-tag
+    // history. Sticky via egui temp memory.
+    let live_level = history.live_level().map(str::to_owned);
+    let filter_key = egui::Id::new("history_level_filter");
+    let mut this_level_only: bool = ui.data_mut(|d| *d.get_temp_mut_or(filter_key, true));
+    if let Some(code) = live_level.as_deref() {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut this_level_only, format!("This level only ({})", code))
+                .on_hover_text(
+                    "Show only history made on the current track. \
+                     Untagged (older) entries are always shown.",
+                );
+        });
+        ui.data_mut(|d| d.insert_temp(filter_key, this_level_only));
+    }
+    let level_filter = if this_level_only { live_level.clone() } else { None };
+
     // Inline-rename state (which entry is being edited + its text buffer),
     // persisted in egui memory across frames.
     let rename_key = egui::Id::new("history_rename_state");
@@ -53,8 +72,15 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
             // undo/redo remain unchanged. The vec index travels with
             // each row so Restore(idx) still targets the right entry.
             let entries = history.entries();
-            let mut visible: Vec<(usize, &HistoryEntry)> =
-                entries.iter().enumerate().collect();
+            let mut visible: Vec<(usize, &HistoryEntry)> = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| match (&level_filter, &e.level) {
+                    (Some(want), Some(have)) => want == have,
+                    // No filter active, or an untagged entry: always visible.
+                    _ => true,
+                })
+                .collect();
             visible.sort_by(|(a_idx, a), (b_idx, b)| {
                 // Newest day first; PINNED float to the top within their day;
                 // then newest-first, with push recency as the final tiebreak.

@@ -78,6 +78,15 @@ pub fn parse_level_code(path: &str) -> Option<String> {
     Some(format!("{}{}{}", a, mark, d))
 }
 
+/// Level code from the DLL's published `level_id` (shared memory): 0..8 =
+/// area*3 + difficulty (area 0=Forest, 1=Alpine, 2=Village; diff 0=Easy,
+/// 1=Medium, 2=Hard). 0xFFFFFFFF = unknown/menu → None. The in-process heap
+/// scan only detects the main Tracks (no Halfpipe/Ramp codes here).
+pub fn level_code_from_id(level_id: u32) -> Option<&'static str> {
+    const CODES: [&str; 9] = ["FE", "FM", "FH", "AE", "AM", "AH", "VE", "VM", "VH"];
+    CODES.get(level_id as usize).copied()
+}
+
 /// The in-race duration of a recording, in centiseconds (= ticks, since the
 /// game runs at exactly 100 ticks/s). Measured from the gate (`first_moving`,
 /// when the character leaves spawn) to the end of the recording — that matches
@@ -161,6 +170,15 @@ mod tests {
     #[test]
     fn default_name_formats_level_and_time() {
         assert_eq!(default_recording_name(Some("FE"), Some(5876)), "FE-5876.tasrec");
+    }
+
+    #[test]
+    fn level_code_from_id_maps_all_nine_tracks() {
+        assert_eq!(level_code_from_id(0), Some("FE"));
+        assert_eq!(level_code_from_id(4), Some("AM"));
+        assert_eq!(level_code_from_id(8), Some("VH"));
+        assert_eq!(level_code_from_id(9), None);
+        assert_eq!(level_code_from_id(0xFFFF_FFFF), None);
     }
 
     #[test]

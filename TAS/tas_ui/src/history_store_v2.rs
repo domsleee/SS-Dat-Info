@@ -60,6 +60,8 @@ pub struct StoredEntry {
     pub start_tick: u32,
     pub end_tick: u32,
     pub first_moving: Option<u32>,
+    /// Level code (e.g. "FE") the entry was created on; None = unknown/legacy.
+    pub level: Option<String>,
     pub created_at_iso: String,
     pub snapshot: Option<PersistedSnapshot>,
 }
@@ -76,6 +78,8 @@ pub struct LoadedEntry {
     pub start_tick: u32,
     pub end_tick: u32,
     pub first_moving: Option<u32>,
+    /// Level code (e.g. "FE"); None on manifests written before this field.
+    pub level: Option<String>,
     pub created_at_iso: String,
     pub snapshot: Option<PersistedSnapshot>,
     pub available: bool,
@@ -106,6 +110,9 @@ struct ManifestEntry {
     start_tick: u32,
     end_tick: u32,
     first_moving: Option<u32>,
+    /// Level code (e.g. "FE"). Absent on older manifests → None.
+    #[serde(default)]
+    level: Option<String>,
     created_at_iso: String,
     /// `None` for marker entries with no blob.
     size: Option<u64>,
@@ -227,6 +234,7 @@ impl HistoryStoreV2 {
                     start_tick: me.start_tick,
                     end_tick: me.end_tick,
                     first_moving: me.first_moving,
+                    level: me.level.clone(),
                     created_at_iso: me.created_at_iso.clone(),
                     snapshot,
                     available,
@@ -328,6 +336,7 @@ impl HistoryStoreV2 {
                 start_tick: e.start_tick,
                 end_tick: e.end_tick,
                 first_moving: e.first_moving,
+                level: e.level.clone(),
                 created_at_iso: e.created_at_iso.clone(),
                 size,
                 checksum,
@@ -838,6 +847,7 @@ mod tests {
             start_tick: 0,
             end_tick: count,
             first_moving: None,
+            level: None,
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
             snapshot: Some(snap(count, id as u8)),
         }
@@ -853,6 +863,7 @@ mod tests {
             start_tick: 0,
             end_tick: 0,
             first_moving: None,
+            level: None,
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
             snapshot: None,
         }
@@ -1308,6 +1319,7 @@ mod tests {
                 start_tick: 0,
                 end_tick: 4,
                 first_moving: None,
+                level: None,
                 created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
                 size: size.or(Some(bytes.len() as u64)),
                 checksum: Some(crc32fast::hash(bytes)),
@@ -1343,6 +1355,7 @@ mod tests {
             start_tick: 0,
             end_tick: 4,
             first_moving: None,
+            level: None,
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
             snapshot: res.entries[0].snapshot.clone(),
         };

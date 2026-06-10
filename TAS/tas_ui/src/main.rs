@@ -2114,6 +2114,11 @@ impl eframe::App for TasApp {
                 // index into shared `level_id` (no RPM scan from the UI).
                 let game_level = level_name_from_id(shared.state().level_id);
 
+                // Stamp new history entries with the level they're made on
+                // (per-level history filter).
+                self.history
+                    .set_live_level(crate::level::level_code_from_id(shared.state().level_id));
+
                 transport::show(
                     ui,
                     mode,
