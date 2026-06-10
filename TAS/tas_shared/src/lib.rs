@@ -572,23 +572,52 @@ pub mod cont {
     }
 
     /// Frames PAST the recording's first-moving frame that the replay must
-    /// reproduce BIT-EXACTLY for the bucket to be accepted. The first-moving
-    /// frame alone is a coarse fingerprint — two F5 buckets can share a
-    /// first-moving frame yet have slightly different physics, so matching only
-    /// the frame number lets a near-miss bucket through and the continue resumes
-    /// a few frames off. Requiring the trajectory to be bit-identical out to
-    /// first_moving + this window rejects those: a wrong bucket diverges within
-    /// a few frames of leaving spawn.
+    /// reproduce for the bucket to be accepted. The first-moving frame alone is
+    /// a coarse fingerprint — two F5 buckets can share a first-moving frame yet
+    /// have slightly different physics, so matching only the frame number lets a
+    /// near-miss bucket through and the continue resumes a few frames off.
+    /// Requiring the trajectory to stay together out to first_moving + this
+    /// window rejects those: a wrong bucket diverges within a few frames of
+    /// leaving spawn.
     pub const BUCKET_MATCH_WINDOW: u32 = 64;
 
+    /// Per-axis position tolerance (game units) for the bucket-match window.
+    ///
+    /// We do NOT compare bit-for-bit here, and that is the whole point: the
+    /// per-frame physics carries an irreducible float lottery
+    /// (precision-sensitive `__ftol`, OpenGL timing) that wiggles the low bits,
+    /// so the previous bit-exact gate rejected even the correct bucket — every
+    /// reroll failed, CONT stopped landing.
+    ///
+    /// The threshold is the geometric center of two MEASURED populations. When a
+    /// reroll lands the recording's EXACT spawn bucket, the replay tracks it FLAT
+    /// across the whole window — the lateral axis to ~6e-5, the fast-settling
+    /// axis to ~0.003 (that float noise). A near-miss
+    /// bucket (departs spawn a tick off-phase) instead tracks closely for a
+    /// while then DIVERGES, growing ~0.01/frame and reaching ~0.035 at one tick,
+    /// 0.3+ for a fully wrong bucket. So the discriminator is flat-vs-growing,
+    /// and √(0.003·0.035) ≈ 0.01 gives ~3x margin on BOTH sides: it clears the
+    /// exact bucket's noise yet a growing near-miss still crosses it within a
+    /// frame or two (and blows past it well before the window ends, so it can
+    /// never sneak the full window). Widening epsilon does NOT help land a
+    /// stale-recording bucket — it only moves the breakpoint a frame. The spawn
+    /// fingerprint (frame 0) is still matched bit-exactly: the pre-movement
+    /// state IS deterministic and is the true bucket identity.
+    pub const BUCKET_MATCH_EPSILON: f32 = 0.01;
+
     /// Judge a CONT replay's F5 bucket. The replay's spawn bits must match the
-    /// recording's start, and the replay must then be BIT-IDENTICAL to the
-    /// recording out to `expected_first_moving + BUCKET_MATCH_WINDOW` — not just
-    /// share the first-moving frame. So only the exact bucket is accepted; a
-    /// same-first-moving-but-different-physics bucket (which would resume a few
-    /// frames off) is rejected as `WrongBucket`. Pure function over the
-    /// shared-memory snapshot so tas_ui and the harness share one source of
-    /// truth. `observed` in WrongBucket is the first frame that diverged.
+    /// recording's start (bit-exact — the spawn state is deterministic and is the
+    /// true bucket identity), and the replay must then track the recording within
+    /// `BUCKET_MATCH_EPSILON` per axis out to
+    /// `expected_first_moving + BUCKET_MATCH_WINDOW` — not just share the
+    /// first-moving frame. So only the correct bucket is accepted; a
+    /// same-first-moving-but-different-physics bucket (the closest dangerous one
+    /// departs spawn a tick off-phase and diverges past ~0.035 within the window,
+    /// growing from there) is rejected as `WrongBucket`, while the right bucket's
+    /// irreducible ~6e-5 per-frame float noise is tolerated. Pure
+    /// function over the shared-memory snapshot so tas_ui and the harness share
+    /// one source of truth. `observed` in WrongBucket is the first frame that
+    /// diverged beyond tolerance.
     pub fn judge_cont_bucket(
         play_coords: &[[f32; 3]],
         rec_coords: &[[f32; 3]],
@@ -614,9 +643,11 @@ pub mod cont {
         if playback_pos < needed {
             return BucketVerdict::KeepWaiting;
         }
-        // The replay must reproduce the recording bit-for-bit up to the window.
-        // The first divergence (one moves while the other is stationary, or the
-        // trajectories differ) marks a wrong bucket.
+        // The replay must track the recording within BUCKET_MATCH_EPSILON up to
+        // the window. The first frame that diverges beyond tolerance (one moves
+        // while the other is stationary, or the trajectories split) marks a wrong
+        // bucket. We tolerate the right bucket's irreducible float noise (~6e-5)
+        // but reject a near-miss bucket (~0.035 within the window, growing).
         let end = (needed as usize)
             .min(play_coords.len())
             .min(rec_coords.len())
@@ -624,9 +655,9 @@ pub mod cont {
         for k in 0..end {
             let p = play_coords[k];
             let r = rec_coords[k];
-            if p[0].to_bits() != r[0].to_bits()
-                || p[1].to_bits() != r[1].to_bits()
-                || p[2].to_bits() != r[2].to_bits()
+            if (p[0] - r[0]).abs() > BUCKET_MATCH_EPSILON
+                || (p[1] - r[1]).abs() > BUCKET_MATCH_EPSILON
+                || (p[2] - r[2]).abs() > BUCKET_MATCH_EPSILON
             {
                 return BucketVerdict::WrongBucket {
                     observed: Some(k as u32),
@@ -709,6 +740,35 @@ pub mod cont {
             assert_eq!(
                 judge_cont_bucket(&near, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250)),
                 BucketVerdict::WrongBucket { observed: Some(260) }
+            );
+        }
+
+        #[test]
+        fn judge_tolerates_right_bucket_float_noise() {
+            // THE REGRESSION CASE: the right bucket reproduces the recording but
+            // with the environment's irreducible per-frame float noise (~6e-5).
+            // Bit-exact matching rejected this (0% CONT success); epsilon accepts
+            // it. Wrong buckets (0.3+ divergence) are still rejected.
+            let mut rec = vec![[100.0_f32, 200.0, 300.0]; 400];
+            for f in 250..400 {
+                rec[f] = [100.0 + (f as f32) * 0.5, 200.0, 300.0];
+            }
+            // Right bucket: same trajectory + tiny noise on every moving frame.
+            let mut noisy = rec.clone();
+            for f in 250..400 {
+                noisy[f][0] += 0.00006;
+                noisy[f][2] -= 0.00004;
+            }
+            assert_eq!(
+                judge_cont_bucket(&noisy, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250)),
+                BucketVerdict::Match
+            );
+            // Wrong bucket: gross divergence just past spawn — still rejected.
+            let mut wrong = rec.clone();
+            wrong[252][0] += 0.4;
+            assert_eq!(
+                judge_cont_bucket(&wrong, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250)),
+                BucketVerdict::WrongBucket { observed: Some(252) }
             );
         }
 
