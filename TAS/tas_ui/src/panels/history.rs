@@ -31,24 +31,24 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
     let today = Local::now().date_naive();
     let yesterday = today.pred_opt();
 
-    // Per-level filter: when the game is on a known track, default to showing
-    // only that track's entries. Entries with no level tag (legacy, or made
-    // at the menu) are always shown — hiding them would "lose" pre-tag
-    // history. Sticky via egui temp memory.
-    let live_level = history.live_level().map(str::to_owned);
-    let filter_key = egui::Id::new("history_level_filter");
-    let mut this_level_only: bool = ui.data_mut(|d| *d.get_temp_mut_or(filter_key, true));
-    if let Some(code) = live_level.as_deref() {
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut this_level_only, format!("This level only ({})", code))
-                .on_hover_text(
-                    "Show only history made on the current track. \
-                     Untagged (older) entries are always shown.",
-                );
-        });
-        ui.data_mut(|d| d.insert_temp(filter_key, this_level_only));
+    // Per-level view: history is ALWAYS scoped to the current track — you
+    // work one level at a time, and restoring another track's snapshot into
+    // this session would be wrong anyway. The scope is the last-KNOWN level
+    // (sticky across menu visits); before any level is seen, everything
+    // shows. Entries with no level tag (legacy, or unclassifiable shared
+    // spawns) are always shown — hiding them would "lose" pre-tag history.
+    let level_filter = history.live_level().map(str::to_owned);
+    if let Some(code) = level_filter.as_deref() {
+        ui.label(
+            egui::RichText::new(format!("Level: {} · untagged shown", code))
+                .size(10.0)
+                .color(egui::Color32::from_gray(120)),
+        )
+        .on_hover_text(
+            "History is per-level: only entries made on this track (plus \
+             untagged older ones) are listed. Switches with the game.",
+        );
     }
-    let level_filter = if this_level_only { live_level.clone() } else { None };
 
     // Inline-rename state (which entry is being edited + its text buffer),
     // persisted in egui memory across frames.
