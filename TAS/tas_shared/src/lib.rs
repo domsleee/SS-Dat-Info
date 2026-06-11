@@ -608,9 +608,25 @@ pub mod cont {
         WrongBucket { observed: Option<u32> },
     }
 
-    /// Frames PAST the recording's first-moving frame the judge waits for before
-    /// deciding, so the blowup guard has trajectory to look at.
+    /// MINIMUM frames past the recording's first-moving frame before the judge
+    /// will decide at all — enough settle trajectory to detect the first-moving
+    /// frame and seed the blowup guard.
     pub const BUCKET_MATCH_WINDOW: u32 = 64;
+
+    /// MAXIMUM frames past first-moving the judge bothers to validate before
+    /// declaring Match (capped so a deep splice still gets a positive Match
+    /// well before the splice, instead of running the whole catch-up Unjudged).
+    ///
+    /// THIS is the fix for the "accepts a bucket that diverges after the
+    /// window" bug: the old judge accepted Match at first_moving+64, so a
+    /// bucket that tracked through the settle then veered off LATER (live: drift
+    /// growing 0.5→2.5→5.6→11 over ticks ~377-1071, ≈ fm+79..fm+773) sailed
+    /// through and the resume spliced onto a wrong trajectory. The guard now
+    /// runs over the WHOLE replayed prefix up to `min(splice, fm+VALIDATE)` on
+    /// every poll, so a late divergence rerolls the instant drift exceeds
+    /// epsilon — while a working bucket (which stays ≤~0.42 for the entire run,
+    /// per the field's 4500+ logged successes) confirms Match at the cap.
+    pub const BUCKET_VALIDATE_WINDOW: u32 = 1024;
 
     /// Per-axis BLOWUP guard (game units) over the judge window.
     ///
@@ -640,14 +656,22 @@ pub mod cont {
     /// 2. The replay's FIRST-MOVING FRAME must equal the recording's. This is
     ///    the bucket fingerprint; rerolling until it matches is the lottery.
     /// 3. Blowup guard: the trajectory must stay within `BUCKET_MATCH_EPSILON`
-    ///    (generous, 0.5) of the recording out to
-    ///    `expected_first_moving + BUCKET_MATCH_WINDOW`. This does NOT demand
-    ///    tight tracking (a working bucket legitimately blips ~0.035-0.4 during
-    ///    the spawn settle); it only rejects the rare catastrophic impostor
-    ///    that shares the first-moving frame yet veers off-trajectory (logged
-    ///    disasters: 0.5+ .. 2265).
+    ///    (generous, 0.5) of the recording over the WHOLE replayed prefix seen
+    ///    so far, up to `min(match_through, first_moving + VALIDATE_WINDOW)`.
+    ///    This does NOT demand tight tracking (a working bucket legitimately
+    ///    blips ~0.035-0.4 during the spawn settle, and stays ≤~0.42 for the
+    ///    entire run); it rejects the catastrophic impostor that shares the
+    ///    first-moving frame yet veers off-trajectory — whether that veer
+    ///    starts in the settle OR hundreds of ticks later (the late-divergence
+    ///    bug: accepted at fm+64 but drift grew to 11 by fm+773).
     ///
-    /// History: matching the trajectory per-frame instead (bit-exact in
+    /// `match_through` is the splice target (continue_from): the bucket must be
+    /// validated clean THROUGH there before Match. Capped at fm+VALIDATE_WINDOW
+    /// so a deep splice still confirms positively rather than running the whole
+    /// catch-up. A bad bucket rerolls as soon as drift exceeds epsilon at ANY
+    /// tick up to that cap — long before the splice.
+    ///
+    /// History: matching the trajectory per-frame TIGHTLY (bit-exact in
     /// 047f99c, then small epsilons) rejected the very buckets that worked —
     /// CONT went from "3-4 retries" to "never lands". Pure function over the
     /// shared-memory snapshot so tas_ui and the harness share one source of
@@ -660,6 +684,7 @@ pub mod cont {
         playback_pos: u32,
         expected_start_bits: [u32; 3],
         expected_first_moving: Option<u32>,
+        match_through: u32,
     ) -> BucketVerdict {
         if playback_pos == 0 || play_coords.is_empty() {
             return BucketVerdict::KeepWaiting;
@@ -673,9 +698,9 @@ pub mod cont {
             Some(f) => f,
             None => return BucketVerdict::NoSignal,
         };
-        // Need to see far enough past first-moving to apply the blowup guard.
-        let needed = expected_fm + BUCKET_MATCH_WINDOW;
-        if playback_pos < needed {
+        // Minimum settle trajectory before we judge the fingerprint at all.
+        let min_judge = expected_fm + BUCKET_MATCH_WINDOW;
+        if playback_pos < min_judge {
             return BucketVerdict::KeepWaiting;
         }
         // The bucket fingerprint: the replay must leave spawn on the SAME frame
@@ -686,9 +711,17 @@ pub mod cont {
                 observed: observed_fm,
             };
         }
-        // Blowup guard: reject only a catastrophic off-trajectory impostor.
-        // Working buckets blip up to ~0.4 in the window (settle skew) — allowed.
-        let end = (needed as usize)
+        // Validate clean through the splice target, capped so a deep splice
+        // still confirms before running the whole catch-up. Never below the
+        // settle window (we already have at least that much).
+        let validate_to = match_through
+            .min(expected_fm + BUCKET_VALIDATE_WINDOW)
+            .max(min_judge);
+        // Blowup guard over the WHOLE replayed prefix seen so far (not just the
+        // settle window): a late divergence is caught the instant playback
+        // reaches it. Working buckets stay ≤~0.42 the entire way — allowed.
+        let end = (playback_pos as usize)
+            .min(validate_to as usize)
             .min(play_coords.len())
             .min(rec_coords.len())
             .min(recorded_count as usize);
@@ -703,6 +736,12 @@ pub mod cont {
                     observed: Some(k as u32),
                 };
             }
+        }
+        // Clean so far — but only declare Match once we've actually validated
+        // THROUGH the target depth. Until then keep replaying + re-checking, so
+        // a divergence that hasn't happened yet can still reroll.
+        if playback_pos < validate_to {
+            return BucketVerdict::KeepWaiting;
         }
         BucketVerdict::Match
     }
@@ -734,7 +773,7 @@ pub mod cont {
             let play = vec![[9.0, 9.0, 9.0]; 400];
             let rec = vec![[1.0, 2.0, 3.0]; 400];
             assert_eq!(
-                judge_cont_bucket(&play, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250)),
+                judge_cont_bucket(&play, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250), 320),
                 BucketVerdict::WrongStart
             );
         }
@@ -746,11 +785,11 @@ pub mod cont {
             let rec = play.clone();
             // pos must be >= first_moving + BUCKET_MATCH_WINDOW (314) to judge.
             assert_eq!(
-                judge_cont_bucket(&play, &rec, 400, 100, bits(1.0, 2.0, 3.0), Some(250)),
+                judge_cont_bucket(&play, &rec, 400, 100, bits(1.0, 2.0, 3.0), Some(250), 320),
                 BucketVerdict::KeepWaiting
             );
             assert_eq!(
-                judge_cont_bucket(&play, &rec, 400, 313, bits(1.0, 2.0, 3.0), Some(250)),
+                judge_cont_bucket(&play, &rec, 400, 313, bits(1.0, 2.0, 3.0), Some(250), 320),
                 BucketVerdict::KeepWaiting
             );
         }
@@ -761,14 +800,14 @@ pub mod cont {
             rec[250] = [1.0, 2.0, 3.5];
             // identical trajectory → Match
             assert_eq!(
-                judge_cont_bucket(&rec, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250)),
+                judge_cont_bucket(&rec, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250), 320),
                 BucketVerdict::Match
             );
             // moves at 248 not 250 → diverges at 248
             let mut wrong = vec![[1.0, 2.0, 3.0]; 400];
             wrong[248] = [1.0, 2.0, 3.5];
             assert_eq!(
-                judge_cont_bucket(&wrong, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250)),
+                judge_cont_bucket(&wrong, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250), 320),
                 BucketVerdict::WrongBucket { observed: Some(248) }
             );
             // THE KEY CASE: same first-moving frame (250) as rec, but the
@@ -778,7 +817,7 @@ pub mod cont {
             near[250] = [1.0, 2.0, 3.5];
             near[260] = [9.0, 9.0, 9.0];
             assert_eq!(
-                judge_cont_bucket(&near, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250)),
+                judge_cont_bucket(&near, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250), 320),
                 BucketVerdict::WrongBucket { observed: Some(260) }
             );
         }
@@ -803,7 +842,7 @@ pub mod cont {
                 noisy[f][2] -= 0.00004;
             }
             assert_eq!(
-                judge_cont_bucket(&noisy, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250)),
+                judge_cont_bucket(&noisy, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250), 320),
                 BucketVerdict::Match
             );
             // Working bucket with a settle blip (0.4 transient) — still accepted;
@@ -811,7 +850,7 @@ pub mod cont {
             let mut blip = rec.clone();
             blip[252][0] += 0.4;
             assert_eq!(
-                judge_cont_bucket(&blip, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250)),
+                judge_cont_bucket(&blip, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250), 320),
                 BucketVerdict::Match
             );
             // Catastrophic impostor: same first-moving frame but veers off the
@@ -819,7 +858,7 @@ pub mod cont {
             let mut wrong = rec.clone();
             wrong[252][0] += 0.7;
             assert_eq!(
-                judge_cont_bucket(&wrong, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250)),
+                judge_cont_bucket(&wrong, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250), 320),
                 BucketVerdict::WrongBucket { observed: Some(252) }
             );
             // Wrong fingerprint: departs spawn a frame early — rejected with the
@@ -827,8 +866,50 @@ pub mod cont {
             let mut early = rec.clone();
             early[249] = [100.5, 200.0, 300.0];
             assert_eq!(
-                judge_cont_bucket(&early, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250)),
+                judge_cont_bucket(&early, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250), 320),
                 BucketVerdict::WrongBucket { observed: Some(249) }
+            );
+        }
+
+        #[test]
+        fn judge_rejects_late_divergence_past_settle_window() {
+            // THE BUG THIS FIX CLOSES (live: drift grew 0.5→11 over ticks
+            // ~377-1071 ≈ fm+79..fm+773, yet "bucket matched" and resumed onto
+            // a wrong trajectory). The bucket is bit-clean through the old
+            // fm+64 settle window, then veers off WELL PAST it. The judge must
+            // reroll, not accept.
+            let fm = 250usize;
+            let splice = 1200u32; // deep splice, like a real run
+            let mut rec = vec![[100.0_f32, 200.0, 300.0]; 1400];
+            for f in fm..1400 {
+                rec[f] = [100.0, 200.0, 300.0 + (f as f32) * 0.5]; // rides +Z
+            }
+            // Replay: identical through the settle, then diverges hard at
+            // tick 750 (= fm+500, far past the old fm+64=314 window).
+            let mut play = rec.clone();
+            for f in (fm + 500)..1400 {
+                play[f][0] += 8.0; // 8-unit lateral veer — a real wrong bucket
+            }
+
+            // Old behaviour accepted Match at fm+64. The fix keeps validating:
+            // at pos 320 (just past the settle) it's clean SO FAR but not yet
+            // validated to the target → KeepWaiting, NOT a premature Match.
+            assert_eq!(
+                judge_cont_bucket(&play, &rec, 1400, 320, bits(100.0, 200.0, 300.0), Some(250), splice),
+                BucketVerdict::KeepWaiting,
+                "must not Match at the old settle window — keep validating"
+            );
+            // Once playback reaches the divergence (tick 750), reroll.
+            assert_eq!(
+                judge_cont_bucket(&play, &rec, 1400, 800, bits(100.0, 200.0, 300.0), Some(250), splice),
+                BucketVerdict::WrongBucket { observed: Some(750) },
+                "late divergence must reroll, not splice onto a wrong trajectory"
+            );
+            // A clean bucket validated through the splice target → Match.
+            assert_eq!(
+                judge_cont_bucket(&rec, &rec, 1400, splice, bits(100.0, 200.0, 300.0), Some(250), splice),
+                BucketVerdict::Match,
+                "a clean bucket confirms Match through the splice target"
             );
         }
 
@@ -837,7 +918,7 @@ pub mod cont {
             let play = vec![[1.0, 2.0, 3.0]; 400];
             let rec = play.clone();
             assert_eq!(
-                judge_cont_bucket(&play, &rec, 400, 320, bits(1.0, 2.0, 3.0), None),
+                judge_cont_bucket(&play, &rec, 400, 320, bits(1.0, 2.0, 3.0), None, 320),
                 BucketVerdict::NoSignal
             );
         }
@@ -1170,6 +1251,10 @@ pub mod transport {
                         pos,
                         target.expected_start_bits,
                         target.expected_first_moving,
+                        // Validate the bucket clean through the splice point —
+                        // not just the settle window — so a late divergence
+                        // rerolls instead of splicing onto a wrong trajectory.
+                        self.cfg.continue_from_frame,
                     );
                     match verdict {
                         BucketVerdict::KeepWaiting => StepOutcome::InProgress,
@@ -1299,7 +1384,11 @@ pub mod transport {
             ArmConfig {
                 arm,
                 catchup_speed: 12.0,
-                continue_from_frame: if arm == Arm::Continue { 1000 } else { 0 },
+                // Splice at 320 so the judge validates through exactly the
+                // pos=320 these tests poll at (the controller passes this as
+                // judge match_through). The deep validate-through-splice path
+                // is covered directly by judge_rejects_late_divergence_*.
+                continue_from_frame: if arm == Arm::Continue { 320 } else { 0 },
                 target,
                 max_retries,
             }
@@ -1570,7 +1659,7 @@ pub mod transport {
             // "Continue must continue on the correct frame": the controller has
             // to push continue_from_frame (the splice frame) into the game both
             // before arming AND re-assert it on every reroll, or cave2 splices
-            // at the wrong tick. cfg() sets continue_from_frame = 1000 for CONT.
+            // at the wrong tick. cfg() sets continue_from_frame = 320 for CONT.
             let target = BucketTarget {
                 expected_start_bits: bits(1.0, 2.0, 3.0),
                 expected_first_moving: Some(250),
@@ -1586,7 +1675,7 @@ pub mod transport {
             p.recorded_count = 400;
             drive_to_judge(&mut c, &mut p);
             assert_eq!(
-                p.continue_from_frame, 1000,
+                p.continue_from_frame, 320,
                 "splice frame not handed to the game before arming"
             );
 
@@ -1602,7 +1691,7 @@ pub mod transport {
                 other => panic!("expected Reroll, got {:?}", other),
             }
             assert_eq!(
-                p.continue_from_frame, 1000,
+                p.continue_from_frame, 320,
                 "splice frame not re-asserted on reroll"
             );
         }
