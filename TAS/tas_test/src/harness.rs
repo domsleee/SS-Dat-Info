@@ -1257,6 +1257,7 @@ fn poll_cont_verdict(
                     s.playback_pos,
                     expected_start_bits,
                     expected_first_moving,
+                    splice_frame,
                 ),
                 s.mode,
                 s.playback_pos,
@@ -1274,6 +1275,7 @@ fn poll_cont_verdict(
                 splice_frame.max(1),
                 expected_start_bits,
                 expected_first_moving,
+                splice_frame,
             );
         }
         if mode == TasMode::Off as u32 {
