@@ -3,6 +3,7 @@
 #include "../log.hpp"
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
+#include "../input_gate.hpp"
 #include "../external/safetyhook.hpp"
 
 // Cave 1C: Handler gate hooks at HMG+3940 (keyDown) and HMG+3980 (keyUp).
@@ -54,23 +55,14 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
     // work with record"). Let the real handler process it; a1 is the Win32 VK
     // (the dispatcher forwards wParam — see the Translate RE).
     //
-    bool gamePaused = (GetTickCount() - g_lastCycleMs) > 250;
-    // CONT block — takes PRECEDENCE over the pause passthrough. While a
-    // Continue is in flight (cont_suppress_input) live input must be inert
-    // through the whole restart/replay, ESC excepted. Critically this ignores
-    // gamePaused: a CONT's F5 RELOAD and a post-finish/dialog state legitimately
-    // stall Supreme::Cycle, but a held/pressed key reaching the spawn THEN
-    // corrupts the restart (observed: ctrl/Enter held during a post-finish CONT
-    // → F5 spawned the boarder at the finish line, drift 2315 at tick 1). The
-    // pause passthrough (for menu navigation) must not reopen that hole.
-    if (s && s->cont_suppress_input && !s->cave2_injecting && a1 != VK_ESCAPE) {
-        s->handler_block_count++;
-        PerfSample(s->perf_cave1c_down, __rdtsc() - t0);
-        return;
-    }
-    // REC/PLAY symmetry block — pause-exempt so the pause menu (and a
-    // stuck-mode session) stays navigable. ESC always passes.
-    if (s && s->mode != MODE_OFF && !s->cave2_injecting && a1 != VK_ESCAPE && !gamePaused) {
+    // Gate the real key event (policy in input_gate.hpp — unit-tested).
+    if (s && ShouldBlockRealInput({
+            s->mode,
+            s->cont_suppress_input != 0,
+            s->cave2_injecting != 0,
+            (GetTickCount() - g_lastCycleMs) > 250,
+            a1 == VK_ESCAPE,
+        })) {
         s->handler_block_count++;
         PerfSample(s->perf_cave1c_down, __rdtsc() - t0);
         return;
@@ -116,18 +108,16 @@ void __fastcall Cave1C_UpDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, 
     if (s && !s->cave2_injecting && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
         g_bb3b10Arg4 = a3;
     }
-    // Keep down/up symmetric (see DownDetour). A key RELEASED during a CONT
-    // must be blocked too, else a press blocked on the way down but released
-    // after the flag clears lands an unbalanced up event on the spawn.
-    bool gamePaused = (GetTickCount() - g_lastCycleMs) > 250;
-    // CONT block — precedence over pause passthrough (see DownDetour).
-    if (s && s->cont_suppress_input && !s->cave2_injecting && a1 != VK_ESCAPE) {
-        s->handler_block_count++;
-        PerfSample(s->perf_cave1c_up, __rdtsc() - t0);
-        return;
-    }
-    // REC/PLAY symmetry block — pause-exempt.
-    if (s && s->mode != MODE_OFF && !s->cave2_injecting && a1 != VK_ESCAPE && !gamePaused) {
+    // Keep down/up symmetric (see DownDetour) — same gate policy. A key
+    // RELEASED during a CONT must be blocked too, else a press blocked on the
+    // way down but released after the flag clears lands an unbalanced up event.
+    if (s && ShouldBlockRealInput({
+            s->mode,
+            s->cont_suppress_input != 0,
+            s->cave2_injecting != 0,
+            (GetTickCount() - g_lastCycleMs) > 250,
+            a1 == VK_ESCAPE,
+        })) {
         s->handler_block_count++;
         PerfSample(s->perf_cave1c_up, __rdtsc() - t0);
         return;
