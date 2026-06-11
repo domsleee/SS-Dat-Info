@@ -8,6 +8,7 @@
 #include "caves/cave1c.hpp"
 #include "caves/cave1d.hpp"
 #include "caves/cave5.hpp"
+#include "caves/frame_limit.hpp"
 #include "caves/race_timer.hpp"
 #include "level_scan.hpp"
 
@@ -43,6 +44,7 @@ void run() {
     bool cave1c_ok = InstallCave1C(g_addr, state);
     bool cave2_ok = InstallCave2(g_addr, state);
     bool cave5_ok = InstallCave5(g_addr, state);
+    bool framelimit_ok = InstallFrameLimit(state);
 
     Log("=== Hook installation summary ===");
     Log(std::format("  Replay capture (SG+9E8F0):  {}", replay_ok ? "OK" : "FAILED"));
@@ -50,6 +52,7 @@ void run() {
     Log(std::format("  Cave 1C (handler gate):      {}", cave1c_ok ? "OK" : "FAILED"));
     Log(std::format("  Cave 2  (Supreme::Cycle):    {}", cave2_ok ? "OK" : "FAILED"));
     Log(std::format("  Cave 5  (fixed tick):        {}", cave5_ok ? "OK" : "FAILED"));
+    Log(std::format("  FrameLimit (SwapBuffers):    {}", framelimit_ok ? "OK" : "FAILED"));
 
     if (!cave2_ok) {
         Log("CRITICAL: Cave 2 hook failed - TAS will not function");

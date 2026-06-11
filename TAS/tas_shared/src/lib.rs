@@ -1,5 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 12; // +cont_suppress_input (block live input during CONT)
+pub const TAS_SHARED_VERSION: u32 = 13; // +present_count/menu_fps_cap (menu SwapBuffers throttle)
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
@@ -276,6 +276,18 @@ pub struct TasSharedState {
     /// REC are already handler-blocked by mode, and post-splice REC must see
     /// live input). See cave1c.
     pub cont_suppress_input: u32,
+
+    /// DLL-written: monotonic count of gdi32!SwapBuffers presents. Lets a
+    /// poller measure the live present rate (menu vs in-game).
+    pub present_count: u32,
+    /// UI/config: menu present-rate cap. 0 = OFF (count only, no throttle);
+    /// N = cap presents to N fps while the engine cycle is frozen (menu/pause).
+    /// Default 34. The static main menu animates one frame per present and
+    /// sr.dll's limiter is Sleep-based, so the 1 ms system timer the TAS tooling
+    /// raises doubles it to ~68 fps (the "2x menu video"); capping to ~34
+    /// restores native. Gameplay (timer-independent accumulator) + CONT (gated
+    /// by cont_suppress_input) are untouched.
+    pub menu_fps_cap: u32,
 }
 
 pub const ARG4_SOURCE_NONE: u32 = 0;
@@ -1801,8 +1813,9 @@ mod tests {
         // test_arg4_override (v10, filled the v9 trailing pad), arg4_source
         // (v11, +8 = field + pad), then cont_suppress_input (v12) — fills
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
-        // 1_647_280.
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_280);
+        // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
+        // 1_647_288 (still 8-aligned, no extra pad).
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_288);
     }
 
     #[test]

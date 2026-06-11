@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 12; // +cont_suppress_input (block live input during CONT)
+constexpr uint32_t TAS_SHARED_VERSION = 13; // +present_count/menu_fps_cap (menu SwapBuffers throttle)
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
@@ -252,6 +252,35 @@ struct TasSharedState {
     // — from there on only PLAY/REC run, and post-splice REC must see live
     // input (that's the resumed recording). ESC stays exempt (abort hatch).
     uint32_t cont_suppress_input;
+
+    // -- Menu present-rate throttle (DLL writes present_count; UI writes cap) --
+    // The renderer presents via gdi32!SwapBuffers. Windowed on a high-refresh
+    // desktop, DWM vsyncs every present to the monitor (e.g. 165 Hz), and the
+    // main-menu attract demo advances one video frame per present -> it plays
+    // ~2.7x too fast. Gameplay is refresh-independent (cave5 accumulator), so
+    // we throttle ONLY while the engine cycle is frozen (menu/pause). See
+    // frame_limit.hpp.
+    //   present_count: monotonic count of SwapBuffers calls (diagnostic; lets a
+    //                  poller measure the live present rate).
+    //   menu_fps_cap:  0 = OFF (count only, no throttle); N = cap menu presents
+    //                  to N fps. Default 34.
+    //
+    // ROOT CAUSE of the 2x (RE'd 2026-06-11): the static main menu has no FMV
+    // file — Main_Menu.dll animates the background one frame per present, and
+    // sr.dll's frame limiter is Sleep-based (it imports kernel32 Sleep +
+    // GetTickCount). A Sleep limiter's effective rate depends on the SYSTEM
+    // TIMER RESOLUTION: with the TAS tooling running, the resolution is raised
+    // to 1 ms (vs the native ~15.6 ms), so Sleep is accurate, the limiter
+    // undershoots its delay, and the menu presents ~2x faster (~68 vs ~34 fps)
+    // — i.e. "without the dll it is not fast forwarded." NEITHER DLL hooks the
+    // present path (proven: caves frozen at the menu + full code search); the
+    // doubling is purely the timer-resolution side effect. Capping presents to
+    // 34 while the engine cycle is frozen restores the native menu speed and is
+    // robust regardless of who raised the timer. Gameplay is refresh- and
+    // timer-independent (cave5 accumulator) so it is untouched, and CONT is
+    // gated out (cont_suppress_input) so the F5 bucket lottery is unaffected.
+    uint32_t present_count;
+    uint32_t menu_fps_cap;
 };
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks
@@ -346,6 +375,13 @@ public:
         state->test_arg4_override = 0;
         state->arg4_source = ARG4_SOURCE_NONE;
         state->cont_suppress_input = 0;
+        state->present_count = 0;
+        // Cap the static-menu present rate to its native ~34 fps (the TAS
+        // tooling raises the system timer to 1 ms, which doubles sr.dll's
+        // Sleep-based menu limiter to ~68 fps = the "2x menu video"). Engaged
+        // only while the engine cycle is frozen (menu/pause); gameplay + CONT
+        // are untouched. Set 0 via shared memory to disable.
+        state->menu_fps_cap = 34;
         return true;
     }
 
