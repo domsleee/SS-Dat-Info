@@ -470,6 +470,14 @@ struct TasApp {
     last_frame_count: u32,
     stale_frame_ticks: u32,
     last_health_check: std::time::Instant,
+    // Cycle-activity tracker for the In-Game chip: game_in_game (exe+0x8895C)
+    // is written by the Supreme::Cycle hook, so when the cycle STOPS (quit to
+    // menu / pause / dialog) it freezes at its last value (1) instead of going
+    // to 0 — the "stale In Game (Forest Easy)" chip. frame_count only advances
+    // while the cycle runs, so a fresh advance means the game is actually
+    // ticking a level; a stale one means menu/paused. Sampled every frame.
+    cycle_fc: u32,
+    cycle_advance_at: std::time::Instant,
 
     // One-shot: force dark title bar on first frame
     #[cfg(windows)]
@@ -642,7 +650,8 @@ impl TasApp {
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
-            #[cfg(windows)]
+            cycle_fc: 0,
+            cycle_advance_at: std::time::Instant::now(),            #[cfg(windows)]
             dark_title_bar_set: false,
         };
 
@@ -1514,6 +1523,17 @@ impl TasApp {
     /// Check if the game process is still alive by monitoring frame_count advancement.
     /// If frame_count hasn't changed for ~3 seconds, assume the game crashed.
     fn check_game_health(&mut self) {
+        // Sample cycle activity every frame (cheap) for the In-Game chip:
+        // game_in_game freezes at its last value when the Supreme::Cycle hook
+        // stops running (quit to menu / pause / dialog), so a fresh frame_count
+        // advance is the real "ticking a level" signal.
+        if let Some(ref shared) = self.shared {
+            let fc = shared.frame_count_volatile();
+            if fc != self.cycle_fc {
+                self.cycle_fc = fc;
+                self.cycle_advance_at = std::time::Instant::now();
+            }
+        }
         if self.last_health_check.elapsed() < std::time::Duration::from_secs(1) {
             return;
         }
@@ -2425,7 +2445,16 @@ impl eframe::App for TasApp {
                                     t
                                 ));
                         }
-                        let in_game = state.game_in_game != 0;
+                        // game_in_game (exe+0x8895C) freezes at its last value
+                        // when Supreme::Cycle stops (quit to menu / pause /
+                        // dialog) — so the flag alone reads "In Game" forever
+                        // after you leave. Gate it on the cycle actually
+                        // TICKING (frame_count advanced within ~400ms); a frozen
+                        // cycle = menu/paused. `cycle_advance_at` is a disjoint
+                        // field from `self.shared`, so reading it here is fine.
+                        let cycle_ticking = self.cycle_advance_at.elapsed()
+                            < std::time::Duration::from_millis(400);
+                        let in_game = state.game_in_game != 0 && cycle_ticking;
                         let card_level = level_name_from_id(state.level_id);
                         let (g_txt, g_col) = if in_game {
                             (
@@ -2437,6 +2466,10 @@ impl eframe::App for TasApp {
                                 },
                                 egui::Color32::from_rgb(90, 200, 120),
                             )
+                        } else if state.game_in_game != 0 {
+                            // Flag set but cycle frozen = paused / dialog / a
+                            // static menu reached by quitting mid-level.
+                            ("\u{2630} Menu / Paused".to_string(), egui::Color32::from_gray(150))
                         } else {
                             ("\u{2630} In Menu".to_string(), egui::Color32::from_gray(150))
                         };
@@ -2932,7 +2965,8 @@ mod tests {
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
-            #[cfg(windows)]
+            cycle_fc: 0,
+            cycle_advance_at: std::time::Instant::now(),            #[cfg(windows)]
             dark_title_bar_set: false,
         }
     }
