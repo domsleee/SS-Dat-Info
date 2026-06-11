@@ -749,6 +749,22 @@ impl TasApp {
         // without this the controller would keep stepping and silently start
         // recording/playback after the restart completes.
         self.cont_controller = None;
+        // A cancelled CONT must not leave live input blocked.
+        self.set_cont_suppress_input(false);
+    }
+
+    /// Write the CONT live-input-suppression flag into shared memory (no-op if
+    /// the value is unchanged or the DLL isn't connected). While set, the DLL
+    /// blocks the real key handler so live input can't perturb the bucket
+    /// during a CONT's OFF-mode spawn countdown. Cleared the moment the bucket
+    /// aligns and on every CONT teardown (stop / abort / disconnect).
+    fn set_cont_suppress_input(&mut self, on: bool) {
+        if let Some(shared) = self.shared.as_mut() {
+            let want = on as u32;
+            if shared.state().cont_suppress_input != want {
+                shared.state_mut().cont_suppress_input = want;
+            }
+        }
     }
 
     /// Build the CONT bucket fingerprint (spawn bits + first-moving frame) from
@@ -846,6 +862,19 @@ impl TasApp {
     }
 
     fn queue_restart_then(&mut self, command: TasCommand, ts: &str) {
+        // Debounce overlapping cycles: a transport cycle (REC/PLAY/CONT
+        // restart→arm) is already in flight, so a second F9/F10/F12 press
+        // would clobber the single-u32 command slot mid-sequence and could
+        // arm the wrong thing (observed: a stray ArmRec after a rapid double
+        // CONT wiped the recording to a fresh spawn run). Ignore until the
+        // current cycle finishes.
+        if self.cont_controller.is_some() {
+            self.log_lines.push(format!(
+                "[{}] {:?} ignored: a restart/arm cycle is already in progress",
+                ts, command
+            ));
+            return;
+        }
         // Refuse degenerate CONT requests that would leave the app
         // half-armed: cont_catchup_speed=Some, playback_speed=multiplier,
         // but no actual playback ever starts (cave2 has nothing to splice),
@@ -958,6 +987,18 @@ impl TasApp {
             max_retries: CONT_START_MATCH_MAX_RETRIES,
         };
         self.cont_controller = Some(tas_shared::transport::TransportController::new(cfg));
+        // Block live input for the whole CONT — set BEFORE the controller's
+        // first command so it covers every restart's OFF-mode spawn countdown
+        // (the window the mode-based handler block misses). Cleared when the
+        // bucket aligns (step_cont_controller / Done) — from there the catch-up
+        // PLAY and resumed REC are handler-blocked by mode, and post-splice REC
+        // must see live input. REC/PLAY don't need it (the countdown isn't
+        // replayed against a bucket), so scope it to CONT.
+        if command == TasCommand::ArmContinue {
+            if let Some(shared) = self.shared.as_mut() {
+                shared.state_mut().cont_suppress_input = 1;
+            }
+        }
         let resume_at = if command == TasCommand::ArmContinue {
             format!(" @frame {}", continue_from_frame)
         } else {
@@ -1055,6 +1096,11 @@ impl TasApp {
                     // where the actual resume frame is known. attempts = rerolls + 1.
                     self.cont_last_outcome = Some((retries_used + 1, completed_via));
                     self.cont_controller = None;
+                    // Bucket aligned — release the live-input block. The
+                    // remaining catch-up PLAY → splice → REC are all
+                    // handler-blocked by mode, and post-splice REC must record
+                    // live input (the resumed recording).
+                    self.set_cont_suppress_input(false);
                     return;
                 }
                 StepOutcome::Aborted { reason } => {
@@ -1062,6 +1108,7 @@ impl TasApp {
                     self.clear_cont_catchup();
                     // also clears cont_controller
                     self.reset_continue_runtime_state();
+                    self.set_cont_suppress_input(false);
                     return;
                 }
             }
