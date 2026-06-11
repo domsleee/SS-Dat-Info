@@ -45,6 +45,18 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
             return;
         }
 
+        bool gamePaused = (GetTickCount() - g_lastCycleMs) > 250;
+        // CONT block (defense-in-depth) — precedence over pause, ESC exempt.
+        // cave1c already blocks the +3940 handler (the only path real input
+        // reaches BB3B10), so this is a backstop: if any real observer call
+        // slips through during a Continue, drop it so it can't perturb the
+        // spawn. NOT pause-exempt (the F5 reload stalls the cycle).
+        if (s->cont_suppress_input && keyIndex != GameAddresses::BB3B10_ESC) {
+            s->bb3b10_block_count++;
+            PerfSample(s->perf_cave1d, __rdtsc() - t0);
+            return;
+        }
+
         // Block during REC mode 6: Cave 2 will call BB3B10 directly on
         // transitions for symmetric timing between REC and PLAY. Exempt:
         //  - ESC (ki 0x48): not a gameplay key; the PAUSE MENU subscribes to
@@ -54,7 +66,6 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
         //    there's no REC/PLAY symmetry to protect, and the pause menu's
         //    OWN navigation (arrows/enter) is observer-driven — without this
         //    the menu opens but can't be operated during REC.
-        bool gamePaused = (GetTickCount() - g_lastCycleMs) > 250;
         if (s->mode == MODE_REC && s->inject_mode == 6
             && keyIndex != GameAddresses::BB3B10_ESC && !gamePaused) {
             s->bb3b10_block_count++;
