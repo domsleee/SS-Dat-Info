@@ -800,6 +800,67 @@ impl TasApp {
         self.log_lines.push(format!("[{}] Sent: {:?}", ts, command));
     }
 
+    /// Stop any active REC/PLAY and wait (bounded) for the DLL to reach OFF
+    /// BEFORE overwriting the recording buffer (load / history restore).
+    /// Without this, a load while recording races the DLL's cycle hook — it's
+    /// appending to input_log as the UI rewrites the whole buffer, corrupting
+    /// state and silently dropping the in-progress recording. Returns once the
+    /// DLL is OFF (or the timeout elapses; we proceed either way, having at
+    /// least sent STOP). The file-dialog that precedes a load already blocked
+    /// far longer, so a sub-frame spin here is unnoticeable.
+    fn stop_active_session_for_load(&mut self, ts: impl std::fmt::Display) {
+        let mode = self
+            .shared
+            .as_ref()
+            .map(|s| s.mode_volatile())
+            .unwrap_or(TasMode::Off as u32);
+        if mode == TasMode::Off as u32 {
+            return;
+        }
+        let was_rec = mode == TasMode::Rec as u32;
+        let ts = ts.to_string();
+        self.log_lines
+            .push(format!("[{}] Stopping active session before load", ts));
+        self.send_action_command(TasCommand::Stop, &ts);
+        // Spin up to ~250ms for the DLL's cycle hook to process CMD_STOP and
+        // flip to OFF (typically 1-2 cycles, ~7-14ms).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        while std::time::Instant::now() < deadline {
+            let off = self
+                .shared
+                .as_ref()
+                .map(|s| s.mode_volatile() == TasMode::Off as u32)
+                .unwrap_or(true);
+            if off {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Finalize the just-stopped recording into history NOW, before the
+        // caller overwrites the buffer — same as a normal STOP, so the
+        // in-progress take isn't lost (it becomes an undoable entry). Capturing
+        // it here (not next frame, like the mode-transition handler does) is
+        // essential: by next frame the buffer holds the LOADED recording, so
+        // the transition handler would snapshot the wrong data. We then pin
+        // last_mode = OFF so that handler sees no REC→OFF edge and can't
+        // double-finalize.
+        if was_rec {
+            if let Some((recorded, snap)) = self.shared.as_ref().map(|s| {
+                (
+                    s.recorded_count_volatile(),
+                    recording::RecordingSnapshot::from_state(s.state()),
+                )
+            }) {
+                self.segment_tracker.on_rec_stop(recorded);
+                self.finalize_recording_session(&snap, recorded);
+            }
+        }
+        self.last_mode = TasMode::Off as u32;
+        // A fresh recording is about to load — clear the finish-flag marker.
+        self.finished_at_tick = None;
+        self.finish_scan_cursor = 0;
+    }
+
     /// Single dispatch for a transport `Action`, shared by the keyboard-shortcut
     /// path and the transport-bar button path so the two can never diverge. (The
     /// button path used to inline its own copy — including a hand-rolled
@@ -1751,23 +1812,40 @@ impl TasApp {
             }
         }
         if open {
-            if let Some(ref mut shared) = self.shared {
-                if let Some(path) = recording::load_dialog(
-                    shared.state_mut(),
-                    &mut self.segment_tracker,
-                    &mut self.log_lines,
-                ) {
-                    let _ = self.history.push_loaded_snapshot(shared.state(), &path);
-                    // Auto-play after loading a recording
-                    if shared.state().recorded_count > 0 {
-                        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-                        self.queue_restart_then(TasCommand::ArmPlay, &ts);
-                    }
-                }
-            }
+            self.load_recording_flow();
         }
 
         actions
+    }
+
+    /// Pick a recording, stop any active session, load it, then auto-play.
+    /// The stop happens AFTER the (cancellable) file pick so cancelling the
+    /// dialog never kills an in-progress recording, and BEFORE the load so the
+    /// buffer overwrite doesn't race the DLL's REC cycle hook.
+    fn load_recording_flow(&mut self) {
+        let level_id = match self.shared.as_ref() {
+            Some(s) => s.state().level_id,
+            None => return,
+        };
+        let Some(path) = recording::pick_recording_path(level_id) else {
+            return;
+        };
+        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+        self.stop_active_session_for_load(&ts);
+        if let Some(shared) = self.shared.as_mut() {
+            let loaded = recording::load_recording_path(
+                shared.state_mut(),
+                &mut self.segment_tracker,
+                &mut self.log_lines,
+                &path,
+            );
+            if loaded {
+                let _ = self.history.push_loaded_snapshot(shared.state(), &path);
+                if shared.state().recorded_count > 0 {
+                    self.queue_restart_then(TasCommand::ArmPlay, &ts);
+                }
+            }
+        }
     }
 }
 
@@ -1939,20 +2017,7 @@ impl eframe::App for TasApp {
                     }
                     if ui.button("Load Recording...  Ctrl+O").clicked() {
                         ui.close_menu();
-                        if let Some(ref mut shared) = self.shared {
-                            if let Some(path) = recording::load_dialog(
-                                shared.state_mut(),
-                                &mut self.segment_tracker,
-                                &mut self.log_lines,
-                            ) {
-                                let _ = self.history.push_loaded_snapshot(shared.state(), &path);
-                                // Auto-play after loading a recording
-                                if shared.state().recorded_count > 0 {
-                                    let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-                                    self.queue_restart_then(TasCommand::ArmPlay, &ts);
-                                }
-                            }
-                        }
+                        self.load_recording_flow();
                     }
                     ui.separator();
                     if ui.button("Dump Diagnostics...").clicked() {
@@ -2177,7 +2242,24 @@ impl eframe::App for TasApp {
                 match action {
                     history::HistoryAction::Restore(idx) => {
                         // Restoring writes into the live game buffer — needs a
-                        // connection. Pin/rename don't.
+                        // connection. Pin/rename don't. Stop any active REC/PLAY
+                        // first so the DLL isn't writing input_log while we
+                        // overwrite the whole buffer (clicking a history entry
+                        // mid-record must stop the record, not race it).
+                        //
+                        // Resolve the clicked row to its STABLE entry_id before
+                        // stopping: stop_active_session_for_load finalizes the
+                        // interrupted take into history, which can evict the
+                        // oldest entry and shift positional indices — so a
+                        // post-stop restore_index(idx) could target the wrong row.
+                        let target_id =
+                            self.history.entries().get(idx).map(|e| e.entry_id);
+                        self.stop_active_session_for_load(&ts);
+                        let idx = target_id
+                            .and_then(|id| {
+                                self.history.entries().iter().position(|e| e.entry_id == id)
+                            })
+                            .unwrap_or(idx);
                         if let Some(shared) = self.shared.as_mut() {
                             let restored = self.history.restore_index(idx).map(|snap| {
                                 snap.restore_to(shared.state_mut());

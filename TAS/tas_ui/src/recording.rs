@@ -1564,41 +1564,49 @@ pub fn save_dialog_with_segments(
     None
 }
 
-pub fn load_dialog(
-    state: &mut TasSharedState,
-    tracker: &mut SegmentTracker,
-    log: &mut Vec<String>,
-) -> Option<PathBuf> {
-    // Open in the current level's folder when it has recordings; the flat
-    // root otherwise (pre-per-level saves live there).
-    let level = crate::level::level_code_from_id(state.level_id);
-    if let Some(path) = rfd::FileDialog::new()
+/// Show the Load file dialog and return the chosen path WITHOUT loading it.
+/// Split from the load so the caller can STOP an active recording between the
+/// (cancellable) pick and the buffer-overwriting load — picking then loading
+/// in one call would force a stop-before-dialog that a cancel would waste.
+/// `level_id` selects the starting folder. None = the user cancelled.
+pub fn pick_recording_path(level_id: u32) -> Option<PathBuf> {
+    let level = crate::level::level_code_from_id(level_id);
+    rfd::FileDialog::new()
         .set_title("Load TAS Recording")
         .set_directory(load_dir_for_level(level))
         .add_filter("TAS Recording", &["tasrec"])
         .pick_file()
-    {
-        match RecordingFile::load(state, &path) {
-            Ok((count, segments)) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                let seg_count = segments.len();
-                tracker.restore_from(segments);
-                log.push(format!(
-                    "[{}] Loaded {} ticks, {} segments from {}",
-                    ts,
-                    count,
-                    seg_count,
-                    path.display()
-                ));
-                return Some(path);
-            }
-            Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                log.push(format!("[{}] Load error: {}", ts, e));
-            }
+}
+
+/// Load a previously-picked recording into shared state. The caller must have
+/// already stopped any active REC/PLAY (the DLL must be OFF) — this overwrites
+/// the whole input/coords buffer.
+pub fn load_recording_path(
+    state: &mut TasSharedState,
+    tracker: &mut SegmentTracker,
+    log: &mut Vec<String>,
+    path: &std::path::Path,
+) -> bool {
+    match RecordingFile::load(state, path) {
+        Ok((count, segments)) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            let seg_count = segments.len();
+            tracker.restore_from(segments);
+            log.push(format!(
+                "[{}] Loaded {} ticks, {} segments from {}",
+                ts,
+                count,
+                seg_count,
+                path.display()
+            ));
+            true
+        }
+        Err(e) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            log.push(format!("[{}] Load error: {}", ts, e));
+            false
         }
     }
-    None
 }
 
 pub fn dump_diagnostics(state: &TasSharedState, ui_drift: (f32, f32), log: &mut Vec<String>) {
