@@ -1932,8 +1932,34 @@ impl eframe::App for TasApp {
             }
         }
 
-        // Check game health (crash detection)
+        // Check game health (crash detection) — also samples cycle activity.
         self.check_game_health();
+
+        // Auto-stop REC/PLAY when you leave the level. Quitting to the menu
+        // tears the level down and STOPS Supreme::Cycle, so the DLL's
+        // root-change auto-stop (which runs in the cycle hook) can't fire — the
+        // recording would stay armed at the menu. tas_ui sees it: the cycle
+        // heartbeat (frame_count) freezes. A generous threshold rides out the
+        // CONT F5-reload stall and a brief pause-menu glance, but a sustained
+        // freeze means you've left → stop. (Pause >threshold also stops, which
+        // is fine — nothing meaningful records while paused.)
+        if let Some(ref shared) = self.shared {
+            let mode = shared.mode_volatile();
+            let racing = mode == TasMode::Rec as u32 || mode == TasMode::Play as u32;
+            let frozen = self.cycle_fc != 0
+                && self.cycle_advance_at.elapsed() > std::time::Duration::from_secs(5);
+            if racing && frozen {
+                let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                self.log_lines.push(format!(
+                    "[{}] Auto-stopped: left the level (game cycle stopped while {})",
+                    ts,
+                    if mode == TasMode::Rec as u32 { "recording" } else { "playing" }
+                ));
+                self.send_action_command(TasCommand::Stop, &ts);
+                // Don't re-fire next frame before mode flips / cycle resumes.
+                self.cycle_advance_at = std::time::Instant::now();
+            }
+        }
 
         // Track mode transitions for segment history + recovery checkpoints.
         let mut mode_snapshot: Option<(u32, u32, u32, recording::RecordingSnapshot)> = None;
