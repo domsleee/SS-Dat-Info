@@ -887,17 +887,54 @@ impl RecordingHistory {
         }
     }
 
-    /// Refresh the level code stamped onto subsequently pushed entries.
+    /// Refresh the level code stamped onto subsequently pushed entries and
+    /// used by the panel's per-level view. STICKY: `None` (menu / unknown) is
+    /// ignored so the panel keeps showing the track you were just on — you're
+    /// almost always between restarts of the same level, and entries pushed
+    /// at the menu (e.g. a save marker right after a run) still belong to it.
     /// Not a history mutation — does not bump the revision.
     pub fn set_live_level(&mut self, level: Option<&str>) {
-        if self.live_level.as_deref() != level {
-            self.live_level = level.map(str::to_owned);
+        if let Some(code) = level {
+            if self.live_level.as_deref() != Some(code) {
+                self.live_level = Some(code.to_owned());
+            }
         }
     }
 
     /// The level code new entries are currently stamped with (None = unknown).
     pub fn live_level(&self) -> Option<&str> {
         self.live_level.as_deref()
+    }
+
+    /// Backfill level tags on entries persisted before tagging existed, by
+    /// classifying each snapshot's spawn position (rec_coords[0]). Only
+    /// unambiguous spawns are tagged (the classifier refuses shared clusters),
+    /// so a wrong tag can't hide an entry from its real level. Returns the
+    /// number of entries tagged.
+    pub fn backfill_levels<F>(&mut self, classify: F) -> usize
+    where
+        F: Fn(&[f32; 3]) -> Option<&'static str>,
+    {
+        let mut tagged = 0;
+        for e in &mut self.entries {
+            if e.level.is_some() {
+                continue;
+            }
+            let Some(snap) = e.snapshot.as_ref() else {
+                continue;
+            };
+            if snap.recorded_count == 0 {
+                continue;
+            }
+            if let Some(code) = classify(&snap.rec_coords[0]) {
+                e.level = Some(code.to_string());
+                tagged += 1;
+            }
+        }
+        if tagged > 0 {
+            self.bump(); // persist the new tags
+        }
+        tagged
     }
 
     fn alloc_id(&mut self) -> u64 {
@@ -1455,6 +1492,41 @@ pub fn recordings_dir() -> PathBuf {
     dir
 }
 
+/// Per-LEVEL recordings folder: `recordings/<code>` (e.g. `recordings/FE`),
+/// created on demand. Unknown level → the flat recordings root.
+pub fn recordings_dir_for_level(level: Option<&str>) -> PathBuf {
+    match level {
+        Some(code) => {
+            let dir = recordings_dir().join(code);
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        }
+        None => recordings_dir(),
+    }
+}
+
+/// Where the Load dialog should open: the current level's folder when it
+/// already holds recordings, else the flat root (where pre-per-level saves
+/// live — don't hide them behind an empty subfolder).
+fn load_dir_for_level(level: Option<&str>) -> PathBuf {
+    if let Some(code) = level {
+        let dir = recordings_dir().join(code);
+        let has_recs = std::fs::read_dir(&dir)
+            .map(|entries| {
+                entries.flatten().any(|e| {
+                    e.path()
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("tasrec"))
+                })
+            })
+            .unwrap_or(false);
+        if has_recs {
+            return dir;
+        }
+    }
+    recordings_dir()
+}
+
 /// Default save name. The `<level>-<time>` convention (e.g. `FE-5876`) needs the
 /// level id + finish time from the game (pending the game-awareness RE); until
 /// then we default to a timestamp so saves still land somewhere sensible.
@@ -1472,7 +1544,7 @@ pub fn save_dialog_with_segments(
     let default_name = crate::level::default_recording_name(level, race_cs);
     if let Some(path) = rfd::FileDialog::new()
         .set_title("Save TAS Recording")
-        .set_directory(recordings_dir())
+        .set_directory(recordings_dir_for_level(level))
         .set_file_name(default_name)
         .add_filter("TAS Recording", &["tasrec"])
         .save_file()
@@ -1497,9 +1569,12 @@ pub fn load_dialog(
     tracker: &mut SegmentTracker,
     log: &mut Vec<String>,
 ) -> Option<PathBuf> {
+    // Open in the current level's folder when it has recordings; the flat
+    // root otherwise (pre-per-level saves live there).
+    let level = crate::level::level_code_from_id(state.level_id);
     if let Some(path) = rfd::FileDialog::new()
         .set_title("Load TAS Recording")
-        .set_directory(recordings_dir())
+        .set_directory(load_dir_for_level(level))
         .add_filter("TAS Recording", &["tasrec"])
         .pick_file()
     {
@@ -2428,6 +2503,47 @@ mod tests {
             state.rec_coords[i] = [i as f32, 0.0, i as f32 * 0.5];
         }
         state
+    }
+
+    #[test]
+    fn backfill_levels_tags_unambiguous_spawns_idempotently() {
+        let mut h = RecordingHistory::new(8);
+        // FE-spawn recording (unique cluster → taggable).
+        let mut fe = state_with_ticks(10);
+        fe.rec_coords[0] = [519.2, -1401.6, 53.6];
+        assert!(h.push_snapshot(&fe, "fe run"));
+        // Alpine-spawn recording (shared cluster → must stay untagged).
+        let mut alpine = state_with_ticks(10);
+        alpine.rec_coords[0] = [642.9, -842.2, 96.5];
+        assert!(h.push_snapshot(&alpine, "alpine run"));
+        // Simulate pre-tagging entries.
+        for e in &mut h.entries {
+            e.level = None;
+        }
+
+        let rev = h.revision();
+        assert_eq!(h.backfill_levels(crate::start_line::level_code_from_spawn), 1);
+        assert_eq!(h.entries()[0].level.as_deref(), Some("FE"));
+        assert_eq!(h.entries()[1].level, None);
+        assert!(h.revision() > rev, "tagging must mark history dirty");
+
+        // Idempotent: second pass tags nothing, revision untouched.
+        let rev = h.revision();
+        assert_eq!(h.backfill_levels(crate::start_line::level_code_from_spawn), 0);
+        assert_eq!(h.revision(), rev);
+    }
+
+    #[test]
+    fn set_live_level_is_sticky_across_unknown() {
+        let mut h = RecordingHistory::new(8);
+        assert_eq!(h.live_level(), None);
+        h.set_live_level(Some("FE"));
+        assert_eq!(h.live_level(), Some("FE"));
+        // Menu / unknown must NOT clear the last-known level.
+        h.set_live_level(None);
+        assert_eq!(h.live_level(), Some("FE"));
+        h.set_live_level(Some("AM"));
+        assert_eq!(h.live_level(), Some("AM"));
     }
 
     // ===== Phase 2a: entry_id, pin, soft cap, store bridge =====

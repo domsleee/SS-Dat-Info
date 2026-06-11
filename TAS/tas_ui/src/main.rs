@@ -533,6 +533,18 @@ impl TasApp {
                 None
             }
         };
+        // One-time level backfill: tag pre-tagging entries by classifying
+        // their snapshot's spawn position (only unambiguous spawns — shared
+        // Alpine / FM-FH clusters stay untagged and remain visible on every
+        // level). Idempotent: already-tagged entries are skipped, so this is
+        // a no-op on every launch after the first.
+        let backfilled = history.backfill_levels(start_line::level_code_from_spawn);
+        if backfilled > 0 {
+            history_notices.push(format!(
+                "History: backfilled level tags on {} entries (by spawn position)",
+                backfilled
+            ));
+        }
         let recovery_store = recording::RecoveryStore::new().ok();
         let recovery_store_notice = recovery_store
             .as_ref()
