@@ -58,8 +58,17 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
     // is paused (pause menu / dialog / static menu) — the sim isn't running,
     // so blocking buys no REC/PLAY symmetry and only makes the pause menu
     // (and a stuck-mode session) unnavigable. Pass everything through.
+    //
+    // CONT countdown coverage: cont_suppress_input extends the block into OFF
+    // mode while a Continue is in flight — the post-F5 spawn countdown is OFF,
+    // and a stray live keypress there perturbs the spawn so the bucket matches
+    // first-moving but diverges right after the judge window. Live input must
+    // be inert from CONT start until the splice; the UI clears the flag the
+    // instant the bucket aligns, so post-splice REC still records live input.
     bool gamePaused = (GetTickCount() - g_lastCycleMs) > 250;
-    if (s && s->mode != MODE_OFF && !s->cave2_injecting && a1 != VK_ESCAPE && !gamePaused) {
+    bool contCountdown = s && s->cont_suppress_input;
+    if (s && (s->mode != MODE_OFF || contCountdown)
+        && !s->cave2_injecting && a1 != VK_ESCAPE && !gamePaused) {
         s->handler_block_count++;
         PerfSample(s->perf_cave1c_down, __rdtsc() - t0);
         return;
@@ -105,9 +114,14 @@ void __fastcall Cave1C_UpDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, 
     if (s && !s->cave2_injecting && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
         g_bb3b10Arg4 = a3;
     }
-    // ESC + pause passthrough — keep down/up symmetric (see DownDetour).
+    // ESC + pause passthrough + CONT-countdown block — keep down/up symmetric
+    // (see DownDetour). A key RELEASED during the countdown must be blocked
+    // too, else a press blocked on the way down but released after the flag
+    // clears would land an unbalanced up event on the spawn.
     bool gamePaused = (GetTickCount() - g_lastCycleMs) > 250;
-    if (s && s->mode != MODE_OFF && !s->cave2_injecting && a1 != VK_ESCAPE && !gamePaused) {
+    bool contCountdown = s && s->cont_suppress_input;
+    if (s && (s->mode != MODE_OFF || contCountdown)
+        && !s->cave2_injecting && a1 != VK_ESCAPE && !gamePaused) {
         s->handler_block_count++;
         PerfSample(s->perf_cave1c_up, __rdtsc() - t0);
         return;

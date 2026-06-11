@@ -1,5 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 11; // +arg4_source (Kernel::Time injection diagnostics)
+pub const TAS_SHARED_VERSION: u32 = 12; // +cont_suppress_input (block live input during CONT)
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
@@ -267,6 +267,15 @@ pub struct TasSharedState {
     /// 3 = test_arg4_override forced. steer-impact asserts 1 in its live
     /// phase so the proper mechanism can't silently regress to the fallback.
     pub arg4_source: u32,
+
+    /// UI-written: 1 while a Continue cycle is in flight (from CONT start,
+    /// before the F5 restart, until the bucket aligns). The DLL blocks the
+    /// real key handler whenever this is set — covering the OFF-mode spawn
+    /// countdown the mode-based block misses, so live input can't perturb the
+    /// bucket. Cleared the instant the bucket aligns (catch-up PLAY / resumed
+    /// REC are already handler-blocked by mode, and post-splice REC must see
+    /// live input). See cave1c.
+    pub cont_suppress_input: u32,
 }
 
 pub const ARG4_SOURCE_NONE: u32 = 0;
@@ -1700,9 +1709,10 @@ mod tests {
     fn size_of_tas_shared_state_pinned() {
         // Pin the total struct size so C++ and Rust sides stay in sync.
         // align-8 struct. Tail: ..., clock_pin_enabled, clock_pin_phase,
-        // test_arg4_override (v10, filled the v9 trailing pad), then
-        // arg4_source (v11) — starts a new 8-byte slot, so the total grows
-        // from 1_647_272 to 1_647_280 (4 bytes field + 4 bytes pad).
+        // test_arg4_override (v10, filled the v9 trailing pad), arg4_source
+        // (v11, +8 = field + pad), then cont_suppress_input (v12) — fills
+        // arg4_source's 4-byte trailing pad, so the total is unchanged at
+        // 1_647_280.
         assert_eq!(mem::size_of::<TasSharedState>(), 1_647_280);
     }
 

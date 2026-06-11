@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 11; // +arg4_source (Kernel::Time injection diagnostics)
+constexpr uint32_t TAS_SHARED_VERSION = 12; // +cont_suppress_input (block live input during CONT)
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
@@ -237,6 +237,21 @@ struct TasSharedState {
     // steer-impact test asserts 1 so the proper mechanism can't silently
     // regress to the fallback.
     uint32_t arg4_source;
+
+    // -- Live-input suppression during a CONT (UI writes, DLL reads) --
+    // 1 while a Continue cycle is in flight — from the moment the UI begins
+    // the CONT (BEFORE the F5 restart) through to the PLAY→REC splice. cave1c
+    // blocks the game's real key handler whenever this is set, regardless of
+    // mode. This plugs the hole the mode-based block can't: the post-F5 spawn
+    // COUNTDOWN runs in OFF mode, so without this a live keypress (e.g. jump)
+    // reaches the spawn and perturbs the physics — the bucket then matches
+    // first-moving but diverges right after the judge window (observed: drift
+    // growing 0.5→5.6 over ticks 377-533, accepted as "bucket matched").
+    // Catch-up PLAY and post-splice REC are already handler-blocked by mode,
+    // so the UI clears this the instant the bucket aligns (StepOutcome::Done)
+    // — from there on only PLAY/REC run, and post-splice REC must see live
+    // input (that's the resumed recording). ESC stays exempt (abort hatch).
+    uint32_t cont_suppress_input;
 };
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks
@@ -330,6 +345,7 @@ public:
         state->clock_pin_phase = 0;
         state->test_arg4_override = 0;
         state->arg4_source = ARG4_SOURCE_NONE;
+        state->cont_suppress_input = 0;
         return true;
     }
 
