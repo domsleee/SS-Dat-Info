@@ -269,40 +269,48 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
         Log(std::format("Cave 5: tick advance constant at {:p} unprotected (was 0x{:X})", (void*)g_tickAdvancePtr, oldProtect));
     }
 
-    // Raise the game's per-frame tick clamp from 14h (20) to 40h (64) so
-    // playback_speed > 12× actually delivers higher catch-up rates instead
-    // of being bottlenecked by the game's own cmp/clamp pair. Two bytes:
-    //   EXE+0x25C83: immediate of `cmp esi, 14h` (the comparison)
-    //   EXE+0x26001: immediate of `mov ebx, 14h`  (the clamp value)
-    // Patches must happen BEFORE installing the SafetyHook mid-hook —
-    // SafetyHook captures the bytes at the hook site into its trampoline,
-    // and we want that trampoline copy to use the bumped immediate.
+    // Raise the game's per-frame tick clamp so playback_speed > 12× delivers
+    // higher catch-up rates instead of being bottlenecked by the game's own
+    // cmp/clamp pair. The clamp is two instructions:
+    //   EXE+0x25C83: immediate of `cmp esi, 14h`  (the THRESHOLD)
+    //   EXE+0x26001: immediate of `mov ebx, 14h`  (the clamp VALUE)
+    //
+    // PATCH ONLY THE CMP THRESHOLD — leave the mov-ebx value NATIVE (20).
+    // cave5 caps the injected tick count (ctx.esi) at CAVE5_PER_FRAME_TICK_CAP
+    // (64), so with the threshold raised to 64 the comparison passes and the
+    // `mov esi, ebx` clamp branch NEVER fires for catch-up — the native ebx
+    // (20) is irrelevant to us. But the MENU's tick loop runs a DIFFERENT path
+    // (not through cave5's hook at 0x25C81 — measured: cave5 frozen at the
+    // menu) and hits the mov-ebx clamp directly; raising IT to 64 let the menu
+    // background animation run ~2× (1999 game on a high-refresh monitor). So
+    // leaving mov-ebx native keeps the menu at its intended speed while catch-up
+    // is unaffected (verified: 256× cont-reliability still ~21.5 ticks/frame).
+    //
+    // The cmp patch must happen BEFORE installing the SafetyHook mid-hook —
+    // SafetyHook captures the bytes at the hook site into its trampoline, and
+    // we want that trampoline copy to use the bumped immediate.
     {
         uint8_t* cmp_imm = exeBase + 0x25C83;
-        uint8_t* mov_imm = exeBase + 0x26001;
         DWORD cmpProtect = 0;
-        DWORD movProtect = 0;
         bool cmp_ok = VirtualProtect(cmp_imm, 1, PAGE_READWRITE, &cmpProtect) != 0;
-        bool mov_ok = VirtualProtect(mov_imm, 1, PAGE_READWRITE, &movProtect) != 0;
-        if (cmp_ok && mov_ok) {
-            // Sanity-check current values before clobbering — refuse to patch
-            // if the game's bytes drifted from what we expect (defends against
-            // wrong-build EXEs).
-            if (*cmp_imm == 0x14 && *mov_imm == 0x14) {
+        if (cmp_ok) {
+            // Sanity-check the current value before clobbering — refuse to patch
+            // if the game's byte drifted from what we expect (wrong-build EXE).
+            if (*cmp_imm == 0x14) {
                 *cmp_imm = (uint8_t)CAVE5_PER_FRAME_TICK_CAP;
-                *mov_imm = (uint8_t)CAVE5_PER_FRAME_TICK_CAP;
                 Log(std::format(
-                    "Cave 5: raised tick clamp 0x14 -> 0x{:02X} at EXE+0x25C83 and EXE+0x26001",
+                    "Cave 5: raised tick-clamp THRESHOLD 0x14 -> 0x{:02X} at EXE+0x25C83 "
+                    "(mov-ebx clamp value left native to keep the menu at 1x)",
                     CAVE5_PER_FRAME_TICK_CAP));
             } else {
                 Log(std::format(
-                    "Cave 5: tick clamp bytes unexpected (cmp_imm=0x{:02X} mov_imm=0x{:02X}); not patching",
-                    *cmp_imm, *mov_imm));
+                    "Cave 5: tick clamp cmp byte unexpected (0x{:02X}); not patching",
+                    *cmp_imm));
             }
         } else {
             Log(std::format(
-                "Cave 5: VirtualProtect on tick clamp bytes FAILED (cmp_ok={} mov_ok={} err={})",
-                cmp_ok, mov_ok, GetLastError()));
+                "Cave 5: VirtualProtect on tick clamp cmp byte FAILED (err={})",
+                GetLastError()));
         }
         // Leave page RW — restoring protection on a 1-byte slice would
         // probably affect surrounding code on the same page anyway.
