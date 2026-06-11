@@ -20,6 +20,15 @@ tas_dll:
 tas_rust:
     cd TAS && cargo build --release
 
+# Compile + run the standalone C++ unit tests (pure gate-policy logic, no DLL).
+# Uses the VS dev shell's cl.exe via vswhere + VsDevCmd.
+test_dll:
+    $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath; \
+    $out = Join-Path $env:TEMP 'tas_test_input_gate.exe'; \
+    & cmd /c "`"$vsPath\Common7\Tools\VsDevCmd.bat`" -arch=x64 -no_logo && cl /nologo /EHsc /std:c++17 /Fe:`"$out`" /Fo:`"$env:TEMP\\`" .\TAS\TAS_Helper\src\tests\test_input_gate.cpp" ; \
+    if ($LASTEXITCODE -ne 0) { throw 'compile failed' }; \
+    & $out
+
 [private]
 [no-exit-message]
 stop_game:
