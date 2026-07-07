@@ -31,9 +31,15 @@ let updateStatus = {
 };
 
 async function run() {
-  const x = await checkForUpdates();
-  updateStatus = x;
-  hasUpdate.value = updateStatus.latestVersion !== updateStatus.currentVersion;
+  // Best-effort: a failed/rate-limited update check must never surface as an
+  // error (the backend already degrades gracefully; this is a second guard).
+  try {
+    const x = await checkForUpdates();
+    updateStatus = x;
+    hasUpdate.value = updateStatus.latestVersion !== updateStatus.currentVersion;
+  } catch {
+    hasUpdate.value = false;
+  }
 }
 
 async function downloadLatest() {
