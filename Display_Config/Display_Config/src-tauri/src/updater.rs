@@ -24,8 +24,14 @@ struct UpdateCache {
 const CACHE_TTL_SECS: u64 = 3600; // re-check GitHub at most once per hour
 const REQUEST_TIMEOUT_SECS: u64 = 10;
 
+// Per-user app-data dir, NOT the game's Display_Config_Resources folder: the
+// game may live somewhere the user can't write (e.g. Program Files), and a
+// failed cache write would silently bring the request storm back.
 fn cache_path() -> std::path::PathBuf {
-    crate::inject::get_display_config_resources_path().join("update_check_cache.json")
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("SS-Dat-Info").join("update_check_cache.json")
 }
 
 fn now_secs() -> u64 {
@@ -44,8 +50,20 @@ fn write_cache(latest_version: &str) {
         checked_at_secs: now_secs(),
         latest_version: latest_version.to_string(),
     };
-    if let Ok(json) = serde_json::to_string(&cache) {
-        let _ = std::fs::write(cache_path(), json);
+    let path = cache_path();
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("update cache: create dir {} failed: {e}", dir.display());
+            return;
+        }
+    }
+    match serde_json::to_string(&cache) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                eprintln!("update cache: write {} failed: {e}", path.display());
+            }
+        }
+        Err(e) => eprintln!("update cache: serialize failed: {e}"),
     }
 }
 
