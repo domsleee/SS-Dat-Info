@@ -17,11 +17,18 @@ pub struct UpdateInfo {
 // the cache, a whole hour of relaunches costs at most one real request.
 #[derive(Serialize, Deserialize)]
 struct UpdateCache {
-    checked_at_secs: u64,
+    checked_at_secs: u64, // last SUCCESSFUL check
+    // Last attempt, success OR failure. Failures don't refresh checked_at (a
+    // transient blip must not hide a pending update for a whole TTL), but they
+    // do back off retries — without this, a cold start while rate-limited
+    // would fire one request per relaunch until the first success.
+    #[serde(default)]
+    last_attempt_secs: u64,
     latest_version: String,
 }
 
 const CACHE_TTL_SECS: u64 = 3600; // re-check GitHub at most once per hour
+const FAILURE_RETRY_SECS: u64 = 300; // after a failed check, back off 5 min
 const REQUEST_TIMEOUT_SECS: u64 = 10;
 
 // Per-user app-data dir, NOT the game's Display_Config_Resources folder: the
@@ -45,11 +52,7 @@ fn read_cache() -> Option<UpdateCache> {
     serde_json::from_str(&std::fs::read_to_string(cache_path()).ok()?).ok()
 }
 
-fn write_cache(latest_version: &str) {
-    let cache = UpdateCache {
-        checked_at_secs: now_secs(),
-        latest_version: latest_version.to_string(),
-    };
+fn write_cache(cache: &UpdateCache) {
     let path = cache_path();
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
@@ -57,13 +60,18 @@ fn write_cache(latest_version: &str) {
             return;
         }
     }
-    match serde_json::to_string(&cache) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                eprintln!("update cache: write {} failed: {e}", path.display());
-            }
+    let json = match serde_json::to_string(cache) {
+        Ok(json) => json,
+        Err(e) => {
+            eprintln!("update cache: serialize failed: {e}");
+            return;
         }
-        Err(e) => eprintln!("update cache: serialize failed: {e}"),
+    };
+    // Write-then-rename so a concurrently launching process never reads a
+    // truncated file (rename replaces atomically on the same volume).
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path)) {
+        eprintln!("update cache: write {} failed: {e}", path.display());
     }
 }
 
@@ -72,9 +80,14 @@ fn write_cache(latest_version: &str) {
 pub async fn check_for_updates() -> Result<UpdateInfo, String> {
     let current_version = get_version().to_string();
 
-    // Fresh cache -> serve it, no network. Collapses relaunch storms to ~1/hr.
+    // Serve the cache without touching the network while the last success is
+    // fresh, or while backing off after a recent failed attempt. Collapses
+    // relaunch storms to ~1 request/hr (worst case 12/hr while failing).
     if let Some(c) = read_cache() {
-        if now_secs().saturating_sub(c.checked_at_secs) < CACHE_TTL_SECS {
+        let now = now_secs();
+        let success_fresh = now.saturating_sub(c.checked_at_secs) < CACHE_TTL_SECS;
+        let backing_off = now.saturating_sub(c.last_attempt_secs) < FAILURE_RETRY_SECS;
+        if success_fresh || backing_off {
             return Ok(UpdateInfo {
                 current_version,
                 latest_version: c.latest_version,
@@ -84,7 +97,11 @@ pub async fn check_for_updates() -> Result<UpdateInfo, String> {
 
     match fetch_latest_version().await {
         Ok(latest) => {
-            write_cache(&latest);
+            write_cache(&UpdateCache {
+                checked_at_secs: now_secs(),
+                last_attempt_secs: now_secs(),
+                latest_version: latest.clone(),
+            });
             Ok(UpdateInfo {
                 current_version,
                 latest_version: latest,
@@ -97,9 +114,18 @@ pub async fn check_for_updates() -> Result<UpdateInfo, String> {
         // "no update" (latest == current).
         Err(e) => {
             eprintln!("update check failed, degrading gracefully: {e}");
-            let latest_version = read_cache()
-                .map(|c| c.latest_version)
+            let prev = read_cache();
+            let latest_version = prev
+                .as_ref()
+                .map(|c| c.latest_version.clone())
                 .unwrap_or_else(|| current_version.clone());
+            // Stamp the attempt (keeping the old success time) so the next
+            // few relaunches back off instead of re-firing the request.
+            write_cache(&UpdateCache {
+                checked_at_secs: prev.map(|c| c.checked_at_secs).unwrap_or(0),
+                last_attempt_secs: now_secs(),
+                latest_version: latest_version.clone(),
+            });
             Ok(UpdateInfo {
                 current_version,
                 latest_version,
