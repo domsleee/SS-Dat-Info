@@ -33,9 +33,23 @@ Built and **validated on the good 1d32308 baseline** (all live against the runni
 `DriftResult::is_zero()` / `is_within()` and `compute_drift_between` compared **X and Z
 only** — every drift-based mode was blind to vertical position. A regression that changed
 height while preserving the ground track (jump arcs, terrain following) reported bit-exact
-"zero drift". Y is now compared alongside X/Z, and the 13 call sites that had inlined
+"zero drift". Y is now compared alongside X/Z, and the call sites that had inlined
 `max_drift_x == 0.0 && max_drift_z == 0.0` instead of calling `is_zero()` were routed
 through it (they would otherwise have silently kept the old two-axis oracle).
+
+**Scope, precisely:** no *top-level exit verdict* remains X/Z-only. Three **subordinate
+diagnostics** are still X/Z by design, and are labelled so they cannot be misread:
+`regression`'s `fullNormZeroXZ` translation line and the `WindowMetrics`/certificate CSV
+fields (widening them would change a consumed artifact schema for a non-verdict), and the
+`certificate.rs` `all_zero_full_norm_drift` field. In each case the authoritative gate
+(Gate 3 / `replay_zero`) does check Y, so a Y-only failure still fails the run — it just
+will not be explained by those numeric fields. `segment`'s boundary sub-check WAS X/Z-only
+and printed a misleading local `PASS`; it now checks all three axes.
+
+Also hardened here: `compute_drift_between` now maps a NaN delta to infinity. Every
+comparison against NaN is false, so a non-finite coordinate used to slide through the `>`
+tests and leave the maxima at 0.0 — `is_zero()` reported a clean run for a simulation that
+had gone NaN. That defect predated the Y work and affected X/Z equally.
 
 Verified live: Y drift is **0.000000000** on `f5`, `replay` ×3, `cont-splice-frame`, and
 `fe10065-cont` 8/8 at both 64× and 256× — so the tightening costs nothing on a healthy

@@ -505,8 +505,12 @@ fn print_window_metrics(metrics: &WindowMetrics) {
 }
 
 fn print_translation_verdict(start_matched: bool, metrics: &WindowMetrics) {
+    // NOTE: X/Z only — this is a translation *diagnostic*, and WindowMetrics
+    // feeds the CSV artifact schema, so it is deliberately not widened to Y.
+    // The authoritative zero-drift verdict (Gate 3 / `replay_zero`) does check
+    // all three axes; the name says XZ so this line cannot be misread as one.
     println!(
-        "  Translation diagnostic: startMatched={} fullNormZero={} fullNorm=({:.9}, {:.9})",
+        "  Translation diagnostic: startMatched={} fullNormZeroXZ={} fullNormXZ=({:.9}, {:.9})",
         start_matched,
         metrics.full_norm_drift_x == 0.0 && metrics.full_norm_drift_z == 0.0,
         metrics.full_norm_drift_x,

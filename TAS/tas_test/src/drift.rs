@@ -86,6 +86,14 @@ fn compute_drift_between(
         let dy = (rec_y as f64 - play_y as f64).abs();
         let dz = (rec_z as f64 - play_z as f64).abs();
 
+        // NaN must never read as "no drift". Every comparison against NaN is
+        // false, so a NaN delta would slide through the `>` tests below and leave
+        // the maxima at 0.0 — i.e. `is_zero()` would report a clean run for a
+        // simulation that had gone non-finite. Force it to infinity so it fails
+        // every gate loudly instead.
+        let sanitize = |d: f64| if d.is_nan() { f64::INFINITY } else { d };
+        let (dx, dy, dz) = (sanitize(dx), sanitize(dy), sanitize(dz));
+
         if dx > result.max_drift_x {
             result.max_drift_x = dx;
             result.max_drift_frame_x = i;
@@ -299,6 +307,24 @@ mod tests {
         let normalized = compute_normalized_drift_window(&state, 2, 6);
         assert_eq!(raw.max_drift_y, 40.0);
         assert!(normalized.is_zero());
+    }
+
+    #[test]
+    fn nan_coordinate_is_not_zero_drift() {
+        let mut state = zeroed_state();
+        for i in 0..20 {
+            state.rec_coords[i] = [1.0, 2.0, 3.0];
+            state.play_coords[i] = [1.0, 2.0, 3.0];
+        }
+        // A non-finite simulation must fail, not report a clean run. Every
+        // comparison against NaN is false, so without the guard the maxima stay
+        // 0.0 and is_zero() returns true.
+        state.play_coords[7][1] = f32::NAN;
+
+        let d = compute_drift(&state, 20);
+        assert!(!d.is_zero(), "NaN must not read as zero drift");
+        assert!(!d.is_within(f64::MAX));
+        assert!(d.max_drift_y.is_infinite());
     }
 
     #[test]

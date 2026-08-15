@@ -772,6 +772,8 @@ fn run_segment_test() {
         let sf = splice_frame as usize;
         let boundary_drift_x =
             (state.rec_coords[sf][0] as f64 - state.play_coords[sf][0] as f64).abs();
+        let boundary_drift_y =
+            (state.rec_coords[sf][1] as f64 - state.play_coords[sf][1] as f64).abs();
         let boundary_drift_z =
             (state.rec_coords[sf][2] as f64 - state.play_coords[sf][2] as f64).abs();
         println!("\n--- Segment Boundary (frame {}) ---", splice_frame);
@@ -784,10 +786,10 @@ fn run_segment_test() {
             sf, state.play_coords[sf][0], state.play_coords[sf][1], state.play_coords[sf][2]
         );
         println!(
-            "  Boundary drift: X={:.9} Z={:.9}",
-            boundary_drift_x, boundary_drift_z
+            "  Boundary drift: X={:.9} Y={:.9} Z={:.9}",
+            boundary_drift_x, boundary_drift_y, boundary_drift_z
         );
-        if boundary_drift_x == 0.0 && boundary_drift_z == 0.0 {
+        if boundary_drift_x == 0.0 && boundary_drift_y == 0.0 && boundary_drift_z == 0.0 {
             println!("  Boundary check: PASS (zero discontinuity)");
         } else {
             println!("  Boundary check: FAIL (drift at segment boundary)");
@@ -850,14 +852,19 @@ fn run_smoke_test() {
     // rec_count would walk past playback_pos into stale/zero play_coords, which
     // can manufacture a large bogus delta on a short playback and mask the very
     // failure `complete_ok` is there to catch.
-    let (_, _, rec_dz) = drift::compute_movement(&state.rec_coords, rec_count as usize);
-    let (_, _, play_dz) =
+    // "Moved" means moved on ANY axis. Gating on Z alone would call a run that
+    // travelled purely in X/Y motionless.
+    let (rec_dx, rec_dy, rec_dz) =
+        drift::compute_movement(&state.rec_coords, rec_count as usize);
+    let (play_dx, play_dy, play_dz) =
         drift::compute_movement(&state.play_coords, rec_count.min(played) as usize);
+    let rec_travel = rec_dx.max(rec_dy).max(rec_dz);
+    let play_travel = play_dx.max(play_dy).max(play_dz);
 
     let recorded_ok = rec_count > 0;
     let complete_ok = play_ok && played >= rec_count;
-    let rec_moved = rec_dz > 0.1;
-    let play_moved = play_dz > 0.1;
+    let rec_moved = rec_travel > 0.1;
+    let play_moved = play_travel > 0.1;
 
     println!("\n=== SMOKE CHECKS ===");
     println!(
@@ -872,12 +879,18 @@ fn run_smoke_test() {
         if complete_ok { "PASS" } else { "FAIL" }
     );
     println!(
-        "  REC movement      : dz={:.4} — {}",
+        "  REC movement      : max(dx,dy,dz)={:.4} (dx={:.4} dy={:.4} dz={:.4}) — {}",
+        rec_travel,
+        rec_dx,
+        rec_dy,
         rec_dz,
         if rec_moved { "PASS" } else { "FAIL" }
     );
     println!(
-        "  PLAY movement     : dz={:.4} — {}",
+        "  PLAY movement     : max(dx,dy,dz)={:.4} (dx={:.4} dy={:.4} dz={:.4}) — {}",
+        play_travel,
+        play_dx,
+        play_dy,
         play_dz,
         if play_moved { "PASS" } else { "FAIL" }
     );

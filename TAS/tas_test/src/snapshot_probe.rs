@@ -205,23 +205,31 @@ pub fn run() -> bool {
     // Verdict. The DLL's frame-exact 3/3 match is the gold standard for a clean
     // rewind (the live-position check is confounded by post-restore motion).
     let rewound = exact;
-    // Determinism gate = the DLL's frame-exact trajectory compare (24/24 bit-
-    // identical frames). The `traj_max` distance below is NOT a gate: traj_a and
-    // traj_b come from two independent forward runs, so the F5 spawn-bucket
-    // lottery moves it by tens of units on a perfectly healthy build (measured
-    // 12.56 with a 24/24 frame-exact match). It stays as a printed diagnostic.
-    let deterministic = traj_match == TRAJ_FRAMES;
+    // Determinism gate = the DLL's frame-exact trajectory compare. It must match
+    // on EVERY OVERLAPPING frame, not all 24: the producer deliberately searches
+    // shifts in [-3,3] because a correct restore differs from the snapshot run by
+    // the clock-reset's ±1 tick (snapshot.hpp:373-376), and its compare loop skips
+    // out-of-range indices (snapshot.hpp:409). So at shift ±1 only 23 of 24 frames
+    // can possibly match and a flat `== 24` would fail a healthy build whenever the
+    // clock lands a tick off. Require full overlap for whatever shift was reported.
+    //
+    // The `traj_max` distance below is NOT a gate: traj_a and traj_b come from two
+    // independent forward runs, so the F5 spawn-bucket lottery moves it by tens of
+    // units on a perfectly healthy build (measured 12.56 alongside a 24/24 match).
+    // It stays a printed diagnostic.
+    let expected_overlap = (TRAJ_FRAMES as i32 - traj_shift.abs()).max(0) as u32;
+    let deterministic = traj_match == expected_overlap;
     let ok = alive && rewound && deterministic && snap_bytes > 0 && rest_bytes > 0;
     println!();
     if ok {
         println!(
-            "*** SNAPSHOT PROBE PASSED: rewind {:.6} (exact={}), frame-exact traj {}/{}, re-run spread {:.4} (info), snap {:.1}ms / restore {:.1}ms ***",
-            revert_err, exact, traj_match, TRAJ_FRAMES, traj_max, snap_us as f64 / 1000.0, rest_us as f64 / 1000.0
+            "*** SNAPSHOT PROBE PASSED: rewind {:.6} (exact={}), frame-exact traj {}/{} at shift {}, re-run spread {:.4} (info), snap {:.1}ms / restore {:.1}ms ***",
+            revert_err, exact, traj_match, expected_overlap, traj_shift, traj_max, snap_us as f64 / 1000.0, rest_us as f64 / 1000.0
         );
     } else {
         println!(
-            "*** SNAPSHOT PROBE FAILED: alive={} rewound={}({:.4}) deterministic={}({}/{} frame-exact) snap_bytes={} rest_bytes={} ***",
-            alive, rewound, revert_err, deterministic, traj_match, TRAJ_FRAMES, snap_bytes, rest_bytes
+            "*** SNAPSHOT PROBE FAILED: alive={} rewound={}({:.4}) deterministic={}({}/{} overlapping frames at shift {}) snap_bytes={} rest_bytes={} ***",
+            alive, rewound, revert_err, deterministic, traj_match, expected_overlap, traj_shift, snap_bytes, rest_bytes
         );
     }
     ok

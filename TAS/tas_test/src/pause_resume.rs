@@ -171,12 +171,33 @@ pub fn run() -> bool {
     let drift_result = drift::compute_drift(state, check_end);
 
     println!(
-        "  Drift over frames 0..{}: X={:.9} (frame {}) Z={:.9} (frame {})",
+        "  Prefix drift over frames 0..{}: X={:.9} (frame {}) Y={:.9} Z={:.9} (frame {})",
         check_end,
         drift_result.max_drift_x,
         drift_result.max_drift_frame_x,
+        drift_result.max_drift_y,
         drift_result.max_drift_z,
         drift_result.max_drift_frame_z
+    );
+
+    // The prefix window above is NOT the test. `restart_play_and_match_inprocess`
+    // verifies the first MATCH_VERIFY_FRAMES (=ZERO_DRIFT_FRAMES) before it
+    // returns, so by the time we wait for PAUSE_AT_FRAME the replay is already
+    // past it — the pause lands at ~1089 with the window ending at 1000. Checking
+    // [0,1000) therefore only re-checks frames that played BEFORE the pause, and
+    // is structurally incapable of seeing a pause-induced divergence. The real
+    // assertion is the window AFTER the pause point.
+    let post_pause_drift = drift::compute_drift_window(state, pos_at_pause, rec_count);
+    let post_pause_frames = rec_count.saturating_sub(pos_at_pause);
+    println!(
+        "  POST-PAUSE drift over frames {}..{} ({} frames — the window the pause can affect): \
+         X={:.9} Y={:.9} Z={:.9}",
+        pos_at_pause,
+        rec_count,
+        post_pause_frames,
+        post_pause_drift.max_drift_x,
+        post_pause_drift.max_drift_y,
+        post_pause_drift.max_drift_z
     );
 
     let mut first_div: Option<usize> = None;
@@ -196,8 +217,29 @@ pub fn run() -> bool {
     // it the replay ran start-to-finish uninterrupted, which trivially yields
     // zero drift while testing nothing — a false green. `actually_paused` was
     // already measured above (frame_count stalled during the hold); gate on it.
-    let pass = drift_result.is_zero() && actually_paused;
-    if !actually_paused {
+    // Completion matters too: the drift window is only the first 1000 frames, so
+    // a replay that renders that prefix and then stalls or drops out of PLAY
+    // before rec_count would otherwise pass on a prefix that proves nothing about
+    // the pause it was supposed to survive.
+    let played_all = client.state().playback_pos >= rec_count;
+    // A post-pause window that is empty means the pause landed at/after the end
+    // of playback — there is nothing it could have perturbed, so the run proves
+    // nothing and must not pass.
+    let post_pause_window_ok = post_pause_frames > 0;
+    let pass = drift_result.is_zero()
+        && post_pause_drift.is_zero()
+        && post_pause_window_ok
+        && actually_paused
+        && play_ok
+        && played_all;
+    if !post_pause_window_ok {
+        println!(
+            "\n*** PAUSE/RESUME REPLAY FAILED: the pause landed at frame {} but the recording is \
+             only {} frames — there is no post-pause window to assess, so this run proves nothing \
+             about pause/resume. ***",
+            pos_at_pause, rec_count
+        );
+    } else if !actually_paused {
         println!(
             "\n*** PAUSE/RESUME REPLAY FAILED: the game never paused — Escape did not reach the \
              pause handler (frame_count advanced {} during the {}s hold). The replay ran \
@@ -205,10 +247,28 @@ pub fn run() -> bool {
              Pico HID; keybd_event/PostMessage do not reach the pause handler. ***",
             fc_delta, PAUSE_DURATION_SECS
         );
+    } else if !play_ok || !played_all {
+        println!(
+            "\n*** PAUSE/RESUME REPLAY FAILED: playback did not complete after the resume \
+             (playback_pos={} of {}). The pre-pause prefix cannot stand in for a failed resume. ***",
+            client.state().playback_pos,
+            rec_count
+        );
     } else if pass {
         println!(
-            "\n*** PAUSE/RESUME REPLAY PASSED: zero drift across pause+resume for {} frames ***",
-            check_end
+            "\n*** PAUSE/RESUME REPLAY PASSED: zero drift across pause+resume — prefix {} frames \
+             AND {} frames after the pause at {} ***",
+            check_end, post_pause_frames, pos_at_pause
+        );
+    } else if !post_pause_drift.is_zero() {
+        println!(
+            "\n*** PAUSE/RESUME REPLAY FAILED: trajectory diverges AFTER the pause (frames {}..{}): \
+             X={:.9} Y={:.9} Z={:.9} — this is the pause/resume regression. ***",
+            pos_at_pause,
+            rec_count,
+            post_pause_drift.max_drift_x,
+            post_pause_drift.max_drift_y,
+            post_pause_drift.max_drift_z
         );
     } else if let Some(i) = first_div {
         let p = state.play_coords[i];
