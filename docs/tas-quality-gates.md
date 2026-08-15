@@ -42,6 +42,25 @@ session you already have running).
 
 All gates require exit code `0` in addition to the pass signature.
 
+### Track guard
+
+Every mode asserts the game is on **Forest Easy** before it runs, and exits `1`
+with an explanation otherwise. This is not cosmetic: on the wrong track the spawn
+is on a different map, so a replay's start matcher can never hit its target and
+burns its whole retry budget (a mode appears to hang for ~10 minutes), while a
+fresh REC silently records another course. The check waits up to 12s for the
+DLL's level-scan thread to publish a track, since it re-scans about every 1.5s.
+
+```powershell
+$env:TAS_TEST_LEVEL = 'AM'    # expect a different track
+$env:TAS_TEST_LEVEL = 'any'   # disable the check (deliberate off-track work)
+```
+
+`level_id = 0xFFFFFFFF` means the game is **not on one of the nine Tracks** — a
+menu, or a mode the scan does not cover (Practice, Halfpipe). `gamestate` opts
+out automatically so it stays usable as a diagnostic precisely when the session
+is in that state.
+
 ## Recipes
 
 ```powershell
