@@ -20,6 +20,10 @@ use tas_shared::TasCommand;
 
 use crate::harness;
 
+/// Frames in the DLL's post-restore frame-exact trajectory compare. All of them
+/// must be bit-identical for the rewind to count as deterministic.
+const TRAJ_FRAMES: u32 = 24;
+
 fn read_pos(client: &tas_shared::TasSharedMemoryClient) -> [f32; 3] {
     let s = client.state();
     [s.player_x, s.player_y, s.player_z]
@@ -176,8 +180,8 @@ pub fn run() -> bool {
     let traj_match = traj_result & 0xFFFF;
     let traj_shift = (traj_result >> 16) as i32 - 8;
     println!(
-        "  DLL FRAME-EXACT TRAJ: {}/{} frames bit-identical at shift {} (24=fully deterministic)",
-        traj_match, 24, traj_shift
+        "  DLL FRAME-EXACT TRAJ: {}/{} frames bit-identical at shift {} ({}=fully deterministic)",
+        traj_match, TRAJ_FRAMES, traj_shift, TRAJ_FRAMES
     );
     let mut traj_b = Vec::new();
     for _ in 0..6 {
@@ -201,18 +205,23 @@ pub fn run() -> bool {
     // Verdict. The DLL's frame-exact 3/3 match is the gold standard for a clean
     // rewind (the live-position check is confounded by post-restore motion).
     let rewound = exact;
-    let deterministic = traj_max < 0.5; // loose: just "follows a similar path"
-    let ok = alive && rewound && snap_bytes > 0 && rest_bytes > 0;
+    // Determinism gate = the DLL's frame-exact trajectory compare (24/24 bit-
+    // identical frames). The `traj_max` distance below is NOT a gate: traj_a and
+    // traj_b come from two independent forward runs, so the F5 spawn-bucket
+    // lottery moves it by tens of units on a perfectly healthy build (measured
+    // 12.56 with a 24/24 frame-exact match). It stays as a printed diagnostic.
+    let deterministic = traj_match == TRAJ_FRAMES;
+    let ok = alive && rewound && deterministic && snap_bytes > 0 && rest_bytes > 0;
     println!();
     if ok {
         println!(
-            "*** SNAPSHOT PROBE PASSED: rewind {:.6} (exact={}), determinism drift {:.4}, snap {:.1}ms / restore {:.1}ms ***",
-            revert_err, exact, traj_max, snap_us as f64 / 1000.0, rest_us as f64 / 1000.0
+            "*** SNAPSHOT PROBE PASSED: rewind {:.6} (exact={}), frame-exact traj {}/{}, re-run spread {:.4} (info), snap {:.1}ms / restore {:.1}ms ***",
+            revert_err, exact, traj_match, TRAJ_FRAMES, traj_max, snap_us as f64 / 1000.0, rest_us as f64 / 1000.0
         );
     } else {
         println!(
-            "*** SNAPSHOT PROBE FAILED: alive={} rewound={}({:.4}) deterministic={}({:.4}) ***",
-            alive, rewound, revert_err, deterministic, traj_max
+            "*** SNAPSHOT PROBE FAILED: alive={} rewound={}({:.4}) deterministic={}({}/{} frame-exact) snap_bytes={} rest_bytes={} ***",
+            alive, rewound, revert_err, deterministic, traj_match, TRAJ_FRAMES, snap_bytes, rest_bytes
         );
     }
     ok

@@ -52,7 +52,7 @@ const PLAY_MODE: u32 = 2;
 /// Drift of the just-played prefix vs the recording (max of X/Z over CHECK_FRAME).
 fn check_drift(client: &tas_shared::TasSharedMemoryClient) -> f64 {
     let d = drift::compute_drift(client.state(), CHECK_FRAME);
-    d.max_drift_x.max(d.max_drift_z)
+    d.max_axis()
 }
 
 
@@ -154,23 +154,31 @@ pub fn run() -> bool {
     // 3. VALIDATE: lottery-free restores.
     println!("\n--- VALIDATE ({} lottery-free CONTs via RESTORE, no F5) ---", VALIDATE_ITERS);
     let mut clean = 0u32;
-    let mut worst_drift = 0.0f64;
+    // `None` until an iteration actually completes a replay and measures drift.
+    // Tracked as an Option so a run where EVERY iteration stalled reports "n/a"
+    // rather than the 0.0 initialiser — a total failure used to print the
+    // healthiest-looking drift number possible.
+    let mut worst_drift: Option<f64> = None;
+    let mut stalled = 0u32;
+    let mut restore_failed = 0u32;
     let mut restore_ms_sum = 0.0f64;
     for i in 1..=VALIDATE_ITERS {
         let (rest_bytes, rest_us) = restore(&mut client);
         restore_ms_sum += rest_us as f64 / 1000.0;
         if rest_bytes == 0 {
             println!("  #{}: RESTORE failed (0 bytes)", i);
+            restore_failed += 1;
             continue;
         }
         if !replay_to_check(&mut client) {
             println!("  #{}: replay stalled", i);
+            stalled += 1;
             harness::stop(&mut client);
             continue;
         }
         let drift = check_drift(&client);
         harness::stop(&mut client);
-        worst_drift = worst_drift.max(drift);
+        worst_drift = Some(worst_drift.map_or(drift, |w: f64| w.max(drift)));
         let ok = drift < MATCH_EPS;
         if ok { clean += 1; }
         println!(
@@ -181,10 +189,21 @@ pub fn run() -> bool {
 
     println!("\n=== SUMMARY ===");
     println!("  Established spawn snapshot after {} F5 attempt(s) (one-time lottery).", establish_f5);
+    let worst_str = match worst_drift {
+        Some(w) => format!("{:.6}", w),
+        None => "n/a (no iteration produced a measurement)".to_string(),
+    };
     println!(
-        "  Then {}/{} lottery-free restores clean, worst drift {:.6}, mean restore {:.0}ms.",
-        clean, VALIDATE_ITERS, worst_drift, restore_ms_sum / VALIDATE_ITERS as f64
+        "  Then {}/{} lottery-free restores clean, worst drift {}, mean restore {:.0}ms.",
+        clean, VALIDATE_ITERS, worst_str, restore_ms_sum / VALIDATE_ITERS as f64
     );
+    if stalled > 0 || restore_failed > 0 {
+        println!(
+            "  Unmeasured: {} replay stall(s), {} restore failure(s) — these never reached a drift \
+             comparison, so they are failures, not clean runs.",
+            stalled, restore_failed
+        );
+    }
     let ok = clean == VALIDATE_ITERS;
     if ok {
         println!("\n*** SNAPSHOT CONT PASSED: {}/{} replays bit-exact with ZERO rerolls (F5 lottery eliminated) ***", clean, VALIDATE_ITERS);

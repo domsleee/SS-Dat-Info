@@ -26,12 +26,24 @@ pub struct CycleResult {
     pub rec_count: u32,
     pub transitions: u32,
     pub max_drift_x: f64,
+    pub max_drift_y: f64,
     pub max_drift_z: f64,
     pub max_drift_frame_x: usize,
     pub max_drift_frame_z: usize,
     pub position_matched: bool,
     pub playback_complete: bool,
     pub all_gates_pass: bool,
+}
+
+impl CycleResult {
+    /// Zero drift on every axis, playback finished, gates green.
+    fn is_clean(&self) -> bool {
+        self.max_drift_x == 0.0
+            && self.max_drift_y == 0.0
+            && self.max_drift_z == 0.0
+            && self.playback_complete
+            && self.all_gates_pass
+    }
 }
 
 #[derive(Debug)]
@@ -43,9 +55,7 @@ pub struct ReliabilityReport {
 
 impl ReliabilityReport {
     pub fn all_pass(&self) -> bool {
-        self.results.iter().all(|r| {
-            r.max_drift_x == 0.0 && r.max_drift_z == 0.0 && r.playback_complete && r.all_gates_pass
-        })
+        self.results.iter().all(|r| r.is_clean())
     }
 
     pub fn print_summary(&self) {
@@ -54,26 +64,24 @@ impl ReliabilityReport {
         println!("Iterations: {}", self.iterations);
         println!();
         println!(
-            "{:>3} {:>6} {:>5} {:>12} {:>12} {:>6} {:>6} {:>5}",
-            "#", "ticks", "trans", "max_drift_x", "max_drift_z", "pos", "play", "gates"
+            "{:>3} {:>6} {:>5} {:>12} {:>12} {:>12} {:>6} {:>6} {:>5}",
+            "#", "ticks", "trans", "max_drift_x", "max_drift_y", "max_drift_z", "pos", "play",
+            "gates"
         );
-        println!("{}", "-".repeat(72));
+        println!("{}", "-".repeat(86));
 
         let mut fail_count = 0;
         for r in &self.results {
-            let pass = r.max_drift_x == 0.0
-                && r.max_drift_z == 0.0
-                && r.playback_complete
-                && r.all_gates_pass;
-            if !pass {
+            if !r.is_clean() {
                 fail_count += 1;
             }
             println!(
-                "{:>3} {:>6} {:>5} {:>12.9} {:>12.9} {:>6} {:>6} {:>5}",
+                "{:>3} {:>6} {:>5} {:>12.9} {:>12.9} {:>12.9} {:>6} {:>6} {:>5}",
                 r.iteration,
                 r.rec_count,
                 r.transitions,
                 r.max_drift_x,
+                r.max_drift_y,
                 r.max_drift_z,
                 if r.position_matched { "ok" } else { "MISS" },
                 if r.playback_complete { "ok" } else { "FAIL" },
@@ -234,6 +242,7 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
             rec_count,
             transitions,
             max_drift_x: d.max_drift_x,
+            max_drift_y: d.max_drift_y,
             max_drift_z: d.max_drift_z,
             max_drift_frame_x: d.max_drift_frame_x,
             max_drift_frame_z: d.max_drift_frame_z,

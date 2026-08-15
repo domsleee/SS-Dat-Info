@@ -15,13 +15,36 @@ Built and **validated on the good 1d32308 baseline** (all live against the runni
   (prefix 298–320, ratio 0.000) and live (605 frames, prefix 196, ratio 0.000 → PASS).
   A mid-fall arm fails on prefix≈0 AND ratio≈1 — two independent gates.
 - **`catchup-speed`** (64× collapse) — DONE, new. Median `T_1x/T_64x` to the same
-  splice frame; floor **8×**. Measured **32.8×** on baseline (T_1x=21.99s, T_64x=0.67s).
-  The splice lands **bit-identical** at 1× and 64× (end-coord delta 0.0000) → speed
-  changes only time-to-splice, so the ratio is the true speedup. Bucket-independent.
+  splice frame; floor **8×**. Measured **32.8×** on baseline (T_1x=21.99s, T_64x=0.67s),
+  re-measured **32.7×** on 2026-08-14 after trimming TRIALS 5→3 (T_1x=21.99s,
+  T_64x=0.67s — the trim does not move the verdict).
+  **Correction (2026-08-14):** the original claim that the splice lands bit-identical
+  at 1× and 64× (end-coord delta 0.0000) no longer holds — measured delta **133.66**.
+  This is NOT a speed effect: the 1× trials alone span three distinct end coords
+  (spawn-bucket lottery). The test is unaffected because it asserts only the ratio,
+  which stays bucket-independent; but do not rely on cross-speed end-coord equality.
 - **`play-pace`** (skip-ahead) — DONE, new. 1× PLAY of a 2000-frame window must take
   ≈ native `frames×0.01s`. Measured **ratio 1.000** (19.999s vs 20.000s). Band [0.85,1.30].
 - **`fe-cont-stress`** — its bogus-looking `effective_x` column replaced with an
   honest in-sweep `vs_1x` speedup (measured 1× wall ÷ this speed's wall).
+
+### Suite-wide oracle change (2026-08-14): drift now includes Y
+
+`DriftResult::is_zero()` / `is_within()` and `compute_drift_between` compared **X and Z
+only** — every drift-based mode was blind to vertical position. A regression that changed
+height while preserving the ground track (jump arcs, terrain following) reported bit-exact
+"zero drift". Y is now compared alongside X/Z, and the 13 call sites that had inlined
+`max_drift_x == 0.0 && max_drift_z == 0.0` instead of calling `is_zero()` were routed
+through it (they would otherwise have silently kept the old two-axis oracle).
+
+Verified live: Y drift is **0.000000000** on `f5`, `replay` ×3, `cont-splice-frame`, and
+`fe10065-cont` 8/8 at both 64× and 256× — so the tightening costs nothing on a healthy
+build — and **15.24** on `smoke`, which is deliberately not F5-aligned. Y is a live,
+discriminating signal, not a dead axis.
+
+Still X/Z-only: the **DLL's** `state.max_drift_x/z` that `tas_ui` displays
+(`shared_state.hpp:104`). Fixing that needs a shared-state version bump, so it is left
+as follow-up — the test oracle and the on-screen number now differ.
 
 ### Empirical corrections to this plan's own assumptions
 
@@ -80,7 +103,7 @@ session. **Rule: never assert an absolute wall-clock duration.** Use only:
 | Playback-speed (skip-ahead) | `play-pace` (new) | `T_rec_window / T_play_window ∈ [0.7,1.6]` at 1× | REC-vs-PLAY wall over same frame window | yes (ratio) |
 | | (stronger, optional) `play-pace-clockforce` | plain PLAY: `cave6_force_count == 0`; forced control: `≈ playback_pos` | DLL counter | yes (count) |
 | Catch-up-speed (64× collapse) | `fe-cont-stress` **+ assert** | add `effective_x ≥ FLOOR` (e.g. ≥8×) to the pass condition; or `catchup-speed`: `T₁ₓ/T₆₄ₓ ≥ 8` | speed ratio | yes (ratio) |
-| Determinism | drift suite (exists) | `compute_drift().is_zero()` | bit-match | yes |
+| Determinism | drift suite (exists) | `compute_drift().is_zero()` — **X/Y/Z since 2026-08-14** | bit-match | yes |
 | Ghost | **`ghost-policy`** (new) | default: ghost flag bytes == 0 during TAS, == saved on STOP; `native`/`enable` as labeled | ghost-flag bytes (expose via shared state) | yes (state) |
 
 ## Two sharpest techniques
@@ -111,7 +134,10 @@ directly — env-immune. Not required: the harness-only `play-pace` ratio catche
 bug without DLL churn.
 
 ## Recommended order (all harness-only except the optional DLL counter)
-1. Assert `effective_x` in `fe-cont-stress` — ~5 lines, closes the 64× gap now.
+1. ~~Assert `effective_x` in `fe-cont-stress`~~ — **SUPERSEDED** by `catchup-speed`,
+   which asserts the same 64×-collapse property on a dedicated ratio. `fe-cont-stress`
+   keeps its speedup column as an informational sweep on purpose (see the comment in
+   `fe_cont_stress.rs`); adding a second assertion there would duplicate the gate.
 2. `rec-repro` — the scuffing catcher.
 3. `play-pace` — the skip-ahead catcher (REC-vs-PLAY ratio).
 4. Harden `rec-start`; add `ghost-policy`.

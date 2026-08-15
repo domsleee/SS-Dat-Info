@@ -313,7 +313,7 @@ fn main() {
             // a run that never started returns 0.0 drift and would have
             // exited 0, hiding real failures from CI.
             let any_failure = report.results.iter().any(|r| {
-                let drifted = r.max_drift_x > 0.0 || r.max_drift_z > 0.0;
+                let drifted = r.has_drift();
                 let pos_failed = !no_match && !r.position_matched;
                 drifted || !r.playback_complete || pos_failed
             });
@@ -834,8 +834,62 @@ fn run_smoke_test() {
     // PLAY
     println!("--- PLAY ---");
     harness::arm_play(&mut client);
-    harness::wait_playback(&client, rec_count);
+    let play_ok = harness::wait_playback(&client, rec_count);
     harness::print_results(&client);
+
+    // Verdict. Smoke is deliberately NOT F5-aligned, so REC and PLAY start from
+    // different spawns and drift is EXPECTED — asserting zero drift here would
+    // be wrong. What smoke can and must assert is that the pipeline is alive
+    // end to end: ticks were captured, playback ran to completion, and the
+    // player actually moved in both phases. Previously this mode asserted
+    // nothing at all and reported success purely by exiting 0, so a run that
+    // recorded zero ticks or never moved still looked green.
+    let state = client.state();
+    let played = state.playback_pos;
+    // Measure PLAY movement only over frames that actually played. Using
+    // rec_count would walk past playback_pos into stale/zero play_coords, which
+    // can manufacture a large bogus delta on a short playback and mask the very
+    // failure `complete_ok` is there to catch.
+    let (_, _, rec_dz) = drift::compute_movement(&state.rec_coords, rec_count as usize);
+    let (_, _, play_dz) =
+        drift::compute_movement(&state.play_coords, rec_count.min(played) as usize);
+
+    let recorded_ok = rec_count > 0;
+    let complete_ok = play_ok && played >= rec_count;
+    let rec_moved = rec_dz > 0.1;
+    let play_moved = play_dz > 0.1;
+
+    println!("\n=== SMOKE CHECKS ===");
+    println!(
+        "  recorded ticks    : {} — {}",
+        rec_count,
+        if recorded_ok { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  playback complete : {}/{} — {}",
+        played,
+        rec_count,
+        if complete_ok { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  REC movement      : dz={:.4} — {}",
+        rec_dz,
+        if rec_moved { "PASS" } else { "FAIL" }
+    );
+    println!(
+        "  PLAY movement     : dz={:.4} — {}",
+        play_dz,
+        if play_moved { "PASS" } else { "FAIL" }
+    );
+    println!("  (drift is not asserted — smoke is not F5-aligned by design)");
+
+    let pass = recorded_ok && complete_ok && rec_moved && play_moved;
+    if pass {
+        println!("\n*** SMOKE TEST PASSED ***");
+    } else {
+        println!("\n*** SMOKE TEST FAILED ***");
+    }
+    std::process::exit(if pass { 0 } else { 1 });
 }
 
 fn run_f5_aligned_test() {

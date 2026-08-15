@@ -60,6 +60,7 @@ pub struct ContCycleResult {
     pub replay_start_fc: u32,
     pub splice_fc: u32,
     pub max_drift_x: f64,
+    pub max_drift_y: f64,
     pub max_drift_z: f64,
     pub max_drift_frame_x: usize,
     pub max_drift_frame_z: usize,
@@ -92,6 +93,7 @@ impl ContReliabilityReport {
                 && r.replay_coverage_ok
                 && r.forward_only_ok
                 && r.max_drift_x == 0.0
+                && r.max_drift_y == 0.0
                 && r.max_drift_z == 0.0
         })
     }
@@ -108,7 +110,7 @@ impl ContReliabilityReport {
         );
         println!();
         println!(
-            "{:>3} {:>6} {:>6} {:>8} {:>8} {:>6} {:>5} {:>8} {:>8} {:>10} {:>12} {:>12}",
+            "{:>3} {:>6} {:>6} {:>8} {:>8} {:>6} {:>5} {:>8} {:>8} {:>10} {:>12} {:>12} {:>12}",
             "#",
             "splice",
             "mode",
@@ -120,12 +122,13 @@ impl ContReliabilityReport {
             "frame_z",
             "net_z",
             "max_drift_x",
+            "max_drift_y",
             "max_drift_z"
         );
-        println!("{}", "-".repeat(122));
+        println!("{}", "-".repeat(135));
         for r in &self.results {
             println!(
-                "{:>3} {:>6} {:>6} {:>8} {:>8} {:>6} {:>5} {:>8} {:>8} {:>10.3} {:>12.9} {:>12.9}",
+                "{:>3} {:>6} {:>6} {:>8} {:>8} {:>6} {:>5} {:>8} {:>8} {:>10.3} {:>12.9} {:>12.9} {:>12.9}",
                 r.iteration,
                 if r.spliced { "ok" } else { "FAIL" },
                 if r.mode_rec_after_splice {
@@ -141,6 +144,7 @@ impl ContReliabilityReport {
                 r.max_drift_frame_z,
                 r.prefix_net_z,
                 r.max_drift_x,
+                r.max_drift_y,
                 r.max_drift_z,
             );
         }
@@ -270,6 +274,7 @@ impl ContReliabilityReport {
                         && r.replay_coverage_ok
                         && r.forward_only_ok
                         && r.max_drift_x == 0.0
+                        && r.max_drift_y == 0.0
                         && r.max_drift_z == 0.0)
                 })
                 .count();
@@ -689,6 +694,7 @@ pub fn run(
             let mut playback_pos_at_splice = 0;
             let mut splice_recorded_count = 0;
             let mut max_drift_x = f64::INFINITY;
+            let mut max_drift_y = f64::INFINITY;
             let mut max_drift_z = f64::INFINITY;
             let mut max_drift_frame_x = usize::MAX;
             let mut max_drift_frame_z = usize::MAX;
@@ -714,6 +720,7 @@ pub fn run(
                 let assessed_prefix = splice_frame.min(playback_pos_at_splice);
                 let d = drift::compute_drift(state, assessed_prefix);
                 max_drift_x = d.max_drift_x;
+                max_drift_y = d.max_drift_y;
                 max_drift_z = d.max_drift_z;
                 max_drift_frame_x = d.max_drift_frame_x;
                 max_drift_frame_z = d.max_drift_frame_z;
@@ -727,8 +734,13 @@ pub fn run(
                 prefix_min_z = prefix_stats.min_z;
                 prefix_max_z = prefix_stats.max_z;
                 println!(
-                    "  Drift over replayed prefix [0..{}): X={:.9} (frame {}) Z={:.9} (frame {})",
-                    assessed_prefix, max_drift_x, max_drift_frame_x, max_drift_z, max_drift_frame_z
+                    "  Drift over replayed prefix [0..{}): X={:.9} (frame {}) Y={:.9} Z={:.9} (frame {})",
+                    assessed_prefix,
+                    max_drift_x,
+                    max_drift_frame_x,
+                    max_drift_y,
+                    max_drift_z,
+                    max_drift_frame_z
                 );
                 println!(
                     "  Prefix range PLAY: X[{:.3}..{:.3}] Z[{:.3}..{:.3}] net_z={:.3} steps(+/-/0)={}/{}/{}",
@@ -769,6 +781,7 @@ pub fn run(
                 replay_start_fc,
                 splice_fc,
                 max_drift_x,
+                max_drift_y,
                 max_drift_z,
                 max_drift_frame_x,
                 max_drift_frame_z,

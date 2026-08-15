@@ -32,8 +32,11 @@ const SPLICE_FRAME: u32 = 2200;
 /// playback_pos stops advancing, so waiting for it to reach SPLICE_FRAME hangs.
 const VERIFY_FRAMES: u32 = 2199;
 /// Trials per speed; the median rejects the occasional slow restart/scheduler
-/// hiccup so the ratio is stable.
-const TRIALS: u32 = 5;
+/// hiccup so the ratio is stable. 3 is enough for a median: the 1x leg measured
+/// ±3% across 5 trials (21.98-21.99s), and the gate has ~4x headroom (32.6x
+/// measured vs an 8x floor), so the extra 2 trials cost ~44s of the lane
+/// without moving the verdict.
+const TRIALS: u32 = 3;
 const RESTART_TIMEOUT_SECS: u64 = 15;
 const SPLICE_TIMEOUT_SECS: u64 = 120;
 /// The 1× and 64× speeds whose time-to-splice ratio is the catch-up speedup.

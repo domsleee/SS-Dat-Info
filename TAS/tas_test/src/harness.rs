@@ -792,6 +792,10 @@ pub fn print_results(client: &TasSharedMemoryClient) {
         drift.max_drift_x, drift.max_drift_frame_x
     );
     println!(
+        "Max drift Y: {:.9} (frame {})",
+        drift.max_drift_y, drift.max_drift_frame_y
+    );
+    println!(
         "Max drift Z: {:.9} (frame {})",
         drift.max_drift_z, drift.max_drift_frame_z
     );
