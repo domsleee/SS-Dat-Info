@@ -29,15 +29,33 @@ const MATCH_EPS: f64 = 0.001;
 fn replay_to_check(client: &mut tas_shared::TasSharedMemoryClient) -> bool {
     harness::arm_play(client);
     let t0 = Instant::now();
+    // `playback_pos` and the coord buffers PERSIST between iterations, so a
+    // stale value from the previous replay can already be past CHECK_FRAME.
+    // Accepting on that alone reports a clean run for a replay that never
+    // started: observed live as ARM_PLAY silently failing (mode stayed OFF)
+    // while all 10 iterations "passed" in 6s against leftover coordinates.
+    // Require this call to actually observe PLAY before any success.
+    let mut saw_play = false;
     loop {
         let pos = client.playback_pos_volatile();
         let mode = client.state().mode;
-        if pos >= CHECK_FRAME {
+        if mode == PLAY_MODE {
+            saw_play = true;
+        }
+        if saw_play && pos >= CHECK_FRAME {
             return true;
         }
-        if mode != PLAY_MODE {
+        if saw_play && mode != PLAY_MODE {
             // replay ended early (shouldn't before CHECK_FRAME)
             return client.playback_pos_volatile() >= CHECK_FRAME;
+        }
+        if !saw_play && t0.elapsed() > Duration::from_secs(3) {
+            eprintln!(
+                "  WARN: ARM_PLAY did not take effect (mode={} never became PLAY) — \
+                 refusing to judge against stale playback_pos={}",
+                mode, pos
+            );
+            return false;
         }
         if t0.elapsed() > Duration::from_secs(15) {
             eprintln!("  WARN: replay stalled at pos {}", pos);
