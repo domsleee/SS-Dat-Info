@@ -519,6 +519,29 @@ fn no_revive() -> bool {
     std::env::var("NO_REVIVE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
+/// Normalise `playback_speed` to 1.0 before a mode starts.
+///
+/// `playback_speed` lives in shared memory and SURVIVES between tas_test runs.
+/// 13 modes set it; only 8 restore it. So running the suite back to back leaks
+/// speed from one mode into the next — e.g. `cont-splice-frame` finishes at its
+/// 0.25x record speed, and the next `rec-start` then captures 152 frames in its
+/// 6s window instead of ~600, never leaves the spawn countdown, and reports a
+/// degenerate recording. That is a wrong ANSWER, not just a slow run, and it
+/// depends on execution order.
+///
+/// Normalising at the single entry point makes every mode order-independent
+/// regardless of what ran before; modes that want another speed set it after.
+fn normalize_playback_speed(client: &mut TasSharedMemoryClient) {
+    let prev = client.state().playback_speed;
+    if prev != 1.0 {
+        println!(
+            "  Normalised leftover playback_speed {}x -> 1.0x (leaked from a previous run)",
+            prev
+        );
+        client.state_mut().playback_speed = 1.0;
+    }
+}
+
 /// The track every mode assumes. `revive-supreme` navigates Time Attack ->
 /// Forest Easy, and the committed `.tasrec` baselines are all FE, so anything
 /// that records or replays is implicitly an FE test.
@@ -609,8 +632,11 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
                 s.version, s.cave2_hooked, s.cave1c_hooked, s.cave1d_hooked, s.cave5_hooked
             );
             // A reused session is exactly where the track can have drifted since
-            // the last run — check before any mode touches it.
+            // the last run — check before any mode touches it. Same for a
+            // leftover playback_speed.
             verify_expected_level(&c);
+            let mut c = c;
+            normalize_playback_speed(&mut c);
             return c;
         }
     }
@@ -652,6 +678,8 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
             // Even a fresh revive can land somewhere unexpected if the scripted
             // menu navigation drifts, so verify rather than assume.
             verify_expected_level(&c);
+            let mut c = c;
+            normalize_playback_speed(&mut c);
             c
         }
         Ok(_) => {
