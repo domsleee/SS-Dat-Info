@@ -317,6 +317,13 @@ fn main() {
                 let pos_failed = !no_match && !r.position_matched;
                 drifted || !r.playback_complete || pos_failed
             });
+            // An empty result set makes `.any()` vacuously false, so a run that
+            // produced no iterations at all would exit 0 — "nothing failed"
+            // because nothing happened. Zero iterations is a failure.
+            if report.results.is_empty() {
+                eprintln!("ERROR: replay produced no iterations — nothing was verified");
+                std::process::exit(1);
+            }
             std::process::exit(if any_failure { 1 } else { 0 });
         }
         "refresh-tasrec" => {
@@ -861,6 +868,18 @@ fn run_smoke_test() {
     let rec_travel = rec_dx.max(rec_dy).max(rec_dz);
     let play_travel = play_dx.max(play_dy).max(play_dz);
 
+    // Smoke has no drift gate (it is not F5-aligned), so nothing else here would
+    // notice a non-finite trace: `compute_movement` compares with `>`, which is
+    // false for NaN, and infinity would read as "moved". Check finiteness
+    // directly over the assessed spans.
+    let finite = |coords: &[[f32; 3]], n: usize| {
+        coords[..n.min(coords.len())]
+            .iter()
+            .all(|c| c[0].is_finite() && c[1].is_finite() && c[2].is_finite())
+    };
+    let coords_finite = finite(&state.rec_coords, rec_count as usize)
+        && finite(&state.play_coords, rec_count.min(played) as usize);
+
     let recorded_ok = rec_count > 0;
     let complete_ok = play_ok && played >= rec_count;
     let rec_moved = rec_travel > 0.1;
@@ -894,9 +913,14 @@ fn run_smoke_test() {
         play_dz,
         if play_moved { "PASS" } else { "FAIL" }
     );
+    println!(
+        "  coords finite     : {} — {}",
+        coords_finite,
+        if coords_finite { "PASS" } else { "FAIL" }
+    );
     println!("  (drift is not asserted — smoke is not F5-aligned by design)");
 
-    let pass = recorded_ok && complete_ok && rec_moved && play_moved;
+    let pass = recorded_ok && complete_ok && rec_moved && play_moved && coords_finite;
     if pass {
         println!("\n*** SMOKE TEST PASSED ***");
     } else {

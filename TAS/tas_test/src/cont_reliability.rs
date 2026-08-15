@@ -87,15 +87,18 @@ pub struct ContReliabilityReport {
 
 impl ContReliabilityReport {
     pub fn all_pass(&self) -> bool {
-        self.results.iter().all(|r| {
-            r.spliced
-                && r.mode_rec_after_splice
-                && r.replay_coverage_ok
-                && r.forward_only_ok
-                && r.max_drift_x == 0.0
-                && r.max_drift_y == 0.0
-                && r.max_drift_z == 0.0
-        })
+        // `.all()` is vacuously true on an empty set: zero completed splice
+        // cycles would report a clean run. Require at least one.
+        !self.results.is_empty()
+            && self.results.iter().all(|r| {
+                r.spliced
+                    && r.mode_rec_after_splice
+                    && r.replay_coverage_ok
+                    && r.forward_only_ok
+                    && r.max_drift_x == 0.0
+                    && r.max_drift_y == 0.0
+                    && r.max_drift_z == 0.0
+            })
     }
 
     pub fn print_summary(&self) {

@@ -187,11 +187,16 @@ pub fn run() -> bool {
     // [0,1000) therefore only re-checks frames that played BEFORE the pause, and
     // is structurally incapable of seeing a pause-induced divergence. The real
     // assertion is the window AFTER the pause point.
-    // Anchor on the position AFTER the hold, not before it: that is the frame
-    // playback actually resumes from. If the pause worked the two are identical
-    // (nothing advanced); if it did not, the later value is the honest boundary
-    // and the run fails on `actually_paused` regardless.
-    let resume_anchor = pos_at_pause.max(pos_after_pause);
+    // Anchor on the EARLIER position (before the hold), deliberately.
+    //
+    // It is tempting to anchor on pos_after_pause as "the frame playback resumes
+    // from", but `actually_paused` only requires fc_delta < PAUSE_DURATION_SECS*10
+    // (=40), so up to 39 callbacks may advance and still be classified as paused.
+    // Anchoring on the later position would skip those frames — and they are
+    // precisely the frames at the pause boundary where a resume-induced
+    // divergence shows up first. The earlier anchor is conservative: it folds in
+    // a few known-good pre-pause frames, but it cannot miss a post-resume frame.
+    let resume_anchor = pos_at_pause.min(pos_after_pause);
     let post_pause_drift = drift::compute_drift_window(state, resume_anchor, rec_count);
     let post_pause_frames = rec_count.saturating_sub(resume_anchor);
     println!(
