@@ -240,6 +240,17 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
 
+    // Pre-flight: is the game even on the track this recording belongs to?
+    // Without this a wrong-track run looks like a hang — the start matcher can
+    // never reach a spawn that is on another map, so it burns its full retry
+    // budget (~22s each) and the mode appears to stall for many minutes.
+    if let Err(msg) =
+        tas_shared::level::check_recording_matches_live(path, client.state().level_id)
+    {
+        eprintln!("ERROR: {}", msg);
+        std::process::exit(1);
+    }
+
     // Write recording data into shared memory
     write_to_shared(&mut client, &rec);
 

@@ -20,6 +20,7 @@
 
 use crate::harness;
 use std::thread;
+use tas_shared::TasMode;
 use std::time::{Duration, Instant};
 
 /// Duration for each tick rate measurement (seconds).
@@ -150,7 +151,12 @@ pub fn run() -> SpeedResetResult {
     };
 
     let fast_pass = (FAST_RATIO_MIN..=FAST_RATIO_MAX).contains(&fast_ratio);
-    let reset_pass = (RESET_RATIO_MIN..=RESET_RATIO_MAX).contains(&reset_ratio);
+    // `mode_after_stop` was computed and printed but never asserted. The whole
+    // point of phase 3 is "STOP returns the engine to OFF and resets the time
+    // constant"; if the mode never reached OFF the post-stop tick rate is not
+    // measuring what the name says, so it belongs in the verdict.
+    let stopped_ok = mode_after_stop == TasMode::Off as u32;
+    let reset_pass = stopped_ok && (RESET_RATIO_MIN..=RESET_RATIO_MAX).contains(&reset_ratio);
     let f5_pass = f5_ok && (RESET_RATIO_MIN..=RESET_RATIO_MAX).contains(&post_f5_ratio);
 
     let result = SpeedResetResult {

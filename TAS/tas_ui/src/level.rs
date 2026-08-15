@@ -83,8 +83,9 @@ pub fn parse_level_code(path: &str) -> Option<String> {
 /// 1=Medium, 2=Hard). 0xFFFFFFFF = unknown/menu → None. The in-process heap
 /// scan only detects the main Tracks (no Halfpipe/Ramp codes here).
 pub fn level_code_from_id(level_id: u32) -> Option<&'static str> {
-    const CODES: [&str; 9] = ["FE", "FM", "FH", "AE", "AM", "AH", "VE", "VM", "VH"];
-    CODES.get(level_id as usize).copied()
+    // Delegates to tas_shared so the encoding has ONE definition — tas_test's
+    // pre-flight track guard reads the same table.
+    tas_shared::level::code_from_id(level_id)
 }
 
 /// The in-race duration of a recording, in centiseconds (= ticks, since the

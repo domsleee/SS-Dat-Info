@@ -55,7 +55,9 @@ pub struct ReliabilityReport {
 
 impl ReliabilityReport {
     pub fn all_pass(&self) -> bool {
-        self.results.iter().all(|r| r.is_clean())
+        // `.all()` on an empty set is vacuously true — a run that completed zero
+        // cycles would report success. Require at least one measured cycle.
+        !self.results.is_empty() && self.results.iter().all(|r| r.is_clean())
     }
 
     pub fn print_summary(&self) {

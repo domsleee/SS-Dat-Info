@@ -159,12 +159,19 @@ pub fn run() -> DriftSpeedResult {
         same_speed_drift.max_drift_z,
         same_speed_drift.max_drift_frame_z,
     );
-    // Completion and the gate assessment are part of the verdict, not just
-    // warnings: `compute_drift` only inspects frames that played, so a replay
-    // that stalled early returns a small (often zero) drift over a truncated
-    // window. Without these a failed playback reads as a clean pass.
-    let same_speed_pass =
-        same_speed_drift.is_zero() && play_ok_same && same_speed_assessment.all_pass();
+    // Completion is part of the verdict, not just a warning: `compute_drift`
+    // only inspects frames that played, so a replay that stalled early returns a
+    // small (often zero) drift over a truncated window and used to read as a
+    // clean pass.
+    //
+    // The 4-gate assessment is printed but deliberately NOT folded in. Gate 0
+    // requires sampled world Z to be non-zero and Gates 1/2 define movement via
+    // Z alone (gates.rs), so a legitimate zero-drift run that crosses Z==0 or
+    // travels mainly in X/Y would fail for reasons unrelated to speed
+    // transparency — which is the only thing this mode is about. This mode needs
+    // a Pico HID and could not be exercised here, so it does not get an
+    // unverifiable new failure mode. Revisit once it can be run live.
+    let same_speed_pass = same_speed_drift.is_zero() && play_ok_same;
     println!(
         "  Case 1 verdict: {} (expect zero drift)",
         if same_speed_pass { "PASS" } else { "FAIL" }
