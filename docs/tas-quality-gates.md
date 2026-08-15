@@ -26,7 +26,7 @@ session you already have running).
 
 | Mode | Pico? | Pass signature | Notes |
 |---|---|---|---|
-| `smoke` | no | exit 0, no `ERROR:` lines | Quick harness sanity (~30s) |
+| `smoke` | no | `*** SMOKE TEST PASSED ***` | Pipeline liveness (~40s): ticks captured, playback ran to completion, player moved in both REC and PLAY. Drift is deliberately **not** asserted — smoke is not F5-aligned, so REC and PLAY start from different spawns. |
 | `f5` | no | `=== Overall: ALL GATES PASS ===` | F5-aligned zero-drift baseline |
 | `speed` | no | `*** SPEED TEST PASSED ***` | 0.25x / 1x / 2x playback |
 | `speed-reset` | no | `*** SPEED RESET TEST PASSED ***` | Cave-5 OFF-mode regression guard |

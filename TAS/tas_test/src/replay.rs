@@ -145,11 +145,20 @@ pub fn write_to_shared(client: &mut TasSharedMemoryClient, rec: &LoadedRecording
 pub struct ReplayResult {
     pub iteration: u32,
     pub max_drift_x: f64,
+    pub max_drift_y: f64,
     pub max_drift_z: f64,
     pub max_drift_frame_x: usize,
+    pub max_drift_frame_y: usize,
     pub max_drift_frame_z: usize,
     pub position_matched: bool,
     pub playback_complete: bool,
+}
+
+impl ReplayResult {
+    /// Any non-zero drift on any axis (Y included).
+    pub fn has_drift(&self) -> bool {
+        self.max_drift_x > 0.0 || self.max_drift_y > 0.0 || self.max_drift_z > 0.0
+    }
 }
 
 pub struct ReplayReport {
@@ -166,24 +175,22 @@ impl ReplayReport {
         println!("Iterations: {}", self.results.len());
         println!();
         println!(
-            "{:>4} {:>12} {:>12} {:>8} {:>8} {:>7} {:>8}",
-            "#", "max_drift_x", "max_drift_z", "frame_x", "frame_z", "pos_ok", "play_ok"
+            "{:>4} {:>12} {:>12} {:>12} {:>7} {:>8}",
+            "#", "max_drift_x", "max_drift_y", "max_drift_z", "pos_ok", "play_ok"
         );
         println!("{}", "-".repeat(70));
 
         let mut drift_count = 0;
         for r in &self.results {
-            let has_drift = r.max_drift_x > 0.0 || r.max_drift_z > 0.0;
-            if has_drift {
+            if r.has_drift() {
                 drift_count += 1;
             }
             println!(
-                "{:>4} {:>12.9} {:>12.9} {:>8} {:>8} {:>7} {:>8}",
+                "{:>4} {:>12.9} {:>12.9} {:>12.9} {:>7} {:>8}",
                 r.iteration,
                 r.max_drift_x,
+                r.max_drift_y,
                 r.max_drift_z,
-                r.max_drift_frame_x,
-                r.max_drift_frame_z,
                 if r.position_matched { "yes" } else { "NO" },
                 if r.playback_complete { "yes" } else { "NO" },
             );
@@ -276,17 +283,24 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
         let r = ReplayResult {
             iteration: i,
             max_drift_x: d.max_drift_x,
+            max_drift_y: d.max_drift_y,
             max_drift_z: d.max_drift_z,
             max_drift_frame_x: d.max_drift_frame_x,
+            max_drift_frame_y: d.max_drift_frame_y,
             max_drift_frame_z: d.max_drift_frame_z,
             position_matched: matched,
             playback_complete: play_ok,
         };
 
-        if verbose || d.max_drift_x > 0.0 || d.max_drift_z > 0.0 {
+        if verbose || !d.is_zero() {
             println!(
-                "  Drift: X={:.9} (frame {}), Z={:.9} (frame {})",
-                d.max_drift_x, d.max_drift_frame_x, d.max_drift_z, d.max_drift_frame_z
+                "  Drift: X={:.9} (frame {}), Y={:.9} (frame {}), Z={:.9} (frame {})",
+                d.max_drift_x,
+                d.max_drift_frame_x,
+                d.max_drift_y,
+                d.max_drift_frame_y,
+                d.max_drift_z,
+                d.max_drift_frame_z
             );
             // Find first frame where any axis diverges (bit-level mismatch).
             // Reveals whether drift is sudden (rotation mismatch at start) or

@@ -149,7 +149,7 @@ pub fn run(
                 if splice_boundary != splice_frame {
                     all_exact_frame = false;
                 }
-                let it_drift = d.max_drift_x.max(d.max_drift_z);
+                let it_drift = d.max_axis();
                 worst_drift = worst_drift.max(it_drift);
                 // Drop to the slow record speed and record a short burst, like
                 // the user does after the catch-up.

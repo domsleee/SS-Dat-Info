@@ -5,21 +5,33 @@
 use tas_shared::TasSharedState;
 
 /// Per-axis drift result.
+///
+/// Y (vertical) is compared alongside X/Z. It was historically omitted, which
+/// left every drift-based mode blind to a regression that changed height while
+/// preserving the ground track — jump arcs and terrain following are exactly
+/// that shape, so a "zero drift" verdict used to be able to hide them.
 #[derive(Debug, Clone, Default)]
 pub struct DriftResult {
     pub max_drift_x: f64,
+    pub max_drift_y: f64,
     pub max_drift_z: f64,
     pub max_drift_frame_x: usize,
+    pub max_drift_frame_y: usize,
     pub max_drift_frame_z: usize,
 }
 
 impl DriftResult {
     pub fn is_zero(&self) -> bool {
-        self.max_drift_x == 0.0 && self.max_drift_z == 0.0
+        self.max_drift_x == 0.0 && self.max_drift_y == 0.0 && self.max_drift_z == 0.0
     }
 
     pub fn is_within(&self, epsilon: f64) -> bool {
-        self.max_drift_x < epsilon && self.max_drift_z < epsilon
+        self.max_drift_x < epsilon && self.max_drift_y < epsilon && self.max_drift_z < epsilon
+    }
+
+    /// Largest drift across all three axes — for one-line reporting.
+    pub fn max_axis(&self) -> f64 {
+        self.max_drift_x.max(self.max_drift_y).max(self.max_drift_z)
     }
 }
 
@@ -44,6 +56,11 @@ fn compute_drift_between(
         } else {
             rec_coords[i][0]
         };
+        let rec_y = if normalize_to_start {
+            rec_coords[i][1] - rec_origin[1]
+        } else {
+            rec_coords[i][1]
+        };
         let rec_z = if normalize_to_start {
             rec_coords[i][2] - rec_origin[2]
         } else {
@@ -54,6 +71,11 @@ fn compute_drift_between(
         } else {
             play_coords[i][0]
         };
+        let play_y = if normalize_to_start {
+            play_coords[i][1] - play_origin[1]
+        } else {
+            play_coords[i][1]
+        };
         let play_z = if normalize_to_start {
             play_coords[i][2] - play_origin[2]
         } else {
@@ -61,11 +83,16 @@ fn compute_drift_between(
         };
 
         let dx = (rec_x as f64 - play_x as f64).abs();
+        let dy = (rec_y as f64 - play_y as f64).abs();
         let dz = (rec_z as f64 - play_z as f64).abs();
 
         if dx > result.max_drift_x {
             result.max_drift_x = dx;
             result.max_drift_frame_x = i;
+        }
+        if dy > result.max_drift_y {
+            result.max_drift_y = dy;
+            result.max_drift_frame_y = i;
         }
         if dz > result.max_drift_z {
             result.max_drift_z = dz;
@@ -217,12 +244,72 @@ mod tests {
     fn drift_is_within() {
         let d = DriftResult {
             max_drift_x: 0.001,
+            max_drift_y: 0.0015,
             max_drift_z: 0.002,
-            max_drift_frame_x: 0,
-            max_drift_frame_z: 0,
+            ..Default::default()
         };
         assert!(d.is_within(0.01));
         assert!(!d.is_within(0.001));
+    }
+
+    // ========== Y axis (vertical) ==========
+
+    #[test]
+    fn drift_detects_y_difference() {
+        let mut state = zeroed_state();
+        for i in 0..50 {
+            state.rec_coords[i] = [10.0, 5.0, 20.0];
+            state.play_coords[i] = [10.0, 5.0, 20.0];
+        }
+        // A pure height change: ground track (X/Z) is untouched.
+        state.play_coords[30][1] = 8.0;
+
+        let d = compute_drift(&state, 50);
+        assert!(
+            !d.is_zero(),
+            "a vertical-only divergence must not report zero drift"
+        );
+        assert_eq!(d.max_drift_y, 3.0);
+        assert_eq!(d.max_drift_frame_y, 30);
+        // Ground track really is identical — this is the case the old X/Z-only
+        // oracle silently passed.
+        assert_eq!(d.max_drift_x, 0.0);
+        assert_eq!(d.max_drift_z, 0.0);
+    }
+
+    #[test]
+    fn drift_is_within_catches_y_alone() {
+        let d = DriftResult {
+            max_drift_y: 0.5,
+            ..Default::default()
+        };
+        assert!(!d.is_within(0.01));
+        assert!(!d.is_zero());
+    }
+
+    #[test]
+    fn normalized_drift_window_cancels_constant_y_offset() {
+        let mut state = zeroed_state();
+        for i in 0..6 {
+            state.rec_coords[i] = [0.0, 100.0 + i as f32, 0.0];
+            // Same vertical *shape*, shifted by a constant 40 units.
+            state.play_coords[i] = [0.0, 140.0 + i as f32, 0.0];
+        }
+        let raw = compute_drift_window(&state, 2, 6);
+        let normalized = compute_normalized_drift_window(&state, 2, 6);
+        assert_eq!(raw.max_drift_y, 40.0);
+        assert!(normalized.is_zero());
+    }
+
+    #[test]
+    fn max_axis_reports_largest_of_three() {
+        let d = DriftResult {
+            max_drift_x: 1.0,
+            max_drift_y: 7.0,
+            max_drift_z: 3.0,
+            ..Default::default()
+        };
+        assert_eq!(d.max_axis(), 7.0);
     }
 
     #[test]

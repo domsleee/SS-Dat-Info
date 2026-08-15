@@ -192,8 +192,20 @@ pub fn run() -> bool {
         }
     }
 
-    let pass = drift_result.is_zero();
-    if pass {
+    // The drift check is only meaningful if a pause actually happened. Without
+    // it the replay ran start-to-finish uninterrupted, which trivially yields
+    // zero drift while testing nothing — a false green. `actually_paused` was
+    // already measured above (frame_count stalled during the hold); gate on it.
+    let pass = drift_result.is_zero() && actually_paused;
+    if !actually_paused {
+        println!(
+            "\n*** PAUSE/RESUME REPLAY FAILED: the game never paused — Escape did not reach the \
+             pause handler (frame_count advanced {} during the {}s hold). The replay ran \
+             uninterrupted, so the zero-drift result below proves nothing. This mode needs the \
+             Pico HID; keybd_event/PostMessage do not reach the pause handler. ***",
+            fc_delta, PAUSE_DURATION_SECS
+        );
+    } else if pass {
         println!(
             "\n*** PAUSE/RESUME REPLAY PASSED: zero drift across pause+resume for {} frames ***",
             check_end

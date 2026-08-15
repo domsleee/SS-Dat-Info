@@ -130,9 +130,11 @@ pub fn run_gates(state: &TasSharedState, rec_count: u32) -> GateAssessment {
         name: "Zero drift",
         passed: gate3_pass,
         detail: format!(
-            "maxDriftX={:.9} (frame {}) maxDriftZ={:.9} (frame {})",
+            "maxDriftX={:.9} (frame {}) maxDriftY={:.9} (frame {}) maxDriftZ={:.9} (frame {})",
             drift_result.max_drift_x,
             drift_result.max_drift_frame_x,
+            drift_result.max_drift_y,
+            drift_result.max_drift_frame_y,
             drift_result.max_drift_z,
             drift_result.max_drift_frame_z,
         ),
@@ -184,8 +186,8 @@ pub fn run_gates_straight(state: &TasSharedState, rec_count: u32) -> GateAssessm
         name: "Zero drift",
         passed: drift_result.is_zero(),
         detail: format!(
-            "maxDriftX={:.9} maxDriftZ={:.9}",
-            drift_result.max_drift_x, drift_result.max_drift_z,
+            "maxDriftX={:.9} maxDriftY={:.9} maxDriftZ={:.9}",
+            drift_result.max_drift_x, drift_result.max_drift_y, drift_result.max_drift_z,
         ),
     };
 

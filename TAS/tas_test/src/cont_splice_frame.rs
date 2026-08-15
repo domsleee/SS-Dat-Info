@@ -124,12 +124,12 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
         burst_frames, record_speed
     );
     println!(
-        "  prefix drift [0..{}):    X={:.9}  Z={:.9}",
-        splice_frame, d.max_drift_x, d.max_drift_z
+        "  prefix drift [0..{}):    X={:.9}  Y={:.9}  Z={:.9}",
+        splice_frame, d.max_drift_x, d.max_drift_y, d.max_drift_z
     );
 
     let exact = splice_boundary == splice_frame;
-    let drift_ok = d.max_drift_x == 0.0 && d.max_drift_z == 0.0;
+    let drift_ok = d.is_zero();
     let recorded_advanced = burst_frames > 0;
     if exact && mode_rec && drift_ok && recorded_advanced {
         println!(

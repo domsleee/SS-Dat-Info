@@ -86,6 +86,7 @@ pub fn run() -> bool {
                     && r.replay_coverage_ok
                     && r.forward_only_ok
                     && r.max_drift_x == 0.0
+                    && r.max_drift_y == 0.0
                     && r.max_drift_z == 0.0)
             })
             .count();
