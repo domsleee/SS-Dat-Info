@@ -395,6 +395,15 @@ fn main() {
         "gamestate" => {
             // Validate the game_in_game exposure: revive (in-game) + inject, then
             // print state a few times (game_in_game should read 1 in-game).
+            //
+            // This is the diagnostic you reach for WHEN the session is wrong, so
+            // it must not refuse to run on an unexpected track — that would hide
+            // the very state you are trying to inspect. Opt out of the check
+            // unless the caller explicitly asked for one.
+            if std::env::var("TAS_TEST_LEVEL").is_err() {
+                // SAFETY: single-threaded startup, before any harness thread.
+                unsafe { std::env::set_var("TAS_TEST_LEVEL", "any") };
+            }
             let client = harness::ensure_game_running();
             for _ in 0..6 {
                 harness::print_status(&client);

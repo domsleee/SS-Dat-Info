@@ -519,6 +519,79 @@ fn no_revive() -> bool {
     std::env::var("NO_REVIVE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
+/// The track every mode assumes. `revive-supreme` navigates Time Attack ->
+/// Forest Easy, and the committed `.tasrec` baselines are all FE, so anything
+/// that records or replays is implicitly an FE test.
+const DEFAULT_EXPECTED_LEVEL: &str = "FE";
+
+/// How long to wait for the DLL's level-scan thread to publish a track. It
+/// re-scans about every 1.5s (level_scan.hpp), so this is several scans' worth.
+const LEVEL_SCAN_TIMEOUT_SECS: u64 = 12;
+
+/// Assert the game is actually on the expected track before any mode runs.
+///
+/// Being on the wrong track is not a subtle failure, but it *looks* like one:
+/// the spawn is somewhere else entirely, so a replay's start matcher can never
+/// hit its target and simply burns its retry budget, while a fresh REC happily
+/// records meaningless coordinates from another map. Both read as a mysterious
+/// hang or an inexplicable drift number. Checking up front turns that into an
+/// immediate, accurate error.
+///
+/// `TAS_TEST_LEVEL` overrides the expected code (e.g. `AM`); `TAS_TEST_LEVEL=any`
+/// disables the check for deliberate off-track work.
+pub fn verify_expected_level(client: &TasSharedMemoryClient) {
+    let expected = std::env::var("TAS_TEST_LEVEL")
+        .unwrap_or_else(|_| DEFAULT_EXPECTED_LEVEL.to_string());
+    if expected.eq_ignore_ascii_case("any") {
+        println!("  Track check: SKIPPED (TAS_TEST_LEVEL=any)");
+        return;
+    }
+
+    // The scan only publishes while game_in_game, and only every ~1.5s, so a
+    // freshly revived session legitimately reads "unknown" for a moment. Poll.
+    let start = Instant::now();
+    let mut live = None;
+    while start.elapsed() < Duration::from_secs(LEVEL_SCAN_TIMEOUT_SECS) {
+        let id = client.state().level_id;
+        if let Some(code) = tas_shared::level::code_from_id(id) {
+            live = Some(code);
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    match live {
+        Some(code) if code.eq_ignore_ascii_case(&expected) => {
+            println!("  Track check: on {} as expected", code);
+        }
+        Some(code) => {
+            eprintln!(
+                "ERROR: wrong track — the game is on {} but this run expects {}.\n  \
+                 Recording or replaying here produces meaningless results: the spawn is on a\n  \
+                 different map, so a replay's start matcher can never match and a fresh REC\n  \
+                 captures another course entirely.\n  \
+                 Navigate to {} (or set TAS_TEST_LEVEL={} / TAS_TEST_LEVEL=any).",
+                code, expected, expected, code
+            );
+            std::process::exit(1);
+        }
+        None => {
+            eprintln!(
+                "ERROR: could not identify the track after {}s — level_id stayed 0x{:08X}.\n  \
+                 That value means the game is NOT on one of the nine Time-Attack Tracks:\n  \
+                 it is at a menu, mid-teardown, or in a mode the scan does not cover\n  \
+                 (Practice, Halfpipe). This run expects {}.\n  \
+                 Navigate into {} (or set TAS_TEST_LEVEL=any to bypass).",
+                LEVEL_SCAN_TIMEOUT_SECS,
+                client.state().level_id,
+                expected,
+                expected
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Ensure the game is running with hooks active.
 ///
 /// Default behaviour: if the game is already live, reuse it. If not, kill
@@ -535,6 +608,9 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
                 "Game already live (version {}). Hooks: cave2={} cave1c={} cave1d={} cave5={}",
                 s.version, s.cave2_hooked, s.cave1c_hooked, s.cave1d_hooked, s.cave5_hooked
             );
+            // A reused session is exactly where the track can have drifted since
+            // the last run — check before any mode touches it.
+            verify_expected_level(&c);
             return c;
         }
     }
@@ -573,6 +649,9 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
                 "Connected after revive (version {}). Hooks: cave2={} cave1c={} cave1d={} cave5={}",
                 s.version, s.cave2_hooked, s.cave1c_hooked, s.cave1d_hooked, s.cave5_hooked
             );
+            // Even a fresh revive can land somewhere unexpected if the scripted
+            // menu navigation drifts, so verify rather than assume.
+            verify_expected_level(&c);
             c
         }
         Ok(_) => {
