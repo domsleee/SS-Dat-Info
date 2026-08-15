@@ -217,8 +217,13 @@ pub fn run() -> bool {
     // independent forward runs, so the F5 spawn-bucket lottery moves it by tens of
     // units on a perfectly healthy build (measured 12.56 alongside a 24/24 match).
     // It stays a printed diagnostic.
+    // The shift must also be one the producer can actually emit. The DLL only
+    // ever publishes shifts in [-3,3] (snapshot.hpp:405); anything else means we
+    // read an unpublished/stale event_count — a never-written 0 decodes to shift
+    // -8 — so the result is not a real measurement and must not be trusted.
+    let shift_valid = (-3..=3).contains(&traj_shift);
     let expected_overlap = (TRAJ_FRAMES as i32 - traj_shift.abs()).max(0) as u32;
-    let deterministic = traj_match == expected_overlap;
+    let deterministic = shift_valid && traj_match == expected_overlap;
     let ok = alive && rewound && deterministic && snap_bytes > 0 && rest_bytes > 0;
     println!();
     if ok {
@@ -228,8 +233,17 @@ pub fn run() -> bool {
         );
     } else {
         println!(
-            "*** SNAPSHOT PROBE FAILED: alive={} rewound={}({:.4}) deterministic={}({}/{} overlapping frames at shift {}) snap_bytes={} rest_bytes={} ***",
-            alive, rewound, revert_err, deterministic, traj_match, expected_overlap, traj_shift, snap_bytes, rest_bytes
+            "*** SNAPSHOT PROBE FAILED: alive={} rewound={}({:.4}) deterministic={}({}/{} overlapping frames at shift {}{}) snap_bytes={} rest_bytes={} ***",
+            alive,
+            rewound,
+            revert_err,
+            deterministic,
+            traj_match,
+            expected_overlap,
+            traj_shift,
+            if shift_valid { "" } else { " — OUT OF RANGE, no result published" },
+            snap_bytes,
+            rest_bytes
         );
     }
     ok
