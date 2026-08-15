@@ -26,6 +26,9 @@ pub struct AcceptanceResult {
     pub max_base_vs_rec_x: f64,
     pub max_play_vs_base_x: f64,
     pub gates_pass: bool,
+    /// Whether PLAY ran through to `rec_count`. A truncated playback makes the
+    /// drift and gate numbers meaningless, so it is part of the verdict.
+    pub playback_complete: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -56,7 +59,12 @@ impl AcceptanceResult {
         // transitions>0 + recDeltaZ>0.1) and that replay reproduces the
         // recording bit-perfectly (Gate 3), which is the TAS reliability
         // property that actually matters.
-        self.gates_pass && self.zero_drift == Verdict::Pass
+        //
+        // Completion IS required though: `compute_drift` and the gates only
+        // inspect frames that played, so a playback that stalled part-way
+        // yields a clean verdict over a truncated window. Previously this was
+        // only a printed WARNING.
+        self.gates_pass && self.zero_drift == Verdict::Pass && self.playback_complete
     }
 }
 
@@ -253,6 +261,7 @@ pub fn run() -> AcceptanceResult {
         max_base_vs_rec_x,
         max_play_vs_base_x,
         gates_pass: assessment.all_pass(),
+        playback_complete: play_ok,
     };
 
     println!("\n=== ACCEPTANCE VERDICT ===");

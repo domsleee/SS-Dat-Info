@@ -309,6 +309,7 @@ mod tests {
             max_base_vs_rec_x: 15.5,
             max_play_vs_base_x: 14.2,
             gates_pass: true,
+            playback_complete: true,
         };
         let cert_path = temp_path("acceptance.json");
 
@@ -339,6 +340,7 @@ mod tests {
             max_base_vs_rec_x: 0.1,
             max_play_vs_base_x: 0.1,
             gates_pass: false,
+            playback_complete: true,
         };
         let cert_path = temp_path("acceptance_fail.json");
 

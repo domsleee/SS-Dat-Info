@@ -152,13 +152,19 @@ pub fn run() -> DriftSpeedResult {
     same_speed_assessment.print_summary();
 
     println!(
-        "\n  Case 1 drift: X={:.9} (frame {}) Z={:.9} (frame {})",
+        "\n  Case 1 drift: X={:.9} (frame {}) Y={:.9} Z={:.9} (frame {})",
         same_speed_drift.max_drift_x,
         same_speed_drift.max_drift_frame_x,
+        same_speed_drift.max_drift_y,
         same_speed_drift.max_drift_z,
         same_speed_drift.max_drift_frame_z,
     );
-    let same_speed_pass = same_speed_drift.is_zero();
+    // Completion and the gate assessment are part of the verdict, not just
+    // warnings: `compute_drift` only inspects frames that played, so a replay
+    // that stalled early returns a small (often zero) drift over a truncated
+    // window. Without these a failed playback reads as a clean pass.
+    let same_speed_pass =
+        same_speed_drift.is_zero() && play_ok_same && same_speed_assessment.all_pass();
     println!(
         "  Case 1 verdict: {} (expect zero drift)",
         if same_speed_pass { "PASS" } else { "FAIL" }
@@ -179,13 +185,14 @@ pub fn run() -> DriftSpeedResult {
     harness::print_results(&client);
 
     println!(
-        "\n  Case 2 drift: X={:.9} (frame {}) Z={:.9} (frame {})",
+        "\n  Case 2 drift: X={:.9} (frame {}) Y={:.9} Z={:.9} (frame {})",
         cross_speed_drift.max_drift_x,
         cross_speed_drift.max_drift_frame_x,
+        cross_speed_drift.max_drift_y,
         cross_speed_drift.max_drift_z,
         cross_speed_drift.max_drift_frame_z,
     );
-    let cross_speed_pass = cross_speed_drift.is_zero();
+    let cross_speed_pass = cross_speed_drift.is_zero() && play_ok_cross;
     println!(
         "  Case 2 verdict: {} (expect zero drift — speed scaling is physics-transparent)",
         if cross_speed_pass { "PASS" } else { "FAIL" }

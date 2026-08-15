@@ -5,7 +5,7 @@
 //! | 0    | Z-coordinate ref     | 18 reference frames (50-900) match expected  |
 //! | 1    | REC movement         | transitions > 0, firstInput != -1            |
 //! | 2    | PLAY movement        | steering visibly works (coord deltas present) |
-//! | 3    | Zero drift           | maxDriftX == 0.0, maxDriftZ == 0.0            |
+//! | 3    | Zero drift           | maxDriftX/Y/Z all == 0.0 (all three axes)     |
 
 use tas_shared::TasSharedState;
 
