@@ -187,12 +187,17 @@ pub fn run() -> bool {
     // [0,1000) therefore only re-checks frames that played BEFORE the pause, and
     // is structurally incapable of seeing a pause-induced divergence. The real
     // assertion is the window AFTER the pause point.
-    let post_pause_drift = drift::compute_drift_window(state, pos_at_pause, rec_count);
-    let post_pause_frames = rec_count.saturating_sub(pos_at_pause);
+    // Anchor on the position AFTER the hold, not before it: that is the frame
+    // playback actually resumes from. If the pause worked the two are identical
+    // (nothing advanced); if it did not, the later value is the honest boundary
+    // and the run fails on `actually_paused` regardless.
+    let resume_anchor = pos_at_pause.max(pos_after_pause);
+    let post_pause_drift = drift::compute_drift_window(state, resume_anchor, rec_count);
+    let post_pause_frames = rec_count.saturating_sub(resume_anchor);
     println!(
         "  POST-PAUSE drift over frames {}..{} ({} frames — the window the pause can affect): \
          X={:.9} Y={:.9} Z={:.9}",
-        pos_at_pause,
+        resume_anchor,
         rec_count,
         post_pause_frames,
         post_pause_drift.max_drift_x,
@@ -237,7 +242,7 @@ pub fn run() -> bool {
             "\n*** PAUSE/RESUME REPLAY FAILED: the pause landed at frame {} but the recording is \
              only {} frames — there is no post-pause window to assess, so this run proves nothing \
              about pause/resume. ***",
-            pos_at_pause, rec_count
+            resume_anchor, rec_count
         );
     } else if !actually_paused {
         println!(
@@ -258,13 +263,13 @@ pub fn run() -> bool {
         println!(
             "\n*** PAUSE/RESUME REPLAY PASSED: zero drift across pause+resume — prefix {} frames \
              AND {} frames after the pause at {} ***",
-            check_end, post_pause_frames, pos_at_pause
+            check_end, post_pause_frames, resume_anchor
         );
     } else if !post_pause_drift.is_zero() {
         println!(
             "\n*** PAUSE/RESUME REPLAY FAILED: trajectory diverges AFTER the pause (frames {}..{}): \
              X={:.9} Y={:.9} Z={:.9} — this is the pause/resume regression. ***",
-            pos_at_pause,
+            resume_anchor,
             rec_count,
             post_pause_drift.max_drift_x,
             post_pause_drift.max_drift_y,

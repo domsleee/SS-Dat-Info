@@ -43,6 +43,11 @@ fn compute_drift_between(
     normalize_to_start: bool,
 ) -> DriftResult {
     let mut result = DriftResult::default();
+    // Clamp to what the buffers actually hold. `count` comes from the DLL's
+    // recorded_count/playback_pos; a value past TAS_MAX_TICKS (or past a short
+    // reference slice) would otherwise index out of bounds and panic the whole
+    // run rather than report drift.
+    let end = end.min(rec_coords.len()).min(play_coords.len());
     if start >= end {
         return result;
     }
