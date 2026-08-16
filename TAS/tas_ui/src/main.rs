@@ -2888,7 +2888,7 @@ fn main() -> eframe::Result {
             let widget_bg = egui::Color32::from_gray(35);
             let widget_hover = egui::Color32::from_gray(45);
             let widget_active = egui::Color32::from_gray(40);
-            let subtle_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(50));
+            let subtle_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_gray(50));
 
             // Panel and window backgrounds
             visuals.panel_fill = dark_bg;
@@ -2901,7 +2901,7 @@ fn main() -> eframe::Result {
             visuals.widgets.noninteractive.bg_fill = dark_bg;
             visuals.widgets.noninteractive.weak_bg_fill = dark_bg;
             visuals.widgets.noninteractive.bg_stroke =
-                egui::Stroke::new(1.0, egui::Color32::from_gray(40));
+                egui::Stroke::new(1.0_f32, egui::Color32::from_gray(40));
 
             // Inactive widgets (buttons, combo boxes, collapsing headers)
             visuals.widgets.inactive.bg_fill = widget_bg;
@@ -2912,19 +2912,19 @@ fn main() -> eframe::Result {
             visuals.widgets.hovered.bg_fill = widget_hover;
             visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_gray(38);
             visuals.widgets.hovered.bg_stroke =
-                egui::Stroke::new(1.0, egui::Color32::from_gray(70));
+                egui::Stroke::new(1.0_f32, egui::Color32::from_gray(70));
 
             // Active (pressed) widgets
             visuals.widgets.active.bg_fill = widget_active;
             visuals.widgets.active.weak_bg_fill = egui::Color32::from_gray(35);
-            visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(80));
+            visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_gray(80));
 
             // Open widgets (dropdowns)
             visuals.widgets.open.bg_fill = egui::Color32::from_gray(30);
             visuals.widgets.open.weak_bg_fill = egui::Color32::from_gray(28);
 
             // Window decoration
-            visuals.window_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(40));
+            visuals.window_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_gray(40));
 
             cc.egui_ctx.set_visuals_of(egui::Theme::Dark, visuals);
             Ok(Box::new(TasApp::new()))

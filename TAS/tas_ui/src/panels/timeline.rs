@@ -330,7 +330,7 @@ pub fn show(
             painter.rect_filled(hi, 1.0, color.gamma_multiply(0.35));
             painter.line_segment(
                 [egui::pos2(px, rows_top), egui::pos2(px, rows_bottom)],
-                egui::Stroke::new(2.0, color),
+                egui::Stroke::new(2.0_f32, color),
             );
         }
     }
@@ -371,7 +371,7 @@ pub fn show(
             );
             painter.rect_filled(block, 1.0, color);
             if edit.selected == Some(ev) {
-                painter.rect_stroke(block, 1.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+                painter.rect_stroke(block, 1.0, egui::Stroke::new(1.5_f32, egui::Color32::WHITE));
             }
 
             let id = ui.id().with(("blk", ev.bit, i));
@@ -470,7 +470,7 @@ pub fn show(
             egui::pos2(bar_left, axis_y),
             egui::pos2(bar_left + bar_width, axis_y),
         ],
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 70, 85)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(70, 70, 85)),
     );
     let end_tick = view.end.saturating_sub(1);
     let mid_tick = view.start + (end_tick.saturating_sub(view.start) / 2);
@@ -480,7 +480,7 @@ pub fn show(
         let px = to_px(tick);
         painter.line_segment(
             [egui::pos2(px, axis_y), egui::pos2(px, axis_y + 4.0)],
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 90, 105)),
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(90, 90, 105)),
         );
         let align = if tick == view.start {
             egui::Align2::LEFT_TOP
@@ -524,7 +524,7 @@ pub fn show(
         let cc = egui::Color32::from_rgb(120, 200, 255);
         painter.line_segment(
             [egui::pos2(px, rows_top), egui::pos2(px, rows_bottom)],
-            egui::Stroke::new(1.5, cc),
+            egui::Stroke::new(1.5_f32, cc),
         );
         painter.text(
             egui::pos2(px + 3.0, rows_top + 1.0),
@@ -650,7 +650,7 @@ fn brush(
         win_rect,
         2.0,
         ACCENT.gamma_multiply(0.18),
-        egui::Stroke::new(1.0, ACCENT),
+        egui::Stroke::new(1.0_f32, ACCENT),
     );
 
     let hw = 8.0;
