@@ -94,7 +94,7 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
                     Line::new(PlotPoints::new(cache.rec_points.clone()))
                         .name("REC path")
                         .color(egui::Color32::from_rgb(100, 149, 237))
-                        .width(2.0),
+                        .width(2.0_f32),
                 );
             }
             if !cache.play_points.is_empty() {
@@ -102,14 +102,14 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
                     Line::new(PlotPoints::new(cache.play_points.clone()))
                         .name("PLAY path")
                         .color(egui::Color32::from_rgb(80, 200, 80))
-                        .width(2.0),
+                        .width(2.0_f32),
                 );
             }
             plot_ui.points(
                 Points::new(vec![current_pos])
                     .name("Current")
                     .color(egui::Color32::from_rgb(255, 255, 100))
-                    .radius(5.0),
+                    .radius(5.0_f32),
             );
         });
 
@@ -127,7 +127,7 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
                     Line::new(PlotPoints::new(cache.rec_altitude.clone()))
                         .name("REC altitude")
                         .color(egui::Color32::from_rgb(100, 149, 237))
-                        .width(1.5),
+                        .width(1.5_f32),
                 );
             }
             if !cache.play_altitude.is_empty() {
@@ -135,7 +135,7 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
                     Line::new(PlotPoints::new(cache.play_altitude.clone()))
                         .name("PLAY altitude")
                         .color(egui::Color32::from_rgb(80, 200, 80))
-                        .width(1.5),
+                        .width(1.5_f32),
                 );
             }
             // Current altitude marker
@@ -146,7 +146,7 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
                 Points::new(vec![[current_time, current_alt]])
                     .name("Current alt")
                     .color(egui::Color32::from_rgb(255, 255, 100))
-                    .radius(4.0),
+                    .radius(4.0_f32),
             );
         });
 }
