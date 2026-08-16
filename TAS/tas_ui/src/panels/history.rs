@@ -38,7 +38,21 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
     // shows. Entries with no level tag (legacy, or unclassifiable shared
     // spawns) are always shown — hiding them would "lose" pre-tag history.
     let level_filter = history.live_level().map(str::to_owned);
-    if let Some(code) = level_filter.as_deref() {
+    if history.level_is_resolving() {
+        // Between a level change and the scan publishing the new track we do
+        // NOT know where we are. Say so instead of asserting the old track —
+        // silently showing the previous level's entries here is exactly the
+        // "loading Forest Medium, seeing Forest Easy's saves" confusion.
+        ui.label(
+            egui::RichText::new("Level: resolving…")
+                .size(10.0)
+                .color(egui::Color32::from_gray(120)),
+        )
+        .on_hover_text(
+            "The level changed and the track hasn't been identified yet \
+             (~1.5s). Showing everything rather than the previous track.",
+        );
+    } else if let Some(code) = level_filter.as_deref() {
         ui.label(
             egui::RichText::new(format!("Level: {} · untagged shown", code))
                 .size(10.0)

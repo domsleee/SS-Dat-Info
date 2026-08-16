@@ -873,6 +873,9 @@ pub struct RecordingHistory {
     /// refreshes it every frame. Stamped onto each entry at push time so the
     /// panel can filter history per level. None = unknown/menu.
     live_level: Option<String>,
+    /// Set between a level change and the scan publishing the new track, so
+    /// "we don't know yet" is distinguishable from "we are on this track".
+    level_resolving: bool,
 }
 
 impl RecordingHistory {
@@ -884,6 +887,7 @@ impl RecordingHistory {
             next_entry_id: 1,
             revision: 0,
             live_level: None,
+            level_resolving: false,
         }
     }
 
@@ -898,7 +902,33 @@ impl RecordingHistory {
             if self.live_level.as_deref() != Some(code) {
                 self.live_level = Some(code.to_owned());
             }
+            // A concrete reading ends any transition.
+            self.level_resolving = false;
         }
+    }
+
+    /// The level underneath us changed (the engine's root pointer moved — the
+    /// same signal that auto-stops armed TAS modes when you leave a level).
+    ///
+    /// Stickiness is right for a menu glance or an F5 restart of the SAME
+    /// track, but not across a level change: quitting FE and loading Forest
+    /// Medium leaves `level_id` unknown through the menu, the teardown, the
+    /// load, and the first ~1.5s of the new track while the DLL's heap scan
+    /// resolves. Carrying "FE" through all of that made the panel confidently
+    /// filter to the wrong track AND stamp entries pushed mid-load as FE.
+    ///
+    /// A wrong tag is worse than no tag — an untagged entry can be spotted and
+    /// fixed, a confidently mis-stamped one cannot. So drop the claim and mark
+    /// the window explicitly instead.
+    pub fn on_level_changed(&mut self) {
+        self.live_level = None;
+        self.level_resolving = true;
+    }
+
+    /// True between a level change and the scan publishing the new track. The
+    /// panel should say so rather than assert a track it cannot currently know.
+    pub fn level_is_resolving(&self) -> bool {
+        self.level_resolving
     }
 
     /// The level code new entries are currently stamped with (None = unknown).
@@ -2539,6 +2569,57 @@ mod tests {
         let rev = h.revision();
         assert_eq!(h.backfill_levels(crate::start_line::level_code_from_spawn), 0);
         assert_eq!(h.revision(), rev);
+    }
+
+    /// The bug the user hit: quit FE, start LOADING Forest Medium, and the
+    /// panel still says FE — so it filters to FE and, worse, stamps anything
+    /// pushed during the load with FE too.
+    ///
+    /// The transition is: known(FE) -> unknown (menu + level load + up to ~1.5s
+    /// for the DLL heap scan to publish) -> known(FM). Stickiness carries "FE"
+    /// through that whole middle window, and nothing distinguishes "we are
+    /// confidently on FE" from "we have no idea yet".
+    ///
+    /// A wrong tag is worse than no tag: an untagged entry can be spotted and
+    /// fixed later, a confidently mis-stamped one cannot.
+    #[test]
+    fn level_change_does_not_carry_the_old_level_into_the_new_one() {
+        let mut h = RecordingHistory::new(8);
+        h.set_live_level(Some("FE"));
+        assert_eq!(h.live_level(), Some("FE"));
+
+        // Player quits to the menu and starts loading Forest Medium. The DLL
+        // publishes 0xFFFFFFFF throughout: menu, teardown, load, and the first
+        // ~1.5s of the new track before the scan resolves.
+        h.on_level_changed();
+
+        assert_ne!(
+            h.live_level(),
+            Some("FE"),
+            "after the level changed underneath us, FE is no longer a fact — \
+             continuing to assert it filters the panel to the wrong track and \
+             mis-stamps anything pushed during the load"
+        );
+        assert!(
+            h.level_is_resolving(),
+            "the transition window should be an explicit 'resolving' state, not \
+             silently rendered as the previous level"
+        );
+
+        // Anything pushed while resolving must NOT be stamped with the old level.
+        let mut snap = RecordingSnapshot::new_empty();
+        snap.recorded_count = 10;
+        h.push_snapshot_data(snap, "mid-load");
+        assert_eq!(
+            h.entries().last().and_then(|e| e.level.as_deref()),
+            None,
+            "an entry pushed mid-transition must be untagged, never tagged FE"
+        );
+
+        // Scan resolves: now we genuinely know.
+        h.set_live_level(Some("FM"));
+        assert_eq!(h.live_level(), Some("FM"));
+        assert!(!h.level_is_resolving());
     }
 
     #[test]
