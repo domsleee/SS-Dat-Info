@@ -50,11 +50,27 @@ fn replay_to_check(client: &mut tas_shared::TasSharedMemoryClient) -> bool {
             return client.playback_pos_volatile() >= CHECK_FRAME;
         }
         if !saw_play && t0.elapsed() > Duration::from_secs(3) {
-            eprintln!(
-                "  WARN: ARM_PLAY did not take effect (mode={} never became PLAY) — \
-                 refusing to judge against stale playback_pos={}",
-                mode, pos
-            );
+            // Distinguish "the replay did not start" from "the GAME is stopped".
+            // A blind writable-memory restore can corrupt heap strings and trip
+            // Housemarque::Kernel::Error ("String literal must begin (and end)
+            // with a '\"'!", String_Literal.cpp:63). The engine then sits on a
+            // modal exception dialog, Supreme::Cycle stops, and ARM_PLAY has
+            // nothing to arm. Reporting that as a "replay stall" sends you
+            // looking at the replay instead of at the restore that caused it.
+            let cycling = harness::check_liveness(client);
+            if !cycling {
+                eprintln!(
+                    "  ERROR: the ENGINE is not cycling (frame_count frozen) — the game is \
+                     stopped, not the replay. A restore this coarse can corrupt heap strings \
+                     and trip a Housemarque::Kernel::Error dialog; check the game window."
+                );
+            } else {
+                eprintln!(
+                    "  WARN: ARM_PLAY did not take effect (mode={} never became PLAY) — \
+                     refusing to judge against stale playback_pos={}",
+                    mode, pos
+                );
+            }
             return false;
         }
         if t0.elapsed() > Duration::from_secs(15) {
