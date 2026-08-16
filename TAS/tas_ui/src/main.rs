@@ -2364,8 +2364,25 @@ impl eframe::App for TasApp {
 
                 // Stamp new history entries with the level they're made on
                 // (per-level history filter).
-                self.history
-                    .set_live_level(crate::level::level_code_from_id(shared.state().level_id));
+                //
+                // level_id going KNOWN -> UNKNOWN means the level was torn down:
+                // its resource path strings left the heap, which is what the
+                // DLL's scan reads. Verified live that an F5 restart does NOT
+                // clear it (level_id stayed 0x0 across a CMD_RESTART while
+                // player_ptr moved 0x0b271a08 -> 0x0d97f340), so this fires on a
+                // real level change and not on every reroll — player_ptr would
+                // have been a false trigger.
+                //
+                // Without this the last level stayed asserted through the menu,
+                // the load, and the first ~1.5s of the NEW track, so the panel
+                // filtered to the old track and mis-stamped anything pushed
+                // mid-load. A wrong tag is worse than none: it can't be spotted.
+                let live = crate::level::level_code_from_id(shared.state().level_id);
+                if live.is_none() && self.history.live_level().is_some() {
+                    self.history.on_level_changed();
+                } else {
+                    self.history.set_live_level(live);
+                }
 
                 transport::show(
                     ui,
