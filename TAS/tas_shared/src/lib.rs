@@ -1,5 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 13; // +present_count/menu_fps_cap (menu SwapBuffers throttle)
+pub const TAS_SHARED_VERSION: u32 = 14; // +level_epoch/level_scan_epoch (root-based level context)
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
@@ -288,6 +288,31 @@ pub struct TasSharedState {
     /// restores native. Gameplay (timer-independent accumulator) + CONT (gated
     /// by cont_suppress_input) are untouched.
     pub menu_fps_cap: u32,
+
+    /// Bumped by the DLL whenever the engine's root object
+    /// (`[SG+0x1D5450]`) changes. That root SURVIVES an F5 restart but is
+    /// reallocated on quit-to-menu / menu-demo load / track switch, so a change
+    /// is the only trustworthy "the level under you was swapped" event.
+    /// `root == 0` is mid-teardown and does NOT count.
+    pub level_epoch: u32,
+    /// The `level_epoch` the scan thread had observed when it last published a
+    /// concrete `level_id`.
+    ///
+    /// `level_id` is trustworthy **iff `level_scan_epoch == level_epoch`**. When
+    /// they differ the context changed and the new track has not been identified
+    /// yet — callers must treat the level as UNRESOLVED rather than asserting
+    /// the previous one. See [`level_is_resolved`].
+    pub level_scan_epoch: u32,
+}
+
+/// Whether `level_id` describes the level you are actually on.
+///
+/// False between a level swap and the first scan that identifies the new track.
+/// Checking `level_id != 0xFFFFFFFF` is NOT equivalent: the scan publishes
+/// unknown for transient reasons that have nothing to do with a level change,
+/// and it can also still hold the PREVIOUS track's id during a swap.
+pub fn level_is_resolved(state: &TasSharedState) -> bool {
+    state.level_scan_epoch == state.level_epoch
 }
 
 pub const ARG4_SOURCE_NONE: u32 = 0;
@@ -627,6 +652,60 @@ pub mod level {
                 want, live, live_level_id, want
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod level_epoch_tests {
+    use super::*;
+
+    /// The distinction the epoch exists to make, which `level_id` alone cannot:
+    /// an F5 restart keeps the SAME level context, a track switch does not.
+    #[test]
+    fn resolved_only_when_the_scan_ran_in_the_current_context() {
+        let mut s = zeroed_boxed();
+
+        // Fresh init: nothing identified, but nothing swapped either.
+        s.level_epoch = 0;
+        s.level_scan_epoch = 0;
+        assert!(level_is_resolved(&s));
+
+        // Scan identifies FE in this context.
+        s.level_id = 0;
+        assert!(level_is_resolved(&s));
+
+        // F5 restart: the root SURVIVES, so no epoch bump — the level must stay
+        // trusted. This is the case that made player_ptr the wrong signal.
+        assert!(level_is_resolved(&s), "an F5 restart must not unresolve");
+
+        // Track switch: the root is reallocated, DLL bumps the epoch. The scan
+        // has not caught up, so level_id still says FE — and MUST NOT be trusted.
+        s.level_epoch = 1;
+        assert!(
+            !level_is_resolved(&s),
+            "after a context swap the stale level_id must not be trusted, even \
+             though it still holds a concrete (previous) track id"
+        );
+
+        // Scan identifies the new track in the new context.
+        s.level_id = 1; // FM
+        s.level_scan_epoch = 1;
+        assert!(level_is_resolved(&s));
+        assert_eq!(level::code_from_id(s.level_id), Some("FM"));
+    }
+
+    /// A transient scan miss inside one context must not look like a swap.
+    #[test]
+    fn unknown_level_id_alone_is_not_a_context_change() {
+        let mut s = zeroed_boxed();
+        s.level_epoch = 3;
+        s.level_scan_epoch = 3;
+        s.level_id = u32::MAX; // scan found nothing this cycle
+
+        // Resolved-but-unknown is a real state (the menu). It is NOT "the level
+        // changed" — that is exactly the conflation the old code made.
+        assert!(level_is_resolved(&s));
+        assert_eq!(level::code_from_id(s.level_id), None);
     }
 }
 
@@ -1914,7 +1993,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_288);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_296);
     }
 
     #[test]

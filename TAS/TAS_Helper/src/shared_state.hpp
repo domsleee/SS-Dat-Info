@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 13; // +present_count/menu_fps_cap (menu SwapBuffers throttle)
+constexpr uint32_t TAS_SHARED_VERSION = 14; // +level_epoch/level_scan_epoch (root-based level context)
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
@@ -281,6 +281,26 @@ struct TasSharedState {
     // gated out (cont_suppress_input) so the F5 bucket lottery is unaffected.
     uint32_t present_count;
     uint32_t menu_fps_cap;
+
+    // -- Level context epoch (both DLL-written; UI reads) --
+    // The engine's root object ([SG+0x1D5450]) SURVIVES an F5 restart but is
+    // reallocated on quit-to-menu / menu-demo load / track switch — the same
+    // signal the armed-mode auto-stop uses, RDIAG-proven. That makes a root
+    // change the only trustworthy "the level under you was swapped" event;
+    // level_id going unknown is merely "the last scan found nothing", which
+    // also happens transiently while the level is still loaded.
+    //
+    //   level_epoch:      bumped on every root change (root==0 is mid-teardown
+    //                     and is NOT a change). Tracked every cycle regardless
+    //                     of TAS mode, so menu/load transitions are observable.
+    //   level_scan_epoch: the epoch the level-scan thread had observed when it
+    //                     last published a CONCRETE level_id.
+    //
+    // level_id is therefore trustworthy iff level_scan_epoch == level_epoch.
+    // When they differ, the context changed and the new track has not been
+    // identified yet — the UI must say "resolving", not assert the old level.
+    uint32_t level_epoch;
+    uint32_t level_scan_epoch;
 };
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks
@@ -382,6 +402,11 @@ public:
         // only while the engine cycle is frozen (menu/pause); gameplay + CONT
         // are untouched. Set 0 via shared memory to disable.
         state->menu_fps_cap = 34;
+        // Start EQUAL: at init nothing has been identified yet, and level_id is
+        // already 0xFFFFFFFF, so "trustworthy but unknown" is the honest state
+        // (we are at the menu / not yet scanned) rather than "resolving".
+        state->level_epoch = 0;
+        state->level_scan_epoch = 0;
         return true;
     }
 

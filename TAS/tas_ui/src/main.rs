@@ -328,13 +328,6 @@ use panels::{config, drift, history, input_script, log_panel, timeline, trajecto
 use pico::PicoState;
 use recording::{RecordingHistory, RecordingSessionKind};
 
-/// How long `level_id` must READ UNKNOWN before we accept that the level really
-/// changed. The DLL's scan re-runs every ~1.5s and can transiently publish
-/// unknown with the level still loaded (see level_scan.hpp:87,91,92-97), so this
-/// spans several scan periods — long enough that a blip can't wipe the level tag
-/// mid-run, far shorter than any level load.
-const LEVEL_CHANGE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
-
 const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
 const PLAYBACK_SPEED_PRESETS: [f32; 4] = [0.25, 0.5, 1.0, 2.0];
 // Shared with the cont-reliability harness via tas_shared::cont — the bucket
@@ -476,9 +469,6 @@ struct TasApp {
     // Crash recovery
     last_frame_count: u32,
     stale_frame_ticks: u32,
-    /// When `level_id` first read unknown while we still held a level. Used to
-    /// debounce a level change — see the comment at the transition check.
-    level_unknown_since: Option<std::time::Instant>,
     last_health_check: std::time::Instant,
     // Cycle-activity tracker for the In-Game chip: game_in_game (exe+0x8895C)
     // is written by the Supreme::Cycle hook, so when the cycle STOPS (quit to
@@ -659,7 +649,6 @@ impl TasApp {
             game_pid_cached: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
-            level_unknown_since: None,
             last_health_check: std::time::Instant::now(),
             cycle_fc: 0,
             cycle_advance_at: std::time::Instant::now(),            #[cfg(windows)]
@@ -2388,33 +2377,25 @@ impl eframe::App for TasApp {
                 // the load, and the first ~1.5s of the NEW track, so the panel
                 // filtered to the old track and mis-stamped anything pushed
                 // mid-load. A wrong tag is worse than none: it can't be spotted.
-                // DEBOUNCED: a single unknown reading is NOT a level change.
-                // scanLevelId() returns -1 (published as 0xFFFFFFFF) on an
-                // all-zero tally, and that can happen with the level still
-                // loaded — regions >4 MiB are skipped (level_scan.hpp:91), a
-                // faulting region is swallowed by __except (:95-97), a
-                // VirtualQuery failure breaks the whole walk early (:87), and a
-                // transiently guarded region is skipped (:92-93). Clearing on
-                // the first blip would wipe the tag mid-run. The scan re-runs
-                // every ~1.5s, so requiring the unknown to PERSIST past several
-                // scan periods keeps blips harmless while still reacting long
-                // before any level finishes loading.
-                let live = crate::level::level_code_from_id(shared.state().level_id);
-                match live {
-                    Some(_) => {
-                        self.level_unknown_since = None;
-                        self.history.set_live_level(live);
-                    }
-                    None if self.history.live_level().is_some() => {
-                        let since = *self
-                            .level_unknown_since
-                            .get_or_insert_with(std::time::Instant::now);
-                        if since.elapsed() >= LEVEL_CHANGE_DEBOUNCE {
-                            self.history.on_level_changed();
-                            self.level_unknown_since = None;
-                        }
-                    }
-                    None => {}
+                // Trust level_id only when the scan that produced it ran in the
+                // CURRENT level context (level_scan_epoch == level_epoch).
+                //
+                // Inferring the swap from level_id going unknown does not work:
+                // the scan publishes unknown for reasons unrelated to a level
+                // change (a >4 MiB or guarded region skipped, a faulting region
+                // swallowed, a VirtualQuery failure ending the walk early), and
+                // a fast transition can go old-track -> new-track with no
+                // unknown observed at all. The engine's root pointer is the real
+                // signal — it survives F5 but is reallocated on quit-to-menu /
+                // menu-demo / track switch — so the DLL bumps level_epoch on it
+                // and the scan stamps the epoch it identified.
+                let st = shared.state();
+                if tas_shared::level_is_resolved(st) {
+                    self.history
+                        .set_live_level(crate::level::level_code_from_id(st.level_id));
+                } else {
+                    // Context changed, new track not identified yet.
+                    self.history.enter_resolving();
                 }
 
                 transport::show(
@@ -3040,7 +3021,6 @@ mod tests {
             game_pid_cached: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
-            level_unknown_since: None,
             last_health_check: std::time::Instant::now(),
             cycle_fc: 0,
             cycle_advance_at: std::time::Instant::now(),            #[cfg(windows)]
