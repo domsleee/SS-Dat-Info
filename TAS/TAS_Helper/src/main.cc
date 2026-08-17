@@ -68,7 +68,7 @@ void run() {
     if (GetEnvironmentVariableA("TAS_NO_LEVELSCAN", nls, sizeof(nls)) > 0 && nls[0] == '1') {
         Log("  Level scan thread: SKIPPED (TAS_NO_LEVELSCAN=1)");
     } else {
-        levelscan::Start(state);
+        levelscan::Start(state, (uint32_t)g_addr.player_base, &SafeReadPtr);
         Log("  Level scan thread: started");
     }
 

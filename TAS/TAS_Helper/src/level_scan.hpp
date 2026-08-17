@@ -26,6 +26,32 @@ namespace levelscan {
 inline std::atomic<bool> g_stop{ false };
 inline HANDLE g_thread = nullptr;
 
+// Address of the engine's root pointer ([SG+0x1D5450]) and the last value seen,
+// for the level-context epoch. Polled HERE rather than from the Cave2 hook
+// because Supreme::Cycle FREEZES at static menus, dialogs and LEVEL LOADS
+// (frame_limit.hpp:43-47) — i.e. exactly across the transition we need to
+// detect. A cycle-driven bump would not land until the new level's first tick,
+// leaving the old track asserted for the whole menu + load. This thread runs
+// independently of the cycle, so it sees the swap as it happens.
+inline uint32_t g_rootPtrAddr = 0;
+inline uint32_t g_lastRoot = 0;
+// SEH-guarded pointer read, supplied by the caller (cave2's SafeReadPtr) so this
+// header does not depend on the cave headers.
+inline uint32_t (*g_readPtr)(uint32_t) = nullptr;
+
+// Bump the context epoch if the root was reallocated. root==0 is mid-teardown
+// and is NOT a change (restarts pass through it transiently) — same rule the
+// armed-mode auto-stop uses.
+static void pollLevelContext(TasSharedState* s) {
+    if (!g_rootPtrAddr || !g_readPtr) return;
+    uint32_t cur = g_readPtr(g_rootPtrAddr);
+    if (!cur) return;
+    if (g_lastRoot && cur != g_lastRoot) {
+        s->level_epoch++;
+    }
+    g_lastRoot = cur;
+}
+
 static const char* AREAS[3] = { "forest", "alpine", "village" };
 static const char* DIFFS[3] = { "easy", "medium", "hard" };
 
@@ -132,15 +158,22 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // submenus, so the 0->1 edge alone would miss track changes within a
         // session. ~1.5 s keeps the chip fresh at negligible cost. Sleep in
         // short slices so Stop() can join promptly (else detach waits ~1.5s).
+        // Poll the level context on every 100 ms slice, not once per scan: the
+        // whole point is to notice a swap DURING the menu/load, and the scan
+        // itself only runs every ~1.5s.
         for (int i = 0; i < 15 && !g_stop.load(std::memory_order_relaxed); i++) {
             Sleep(100);
+            pollLevelContext(s);
         }
     }
     return 0;
 }
 
 // Spawn the detection thread. Safe to call once during DLL init.
-inline void Start(TasSharedState* s) {
+inline void Start(TasSharedState* s, uint32_t rootPtrAddr, uint32_t (*readPtr)(uint32_t)) {
+    g_rootPtrAddr = rootPtrAddr;
+    g_readPtr = readPtr;
+    g_lastRoot = 0;
     if (!s) return;
     s->level_id = 0xFFFFFFFFu;
     // Reinjection can happen while a level is already loaded, and shared memory

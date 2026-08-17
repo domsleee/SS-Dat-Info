@@ -387,9 +387,6 @@ static volatile uint32_t g_cave2_logParam = 0;
 // fast-forwards the menu video, and the cave1c gate eats all native keys.
 // Cave2 auto-stops the session when the live root no longer matches.
 inline volatile uint32_t g_armedRoot = 0;
-// Last root seen by the always-on level-context tracker (independent of
-// g_armedRoot, which is only captured when a TAS mode arms).
-inline volatile uint32_t g_lastCtxRoot = 0;
 
 // Splice gate: 1 only between a SUCCESSFUL CMD_ARM_CONTINUE and its splice
 // (or any stop/re-arm). The PLAY handler's splice check requires this flag,
@@ -683,21 +680,12 @@ static void __declspec(noinline) Cave2_Logic() {
         }
     }
 
-    // Level-context epoch. Deliberately BEFORE the MODE_OFF early-out: the UI
-    // needs to know the level was swapped whether or not a TAS mode is armed,
-    // and menu/track-switch transitions happen precisely while OFF. Same signal
-    // and same rules as the armed auto-stop below (root survives F5, is
-    // reallocated on quit-to-menu / menu-demo / track switch; root==0 is
-    // mid-teardown and must NOT count as a change).
-    {
-        uint32_t curRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
-        if (curRoot) {
-            if (g_lastCtxRoot && curRoot != g_lastCtxRoot) {
-                s->level_epoch++;
-            }
-            g_lastCtxRoot = curRoot;
-        }
-    }
+    // NOTE: the level-context epoch is NOT bumped here. Supreme::Cycle freezes
+    // at static menus, dialogs and level LOADS (frame_limit.hpp:43-47) — exactly
+    // the transitions it must detect — so a cycle-driven bump would not land
+    // until the new level's first tick, leaving the old track asserted for the
+    // whole menu + load. levelscan's background thread polls the same root every
+    // 100 ms instead (level_scan.hpp).
 
     if (s->mode == MODE_OFF) return;
 
