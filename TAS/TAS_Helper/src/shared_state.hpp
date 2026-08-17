@@ -290,9 +290,12 @@ struct TasSharedState {
     // level_id going unknown is merely "the last scan found nothing", which
     // also happens transiently while the level is still loaded.
     //
-    //   level_epoch:      bumped on every root change (root==0 is mid-teardown
-    //                     and is NOT a change). Tracked every cycle regardless
-    //                     of TAS mode, so menu/load transitions are observable.
+    //   level_epoch:      bumped on every root change, AND once when the root
+    //                     stays 0 for ~0.5s (a restart passes through 0
+    //                     transiently; a teardown/menu leaves it there). Polled
+    //                     by levelscan's background thread every 100 ms, NOT
+    //                     from the Cycle hook — the cycle freezes at menus and
+    //                     level loads, i.e. exactly across the transition.
     //   level_scan_epoch: the epoch the level-scan thread had observed when it
     //                     last published a CONCRETE level_id.
     //
@@ -302,6 +305,16 @@ struct TasSharedState {
     uint32_t level_epoch;
     uint32_t level_scan_epoch;
 };
+
+// The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
+// same shared memory from two processes. Rust pins the same number
+// (tas_shared/src/lib.rs, `size_of::<TasSharedState>()`), but until now only the
+// Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
+// it here too so a layout change fails the DLL build immediately.
+// Bump TAS_SHARED_VERSION whenever this number changes.
+static_assert(sizeof(TasSharedState) == 1647296,
+              "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
+              "the Rust size pin in tas_shared/src/lib.rs");
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks
 // (no file I/O, no heap allocation, no printf/format).

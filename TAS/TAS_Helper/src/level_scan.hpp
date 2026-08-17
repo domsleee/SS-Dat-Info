@@ -42,10 +42,33 @@ inline uint32_t (*g_readPtr)(uint32_t) = nullptr;
 // Bump the context epoch if the root was reallocated. root==0 is mid-teardown
 // and is NOT a change (restarts pass through it transiently) — same rule the
 // armed-mode auto-stop uses.
+// Consecutive zero-root polls. An F5 restart passes through root==0 transiently,
+// but a level TEARDOWN leaves it zero — and at a static menu it can stay zero
+// indefinitely. Treating zero as "no news" therefore left the old track asserted
+// for the whole menu, which is the bug this whole mechanism exists to kill. So
+// zero is news once it PERSISTS past anything a restart could produce.
+inline uint32_t g_zeroRootPolls = 0;
+// Poll interval is 100 ms, so this is ~0.5s of sustained teardown.
+static const uint32_t ZERO_ROOT_INVALIDATE_POLLS = 5;
+
 static void pollLevelContext(TasSharedState* s) {
     if (!g_rootPtrAddr || !g_readPtr) return;
     uint32_t cur = g_readPtr(g_rootPtrAddr);
-    if (!cur) return;
+
+    if (!cur) {
+        g_zeroRootPolls++;
+        if (g_zeroRootPolls == ZERO_ROOT_INVALIDATE_POLLS && g_lastRoot) {
+            // Sustained teardown: we are no longer in the context we identified.
+            // Bump once (the == guard makes this fire a single time) and forget
+            // the old root so the next nonzero value is not read as "a change
+            // from the level we already left".
+            s->level_epoch++;
+            g_lastRoot = 0;
+        }
+        return;
+    }
+
+    g_zeroRootPolls = 0;
     if (g_lastRoot && cur != g_lastRoot) {
         s->level_epoch++;
     }
@@ -135,13 +158,27 @@ static int32_t scanLevelId() {
 static DWORD WINAPI threadProc(LPVOID param) {
     TasSharedState* s = (TasSharedState*)param;
     while (!g_stop) {
-        // Sample the context epoch BEFORE scanning: if the level is swapped
-        // mid-scan, the result belongs to the old context and must not be
-        // published as if it described the new one.
+        // Poll BEFORE sampling the epoch, so a swap that already happened is
+        // reflected in the epoch this scan will be stamped with.
+        pollLevelContext(s);
         uint32_t epochAtScan = s->level_epoch;
         int32_t id = s->game_in_game ? scanLevelId() : -1;
+        // ...and again AFTER, because scanLevelId() walks tens of MiB and the
+        // level can be swapped underneath it. Without this the result of a scan
+        // that straddled the swap would be published as if it described the new
+        // context — stale id, fresh epoch, and the UI would trust it.
+        pollLevelContext(s);
 
-        if (id >= 0) {
+        if (s->level_epoch != epochAtScan) {
+            // The context moved under the scan: whatever we found describes the
+            // level we just left. Discard it and stay unresolved — level_scan_epoch
+            // is deliberately NOT advanced, so resolved stays false until a scan
+            // completes entirely inside one context.
+            s->level_id = 0xFFFFFFFFu;
+        } else if (id >= 0) {
+            // Publish the id BEFORE the marker that validates it: a reader that
+            // sees the new scan epoch must already be able to see the id it
+            // describes, never the previous one.
             s->level_id = (uint32_t)id;
             s->level_scan_epoch = epochAtScan;
         } else if (epochAtScan != s->level_scan_epoch) {

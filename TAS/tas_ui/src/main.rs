@@ -2389,13 +2389,12 @@ impl eframe::App for TasApp {
                 // signal — it survives F5 but is reallocated on quit-to-menu /
                 // menu-demo / track switch — so the DLL bumps level_epoch on it
                 // and the scan stamps the epoch it identified.
-                let st = shared.state();
-                if tas_shared::level_is_resolved(st) {
-                    self.history
-                        .set_live_level(crate::level::level_code_from_id(st.level_id));
-                } else {
+                match tas_shared::resolved_level_id(shared.state()) {
+                    Some(id) => self
+                        .history
+                        .set_live_level(crate::level::level_code_from_id(id)),
                     // Context changed, new track not identified yet.
-                    self.history.enter_resolving();
+                    None => self.history.enter_resolving(),
                 }
 
                 transport::show(
