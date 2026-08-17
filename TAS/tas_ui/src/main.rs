@@ -2011,10 +2011,16 @@ impl eframe::App for TasApp {
                 if self.finished_at_tick.is_none() {
                     let cross = self.shared.as_ref().and_then(|shared| {
                         let s = shared.state();
+                        // Resolved level only: this picks the FINISH-LINE
+                        // GEOMETRY, so a stale id mid-swap would test the run
+                        // against the previous track's line and could auto-stop
+                        // REC in the wrong place. Unresolved => no geometry =>
+                        // no crossing claimed, which is the safe direction.
                         crate::start_line::finish_cross_tick(
                             &s.rec_coords,
                             recorded,
-                            crate::level::level_code_from_id(s.level_id),
+                            tas_shared::resolved_level_id(s)
+                                .and_then(crate::level::level_code_from_id),
                             self.finish_scan_cursor,
                         )
                     });

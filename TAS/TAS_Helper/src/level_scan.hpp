@@ -39,36 +39,50 @@ inline uint32_t g_lastRoot = 0;
 // header does not depend on the cave headers.
 inline uint32_t (*g_readPtr)(uint32_t) = nullptr;
 
-// Bump the context epoch if the root was reallocated. root==0 is mid-teardown
-// and is NOT a change (restarts pass through it transiently) — same rule the
-// armed-mode auto-stop uses.
-// Consecutive zero-root polls. An F5 restart passes through root==0 transiently,
-// but a level TEARDOWN leaves it zero — and at a static menu it can stay zero
-// indefinitely. Treating zero as "no news" therefore left the old track asserted
-// for the whole menu, which is the bug this whole mechanism exists to kill. So
-// zero is news once it PERSISTS past anything a restart could produce.
-inline uint32_t g_zeroRootPolls = 0;
-// Poll interval is 100 ms, so this is ~0.5s of sustained teardown.
-static const uint32_t ZERO_ROOT_INVALIDATE_POLLS = 5;
+// An F5 restart passes through root==0 transiently, but a level TEARDOWN leaves
+// it null — and at a static menu it can stay null indefinitely. So a null root
+// is news once it PERSISTS past anything a restart could produce.
+//
+// Measured in WALL TIME, not poll counts: polls are not evenly spaced (one
+// before the scan, one after, one per 100 ms sleep slice), so at a loop boundary
+// several land back-to-back, while a long scanLevelId() can block this thread
+// well past 100 ms. Counting polls would make the threshold anywhere from ~200 ms
+// to seconds depending on scan timing.
+inline uint32_t g_nullRootSinceMs = 0;   // GetTickCount when the root went null
+inline bool     g_nullRootReported = false;
+static const uint32_t NULL_ROOT_INVALIDATE_MS = 750;
+
+// True while the engine has no root at all — i.e. no level is loaded. Any track
+// strings still in the heap are residue from the level we LEFT, so an
+// identification made now would be confidently wrong.
+inline bool g_rootIsNull = false;
 
 static void pollLevelContext(TasSharedState* s) {
     if (!g_rootPtrAddr || !g_readPtr) return;
     uint32_t cur = g_readPtr(g_rootPtrAddr);
 
     if (!cur) {
-        g_zeroRootPolls++;
-        if (g_zeroRootPolls == ZERO_ROOT_INVALIDATE_POLLS && g_lastRoot) {
+        g_rootIsNull = true;
+        uint32_t now = GetTickCount();
+        if (!g_nullRootSinceMs) g_nullRootSinceMs = now ? now : 1;
+        if (!g_nullRootReported &&
+            (now - g_nullRootSinceMs) >= NULL_ROOT_INVALIDATE_MS && g_lastRoot) {
             // Sustained teardown: we are no longer in the context we identified.
-            // Bump once (the == guard makes this fire a single time) and forget
-            // the old root so the next nonzero value is not read as "a change
-            // from the level we already left".
             s->level_epoch++;
-            g_lastRoot = 0;
+            g_nullRootReported = true;
+            // NOTE: g_lastRoot is deliberately NOT cleared. Clearing it made the
+            // `g_lastRoot &&` guard below false, so the NEXT root — the new
+            // level — produced no bump at all, and a track identified during the
+            // null window stayed formally resolved into the new level. Keeping
+            // the old value means the new root still reads as a change. A second
+            // bump is harmless; the epoch is a change counter, not a sequence.
         }
         return;
     }
 
-    g_zeroRootPolls = 0;
+    g_rootIsNull = false;
+    g_nullRootSinceMs = 0;
+    g_nullRootReported = false;
     if (g_lastRoot && cur != g_lastRoot) {
         s->level_epoch++;
     }
@@ -162,7 +176,13 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // reflected in the epoch this scan will be stamped with.
         pollLevelContext(s);
         uint32_t epochAtScan = s->level_epoch;
-        int32_t id = s->game_in_game ? scanLevelId() : -1;
+        // Refuse to identify anything while there is NO ROOT. game_in_game is
+        // not enough: it is only written by the Cycle hook, so it stays stale at
+        // 1 through a menu/teardown. With no root there is no level, and the
+        // track strings still in the heap are residue from the one we LEFT — a
+        // scan here would publish the OLD track stamped with the NEW epoch, i.e.
+        // confidently wrong, which is worse than unresolved.
+        int32_t id = (s->game_in_game && !g_rootIsNull) ? scanLevelId() : -1;
         // ...and again AFTER, because scanLevelId() walks tens of MiB and the
         // level can be swapped underneath it. Without this the result of a scan
         // that straddled the swap would be published as if it described the new
@@ -179,7 +199,16 @@ static DWORD WINAPI threadProc(LPVOID param) {
             // Publish the id BEFORE the marker that validates it: a reader that
             // sees the new scan epoch must already be able to see the id it
             // describes, never the previous one.
+            //
+            // The barrier is load-bearing, not decoration. These are plain u32s
+            // in a shared mapping; without it the compiler (and, in principle,
+            // the store buffer) may make the marker visible to the OTHER PROCESS
+            // before the id it validates, handing the reader "resolved" plus the
+            // previous track. Volatile reads on the Rust side prevent load
+            // elision but establish no ordering with this writer — the release
+            // has to come from here.
             s->level_id = (uint32_t)id;
+            MemoryBarrier();
             s->level_scan_epoch = epochAtScan;
         } else if (epochAtScan != s->level_scan_epoch) {
             // A context we have not identified yet — stay explicitly unknown.
