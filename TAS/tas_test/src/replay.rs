@@ -244,9 +244,25 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
     // Without this a wrong-track run looks like a hang — the start matcher can
     // never reach a spawn that is on another map, so it burns its full retry
     // budget (~22s each) and the mode appears to stall for many minutes.
-    // Only enforce against a RESOLVED level: mid-swap, level_id still holds the
-    // track we just left, and refusing on that would be a false failure.
-    let live_level_id = tas_shared::resolved_level_id(client.state()).unwrap_or(u32::MAX);
+    // Wait for a RESOLVED level rather than failing open. Mid-swap `level_id`
+    // still holds the track we just left, so enforcing against it would be a
+    // false failure — but mapping unresolved to "no opinion" let a wrong-track
+    // replay through, which is the failure this guard exists to stop. Poll, then
+    // enforce on whatever we actually resolved (still permissive if the level
+    // genuinely can't be identified, e.g. Practice).
+    let live_level_id = {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(id) = tas_shared::resolved_level_id(client.state()) {
+                break id;
+            }
+            if start.elapsed() > std::time::Duration::from_secs(12) {
+                eprintln!("  WARNING: level never resolved — track guard cannot enforce");
+                break u32::MAX;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    };
     if let Err(msg) = tas_shared::level::check_recording_matches_live(path, live_level_id) {
         eprintln!("ERROR: {}", msg);
         std::process::exit(1);
