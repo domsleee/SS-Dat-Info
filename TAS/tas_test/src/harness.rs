@@ -726,6 +726,12 @@ pub fn print_status(client: &TasSharedMemoryClient) {
         s.game_in_game
     );
     println!(
+        "Level: epoch={} scan_epoch={} resolved={}",
+        s.level_epoch,
+        s.level_scan_epoch,
+        tas_shared::level_is_resolved(s)
+    );
+    println!(
         "Ptrs: replay={:#010x} player={:#010x} level_id={:#x} race_time_cs={:#x} pos=({:.2},{:.2},{:.2})",
         s.replay_ptr, s.player_ptr, s.level_id, s.race_time_cs,
         s.player_x, s.player_y, s.player_z

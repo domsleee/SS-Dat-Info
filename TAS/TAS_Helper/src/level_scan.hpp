@@ -109,12 +109,25 @@ static int32_t scanLevelId() {
 static DWORD WINAPI threadProc(LPVOID param) {
     TasSharedState* s = (TasSharedState*)param;
     while (!g_stop) {
-        if (s->game_in_game) {
-            int32_t id = scanLevelId();
-            s->level_id = (id >= 0) ? (uint32_t)id : 0xFFFFFFFFu;
-        } else {
+        // Sample the context epoch BEFORE scanning: if the level is swapped
+        // mid-scan, the result belongs to the old context and must not be
+        // published as if it described the new one.
+        uint32_t epochAtScan = s->level_epoch;
+        int32_t id = s->game_in_game ? scanLevelId() : -1;
+
+        if (id >= 0) {
+            s->level_id = (uint32_t)id;
+            s->level_scan_epoch = epochAtScan;
+        } else if (epochAtScan != s->level_scan_epoch) {
+            // A context we have not identified yet — stay explicitly unknown.
             s->level_id = 0xFFFFFFFFu;
         }
+        // else: same context, scan found nothing. The level CANNOT have changed
+        // without the root changing, so this is a transient miss (a >4 MiB or
+        // guarded region skipped, a faulting region swallowed, a VirtualQuery
+        // failure ending the walk early). Keep the last known level rather than
+        // flapping to unknown — the whole point of the epoch is that only a root
+        // change may invalidate an identification.
         // Re-scan periodically: game_in_game stays 1 across the post-race
         // submenus, so the 0->1 edge alone would miss track changes within a
         // session. ~1.5 s keeps the chip fresh at negligible cost. Sleep in
@@ -130,6 +143,12 @@ static DWORD WINAPI threadProc(LPVOID param) {
 inline void Start(TasSharedState* s) {
     if (!s) return;
     s->level_id = 0xFFFFFFFFu;
+    // Reinjection can happen while a level is already loaded, and shared memory
+    // survives it — so a stale level_scan_epoch could equal level_epoch and make
+    // the cleared level_id read as a trustworthy "we are at the menu". Force the
+    // pair unequal so this reads as "not identified in this context YET", which
+    // is the truth until the first scan of this DLL instance completes.
+    s->level_scan_epoch = s->level_epoch - 1u;
     g_stop.store(false, std::memory_order_relaxed);
     g_thread = CreateThread(nullptr, 0, threadProc, s, 0, nullptr);
 }

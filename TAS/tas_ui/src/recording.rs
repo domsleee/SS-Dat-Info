@@ -907,20 +907,20 @@ impl RecordingHistory {
         }
     }
 
-    /// The level underneath us changed (the engine's root pointer moved — the
-    /// same signal that auto-stops armed TAS modes when you leave a level).
+    /// We are in a level context whose track has not been identified yet.
     ///
-    /// Stickiness is right for a menu glance or an F5 restart of the SAME
-    /// track, but not across a level change: quitting FE and loading Forest
-    /// Medium leaves `level_id` unknown through the menu, the teardown, the
-    /// load, and the first ~1.5s of the new track while the DLL's heap scan
-    /// resolves. Carrying "FE" through all of that made the panel confidently
-    /// filter to the wrong track AND stamp entries pushed mid-load as FE.
+    /// Driven by the DLL's `level_epoch` / `level_scan_epoch` pair: the engine's
+    /// root object survives an F5 restart but is reallocated on quit-to-menu /
+    /// menu-demo / track switch, so a root change is the only trustworthy "the
+    /// level was swapped" event. Until a scan identifies the NEW track we must
+    /// not keep asserting the old one — that filtered the panel to the wrong
+    /// track and stamped entries pushed mid-load with it.
     ///
-    /// A wrong tag is worse than no tag — an untagged entry can be spotted and
-    /// fixed, a confidently mis-stamped one cannot. So drop the claim and mark
-    /// the window explicitly instead.
-    pub fn on_level_changed(&mut self) {
+    /// A wrong tag is worse than no tag: an untagged entry is visibly untagged,
+    /// a confidently mis-stamped one is indistinguishable from a correct one.
+    ///
+    /// Idempotent — called every frame while unresolved.
+    pub fn enter_resolving(&mut self) {
         self.live_level = None;
         self.level_resolving = true;
     }
@@ -2591,7 +2591,7 @@ mod tests {
         // Player quits to the menu and starts loading Forest Medium. The DLL
         // publishes 0xFFFFFFFF throughout: menu, teardown, load, and the first
         // ~1.5s of the new track before the scan resolves.
-        h.on_level_changed();
+        h.enter_resolving();
 
         assert_ne!(
             h.live_level(),
