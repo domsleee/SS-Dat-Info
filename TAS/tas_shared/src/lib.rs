@@ -290,10 +290,11 @@ pub struct TasSharedState {
     pub menu_fps_cap: u32,
 
     /// Bumped by the DLL whenever the engine's root object
-    /// (`[SG+0x1D5450]`) changes. That root SURVIVES an F5 restart but is
-    /// reallocated on quit-to-menu / menu-demo load / track switch, so a change
-    /// is the only trustworthy "the level under you was swapped" event.
-    /// `root == 0` is mid-teardown and does NOT count.
+    /// (`[SG+0x1D5450]`) changes, and once when it stays NULL for ~0.5s. That
+    /// root SURVIVES an F5 restart but is reallocated on quit-to-menu /
+    /// menu-demo load / track switch, so a change is the only trustworthy "the
+    /// level under you was swapped" event. A restart passes through NULL
+    /// transiently, which is why only a SUSTAINED null counts as a teardown.
     pub level_epoch: u32,
     /// The `level_epoch` the scan thread had observed when it last published a
     /// concrete `level_id`.
@@ -305,14 +306,45 @@ pub struct TasSharedState {
     pub level_scan_epoch: u32,
 }
 
-/// Whether `level_id` describes the level you are actually on.
+/// A coherent read of the current track: `Some(level_id)` only when that id was
+/// identified in the context we are still in, `None` while unresolved.
 ///
-/// False between a level swap and the first scan that identifies the new track.
+/// Reading `level_scan_epoch == level_epoch` and THEN reading `level_id`
+/// separately is not sound — the level can be swapped between the two, giving
+/// "resolved" plus the previous track's id. This reads the three words in the
+/// order that makes a torn snapshot detectable (seqlock-style): the writer
+/// publishes `level_id` before the `level_scan_epoch` that validates it, so the
+/// reader takes the marker, then the id, then RE-READS the invalidating epoch
+/// and requires it to still agree. Any swap that raced the read moves
+/// `level_epoch` and is caught by the recheck.
+///
+/// Volatile reads because the producer is another process's threads; the fields
+/// are plain u32 in a shared mapping and the compiler must not cache or reorder
+/// these loads.
+///
 /// Checking `level_id != 0xFFFFFFFF` is NOT equivalent: the scan publishes
-/// unknown for transient reasons that have nothing to do with a level change,
-/// and it can also still hold the PREVIOUS track's id during a swap.
+/// unknown for transient reasons unrelated to a level change, and can also still
+/// hold the PREVIOUS track's id during a swap.
+pub fn resolved_level_id(state: &TasSharedState) -> Option<u32> {
+    // SAFETY: all three are plain u32 inside the shared mapping, aligned, and
+    // written by the DLL. Volatile reads only prevent caching/reordering; they
+    // do not need the fields to be Rust-exclusive.
+    unsafe {
+        let scan_epoch = std::ptr::read_volatile(&state.level_scan_epoch);
+        let id = std::ptr::read_volatile(&state.level_id);
+        let epoch = std::ptr::read_volatile(&state.level_epoch);
+        if scan_epoch == epoch {
+            Some(id)
+        } else {
+            None
+        }
+    }
+}
+
+/// Whether the current track is known. Prefer [`resolved_level_id`] when you
+/// also need the id — this cannot express "resolved, and it is X" atomically.
 pub fn level_is_resolved(state: &TasSharedState) -> bool {
-    state.level_scan_epoch == state.level_epoch
+    resolved_level_id(state).is_some()
 }
 
 pub const ARG4_SOURCE_NONE: u32 = 0;
@@ -692,6 +724,29 @@ mod level_epoch_tests {
         s.level_scan_epoch = 1;
         assert!(level_is_resolved(&s));
         assert_eq!(level::code_from_id(s.level_id), Some("FM"));
+    }
+
+    /// The snapshot read must hand back the id and its validity TOGETHER.
+    /// Callers that ask "resolved?" and then separately read `level_id` can be
+    /// handed "yes" plus the previous track's id if a swap lands between the
+    /// two reads — that is the hole this API exists to close.
+    #[test]
+    fn resolved_read_returns_id_and_validity_together() {
+        let mut s = zeroed_boxed();
+        s.level_epoch = 7;
+        s.level_scan_epoch = 7;
+        s.level_id = 2; // FH, identified in this context
+        assert_eq!(resolved_level_id(&s), Some(2));
+
+        // Swap: the scan has not caught up, so level_id STILL reads FH. The
+        // snapshot must refuse it rather than report a confident wrong track.
+        s.level_epoch = 8;
+        assert_eq!(
+            resolved_level_id(&s),
+            None,
+            "a stale but concrete level_id must not be handed out as resolved"
+        );
+        assert_eq!(s.level_id, 2, "the stale id is still physically present");
     }
 
     /// A transient scan miss inside one context must not look like a swap.

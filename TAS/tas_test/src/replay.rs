@@ -244,9 +244,10 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
     // Without this a wrong-track run looks like a hang — the start matcher can
     // never reach a spawn that is on another map, so it burns its full retry
     // budget (~22s each) and the mode appears to stall for many minutes.
-    if let Err(msg) =
-        tas_shared::level::check_recording_matches_live(path, client.state().level_id)
-    {
+    // Only enforce against a RESOLVED level: mid-swap, level_id still holds the
+    // track we just left, and refusing on that would be a false failure.
+    let live_level_id = tas_shared::resolved_level_id(client.state()).unwrap_or(u32::MAX);
+    if let Err(msg) = tas_shared::level::check_recording_matches_live(path, live_level_id) {
         eprintln!("ERROR: {}", msg);
         std::process::exit(1);
     }

@@ -575,8 +575,12 @@ pub fn verify_expected_level(client: &TasSharedMemoryClient) {
     let start = Instant::now();
     let mut live = None;
     while start.elapsed() < Duration::from_secs(LEVEL_SCAN_TIMEOUT_SECS) {
-        let id = client.state().level_id;
-        if let Some(code) = tas_shared::level::code_from_id(id) {
+        // Go through the resolved-snapshot read, not raw level_id: during a
+        // level change level_id still holds the PREVIOUS track, and trusting it
+        // here would let a run start against the wrong course's baseline.
+        if let Some(code) =
+            tas_shared::resolved_level_id(client.state()).and_then(tas_shared::level::code_from_id)
+        {
             live = Some(code);
             break;
         }
