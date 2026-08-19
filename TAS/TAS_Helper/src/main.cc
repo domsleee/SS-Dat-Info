@@ -69,7 +69,11 @@ void run() {
         Log("  Level scan thread: SKIPPED (TAS_NO_LEVELSCAN=1)");
     } else {
         levelscan::Start(state, (uint32_t)g_addr.player_base, &SafeReadPtr);
-        Log("  Level scan thread: started");
+        if (levelscan::g_thread) {
+            Log("  Level scan thread: started");
+        } else {
+            Log("  Level scan thread: FAILED TO START — level stays unresolved");
+        }
     }
 
     // Race timer: read the exact on-screen race time (HUD/SR_UIT) → shared state.

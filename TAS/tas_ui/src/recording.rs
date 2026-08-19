@@ -1070,6 +1070,13 @@ impl RecordingHistory {
     /// live buffer. That is the per-level guarantee failing in the one path that
     /// bypasses the list the user can actually see.
     fn entry_on_current_level(&self, i: usize) -> bool {
+        // While RESOLVING we do not know what track we are on, so nothing
+        // qualifies. Treating "no live level" as allow-all made the transition
+        // window show AND restore every track — strictly worse than the bug this
+        // began as, and hoisting the sync earlier only widened it.
+        if self.level_resolving {
+            return false;
+        }
         match (self.live_level.as_deref(), self.entries[i].level.as_deref()) {
             (Some(want), Some(have)) => want == have,
             _ => true,

@@ -38,6 +38,7 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
     // shows. Entries with no level tag (legacy, or unclassifiable shared
     // spawns) are always shown — hiding them would "lose" pre-tag history.
     let level_filter = history.live_level().map(str::to_owned);
+    let resolving = history.level_is_resolving();
     if history.level_is_resolving() {
         // Between a level change and the scan publishing the new track we do
         // NOT know where we are. Say so instead of asserting the old track —
@@ -50,7 +51,7 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
         )
         .on_hover_text(
             "The level changed and the track hasn't been identified yet \
-             (~1.5s). Showing everything rather than the previous track.",
+             (~1.5s). Rows are hidden until it is — showing the previous track's\n             entries here would also let you restore one over the live buffer.",
         );
     } else if let Some(code) = level_filter.as_deref() {
         ui.label(
@@ -89,10 +90,19 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
             let mut visible: Vec<(usize, &HistoryEntry)> = entries
                 .iter()
                 .enumerate()
-                .filter(|(_, e)| match (&level_filter, &e.level) {
-                    (Some(want), Some(have)) => want == have,
-                    // No filter active, or an untagged entry: always visible.
-                    _ => true,
+                .filter(|(_, e)| {
+                    // RESOLVING: we do not know the track, so nothing qualifies.
+                    // Leaving rows visible also leaves them RESTORABLE, which is
+                    // how the transition window became able to overwrite the live
+                    // buffer with another track's recording.
+                    if resolving {
+                        return false;
+                    }
+                    match (&level_filter, &e.level) {
+                        (Some(want), Some(have)) => want == have,
+                        // No filter active, or an untagged entry: always visible.
+                        _ => true,
+                    }
                 })
                 .collect();
             visible.sort_by(|(a_idx, a), (b_idx, b)| {
