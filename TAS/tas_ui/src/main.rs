@@ -1907,6 +1907,25 @@ impl eframe::App for TasApp {
         // captures the events that led up to it.
         self.flush_log_lines_to_file();
 
+        // Synchronise the live level FIRST, before anything reads or acts on
+        // it this frame.
+        //
+        // This used to run inside the central panel, AFTER the history panel had
+        // already rendered its rows and dispatched restores. On the first frame
+        // following a level change that panel therefore still listed — and would
+        // happily restore — the previous track's entries. Ordering is part of
+        // the guarantee: a per-frame fact has to be established before the frame
+        // consumes it.
+        if let Some(shared) = self.shared.as_ref() {
+            match tas_shared::resolved_level_id(shared.state()) {
+                Some(id) => self
+                    .history
+                    .set_live_level(crate::level::level_code_from_id(id)),
+                // Context changed, new track not identified yet.
+                None => self.history.enter_resolving(),
+            }
+        }
+
         // If a screenshot was requested last frame (via F8), the encoded
         // ColorImage arrives in this frame's raw events. Walk them and
         // write any screenshots to disk. egui's screenshot path goes
@@ -2383,25 +2402,6 @@ impl eframe::App for TasApp {
                 // the load, and the first ~1.5s of the NEW track, so the panel
                 // filtered to the old track and mis-stamped anything pushed
                 // mid-load. A wrong tag is worse than none: it can't be spotted.
-                // Trust level_id only when the scan that produced it ran in the
-                // CURRENT level context (level_scan_epoch == level_epoch).
-                //
-                // Inferring the swap from level_id going unknown does not work:
-                // the scan publishes unknown for reasons unrelated to a level
-                // change (a >4 MiB or guarded region skipped, a faulting region
-                // swallowed, a VirtualQuery failure ending the walk early), and
-                // a fast transition can go old-track -> new-track with no
-                // unknown observed at all. The engine's root pointer is the real
-                // signal — it survives F5 but is reallocated on quit-to-menu /
-                // menu-demo / track switch — so the DLL bumps level_epoch on it
-                // and the scan stamps the epoch it identified.
-                match tas_shared::resolved_level_id(shared.state()) {
-                    Some(id) => self
-                        .history
-                        .set_live_level(crate::level::level_code_from_id(id)),
-                    // Context changed, new track not identified yet.
-                    None => self.history.enter_resolving(),
-                }
 
                 transport::show(
                     ui,
