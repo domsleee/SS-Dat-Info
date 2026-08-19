@@ -824,6 +824,7 @@ impl TasApp {
             .map(|s| s.mode_volatile())
             .unwrap_or(TasMode::Off as u32);
         if mode == TasMode::Off as u32 {
+            self.sync_live_level();
             return;
         }
         let was_rec = mode == TasMode::Rec as u32;
@@ -868,6 +869,36 @@ impl TasApp {
         // A fresh recording is about to load — clear the finish-flag marker.
         self.finished_at_tick = None;
         self.finish_scan_cursor = 0;
+        // RE-READ THE LIVE LEVEL. This is the whole reason the guarantee needed
+        // more than a coherent read: we just spun up to 250ms waiting for the
+        // DLL to stop, and every caller of this function is about to overwrite
+        // the live buffer from history. The level the callers were filtering
+        // against was read at frame start, BEFORE that wait — so a quit to the
+        // menu or a track load during it would have gone unnoticed and the
+        // previous track's recording written in anyway. A seqlock makes a read
+        // coherent; it cannot make a stale read fresh. Re-reading here, at the
+        // last moment before the write, is what closes it.
+        self.sync_live_level();
+    }
+
+    /// Pull the live track from shared memory into the history filter, which is
+    /// what undo / redo / restore all consult before overwriting the buffer.
+    ///
+    /// One coherent seqlock read: id and path together, or nothing. Asking
+    /// "resolved?" and then reading `level_id` separately could hand back "yes"
+    /// plus the previous track. `None` means unknown, and unknown matches
+    /// nothing — never "assume we are still where we were".
+    fn sync_live_level(&mut self) {
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        match tas_shared::level_context(shared.state()) {
+            Some((id, _path)) => self
+                .history
+                .set_live_level(crate::level::level_code_from_id(id)),
+            // Context changed, new track not identified yet.
+            None => self.history.enter_resolving(),
+        }
     }
 
     /// Single dispatch for a transport `Action`, shared by the keyboard-shortcut
@@ -1863,6 +1894,26 @@ impl TasApp {
         };
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
         self.stop_active_session_for_load(&ts);
+        // Open bypassed the per-level guarantee entirely: the dialog merely
+        // STARTED in the current track's folder, then accepted any file the user
+        // picked and auto-played it. Recordings are named `<CODE>-<name>`, so the
+        // file itself says which track it belongs to — check it, against a level
+        // re-read after the stop above. Loading another track's recording is not
+        // a subtle failure: the spawn is somewhere else entirely and the run is
+        // meaningless. (Unknown on either side cannot prove a mismatch and is
+        // allowed through — same rule tas_test's pre-flight uses.)
+        let live_id = self
+            .shared
+            .as_ref()
+            .and_then(|s| tas_shared::resolved_level_id(s.state()))
+            .unwrap_or(u32::MAX);
+        if let Err(msg) =
+            tas_shared::level::check_recording_matches_live(&path.to_string_lossy(), live_id)
+        {
+            self.log_lines
+                .push(format!("[{}] Load refused: {}", ts, msg));
+            return;
+        }
         if let Some(shared) = self.shared.as_mut() {
             let loaded = recording::load_recording_path(
                 shared.state_mut(),
@@ -1927,18 +1978,7 @@ impl eframe::App for TasApp {
         // happily restore — the previous track's entries. Ordering is part of
         // the guarantee: a per-frame fact has to be established before the frame
         // consumes it.
-        if let Some(shared) = self.shared.as_ref() {
-            // Coherent seqlock read: id and path together, or nothing. Checking
-            // "resolved?" and then reading level_id separately could hand back
-            // "yes" plus the previous track.
-            match tas_shared::level_context(shared.state()) {
-                Some((id, _path)) => self
-                    .history
-                    .set_live_level(crate::level::level_code_from_id(id)),
-                // Context changed, new track not identified yet.
-                None => self.history.enter_resolving(),
-            }
-        }
+        self.sync_live_level();
 
         // If a screenshot was requested last frame (via F8), the encoded
         // ColorImage arrives in this frame's raw events. Walk them and
@@ -2356,6 +2396,20 @@ impl eframe::App for TasApp {
                                 self.history.entries().iter().position(|e| e.entry_id == id)
                             })
                             .unwrap_or(idx);
+                        // stop_active_session_for_load re-read the live level
+                        // just now, so this decision is made against the track
+                        // we are on AFTER the wait, not the one we were on when
+                        // the frame began. Say so out loud rather than doing
+                        // nothing: a click that silently no-ops reads as a bug.
+                        if !self.history.entry_on_current_level(idx) {
+                            self.log_lines.push(format!(
+                                "[{}] History restore refused: that entry is not for the \
+                                 current track ({})",
+                                ts,
+                                self.history.live_level().unwrap_or("resolving")
+                            ));
+                            continue;
+                        }
                         if let Some(shared) = self.shared.as_mut() {
                             let restored = self.history.restore_index(idx).map(|snap| {
                                 snap.restore_to(shared.state_mut());
