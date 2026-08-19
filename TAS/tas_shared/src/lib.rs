@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
 pub const TAS_SHARED_VERSION: u32 = 20; // +level_ctx_seq (seqlock over the level-context group)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
@@ -322,8 +324,77 @@ pub struct TasSharedState {
     /// Bumped AFTER `level_path` is written, so a reader that sees a new
     /// generation can already see the path it refers to.
     pub level_path_gen: u32,
-    /// Seqlock over the level-context group. ODD = write in progress.
-    pub level_ctx_seq: u32,
+    /// Seqlock over the level-context group (`level_epoch`,
+    /// `level_scan_epoch`, `level_id`, `level_path`). ODD = write in progress.
+    ///
+    /// `AtomicU32` rather than a plain `u32` read volatile. The seqlock's whole
+    /// correctness rests on the payload reads staying BETWEEN the two sequence
+    /// reads, and `read_volatile` does not give that: it promises only that the
+    /// access is not elided or reordered against other volatile accesses, which
+    /// is a statement about the compiler, not about the memory model. An
+    /// `Acquire` load plus a fence before the recheck is the real thing, and on
+    /// x86 it compiles to the same two `mov`s. Layout is identical (4 bytes,
+    /// align 4) so the C++ side stays a plain `volatile uint32_t` bumped with
+    /// `InterlockedIncrement`.
+    pub level_ctx_seq: AtomicU32,
+}
+
+/// How many times to retry a torn level-context read before giving up.
+///
+/// The writer's critical section is a few hundred bytes of stores roughly every
+/// 100ms, so a reader that loses 64 races in a row is not racing — the producer
+/// is wedged or dead. Giving up returns UNKNOWN, which every caller treats as
+/// "match nothing", so exhausting the bound fails closed rather than spinning a
+/// UI frame forever.
+const LEVEL_CTX_RETRIES: usize = 64;
+
+/// Seqlock acquire over the level-context group (`level_epoch`,
+/// `level_scan_epoch`, `level_id`, `level_path`).
+///
+/// `read` runs on a possibly-torn group — that is expected; the value is only
+/// handed back if the sequence was EVEN before it and UNCHANGED after, which is
+/// exactly the window in which no write was in flight. So `read` must not act on
+/// what it sees, only collect it.
+///
+/// `None` means no clean window was obtained: the writer is wedged mid-update
+/// (sequence stuck odd — e.g. the game crashed between the two increments) or
+/// the retry bound ran out. Both are "unknown", never "assume the last value".
+fn with_level_context<T>(state: &TasSharedState, read: impl Fn() -> T) -> Option<T> {
+    for _ in 0..LEVEL_CTX_RETRIES {
+        let s1 = state.level_ctx_seq.load(Ordering::Acquire);
+        if s1 & 1 != 0 {
+            std::hint::spin_loop();
+            continue; // writer mid-update
+        }
+        let value = read();
+        // Keep the payload reads above the recheck. Without this they may sink
+        // below the second load, and then the comparison proves nothing about
+        // what was actually read.
+        std::sync::atomic::fence(Ordering::Acquire);
+        if state.level_ctx_seq.load(Ordering::Relaxed) == s1 {
+            return Some(value);
+        }
+        std::hint::spin_loop(); // torn: the group changed under us
+    }
+    None
+}
+
+/// Read the group's identity half. Caller must be inside [`with_level_context`].
+///
+/// `None` = the context changed and the scan has not re-identified the track,
+/// so `level_id` still physically holds the PREVIOUS one and must not be used.
+/// Checking `level_id != 0xFFFFFFFF` is NOT equivalent: the scan publishes
+/// unknown for transient reasons unrelated to a level change, and a stale id is
+/// a perfectly concrete number.
+fn read_identity(state: &TasSharedState) -> Option<u32> {
+    // SAFETY: plain u32s in a shared mapping written by the DLL's threads.
+    // Volatile so the compiler cannot cache them across the sequence loads.
+    unsafe {
+        let epoch = std::ptr::read_volatile(&state.level_epoch);
+        let scan_epoch = std::ptr::read_volatile(&state.level_scan_epoch);
+        let id = std::ptr::read_volatile(&state.level_id);
+        (epoch == scan_epoch).then_some(id)
+    }
 }
 
 /// A coherent read of the current track: `Some(level_id)` only when that id was
@@ -331,75 +402,38 @@ pub struct TasSharedState {
 ///
 /// Reading `level_scan_epoch == level_epoch` and THEN reading `level_id`
 /// separately is not sound — the level can be swapped between the two, giving
-/// "resolved" plus the previous track's id. This reads the three words in the
-/// order that makes a torn snapshot detectable (seqlock-style): the writer
-/// publishes `level_id` before the `level_scan_epoch` that validates it, so the
-/// reader takes the marker, then the id, then RE-READS the invalidating epoch
-/// and requires it to still agree. Any swap that raced the read moves
-/// `level_epoch` and is caught by the recheck.
-///
-/// Volatile reads because the producer is another process's threads; the fields
-/// are plain u32 in a shared mapping and the compiler must not cache or reorder
-/// these loads.
-///
-/// Checking `level_id != 0xFFFFFFFF` is NOT equivalent: the scan publishes
-/// unknown for transient reasons unrelated to a level change, and can also still
-/// hold the PREVIOUS track's id during a swap.
+/// "resolved" plus the previous track's id. Both now happen inside one seqlock
+/// window, so either the whole group is from a single publication or the read is
+/// rejected.
+pub fn resolved_level_id(state: &TasSharedState) -> Option<u32> {
+    with_level_context(state, || read_identity(state)).flatten()
+}
 
-/// A coherent snapshot of the level context: `(level_id, level_path)`.
+/// A coherent snapshot of the level context: `(level_id, level_path)` together.
 ///
-/// Seqlock acquire. `resolved_level_id` alone could not be made correct: it
-/// checked two counters and then read a THIRD location (`level_id`), and for the
-/// path it is worse — 128 bytes that another process can be halfway through
-/// rewriting. Take the sequence, read the group, re-take the sequence, and
-/// accept only an unchanged EVEN value.
+/// The path is the harder half: 128 bytes that another process can be halfway
+/// through rewriting, so no amount of care about the counters alone makes it
+/// safe. Same window as [`resolved_level_id`], plus the bytes.
 ///
 /// Returns `None` while unresolved OR while the writer is mid-update; a caller
 /// that cannot get a clean read must treat the level as unknown, never guess.
 pub fn level_context(state: &TasSharedState) -> Option<(u32, String)> {
-    for _ in 0..64 {
-        // SAFETY: plain fields in a shared mapping written by the DLL; volatile
-        // so the compiler cannot cache or reorder these across the seq reads.
-        unsafe {
-            let s1 = std::ptr::read_volatile(&state.level_ctx_seq);
-            if s1 & 1 != 0 {
-                std::hint::spin_loop();
-                continue; // writer mid-update
-            }
-            let epoch = std::ptr::read_volatile(&state.level_epoch);
-            let scan_epoch = std::ptr::read_volatile(&state.level_scan_epoch);
-            let id = std::ptr::read_volatile(&state.level_id);
-            let mut path = [0u8; TAS_LEVEL_PATH_MAX];
-            for i in 0..TAS_LEVEL_PATH_MAX {
-                path[i] = std::ptr::read_volatile(&state.level_path[i]);
-            }
-            let s2 = std::ptr::read_volatile(&state.level_ctx_seq);
-            if s1 != s2 {
-                continue; // torn: the group changed under us
-            }
-            if scan_epoch != epoch {
-                return None; // context changed, track not identified yet
-            }
-            let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
-            return Some((id, String::from_utf8_lossy(&path[..end]).into_owned()));
+    // Collect into a plain buffer inside the window; decode (which allocates)
+    // outside it, so a retry never pays for a String it is about to discard.
+    let snapshot = with_level_context(state, || {
+        let id = read_identity(state)?;
+        let mut path = [0u8; TAS_LEVEL_PATH_MAX];
+        for (i, b) in path.iter_mut().enumerate() {
+            // SAFETY: as read_identity — shared mapping, written by the DLL.
+            *b = unsafe { std::ptr::read_volatile(&state.level_path[i]) };
         }
-    }
-    None
-}
-pub fn resolved_level_id(state: &TasSharedState) -> Option<u32> {
-    // SAFETY: all three are plain u32 inside the shared mapping, aligned, and
-    // written by the DLL. Volatile reads only prevent caching/reordering; they
-    // do not need the fields to be Rust-exclusive.
-    unsafe {
-        let scan_epoch = std::ptr::read_volatile(&state.level_scan_epoch);
-        let id = std::ptr::read_volatile(&state.level_id);
-        let epoch = std::ptr::read_volatile(&state.level_epoch);
-        if scan_epoch == epoch {
-            Some(id)
-        } else {
-            None
-        }
-    }
+        Some((id, path))
+    })
+    .flatten();
+
+    let (id, path) = snapshot?;
+    let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+    Some((id, String::from_utf8_lossy(&path[..end]).into_owned()))
 }
 
 /// Whether the current track is known. Prefer [`resolved_level_id`] when you
@@ -2540,8 +2574,11 @@ mod level_seqlock_tests {
             while !w_stop.load(Ordering::Relaxed) {
                 let src: &[u8] = if which { a } else { b };
                 which = !which;
-                // seq -> odd (writing)
-                unsafe { std::ptr::write_volatile(&mut s.level_ctx_seq, s.level_ctx_seq + 1) };
+                // Mirror the DLL exactly: InterlockedIncrement to odd, mutate,
+                // InterlockedIncrement to even. AcqRel is what the Interlocked
+                // intrinsic gives, so the test writer is not weaker than the
+                // real one it stands in for.
+                s.level_ctx_seq.fetch_add(1, Ordering::AcqRel); // -> odd
                 for (i, &c) in src.iter().enumerate() {
                     unsafe { std::ptr::write_volatile(&mut s.level_path[i], c) };
                     if i % 8 == 0 {
@@ -2549,8 +2586,7 @@ mod level_seqlock_tests {
                     }
                 }
                 unsafe { std::ptr::write_volatile(&mut s.level_path[src.len()], 0) };
-                // seq -> even (stable)
-                unsafe { std::ptr::write_volatile(&mut s.level_ctx_seq, s.level_ctx_seq + 1) };
+                s.level_ctx_seq.fetch_add(1, Ordering::AcqRel); // -> even
                 // Leave a stable window. The real writer publishes about every
                 // 100ms; a back-to-back loop would hold the sequence odd almost
                 // always and starve the reader, which tests nothing.
@@ -2588,10 +2624,10 @@ mod level_seqlock_tests {
         let mut s = zeroed_boxed();
         s.level_epoch = 4;
         s.level_scan_epoch = 4;
-        s.level_ctx_seq = 3; // odd => mid-write
+        s.level_ctx_seq.store(3, Ordering::Relaxed); // odd => mid-write
         assert_eq!(level_context(&s), None, "must not read while seq is odd");
 
-        s.level_ctx_seq = 4; // even => stable
+        s.level_ctx_seq.store(4, Ordering::Relaxed); // even => stable
         assert!(level_context(&s).is_some());
     }
 
@@ -2599,7 +2635,7 @@ mod level_seqlock_tests {
     #[test]
     fn clean_sequence_does_not_imply_resolved() {
         let mut s = zeroed_boxed();
-        s.level_ctx_seq = 8;
+        s.level_ctx_seq.store(8, Ordering::Relaxed);
         s.level_epoch = 5;
         s.level_scan_epoch = 4; // scan has not caught up
         s.level_id = 2;

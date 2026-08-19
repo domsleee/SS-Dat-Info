@@ -1586,12 +1586,14 @@ pub fn save_dialog_with_segments(
     segments: &[Segment],
     log: &mut Vec<String>,
 ) -> Option<PathBuf> {
-    // Default name: `<level>-<time>` (e.g. FE-5876). Level comes from the
-    // DLL's live level_id (heap scan); when at the menu / unknown it's None
-    // and the name degrades to time-only. Time is the in-race duration
-    // (gate→end) in cs.
+    // Default name: `<level>-<time>` (e.g. FE-5876). The level must come from
+    // the RESOLVED read — a raw level_id here would name and file the recording
+    // under the track we just left, and since the level filter keys off the
+    // saved name/folder, that mislabel is permanent. Unknown (menu, or mid
+    // switch) degrades to a time-only name in the root folder, which is
+    // recoverable. Time is the in-race duration (gate→end) in cs.
     let race_cs = crate::level::race_centiseconds(&state.rec_coords, state.recorded_count);
-    let level = crate::level::level_code_from_id(state.level_id);
+    let level = crate::level::resolved_level_code(state);
     let default_name = crate::level::default_recording_name(level, race_cs);
     if let Some(path) = rfd::FileDialog::new()
         .set_title("Save TAS Recording")

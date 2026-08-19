@@ -140,7 +140,7 @@ pub fn show(
             let timer_anchor = crate::start_line::start_cross_tick(
                 &state.rec_coords,
                 recorded,
-                crate::level::level_code_from_id(state.level_id),
+                crate::level::resolved_level_code(state),
             )
             .or(first_moving);
             ui.vertical(|ui| {

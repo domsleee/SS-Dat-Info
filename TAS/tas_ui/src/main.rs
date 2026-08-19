@@ -1851,8 +1851,11 @@ impl TasApp {
     /// dialog never kills an in-progress recording, and BEFORE the load so the
     /// buffer overwrite doesn't race the DLL's REC cycle hook.
     fn load_recording_flow(&mut self) {
+        // Resolved, not raw: the starting folder should be the track we are
+        // actually on. Unknown opens the root recordings dir rather than
+        // confidently opening the previous track's.
         let level_id = match self.shared.as_ref() {
-            Some(s) => s.state().level_id,
+            Some(s) => tas_shared::resolved_level_id(s.state()).unwrap_or(u32::MAX),
             None => return,
         };
         let Some(path) = recording::pick_recording_path(level_id) else {
@@ -2539,7 +2542,12 @@ impl eframe::App for TasApp {
                         let cycle_ticking = self.cycle_advance_at.elapsed()
                             < std::time::Duration::from_millis(400);
                         let in_game = state.game_in_game != 0 && cycle_ticking;
-                        let card_level = level_name_from_id(state.level_id);
+                        // Resolved, not raw — the chip must go blank during a
+                        // level change rather than keep naming the old track.
+                        // That stale name is exactly the symptom that started
+                        // this whole line of work.
+                        let card_level =
+                            tas_shared::resolved_level_id(state).and_then(level_name_from_id);
                         let (g_txt, g_col) = if in_game {
                             (
                                 match card_level {
