@@ -730,10 +730,12 @@ pub fn print_status(client: &TasSharedMemoryClient) {
         s.game_in_game
     );
     println!(
-        "Level: epoch={} scan_epoch={} resolved={}",
+        "Level: epoch={} scan_epoch={} resolved={} hits={} vs {}",
         s.level_epoch,
         s.level_scan_epoch,
-        tas_shared::level_is_resolved(s)
+        tas_shared::level_is_resolved(s),
+        s.level_scan_best_hits,
+        s.level_scan_second_hits
     );
     println!(
         "Ptrs: replay={:#010x} player={:#010x} level_id={:#x} race_time_cs={:#x} pos=({:.2},{:.2},{:.2})",

@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 14; // +level_epoch/level_scan_epoch (root-based level context)
+constexpr uint32_t TAS_SHARED_VERSION = 15; // +level_scan_best_hits/second_hits (detection confidence)
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
@@ -304,6 +304,15 @@ struct TasSharedState {
     // identified yet — the UI must say "resolving", not assert the old level.
     uint32_t level_epoch;
     uint32_t level_scan_epoch;
+
+    // -- Level-detection confidence (DLL-written diagnostic) --
+    // Hit counts for the winning track and the runner-up in the last completed
+    // scan. A genuinely loaded level references its resource paths pervasively;
+    // residue from a level already left is sparse. Exposed because the numbers
+    // are the difference between "detected FE" and "guessed FE from one stale
+    // string", and that distinction is invisible in level_id alone.
+    uint32_t level_scan_best_hits;
+    uint32_t level_scan_second_hits;
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -312,7 +321,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1647296,
+static_assert(sizeof(TasSharedState) == 1647304,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 
@@ -420,6 +429,8 @@ public:
         // (we are at the menu / not yet scanned) rather than "resolving".
         state->level_epoch = 0;
         state->level_scan_epoch = 0;
+        state->level_scan_best_hits = 0;
+        state->level_scan_second_hits = 0;
         return true;
     }
 
