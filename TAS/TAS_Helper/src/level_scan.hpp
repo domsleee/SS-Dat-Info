@@ -302,6 +302,14 @@ inline void Start(TasSharedState* s, uint32_t rootPtrAddr, uint32_t (*readPtr)(u
     s->level_scan_epoch = s->level_epoch - 1u;
     g_stop.store(false, std::memory_order_relaxed);
     g_thread = CreateThread(nullptr, 0, threadProc, s, 0, nullptr);
+    if (!g_thread) {
+        // No scanner means level_id can NEVER resolve, and Start() has just
+        // forced the epochs unequal — so every consumer would sit in "resolving"
+        // forever with no explanation. Restore equality so the state reads as an
+        // honest "unknown" (level_id is already 0xFFFFFFFF) rather than a
+        // permanent pending transition, and say so.
+        s->level_scan_epoch = s->level_epoch;
+    }
 }
 
 // Signal the worker and JOIN it before the caller tears down shared memory.
