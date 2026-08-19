@@ -1,5 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 14; // +level_epoch/level_scan_epoch (root-based level context)
+pub const TAS_SHARED_VERSION: u32 = 15; // +level_scan_best_hits/second_hits (detection confidence)
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
@@ -304,6 +304,14 @@ pub struct TasSharedState {
     /// yet — callers must treat the level as UNRESOLVED rather than asserting
     /// the previous one. See [`level_is_resolved`].
     pub level_scan_epoch: u32,
+
+    /// Hit count for the winning track in the last completed scan, and for the
+    /// runner-up. A loaded level references its resource paths pervasively;
+    /// residue from a level already left is sparse — so these separate
+    /// "detected" from "guessed from one stale string", a distinction that is
+    /// invisible in `level_id` alone.
+    pub level_scan_best_hits: u32,
+    pub level_scan_second_hits: u32,
 }
 
 /// A coherent read of the current track: `Some(level_id)` only when that id was
@@ -2048,7 +2056,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_296);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_304);
     }
 
     #[test]

@@ -141,7 +141,44 @@ static void scanRegion(const uint8_t* p, size_t n, int tally[9]) {
 // Walk private committed regions <=4 MiB (path strings live in the small-block
 // heap; the big texture/geometry buffers hold no paths), SEH-guarded. Returns
 // the majority track index 0..8, or -1 if nothing found.
-static int32_t scanLevelId() {
+// Detection confidence floor. A loaded track measures 23-24 hits with a
+// runner-up of 0 (sampled repeatedly on Forest Easy, stable across restarts).
+// Residue from a level already left is far sparser, so a floor well under the
+// observed legitimate count rejects it without risking a real detection.
+static const int MIN_TRACK_HITS = 8;
+// ...and the winner must clearly dominate. Guards the mid-load window where the
+// OLD track's strings are still resident alongside the new one's.
+static const int MIN_DOMINANCE_NUM = 2;
+
+static bool confidentEnough(int best, int second) {
+    return best >= MIN_TRACK_HITS && best >= second * MIN_DOMINANCE_NUM;
+}
+
+// Require the SAME id from two consecutive scans in the SAME context before
+// publishing it.
+//
+// A confidence floor alone cannot fix the worst case: during a level load the
+// root for the new level already exists (so the epoch has moved and we are
+// scanning) while the heap still holds the OLD track's strings in force. That
+// scan legitimately sees the old track with a high, dominant count and would
+// publish it stamped with the NEW epoch — confidently wrong, and no amount of
+// thresholding detects it because the reading is not noisy, just stale.
+//
+// Waiting for the reading to SETTLE does detect it: across a load the tally
+// shifts old -> new, so two consecutive scans disagree until the new level's
+// resources are actually resident. Costs one scan interval (~1.5s) of
+// "resolving" after a change, which is the honest answer during a load anyway.
+inline int32_t g_pendingId = -1;
+inline uint32_t g_pendingEpoch = 0;
+
+static bool confirms(int32_t id, uint32_t epoch) {
+    bool agrees = (id == g_pendingId && epoch == g_pendingEpoch);
+    g_pendingId = id;
+    g_pendingEpoch = epoch;
+    return agrees;
+}
+
+static int32_t scanLevelId(int* outBest, int* outSecond) {
     int tally[9] = { 0 };
     uint8_t* addr = nullptr;
     const uint8_t* MAXADDR = (const uint8_t*)0x7FFF0000u;
@@ -162,10 +199,22 @@ static int32_t scanLevelId() {
         if (next <= addr) break;
         addr = next;
     }
-    int best = -1, bestc = 0;
+    // Confidence, not just a winner. The old code took the largest tally with
+    // NO minimum and NO margin, so a SINGLE residual string from a level we had
+    // already left could win and be published as the current track — "fresh but
+    // wrong", which the epoch cannot detect because the epoch only certifies
+    // WHEN a scan ran, never WHETHER it was right.
+    //
+    // A genuinely loaded level references its resource paths pervasively; heap
+    // residue from a previous one is sparse. So report the top two counts and
+    // let the caller apply the thresholds.
+    int best = -1, bestc = 0, secondc = 0;
     for (int i = 0; i < 9; i++) {
-        if (tally[i] > bestc) { bestc = tally[i]; best = i; }
+        if (tally[i] > bestc) { secondc = bestc; bestc = tally[i]; best = i; }
+        else if (tally[i] > secondc) { secondc = tally[i]; }
     }
+    if (outBest) *outBest = bestc;
+    if (outSecond) *outSecond = secondc;
     return (bestc > 0) ? best : -1;
 }
 
@@ -182,7 +231,10 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // track strings still in the heap are residue from the one we LEFT — a
         // scan here would publish the OLD track stamped with the NEW epoch, i.e.
         // confidently wrong, which is worse than unresolved.
-        int32_t id = (s->game_in_game && !g_rootIsNull) ? scanLevelId() : -1;
+        int scanBest = 0, scanSecond = 0;
+        int32_t id = (s->game_in_game && !g_rootIsNull) ? scanLevelId(&scanBest, &scanSecond) : -1;
+        s->level_scan_best_hits = (uint32_t)scanBest;
+        s->level_scan_second_hits = (uint32_t)scanSecond;
         // ...and again AFTER, because scanLevelId() walks tens of MiB and the
         // level can be swapped underneath it. Without this the result of a scan
         // that straddled the swap would be published as if it described the new
@@ -195,7 +247,7 @@ static DWORD WINAPI threadProc(LPVOID param) {
             // is deliberately NOT advanced, so resolved stays false until a scan
             // completes entirely inside one context.
             s->level_id = 0xFFFFFFFFu;
-        } else if (id >= 0) {
+        } else if (id >= 0 && confidentEnough(scanBest, scanSecond) && confirms(id, epochAtScan)) {
             // Publish the id BEFORE the marker that validates it: a reader that
             // sees the new scan epoch must already be able to see the id it
             // describes, never the previous one.
