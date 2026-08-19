@@ -322,10 +322,20 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // submenus, so the 0->1 edge alone would miss track changes within a
         // session. ~1.5 s keeps the chip fresh at negligible cost. Sleep in
         // short slices so Stop() can join promptly (else detach waits ~1.5s).
-        // Poll the level context on every 100 ms slice, not once per scan: the
-        // whole point is to notice a swap DURING the menu/load, and the scan
-        // itself only runs every ~1.5s.
-        for (int i = 0; i < 15 && !g_stop.load(std::memory_order_relaxed); i++) {
+        // ADAPTIVE CADENCE. 1.5s is right for steady state — the track cannot
+        // change without us noticing via the root — but it is the wrong latency
+        // while we do not know where we are. Unresolved cost the user ~3s after
+        // a level finished loading: up to 1.5s to reach the next loop, then
+        // another 1.5s for the second scan the settle gate needs.
+        //
+        // Polling fast while unresolved is close to free: scanLevelId only runs
+        // when mayScan holds (root present, cycle ticked), so at a menu or
+        // mid-teardown this just re-reads one pointer. The expensive heap walk
+        // happens only when a level is actually there to identify — precisely
+        // when the latency matters.
+        bool resolved = (s->level_scan_epoch == s->level_epoch);
+        int slices = resolved ? 15 : 2;   // 1.5s steady, 200ms while resolving
+        for (int i = 0; i < slices && !g_stop.load(std::memory_order_relaxed); i++) {
             Sleep(100);
             pollLevelContext(s);
         }

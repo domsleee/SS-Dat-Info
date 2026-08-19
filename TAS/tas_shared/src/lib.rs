@@ -1,5 +1,6 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 16; // +max_null_root_ms (root-null gap diagnostic)
+pub const TAS_SHARED_VERSION: u32 = 17; // +level_path/level_path_gen (event-driven level identity)
+pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
@@ -316,6 +317,15 @@ pub struct TasSharedState {
     /// null transiently; a teardown holds it — so the invalidation threshold
     /// must sit above the former and below the latter.
     pub last_null_root_ms: u32,
+    /// The engine loads each track from loose files under
+    /// `Data/Levels/<Area>/<Category>/<Difficulty>/...`, so a file open IS the
+    /// level-identity event — exact and immediate, and richer than the heap
+    /// scan, which only matches `<area>/Tracks/<diff>` and so cannot see
+    /// Practice, Special, Halfpipe or Ramp at all.
+    pub level_path: [u8; TAS_LEVEL_PATH_MAX],
+    /// Bumped AFTER `level_path` is written, so a reader that sees a new
+    /// generation can already see the path it refers to.
+    pub level_path_gen: u32,
 }
 
 /// A coherent read of the current track: `Some(level_id)` only when that id was
@@ -2060,7 +2070,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_312);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_440);
     }
 
     #[test]

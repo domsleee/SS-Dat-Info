@@ -738,6 +738,15 @@ pub fn print_status(client: &TasSharedMemoryClient) {
         s.level_scan_second_hits
     );
     println!("Root: last_null_gap={}ms", s.last_null_root_ms);
+    {
+        let p = &s.level_path;
+        let end = p.iter().position(|&c| c == 0).unwrap_or(p.len());
+        println!(
+            "Path: gen={} {:?}",
+            s.level_path_gen,
+            String::from_utf8_lossy(&p[..end])
+        );
+    }
     println!(
         "Ptrs: replay={:#010x} player={:#010x} level_id={:#x} race_time_cs={:#x} pos=({:.2},{:.2},{:.2})",
         s.replay_ptr, s.player_ptr, s.level_id, s.race_time_cs,
