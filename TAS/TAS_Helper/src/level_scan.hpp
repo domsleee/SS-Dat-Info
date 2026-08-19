@@ -356,20 +356,34 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // the whole point: a reader that sees the validating epoch without the
         // id it validates gets "resolved" plus the PREVIOUS track, which is
         // worse than unresolved because it looks trustworthy.
+        //
+        // Each also publishes only when it would actually CHANGE something. The
+        // steady state re-derives the same id every 1.5s, and republishing it
+        // opened a write window — and made a reader retry — for no new
+        // information. Skipping an identical write is exactly equivalent, and it
+        // buys a real invariant: the sequence advances if and only if the level
+        // context changed. (We are the sole writer, so reading these fields back
+        // to compare is not itself racy.)
         if (s->level_epoch != epochAtScan) {
             // The context moved under the scan: whatever we found describes the
             // level we just left. Discard it and stay unresolved — level_scan_epoch
             // is deliberately NOT advanced, so resolved stays false until a scan
             // completes entirely inside one context.
-            publishContext(s, [&] { s->level_id = 0xFFFFFFFFu; });
+            if (s->level_id != 0xFFFFFFFFu) {
+                publishContext(s, [&] { s->level_id = 0xFFFFFFFFu; });
+            }
         } else if (settled && id >= 0) {
-            publishContext(s, [&] {
-                s->level_id = (uint32_t)id;
-                s->level_scan_epoch = epochAtScan;
-            });
+            if (s->level_id != (uint32_t)id || s->level_scan_epoch != epochAtScan) {
+                publishContext(s, [&] {
+                    s->level_id = (uint32_t)id;
+                    s->level_scan_epoch = epochAtScan;
+                });
+            }
         } else if (epochAtScan != s->level_scan_epoch) {
             // A context we have not identified yet — stay explicitly unknown.
-            publishContext(s, [&] { s->level_id = 0xFFFFFFFFu; });
+            if (s->level_id != 0xFFFFFFFFu) {
+                publishContext(s, [&] { s->level_id = 0xFFFFFFFFu; });
+            }
         }
         // else: same context, scan found nothing. The level CANNOT have changed
         // without the root changing, so this is a transient miss (a >4 MiB or

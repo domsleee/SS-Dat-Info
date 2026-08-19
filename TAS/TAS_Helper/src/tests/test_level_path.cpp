@@ -30,6 +30,22 @@ int main() {
           "unrelated levels-ish string rejected (no tracks)");
     check(!IsPlausible("\x01\x02garbage\xff"), "binary garbage rejected");
 
+    // --- Segment boundaries, not substrings. ---
+    // "Available_Levels" and "Soundtracks" are real names from this game's data
+    // directory, and a substring search accepts the pair as a level path. This
+    // is the case a live run would only hit by luck, and the reason IsPlausible
+    // and AreaFrom both anchor on separators.
+    check(!IsPlausible("Available_Levels/Forest/Soundtracks/x"),
+          "near-miss rejected: levels/tracks only as SUBSTRINGS");
+    check(AreaFrom("Available_Levels/Forest/Soundtracks/x") == -1,
+          "...and it yields no area either");
+    check(!IsPlausible("mylevels/Forest/Tracks/Easy/x"),
+          "levels must start a segment");
+    check(!IsPlausible("data/levelsx/Forest/Tracks/Easy/x"),
+          "levels must end a segment");
+    check(IsPlausible("levels/Forest/tracks/Easy/x"),
+          "a segment at the very start of the string still counts");
+
     // --- Area extraction, the half the path answers reliably. ---
     check(AreaFrom("data/levels/Forest/Tracks/Easy/Cloudy/shadow.qua") == 0, "area Forest");
     check(AreaFrom("data/levels/Alpine/Tracks/Hard/x") == 1, "area Alpine");

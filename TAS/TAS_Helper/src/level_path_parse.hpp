@@ -47,14 +47,37 @@ inline int MatchOne(const char* p, size_t n, const char* const* table, int count
 inline const char* const AREAS[3] = { "forest", "alpine", "village" };
 inline const char* const DIFFS[3] = { "easy", "medium", "hard" };
 
+// Does `path` contain `seg` (lowercase) as a WHOLE path segment — i.e. bounded
+// by separators or by the ends of the string?
+//
+// Substring matching is not good enough. A bare ContainsNoCase accepts
+// "Available_Levels/Forest/Soundtracks/x", because "levels" hides inside
+// "Available_Levels" and "tracks" inside "Soundtracks" — a real filename from
+// this game's own data directory, so this is not a hypothetical.
+inline bool HasSegmentNoCase(const char* path, const char* seg) {
+    if (!path || !seg) return false;
+    size_t sl = 0;
+    while (seg[sl]) sl++;
+    for (size_t i = 0; path[i]; i++) {
+        if (i != 0 && !IsSep(path[i - 1])) continue;      // must start a segment
+        size_t j = 0;
+        while (j < sl && path[i + j] && Lower(path[i + j]) == seg[j]) j++;
+        if (j != sl) continue;
+        char after = path[i + sl];
+        if (after == '\0' || IsSep(after)) return true;   // must end one too
+    }
+    return false;
+}
+
 // Is this a plausible level path?
 //
 // The pointer we dereference can land on freed-but-committed heap, which does
 // NOT fault, so "it read without crashing" proves nothing. Require the grammar
-// we actually depend on. Rejects transient garbage and unrelated strings.
+// we actually depend on, as SEGMENTS. Rejects transient garbage, unrelated
+// strings, and near-misses like "Available_Levels/.../Soundtracks/...".
 inline bool IsPlausible(const char* s) {
     if (!s || !s[0]) return false;
-    return ContainsNoCase(s, "levels") && ContainsNoCase(s, "tracks");
+    return HasSegmentNoCase(s, "levels") && HasSegmentNoCase(s, "tracks");
 }
 
 // Area index (0=Forest, 1=Alpine, 2=Village) from ".../levels/<area>/...", or -1.
@@ -66,6 +89,9 @@ inline int AreaFrom(const char* path) {
     if (!path) return -1;
     for (size_t i = 0; path[i]; i++) {
         if (Lower(path[i]) != 'l') continue;
+        // "levels" must BEGIN a segment, or "Available_Levels/Forest/..." would
+        // report Forest. Same reasoning as HasSegmentNoCase.
+        if (i != 0 && !IsSep(path[i - 1])) continue;
         size_t j = 0;
         const char* w = "levels";
         while (w[j] && path[i + j] && Lower(path[i + j]) == w[j]) j++;

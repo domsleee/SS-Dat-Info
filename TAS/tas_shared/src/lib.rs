@@ -359,6 +359,21 @@ const LEVEL_CTX_RETRIES: usize = 64;
 /// `None` means no clean window was obtained: the writer is wedged mid-update
 /// (sequence stuck odd — e.g. the game crashed between the two increments) or
 /// the retry bound ran out. Both are "unknown", never "assume the last value".
+///
+/// WHAT THIS IS AND IS NOT. The sequence is a real atomic and the ordering
+/// around it is real. The PAYLOAD is not: it is read with `read_volatile` from
+/// memory another PROCESS writes, which Rust's memory model does not describe at
+/// all — formally a data race, and no amount of `Ordering` fixes that, because
+/// the writer is outside the model. What makes it work is the target, not the
+/// abstract machine: on x86 aligned byte and word accesses are indivisible,
+/// loads are not reordered with loads, the mapping is cache-coherent, and the
+/// DLL's `InterlockedIncrement` is a full barrier. So this is a seqlock ON X86
+/// over a cross-process mapping. Do not read it as a portable one.
+///
+/// Freshness is also NOT provided. A clean read is coherent at the instant it
+/// was taken and can be stale by the time the caller acts on it — which is why
+/// the UI re-reads immediately before writing to the live buffer rather than
+/// trusting its frame-start snapshot (see `stop_active_session_for_load`).
 fn with_level_context<T>(state: &TasSharedState, read: impl Fn() -> T) -> Option<T> {
     for _ in 0..LEVEL_CTX_RETRIES {
         let s1 = state.level_ctx_seq.load(Ordering::Acquire);
@@ -2544,18 +2559,41 @@ mod tests {
 mod level_seqlock_tests {
     use super::*;
 
-    /// A reader must never observe a HALF-WRITTEN context.
+    /// A reader must never observe a HALF-WRITTEN context — and the id it gets
+    /// must belong to the path it gets.
     ///
-    /// This is the property a plain store plus one barrier did not provide: the
-    /// path is a 128-byte array, so another process can be midway through
-    /// rewriting it while the counters still read old. The test drives a real
-    /// writer thread that deliberately publishes a path byte-by-byte with the
-    /// sequence held odd, and asserts every successful read is self-consistent —
-    /// i.e. the path is entirely one value, never a splice of two.
+    /// The path is a 128-byte array, so another process can be midway through
+    /// rewriting it while the counters still read old; and `level_id` lives
+    /// somewhere else entirely, so the two can disagree even when neither is
+    /// itself torn. A writer thread publishes BOTH, byte-by-byte, with the
+    /// sequence held odd, and the reader asserts the pair it gets is always one
+    /// consistent publication.
+    ///
+    /// ON THE FORMAL DATA RACE: the payload is written with `write_volatile` and
+    /// read with `read_volatile` from two threads, which Rust's memory model
+    /// calls UB. That is deliberate and unavoidable here — the production reader
+    /// has exactly this shape, because the real writer is ANOTHER PROCESS
+    /// writing a shared mapping, which Rust's model has no vocabulary for at
+    /// all. The target is x86: aligned byte and word accesses are indivisible,
+    /// loads are not reordered with loads, and the mapping is cache-coherent, so
+    /// the sequence is what actually orders things. This test models that, it
+    /// does not launder it. Only `level_ctx_seq` is a real atomic, because that
+    /// is the one location the protocol's correctness depends on.
+    ///
+    /// No `&mut TasSharedState` is ever created while the reader holds `&` —
+    /// the writer goes through raw pointers via `addr_of_mut!`.
     #[test]
-    fn seqlock_reader_never_sees_a_spliced_path() {
+    fn seqlock_reader_never_sees_a_spliced_context() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+
+        // Two publications with paths of the SAME length differing in every
+        // byte, each paired with its own id, so a splice is detectable rather
+        // than accidentally valid — and so an id/path mismatch is too.
+        const PATH_A: &str = "data/levels/Forest/Tracks/Easy/aaaaa";
+        const PATH_B: &str = "data/levels/Alpine/Tracks/Hard/bbbbb";
+        const ID_A: u32 = 0; // Forest Easy
+        const ID_B: u32 = 5; // Alpine Hard
 
         let mut boxed = zeroed_boxed();
         boxed.level_epoch = 1;
@@ -2565,46 +2603,59 @@ mod level_seqlock_tests {
 
         let w_stop = stop.clone();
         let writer = std::thread::spawn(move || {
-            let s = unsafe { &mut *(ptr as *mut TasSharedState) };
-            // Two paths of the SAME length, differing in every byte, so any
-            // splice is detectable rather than accidentally valid.
-            let a = b"data/levels/Forest/Tracks/Easy/aaaaa";
-            let b = b"data/levels/Alpine/Tracks/Hard/bbbbb";
+            let s = ptr as *mut TasSharedState;
             let mut which = false;
             while !w_stop.load(Ordering::Relaxed) {
-                let src: &[u8] = if which { a } else { b };
+                let (src, id) = if which {
+                    (PATH_A.as_bytes(), ID_A)
+                } else {
+                    (PATH_B.as_bytes(), ID_B)
+                };
                 which = !which;
-                // Mirror the DLL exactly: InterlockedIncrement to odd, mutate,
-                // InterlockedIncrement to even. AcqRel is what the Interlocked
-                // intrinsic gives, so the test writer is not weaker than the
-                // real one it stands in for.
-                s.level_ctx_seq.fetch_add(1, Ordering::AcqRel); // -> odd
-                for (i, &c) in src.iter().enumerate() {
-                    unsafe { std::ptr::write_volatile(&mut s.level_path[i], c) };
-                    if i % 8 == 0 {
-                        std::hint::spin_loop(); // widen the tear window
+                unsafe {
+                    // Mirror the DLL exactly: InterlockedIncrement to odd,
+                    // mutate, InterlockedIncrement to even. AcqRel is what the
+                    // Interlocked intrinsic gives, so the stand-in writer is not
+                    // weaker than the real one.
+                    (*s).level_ctx_seq.fetch_add(1, Ordering::AcqRel); // -> odd
+                    std::ptr::write_volatile(std::ptr::addr_of_mut!((*s).level_id), id);
+                    for (i, &c) in src.iter().enumerate() {
+                        std::ptr::write_volatile(std::ptr::addr_of_mut!((*s).level_path[i]), c);
+                        if i % 8 == 0 {
+                            std::hint::spin_loop(); // widen the tear window
+                        }
                     }
+                    std::ptr::write_volatile(
+                        std::ptr::addr_of_mut!((*s).level_path[src.len()]),
+                        0,
+                    );
+                    (*s).level_ctx_seq.fetch_add(1, Ordering::AcqRel); // -> even
                 }
-                unsafe { std::ptr::write_volatile(&mut s.level_path[src.len()], 0) };
-                s.level_ctx_seq.fetch_add(1, Ordering::AcqRel); // -> even
-                // Leave a stable window. The real writer publishes about every
-                // 100ms; a back-to-back loop would hold the sequence odd almost
-                // always and starve the reader, which tests nothing.
+                // Leave a stable window. The real writer publishes on level
+                // changes only; a back-to-back loop would hold the sequence odd
+                // almost always and starve the reader, which tests nothing.
                 std::thread::sleep(std::time::Duration::from_micros(200));
             }
         });
 
         let s = unsafe { &*(ptr as *const TasSharedState) };
         let mut clean = 0usize;
+        let mut saw_a = false;
+        let mut saw_b = false;
         for _ in 0..20_000 {
-            if let Some((_, path)) = level_context(s) {
+            if let Some((id, path)) = level_context(s) {
                 if path.is_empty() {
-                    continue;
+                    continue; // pre-first-publication zeros
                 }
-                // Whatever we got must be exactly one of the two, never a mix.
-                let ok = path == "data/levels/Forest/Tracks/Easy/aaaaa"
-                    || path == "data/levels/Alpine/Tracks/Hard/bbbbb";
-                assert!(ok, "observed a SPLICED path: {:?}", path);
+                match (path.as_str(), id) {
+                    (PATH_A, ID_A) => saw_a = true,
+                    (PATH_B, ID_B) => saw_b = true,
+                    other => panic!(
+                        "incoherent context: {:?} — expected exactly one publication, \
+                         i.e. ({:?}, {}) or ({:?}, {})",
+                        other, PATH_A, ID_A, PATH_B, ID_B
+                    ),
+                }
                 clean += 1;
             }
         }
@@ -2613,9 +2664,19 @@ mod level_seqlock_tests {
         writer.join().unwrap();
         unsafe { drop(Box::from_raw(ptr as *mut TasSharedState)) };
 
-        // The point is that reads either succeed cleanly or are rejected — a
-        // protocol that never returns anything would also "never splice".
+        // Reads must succeed, not merely never splice — a reader that always
+        // returned None would pass every assertion above. And BOTH publications
+        // must have been seen, which is what proves the reader was actually
+        // running concurrently with the writer rather than sampling one quiet
+        // value 20,000 times.
         assert!(clean > 0, "no clean read ever completed — reader is starving");
+        assert!(
+            saw_a && saw_b,
+            "only ever saw one publication (A={} B={}) — the reader never \
+             overlapped the writer, so nothing was actually tested",
+            saw_a,
+            saw_b
+        );
     }
 
     /// An odd sequence means a write is in flight; the reader must refuse.

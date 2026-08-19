@@ -1069,7 +1069,10 @@ impl RecordingHistory {
     /// Ctrl+Z on Forest Medium happily restores a Forest Easy recording over the
     /// live buffer. That is the per-level guarantee failing in the one path that
     /// bypasses the list the user can actually see.
-    fn entry_on_current_level(&self, i: usize) -> bool {
+    pub fn entry_on_current_level(&self, i: usize) -> bool {
+        if i >= self.entries.len() {
+            return false;
+        }
         // While RESOLVING we do not know what track we are on, so nothing
         // qualifies. Treating "no live level" as allow-all made the transition
         // window show AND restore every track — strictly worse than the bug this
@@ -1079,6 +1082,11 @@ impl RecordingHistory {
         }
         match (self.live_level.as_deref(), self.entries[i].level.as_deref()) {
             (Some(want), Some(have)) => want == have,
+            // Untagged: entries from before per-level tagging, and entries made
+            // while the track was unknown. Deliberately allowed everywhere —
+            // they carry no claim about where they belong, and hiding them would
+            // strand the user's existing history. The guarantee is therefore
+            // "no recording TAGGED with another track", not "nothing unknown".
             _ => true,
         }
     }
@@ -1104,6 +1112,15 @@ impl RecordingHistory {
 
     pub fn restore_index(&mut self, index: usize) -> Option<&RecordingSnapshot> {
         if index >= self.entries.len() {
+            return None;
+        }
+        // The same rule undo/redo and the row filter use. It was missing HERE —
+        // in the one path the user actually clicks. The panel hides other-track
+        // rows, so in practice a wrong row was hard to reach, but the index
+        // arrives from the UI and was trusted without checking, which made the
+        // whole per-level guarantee rest on a display filter. It does not any
+        // more.
+        if !self.entry_on_current_level(index) {
             return None;
         }
         self.entries[index].snapshot.as_ref()?;
@@ -2643,6 +2660,78 @@ mod tests {
         h.set_live_level(Some("FM"));
         assert_eq!(h.live_level(), Some("FM"));
         assert!(!h.level_is_resolving());
+    }
+
+    /// Clicking a history row must not reach across tracks either.
+    ///
+    /// undo/redo were guarded and the panel filters its rows, so `restore_index`
+    /// looked safe — but it took an index straight from the UI and trusted it,
+    /// which left the whole per-level guarantee resting on a DISPLAY filter. A
+    /// row that is stale by one frame, or any future caller that indexes the
+    /// unfiltered list, walks straight through.
+    #[test]
+    fn restore_index_does_not_cross_levels() {
+        let mut h = RecordingHistory::new(8);
+
+        h.set_live_level(Some("FE"));
+        let mut fe = RecordingSnapshot::new_empty();
+        fe.recorded_count = 10;
+        h.push_snapshot_data(fe, "fe-run");
+
+        h.set_live_level(Some("FM"));
+        let mut fm = RecordingSnapshot::new_empty();
+        fm.recorded_count = 20;
+        h.push_snapshot_data(fm, "fm-run");
+
+        // Index 0 is the FE entry; we are on FM.
+        assert_eq!(h.entries()[0].level.as_deref(), Some("FE"));
+        assert!(
+            h.restore_index(0).is_none(),
+            "restoring another track's entry by index must be refused, not just \
+             hidden from the list"
+        );
+        // ...and the refusal must not have moved the selection.
+        assert_ne!(h.current_index(), Some(0));
+
+        // The FM entry restores fine.
+        assert!(h.restore_index(1).is_some());
+
+        // While RESOLVING nothing qualifies — we do not know where we are, and
+        // guessing is what caused the original bug.
+        h.enter_resolving();
+        assert!(
+            h.restore_index(1).is_none(),
+            "must refuse every entry while the track is unknown"
+        );
+    }
+
+    /// Untagged entries stay restorable everywhere, deliberately.
+    ///
+    /// They predate per-level tagging (or were made while the track was
+    /// unknown), so they carry no claim about where they belong; hiding them
+    /// would strand the user's existing history. The guarantee is "no recording
+    /// TAGGED with another track", not "nothing unknown" — worth pinning down so
+    /// the looseness is a decision rather than an oversight.
+    #[test]
+    fn untagged_entries_remain_restorable() {
+        let mut h = RecordingHistory::new(8);
+
+        // Pushed with no live level => untagged.
+        h.set_live_level(None);
+        let mut legacy = RecordingSnapshot::new_empty();
+        legacy.recorded_count = 10;
+        h.push_snapshot_data(legacy, "legacy-run");
+        assert_eq!(h.entries()[0].level, None);
+
+        h.set_live_level(Some("VH"));
+        assert!(
+            h.restore_index(0).is_some(),
+            "an untagged entry must stay reachable on any track"
+        );
+
+        // But not while we do not know the track at all.
+        h.enter_resolving();
+        assert!(h.restore_index(0).is_none());
     }
 
     /// Ctrl+Z must not reach across tracks. undo/redo walk snapshots directly
