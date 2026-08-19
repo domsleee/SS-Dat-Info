@@ -1925,8 +1925,11 @@ impl eframe::App for TasApp {
         // the guarantee: a per-frame fact has to be established before the frame
         // consumes it.
         if let Some(shared) = self.shared.as_ref() {
-            match tas_shared::resolved_level_id(shared.state()) {
-                Some(id) => self
+            // Coherent seqlock read: id and path together, or nothing. Checking
+            // "resolved?" and then reading level_id separately could hand back
+            // "yes" plus the previous track.
+            match tas_shared::level_context(shared.state()) {
+                Some((id, _path)) => self
                     .history
                     .set_live_level(crate::level::level_code_from_id(id)),
                 // Context changed, new track not identified yet.

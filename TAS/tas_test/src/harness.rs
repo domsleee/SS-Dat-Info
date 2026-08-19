@@ -737,14 +737,9 @@ pub fn print_status(client: &TasSharedMemoryClient) {
         s.level_scan_best_hits,
         s.level_scan_second_hits
     );
-    {
-        let p = &s.level_path;
-        let end = p.iter().position(|&c| c == 0).unwrap_or(p.len());
-        println!(
-            "Path: gen={} {:?}",
-            s.level_path_gen,
-            String::from_utf8_lossy(&p[..end])
-        );
+    match tas_shared::level_context(s) {
+        Some((id, path)) => println!("Path: gen={} id={:#x} {:?}", s.level_path_gen, id, path),
+        None => println!("Path: gen={} UNRESOLVED", s.level_path_gen),
     }
     println!(
         "Ptrs: replay={:#010x} player={:#010x} level_id={:#x} race_time_cs={:#x} pos=({:.2},{:.2},{:.2})",

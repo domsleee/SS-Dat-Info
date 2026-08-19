@@ -1,5 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 19; // level context from SG+0x1D3304 path; dead root/hook fields removed
+pub const TAS_SHARED_VERSION: u32 = 20; // +level_ctx_seq (seqlock over the level-context group)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -322,6 +322,8 @@ pub struct TasSharedState {
     /// Bumped AFTER `level_path` is written, so a reader that sees a new
     /// generation can already see the path it refers to.
     pub level_path_gen: u32,
+    /// Seqlock over the level-context group. ODD = write in progress.
+    pub level_ctx_seq: u32,
 }
 
 /// A coherent read of the current track: `Some(level_id)` only when that id was
@@ -343,6 +345,47 @@ pub struct TasSharedState {
 /// Checking `level_id != 0xFFFFFFFF` is NOT equivalent: the scan publishes
 /// unknown for transient reasons unrelated to a level change, and can also still
 /// hold the PREVIOUS track's id during a swap.
+
+/// A coherent snapshot of the level context: `(level_id, level_path)`.
+///
+/// Seqlock acquire. `resolved_level_id` alone could not be made correct: it
+/// checked two counters and then read a THIRD location (`level_id`), and for the
+/// path it is worse — 128 bytes that another process can be halfway through
+/// rewriting. Take the sequence, read the group, re-take the sequence, and
+/// accept only an unchanged EVEN value.
+///
+/// Returns `None` while unresolved OR while the writer is mid-update; a caller
+/// that cannot get a clean read must treat the level as unknown, never guess.
+pub fn level_context(state: &TasSharedState) -> Option<(u32, String)> {
+    for _ in 0..64 {
+        // SAFETY: plain fields in a shared mapping written by the DLL; volatile
+        // so the compiler cannot cache or reorder these across the seq reads.
+        unsafe {
+            let s1 = std::ptr::read_volatile(&state.level_ctx_seq);
+            if s1 & 1 != 0 {
+                std::hint::spin_loop();
+                continue; // writer mid-update
+            }
+            let epoch = std::ptr::read_volatile(&state.level_epoch);
+            let scan_epoch = std::ptr::read_volatile(&state.level_scan_epoch);
+            let id = std::ptr::read_volatile(&state.level_id);
+            let mut path = [0u8; TAS_LEVEL_PATH_MAX];
+            for i in 0..TAS_LEVEL_PATH_MAX {
+                path[i] = std::ptr::read_volatile(&state.level_path[i]);
+            }
+            let s2 = std::ptr::read_volatile(&state.level_ctx_seq);
+            if s1 != s2 {
+                continue; // torn: the group changed under us
+            }
+            if scan_epoch != epoch {
+                return None; // context changed, track not identified yet
+            }
+            let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+            return Some((id, String::from_utf8_lossy(&path[..end]).into_owned()));
+        }
+    }
+    None
+}
 pub fn resolved_level_id(state: &TasSharedState) -> Option<u32> {
     // SAFETY: all three are plain u32 inside the shared mapping, aligned, and
     // written by the DLL. Volatile reads only prevent caching/reordering; they
@@ -2460,5 +2503,106 @@ mod tests {
         // Reset brings it to idle; on stub this is a no-op but should not panic
         client.reset_restart_state();
         assert_eq!(client.restart_state(), 0);
+    }
+}
+
+#[cfg(test)]
+mod level_seqlock_tests {
+    use super::*;
+
+    /// A reader must never observe a HALF-WRITTEN context.
+    ///
+    /// This is the property a plain store plus one barrier did not provide: the
+    /// path is a 128-byte array, so another process can be midway through
+    /// rewriting it while the counters still read old. The test drives a real
+    /// writer thread that deliberately publishes a path byte-by-byte with the
+    /// sequence held odd, and asserts every successful read is self-consistent —
+    /// i.e. the path is entirely one value, never a splice of two.
+    #[test]
+    fn seqlock_reader_never_sees_a_spliced_path() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let mut boxed = zeroed_boxed();
+        boxed.level_epoch = 1;
+        boxed.level_scan_epoch = 1;
+        let ptr = Box::into_raw(boxed) as usize;
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let w_stop = stop.clone();
+        let writer = std::thread::spawn(move || {
+            let s = unsafe { &mut *(ptr as *mut TasSharedState) };
+            // Two paths of the SAME length, differing in every byte, so any
+            // splice is detectable rather than accidentally valid.
+            let a = b"data/levels/Forest/Tracks/Easy/aaaaa";
+            let b = b"data/levels/Alpine/Tracks/Hard/bbbbb";
+            let mut which = false;
+            while !w_stop.load(Ordering::Relaxed) {
+                let src: &[u8] = if which { a } else { b };
+                which = !which;
+                // seq -> odd (writing)
+                unsafe { std::ptr::write_volatile(&mut s.level_ctx_seq, s.level_ctx_seq + 1) };
+                for (i, &c) in src.iter().enumerate() {
+                    unsafe { std::ptr::write_volatile(&mut s.level_path[i], c) };
+                    if i % 8 == 0 {
+                        std::hint::spin_loop(); // widen the tear window
+                    }
+                }
+                unsafe { std::ptr::write_volatile(&mut s.level_path[src.len()], 0) };
+                // seq -> even (stable)
+                unsafe { std::ptr::write_volatile(&mut s.level_ctx_seq, s.level_ctx_seq + 1) };
+                // Leave a stable window. The real writer publishes about every
+                // 100ms; a back-to-back loop would hold the sequence odd almost
+                // always and starve the reader, which tests nothing.
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+        });
+
+        let s = unsafe { &*(ptr as *const TasSharedState) };
+        let mut clean = 0usize;
+        for _ in 0..20_000 {
+            if let Some((_, path)) = level_context(s) {
+                if path.is_empty() {
+                    continue;
+                }
+                // Whatever we got must be exactly one of the two, never a mix.
+                let ok = path == "data/levels/Forest/Tracks/Easy/aaaaa"
+                    || path == "data/levels/Alpine/Tracks/Hard/bbbbb";
+                assert!(ok, "observed a SPLICED path: {:?}", path);
+                clean += 1;
+            }
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+        unsafe { drop(Box::from_raw(ptr as *mut TasSharedState)) };
+
+        // The point is that reads either succeed cleanly or are rejected — a
+        // protocol that never returns anything would also "never splice".
+        assert!(clean > 0, "no clean read ever completed — reader is starving");
+    }
+
+    /// An odd sequence means a write is in flight; the reader must refuse.
+    #[test]
+    fn odd_sequence_is_refused() {
+        let mut s = zeroed_boxed();
+        s.level_epoch = 4;
+        s.level_scan_epoch = 4;
+        s.level_ctx_seq = 3; // odd => mid-write
+        assert_eq!(level_context(&s), None, "must not read while seq is odd");
+
+        s.level_ctx_seq = 4; // even => stable
+        assert!(level_context(&s).is_some());
+    }
+
+    /// Unresolved must stay unresolved even when the sequence is clean.
+    #[test]
+    fn clean_sequence_does_not_imply_resolved() {
+        let mut s = zeroed_boxed();
+        s.level_ctx_seq = 8;
+        s.level_epoch = 5;
+        s.level_scan_epoch = 4; // scan has not caught up
+        s.level_id = 2;
+        assert_eq!(level_context(&s), None);
     }
 }

@@ -27,7 +27,12 @@ test_dll:
     $out = Join-Path $env:TEMP 'tas_test_input_gate.exe'; \
     & cmd /c "`"$vsPath\Common7\Tools\VsDevCmd.bat`" -arch=x64 -no_logo && cl /nologo /EHsc /std:c++17 /Fe:`"$out`" /Fo:`"$env:TEMP\\`" .\TAS\TAS_Helper\src\tests\test_input_gate.cpp" ; \
     if ($LASTEXITCODE -ne 0) { throw 'compile failed' }; \
-    & $out
+    & $out; \
+    if ($LASTEXITCODE -ne 0) { throw 'input_gate tests failed' }; \
+    $out2 = Join-Path $env:TEMP 'tas_test_level_path.exe'; \
+    & cmd /c "`"$vsPath\Common7\Tools\VsDevCmd.bat`" -arch=x64 -no_logo && cl /nologo /EHsc /std:c++17 /Fe:`"$out2`" /Fo:`"$env:TEMP\\`" .\TAS\TAS_Helper\src\tests\test_level_path.cpp" ; \
+    if ($LASTEXITCODE -ne 0) { throw 'compile failed (level_path)' }; \
+    & $out2
 
 [private]
 [no-exit-message]
