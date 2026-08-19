@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 19; // level context from SG+0x1D3304 path; dead root/hook fields removed
+constexpr uint32_t TAS_SHARED_VERSION = 20; // +level_ctx_seq (seqlock over the level-context group)
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -327,6 +327,14 @@ struct TasSharedState {
     // sees a new generation can already see the path it refers to.
     char     level_path[TAS_LEVEL_PATH_MAX];
     uint32_t level_path_gen;
+    // SEQLOCK over the whole level-context group (level_path, level_path_gen,
+    // level_epoch). ODD = a write is in progress, EVEN = stable.
+    //
+    // A plain store plus a barrier is not enough: the path is a 128-byte array,
+    // so a reader in the OTHER PROCESS can observe it half-copied while the
+    // counters still read old. Readers must take the sequence, read the group,
+    // re-take the sequence, and accept only an unchanged EVEN value.
+    volatile uint32_t level_ctx_seq;
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -447,6 +455,7 @@ public:
         state->level_scan_second_hits = 0;
         state->level_path[0] = 0;
         state->level_path_gen = 0;
+        state->level_ctx_seq = 0;
         return true;
     }
 

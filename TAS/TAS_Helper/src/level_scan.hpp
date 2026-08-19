@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 #include "shared_state.hpp"
+#include "level_path_parse.hpp"
 #include <cstring>
 
 // In-process level detection.
@@ -74,25 +75,12 @@ inline bool g_noLevelPath = true;
 
 
 
-static const char* AREAS[3] = { "forest", "alpine", "village" };
-static const char* DIFFS[3] = { "easy", "medium", "hard" };
-
-// Case-insensitive match of [p, p+n) against one of `count` lowercase needles.
+// Parsing lives in level_path_parse.hpp so it can be unit-tested WITHOUT the
+// game. Aliased so the shipped code and the tested code are the same code.
+using levelpath::AREAS;
+using levelpath::DIFFS;
 static int matchOne(const char* p, size_t n, const char* const* table, int count) {
-    for (int t = 0; t < count; t++) {
-        const char* w = table[t];
-        size_t wl = 0;
-        while (w[wl]) wl++;
-        if (wl != n) continue;
-        bool ok = true;
-        for (size_t i = 0; i < n; i++) {
-            char c = p[i];
-            if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
-            if (c != w[i]) { ok = false; break; }
-        }
-        if (ok) return t;
-    }
-    return -1;
+    return levelpath::MatchOne(p, n, table, count);
 }
 
 // Read the current level path into `out`. Returns false when unavailable OR not
@@ -120,13 +108,8 @@ static bool readLevelPathOnce(char* out, size_t cap) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
-    // Grammar check, case-folded.
-    bool lv = false, tr = false;
-    for (size_t i = 0; out[i]; i++) {
-        if (!lv && (out[i] == 'l' || out[i] == 'L') && _strnicmp(out + i, "levels", 6) == 0) lv = true;
-        if (!tr && (out[i] == 't' || out[i] == 'T') && _strnicmp(out + i, "tracks", 6) == 0) tr = true;
-    }
-    return lv && tr;
+    // Grammar check — see levelpath::IsPlausible, unit-tested standalone.
+    return levelpath::IsPlausible(out);
 }
 
 static bool readLevelPath(char* out, size_t cap) {
@@ -141,27 +124,24 @@ static bool readLevelPath(char* out, size_t cap) {
     return true;
 }
 
-// Path separator. Written as 0x5C rather than a backslash char literal so the
-// line survives shell heredocs intact.
-static bool isSep(char c) { return c == '/' || c == (char)0x5C; }
+// Parsing lives in level_path_parse.hpp so it can be unit-tested WITHOUT the
+// game (tests/test_level_path.cpp, run by `just test_dll`). Aliased here so the
+// shipped code and the tested code are the same code.
+static int areaFromPath(const char* path) { return levelpath::AreaFrom(path); }
 
-// Area index (0=Forest,1=Alpine,2=Village) parsed from ".../levels/<area>/...",
-// or -1. This is the half of the identity the path answers RELIABLY, and it is
-// used to CONSTRAIN the heap scan below rather than being merely advisory.
-static int areaFromPath(const char* path) {
-    const char* seg = nullptr;
-    for (size_t i = 0; path[i]; i++) {
-        if ((path[i] == 'l' || path[i] == 'L') && _strnicmp(path + i, "levels", 6) == 0) {
-            size_t j = i + 6;
-            if (isSep(path[j])) { seg = path + j + 1; break; }
-        }
-    }
-    if (!seg) return -1;
-    size_t len = 0;
-    while (seg[len] && !isSep(seg[len])) len++;
-    return matchOne(seg, len, AREAS, 3);
+// Seqlock writer. Marks the group as being mutated, applies `fn`, then commits.
+//
+// InterlockedIncrement rather than `++` so the sequence transitions are real
+// atomic release/acquire points and cannot be reordered around the payload by
+// either the compiler or the store buffer — which a plain store plus one
+// MemoryBarrier did not guarantee for a 128-byte array read from another
+// process.
+template <typename F>
+static void publishContext(TasSharedState* s, F&& fn) {
+    InterlockedIncrement((volatile LONG*)&s->level_ctx_seq);   // -> odd: writing
+    fn();
+    InterlockedIncrement((volatile LONG*)&s->level_ctx_seq);   // -> even: stable
 }
-
 // Invalidate the current identification: the context we identified is gone.
 static void invalidateContext(TasSharedState* s) {
     g_lastPath[0] = '\0';
