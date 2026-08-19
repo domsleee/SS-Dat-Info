@@ -33,6 +33,17 @@ inline HANDLE g_thread = nullptr;
 // detect. A cycle-driven bump would not land until the new level's first tick,
 // leaving the old track asserted for the whole menu + load. This thread runs
 // independently of the cycle, so it sees the swap as it happens.
+// frame_count captured when the context last changed. Supreme::Cycle is FROZEN
+// throughout a level load (frame_limit.hpp:43-47), so the cycle ticking again is
+// proof the load FINISHED. Scanning before that is what let a mid-load scan see
+// the OLD track still dominant and publish it under the NEW epoch — and no
+// threshold can catch that, because the reading is stale rather than noisy.
+// Measured on this build: stale FE reads 55 while a freshly loaded track reads
+// 23, so 55 >= 2*23 passes any dominance ratio. Waiting for the tick removes the
+// window instead of trying to out-threshold it.
+inline uint32_t g_frameAtEpochBump = 0;
+inline bool g_awaitingCycleTick = false;
+
 inline uint32_t g_rootPtrAddr = 0;
 inline uint32_t g_lastRoot = 0;
 // SEH-guarded pointer read, supplied by the caller (cave2's SafeReadPtr) so this
@@ -69,6 +80,8 @@ static void pollLevelContext(TasSharedState* s) {
             (now - g_nullRootSinceMs) >= NULL_ROOT_INVALIDATE_MS && g_lastRoot) {
             // Sustained teardown: we are no longer in the context we identified.
             s->level_epoch++;
+            g_frameAtEpochBump = s->frame_count;
+            g_awaitingCycleTick = true;
             g_nullRootReported = true;
             // NOTE: g_lastRoot is deliberately NOT cleared. Clearing it made the
             // `g_lastRoot &&` guard below false, so the NEXT root — the new
@@ -85,6 +98,8 @@ static void pollLevelContext(TasSharedState* s) {
     g_nullRootReported = false;
     if (g_lastRoot && cur != g_lastRoot) {
         s->level_epoch++;
+        g_frameAtEpochBump = s->frame_count;
+        g_awaitingCycleTick = true;
     }
     g_lastRoot = cur;
 }
@@ -231,8 +246,16 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // track strings still in the heap are residue from the one we LEFT — a
         // scan here would publish the OLD track stamped with the NEW epoch, i.e.
         // confidently wrong, which is worse than unresolved.
+        // Wait for the cycle to tick AFTER a context change before scanning at
+        // all: the cycle is frozen for the whole load, so a tick proves the load
+        // finished and the new track's resources are resident. Without this the
+        // scan runs mid-load, when the OLD track's strings are still dominant.
+        if (g_awaitingCycleTick && s->frame_count != g_frameAtEpochBump) {
+            g_awaitingCycleTick = false;
+        }
+        bool mayScan = s->game_in_game && !g_rootIsNull && !g_awaitingCycleTick;
         int scanBest = 0, scanSecond = 0;
-        int32_t id = (s->game_in_game && !g_rootIsNull) ? scanLevelId(&scanBest, &scanSecond) : -1;
+        int32_t id = mayScan ? scanLevelId(&scanBest, &scanSecond) : -1;
         s->level_scan_best_hits = (uint32_t)scanBest;
         s->level_scan_second_hits = (uint32_t)scanSecond;
         // ...and again AFTER, because scanLevelId() walks tens of MiB and the
@@ -241,13 +264,20 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // context — stale id, fresh epoch, and the UI would trust it.
         pollLevelContext(s);
 
+        // Update the pending candidate UNCONDITIONALLY. Folding this into the
+        // publish condition with && short-circuited it: a low-confidence scan
+        // never reset the pending id, so stale -> unconfident -> stale counted as
+        // two "consecutive" agreeing scans when it was nothing of the sort.
+        bool confident = (id >= 0) && confidentEnough(scanBest, scanSecond);
+        bool settled = confirms(confident ? id : -1, epochAtScan) && confident;
+
         if (s->level_epoch != epochAtScan) {
             // The context moved under the scan: whatever we found describes the
             // level we just left. Discard it and stay unresolved — level_scan_epoch
             // is deliberately NOT advanced, so resolved stays false until a scan
             // completes entirely inside one context.
             s->level_id = 0xFFFFFFFFu;
-        } else if (id >= 0 && confidentEnough(scanBest, scanSecond) && confirms(id, epochAtScan)) {
+        } else if (settled && id >= 0) {
             // Publish the id BEFORE the marker that validates it: a reader that
             // sees the new scan epoch must already be able to see the id it
             // describes, never the previous one.
@@ -303,12 +333,11 @@ inline void Start(TasSharedState* s, uint32_t rootPtrAddr, uint32_t (*readPtr)(u
     g_stop.store(false, std::memory_order_relaxed);
     g_thread = CreateThread(nullptr, 0, threadProc, s, 0, nullptr);
     if (!g_thread) {
-        // No scanner means level_id can NEVER resolve, and Start() has just
-        // forced the epochs unequal — so every consumer would sit in "resolving"
-        // forever with no explanation. Restore equality so the state reads as an
-        // honest "unknown" (level_id is already 0xFFFFFFFF) rather than a
-        // permanent pending transition, and say so.
-        s->level_scan_epoch = s->level_epoch;
+        // Leave the epochs UNEQUAL. With no scanner the track is genuinely
+        // unknowable, and unresolved is the honest encoding of that. Restoring
+        // equality here (an earlier attempt) made resolved_level_id() return
+        // Some(0xFFFFFFFF) — "resolved, at the menu" — forever, which is a
+        // confident lie. The caller logs the failure.
     }
 }
 

@@ -2028,6 +2028,12 @@ impl eframe::App for TasApp {
                 // Incremental: only the ticks since the last frame are
                 // scanned.
                 if self.finished_at_tick.is_none() {
+                    let resolved_geometry = self
+                        .shared
+                        .as_ref()
+                        .and_then(|sh| tas_shared::resolved_level_id(sh.state()))
+                        .and_then(crate::level::level_code_from_id)
+                        .is_some();
                     let cross = self.shared.as_ref().and_then(|shared| {
                         let s = shared.state();
                         // Resolved level only: this picks the FINISH-LINE
@@ -2043,7 +2049,12 @@ impl eframe::App for TasApp {
                             self.finish_scan_cursor,
                         )
                     });
-                    self.finish_scan_cursor = recorded.max(1);
+                    // Only advance past ticks we actually SCANNED. While the level
+                    // is unresolved there is no geometry, so those ticks were not
+                    // examined — advancing would skip a crossing permanently.
+                    if resolved_geometry {
+                        self.finish_scan_cursor = recorded.max(1);
+                    }
                     if let Some(tick) = cross {
                         self.finished_at_tick = Some(tick);
                         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
