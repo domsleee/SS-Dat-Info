@@ -124,9 +124,14 @@ fn modules(pid: Dword) -> Vec<Region> {
     out
 }
 
-/// Read every module image and return `(module, offset) -> value` for aligned
-/// words holding a plausible index.
-fn capture(pid: Dword) -> HashMap<(String, usize), u32> {
+/// Read every module image and return `(module, offset) -> value`.
+///
+/// `plausible_only` filters to small values, which is right when building the
+/// INITIAL candidate set (it keeps the first diff readable). It must be OFF when
+/// re-reading known candidates: a candidate whose value leaves the range would
+/// silently VANISH from the table rather than being reported, which is how a
+/// falsified candidate can look like a surviving one.
+fn capture_opt(pid: Dword, plausible_only: bool) -> HashMap<(String, usize), u32> {
     let mut map = HashMap::new();
     let h = unsafe { OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid) };
     if h == 0 {
@@ -155,7 +160,7 @@ fn capture(pid: Dword) -> HashMap<(String, usize), u32> {
         let mut i = 0usize;
         while i + 4 <= got {
             let v = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
-            if v <= MAX_PLAUSIBLE {
+            if !plausible_only || v <= MAX_PLAUSIBLE {
                 map.insert((m.name.clone(), i), v);
             }
             i += 4;
@@ -163,6 +168,10 @@ fn capture(pid: Dword) -> HashMap<(String, usize), u32> {
     }
     unsafe { CloseHandle(h) };
     map
+}
+
+fn capture(pid: Dword) -> HashMap<(String, usize), u32> {
+    capture_opt(pid, true)
 }
 
 fn save(map: &HashMap<(String, usize), u32>) {
@@ -265,13 +274,81 @@ pub fn run(sub: &str) -> bool {
         // addresses that did not change, but "did not change" is itself evidence
         // (an AREA index is constant across two tracks in the same area). Reading
         // the whole set after each switch builds a table instead.
+        // Hunt for a STATIC POINTER to the level path string.
+        //
+        // The value-diff above establishes there is no small track index in the
+        // module statics — which matches the original RE note that the level
+        // identity is "heap-only". But a static POINTER into that heap string is
+        // just as good, and better: dereferencing it yields the full path, so it
+        // names Practice/Halfpipe/Ramp too, which no index encoding we control
+        // would give us.
+        //
+        // Value-diffing cannot find this: a pointer is a large number, excluded
+        // by the plausibility filter, and it changes for reasons unrelated to the
+        // level. So probe directly — treat every aligned static word as an
+        // address, read what it points at, and keep the ones pointing at a level
+        // path.
+        "ptr" => {
+            let h = unsafe { OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid) };
+            if h == 0 {
+                eprintln!("ERROR: OpenProcess failed");
+                return false;
+            }
+            let mut hits = 0usize;
+            for m in modules(pid) {
+                let mut buf = vec![0u8; m.size];
+                let mut got = 0usize;
+                let ok =
+                    unsafe { ReadProcessMemory(h, m.base, buf.as_mut_ptr(), m.size, &mut got) };
+                if ok == 0 || got == 0 {
+                    continue;
+                }
+                println!("  scanning {} ({} bytes) for pointers to a level path", m.name, got);
+                let mut i = 0usize;
+                while i + 4 <= got {
+                    let p = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]])
+                        as usize;
+                    // Plausible user-space address only.
+                    if p >= 0x10000 && p < 0x7fff_0000 {
+                        let mut s = [0u8; 160];
+                        let mut rd = 0usize;
+                        let ok2 = unsafe {
+                            ReadProcessMemory(h, p, s.as_mut_ptr(), s.len(), &mut rd)
+                        };
+                        if ok2 != 0 && rd > 8 {
+                            let end = s.iter().position(|&c| c == 0).unwrap_or(rd);
+                            if end > 8 {
+                                let txt = String::from_utf8_lossy(&s[..end]).to_lowercase();
+                                if txt.contains("levels") {
+                                    println!(
+                                        "  {}+{:#x} -> {:#x}  {:?}",
+                                        m.name,
+                                        i,
+                                        p,
+                                        String::from_utf8_lossy(&s[..end])
+                                    );
+                                    hits += 1;
+                                }
+                            }
+                        }
+                    }
+                    i += 4;
+                }
+            }
+            unsafe { CloseHandle(h) };
+            println!("\n{} static pointer(s) into a level path.", hits);
+            hits > 0
+        }
         "show" => {
             let prev = load();
             if prev.is_empty() {
                 eprintln!("ERROR: no candidates — run `level-hunt begin` first");
                 return false;
             }
-            let now = capture(pid);
+            // Unfiltered: report every candidate's CURRENT value, even if it has
+            // left the plausible range. A vanishing row reads as "still a
+            // candidate" when it is actually a refutation.
+            let now = capture_opt(pid, false);
             let mut rows: Vec<(String, usize, u32)> = prev
                 .keys()
                 .filter_map(|(m, off)| {
