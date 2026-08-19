@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 15; // +level_scan_best_hits/second_hits (detection confidence)
+constexpr uint32_t TAS_SHARED_VERSION = 16; // +max_null_root_ms (root-null gap diagnostic)
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
@@ -313,6 +313,13 @@ struct TasSharedState {
     // string", and that distinction is invisible in level_id alone.
     uint32_t level_scan_best_hits;
     uint32_t level_scan_second_hits;
+
+    // -- Root-null gap diagnostic (DLL-written) --
+    // Duration of the MOST RECENT run of a NULL engine root, in ms. An F5 restart passes
+    // through null transiently; a level teardown holds it. The invalidation
+    // threshold has to sit above the former and below the latter, so the real
+    // number matters more than any reasoning about it.
+    uint32_t last_null_root_ms;
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -321,7 +328,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1647304,
+static_assert(sizeof(TasSharedState) == 1647312,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 
@@ -431,6 +438,7 @@ public:
         state->level_scan_epoch = 0;
         state->level_scan_best_hits = 0;
         state->level_scan_second_hits = 0;
+        state->last_null_root_ms = 0;
         return true;
     }
 
