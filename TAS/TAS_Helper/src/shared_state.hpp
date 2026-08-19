@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 17; // +level_path/level_path_gen (event-driven level identity)
+constexpr uint32_t TAS_SHARED_VERSION = 18; // +level_hook_calls (is the file hook firing at all?)
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -332,6 +332,10 @@ struct TasSharedState {
     // sees a new generation can already see the path it refers to.
     char     level_path[TAS_LEVEL_PATH_MAX];
     uint32_t level_path_gen;
+    // Total CreateFileA/W calls the hook has SEEN. Distinguishes "the hook never
+    // runs" (game does not route file opens through kernel32) from "it runs but
+    // no level path matched" (level files were all opened before injection).
+    uint32_t level_hook_calls;
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -340,7 +344,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1647440,
+static_assert(sizeof(TasSharedState) == 1647448,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 
@@ -453,6 +457,7 @@ public:
         state->last_null_root_ms = 0;
         state->level_path[0] = 0;
         state->level_path_gen = 0;
+        state->level_hook_calls = 0;
         return true;
     }
 

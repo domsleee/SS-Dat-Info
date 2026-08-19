@@ -742,8 +742,9 @@ pub fn print_status(client: &TasSharedMemoryClient) {
         let p = &s.level_path;
         let end = p.iter().position(|&c| c == 0).unwrap_or(p.len());
         println!(
-            "Path: gen={} {:?}",
+            "Path: gen={} calls={} {:?}",
             s.level_path_gen,
+            s.level_hook_calls,
             String::from_utf8_lossy(&p[..end])
         );
     }
