@@ -260,8 +260,34 @@ pub fn run(sub: &str) -> bool {
             );
             true
         }
+        // Print the CURRENT value of every surviving candidate.
+        // Once the set is small, pairwise diffing is the wrong tool: it discards
+        // addresses that did not change, but "did not change" is itself evidence
+        // (an AREA index is constant across two tracks in the same area). Reading
+        // the whole set after each switch builds a table instead.
+        "show" => {
+            let prev = load();
+            if prev.is_empty() {
+                eprintln!("ERROR: no candidates — run `level-hunt begin` first");
+                return false;
+            }
+            let now = capture(pid);
+            let mut rows: Vec<(String, usize, u32)> = prev
+                .keys()
+                .filter_map(|(m, off)| {
+                    now.get(&(m.clone(), *off)).map(|v| (m.clone(), *off, *v))
+                })
+                .collect();
+            rows.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+            println!("
+{} candidates, current values:", rows.len());
+            for (m, off, v) in &rows {
+                println!("  {}+{:#x}	{}", m, off, v);
+            }
+            true
+        }
         _ => {
-            eprintln!("Usage: tas_test level-hunt <begin|diff>");
+            eprintln!("Usage: tas_test level-hunt <begin|diff|show>");
             false
         }
     }
