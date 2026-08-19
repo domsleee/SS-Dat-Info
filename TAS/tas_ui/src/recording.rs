@@ -1062,11 +1062,25 @@ impl RecordingHistory {
         self.bump();
     }
 
+    /// Whether entry `i` belongs to the track we are currently on — the SAME
+    /// rule the history panel filters by (matching level, or untagged).
+    ///
+    /// undo/redo must honour it: they walk snapshots directly, so without this
+    /// Ctrl+Z on Forest Medium happily restores a Forest Easy recording over the
+    /// live buffer. That is the per-level guarantee failing in the one path that
+    /// bypasses the list the user can actually see.
+    fn entry_on_current_level(&self, i: usize) -> bool {
+        match (self.live_level.as_deref(), self.entries[i].level.as_deref()) {
+            (Some(want), Some(have)) => want == have,
+            _ => true,
+        }
+    }
+
     pub fn undo(&mut self) -> Option<&RecordingSnapshot> {
         let current = self.current_index?;
         let prev = (0..current)
             .rev()
-            .find(|&i| self.entries[i].snapshot.is_some())?;
+            .find(|&i| self.entries[i].snapshot.is_some() && self.entry_on_current_level(i))?;
         self.current_index = Some(prev);
         self.bump();
         self.entries[prev].snapshot.as_ref()
@@ -1074,8 +1088,8 @@ impl RecordingHistory {
 
     pub fn redo(&mut self) -> Option<&RecordingSnapshot> {
         let current = self.current_index?;
-        let next =
-            ((current + 1)..self.entries.len()).find(|&i| self.entries[i].snapshot.is_some())?;
+        let next = ((current + 1)..self.entries.len())
+            .find(|&i| self.entries[i].snapshot.is_some() && self.entry_on_current_level(i))?;
         self.current_index = Some(next);
         self.bump();
         self.entries[next].snapshot.as_ref()
@@ -1250,7 +1264,7 @@ impl RecordingHistory {
             return 0;
         };
         (0..current)
-            .filter(|&i| self.entries[i].snapshot.is_some())
+            .filter(|&i| self.entries[i].snapshot.is_some() && self.entry_on_current_level(i))
             .count()
     }
 
@@ -1259,7 +1273,7 @@ impl RecordingHistory {
             return 0;
         };
         ((current + 1)..self.entries.len())
-            .filter(|&i| self.entries[i].snapshot.is_some())
+            .filter(|&i| self.entries[i].snapshot.is_some() && self.entry_on_current_level(i))
             .count()
     }
 
@@ -2620,6 +2634,34 @@ mod tests {
         h.set_live_level(Some("FM"));
         assert_eq!(h.live_level(), Some("FM"));
         assert!(!h.level_is_resolving());
+    }
+
+    /// Ctrl+Z must not reach across tracks. undo/redo walk snapshots directly
+    /// rather than the filtered list the user sees, so without an explicit check
+    /// they restore another level's recording over the live buffer — the
+    /// per-level guarantee failing in the one path that bypasses the panel.
+    #[test]
+    fn undo_does_not_cross_levels() {
+        let mut h = RecordingHistory::new(8);
+
+        h.set_live_level(Some("FE"));
+        let mut fe = RecordingSnapshot::new_empty();
+        fe.recorded_count = 10;
+        h.push_snapshot_data(fe, "fe-run");
+
+        h.set_live_level(Some("FM"));
+        let mut fm = RecordingSnapshot::new_empty();
+        fm.recorded_count = 20;
+        h.push_snapshot_data(fm, "fm-run");
+
+        // On FM with only one FM entry, there is nothing to undo TO. The FE
+        // entry is on another track and must not be offered.
+        assert_eq!(h.undo_depth(), 0, "an FE entry must not be undo-reachable from FM");
+        assert!(h.undo().is_none(), "Ctrl+Z must not restore another track's recording");
+
+        // Back on FE it is reachable again.
+        h.set_live_level(Some("FE"));
+        assert_eq!(h.undo_depth(), 1);
     }
 
     #[test]
