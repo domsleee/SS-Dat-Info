@@ -41,14 +41,20 @@ inline HANDLE g_thread = nullptr;
 //   * a CreateFileA/W hook — 305 file opens intercepted, none under Data/Levels,
 //     because the level's resources are not opened via CreateFile after the DLL
 //     is injected.
-// With them went the null-root threshold, the ABA reasoning and the settle gate:
-// all of that existed to make an unreliable change signal trustworthy.
+// With them went the null-root threshold, the ABA reasoning and the settle gate.
 //
 // The path is RELIABLE FOR AREA but NOT FOR DIFFICULTY — some tracks share the
-// easy/ shadow asset, so Village Hard reads ".../Tracks/easy/...". Difficulty
-// still comes from the majority-voted heap scan below, which exists precisely to
-// survive that outlier. So the path answers WHEN the level changed; the scan
-// answers WHICH track it is.
+// easy/ shadow asset, so Village Hard reads ".../Tracks/easy/...". So:
+//   the PATH gives the change event AND CONSTRAINS THE AREA (areaFromPath),
+//   the majority-voted heap scan picks the DIFFICULTY within that area.
+// Both halves are used; the area constraint is not advisory.
+//
+// KNOWN LIMIT: because some tracks share a path, switching BETWEEN two such
+// tracks (e.g. Village Easy <-> Village Hard, both ".../village/Tracks/easy/")
+// produces NO string change and therefore no change event. The periodic rescan
+// still corrects level_id within a cadence, but no "resolving" state is entered
+// for that transition. Detecting it needs a per-track signal the path cannot
+// give.
 inline uint32_t g_levelPathPtrAddr = 0;
 inline uint32_t (*g_readPtr)(uint32_t) = nullptr;
 
@@ -66,46 +72,6 @@ inline char g_lastPath[TAS_LEVEL_PATH_MAX] = { 0 };
 // strings in the heap are residue from the one we left.
 inline bool g_noLevelPath = true;
 
-// Read the current level path into `out`. Returns false when unavailable.
-static bool readLevelPath(char* out, size_t cap) {
-    if (!g_levelPathPtrAddr || !g_readPtr) return false;
-    uint32_t p = g_readPtr(g_levelPathPtrAddr);
-    if (!p) return false;
-    __try {
-        const char* src = (const char*)p;
-        size_t n = 0;
-        while (n < cap - 1 && src[n]) n++;
-        if (n == 0) return false;
-        for (size_t i = 0; i < n; i++) out[i] = src[i];
-        out[n] = '\0';
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-static void pollLevelContext(TasSharedState* s) {
-    char cur[TAS_LEVEL_PATH_MAX];
-    if (!readLevelPath(cur, sizeof(cur))) {
-        g_noLevelPath = true;
-        return;
-    }
-    g_noLevelPath = false;
-    if (std::strcmp(cur, g_lastPath) == 0) return;   // same level, nothing to say
-
-    // The level changed. Publish the path first, then the epoch that invalidates
-    // the old identification — a reader seeing the new epoch can already see the
-    // path it refers to.
-    size_t n = 0;
-    while (n < TAS_LEVEL_PATH_MAX - 1 && cur[n]) { g_lastPath[n] = cur[n]; n++; }
-    g_lastPath[n] = '\0';
-    for (size_t i = 0; i <= n; i++) s->level_path[i] = g_lastPath[i];
-    s->level_path_gen++;
-    MemoryBarrier();
-    s->level_epoch++;
-    g_frameAtEpochBump = s->frame_count;
-    g_awaitingCycleTick = true;
-}
 
 
 static const char* AREAS[3] = { "forest", "alpine", "village" };
@@ -127,6 +93,113 @@ static int matchOne(const char* p, size_t n, const char* const* table, int count
         if (ok) return t;
     }
     return -1;
+}
+
+// Read the current level path into `out`. Returns false when unavailable OR not
+// a plausible level path.
+//
+// SEH only contains crashes; it does not give a coherent snapshot. Freed-but-
+// still-committed heap does not fault, and an in-place rewrite between the
+// length walk and the copy yields a hybrid string. So:
+//   * require a NUL WITHIN bounds (127 non-NUL bytes is not a valid path, it is
+//     a garbage buffer that happened to be readable);
+//   * require the path grammar we actually depend on ("levels" and "tracks"),
+//     which rejects transient garbage and unrelated strings;
+//   * sample TWICE and require the two to agree, which rejects a torn read.
+static bool readLevelPathOnce(char* out, size_t cap) {
+    if (!g_levelPathPtrAddr || !g_readPtr) return false;
+    uint32_t p = g_readPtr(g_levelPathPtrAddr);
+    if (!p) return false;
+    __try {
+        const char* src = (const char*)p;
+        size_t n = 0;
+        while (n < cap && src[n]) n++;
+        if (n == 0 || n >= cap) return false;   // no NUL in bounds => not a path
+        for (size_t i = 0; i < n; i++) out[i] = src[i];
+        out[n] = '\0';
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    // Grammar check, case-folded.
+    bool lv = false, tr = false;
+    for (size_t i = 0; out[i]; i++) {
+        if (!lv && (out[i] == 'l' || out[i] == 'L') && _strnicmp(out + i, "levels", 6) == 0) lv = true;
+        if (!tr && (out[i] == 't' || out[i] == 'T') && _strnicmp(out + i, "tracks", 6) == 0) tr = true;
+    }
+    return lv && tr;
+}
+
+static bool readLevelPath(char* out, size_t cap) {
+    char a[TAS_LEVEL_PATH_MAX];
+    if (!readLevelPathOnce(a, sizeof(a))) return false;
+    char b[TAS_LEVEL_PATH_MAX];
+    if (!readLevelPathOnce(b, sizeof(b))) return false;
+    if (std::strcmp(a, b) != 0) return false;   // torn / mid-rewrite
+    size_t n = 0;
+    while (n < cap - 1 && a[n]) { out[n] = a[n]; n++; }
+    out[n] = '\0';
+    return true;
+}
+
+// Path separator. Written as 0x5C rather than a backslash char literal so the
+// line survives shell heredocs intact.
+static bool isSep(char c) { return c == '/' || c == (char)0x5C; }
+
+// Area index (0=Forest,1=Alpine,2=Village) parsed from ".../levels/<area>/...",
+// or -1. This is the half of the identity the path answers RELIABLY, and it is
+// used to CONSTRAIN the heap scan below rather than being merely advisory.
+static int areaFromPath(const char* path) {
+    const char* seg = nullptr;
+    for (size_t i = 0; path[i]; i++) {
+        if ((path[i] == 'l' || path[i] == 'L') && _strnicmp(path + i, "levels", 6) == 0) {
+            size_t j = i + 6;
+            if (isSep(path[j])) { seg = path + j + 1; break; }
+        }
+    }
+    if (!seg) return -1;
+    size_t len = 0;
+    while (seg[len] && !isSep(seg[len])) len++;
+    return matchOne(seg, len, AREAS, 3);
+}
+
+// Invalidate the current identification: the context we identified is gone.
+static void invalidateContext(TasSharedState* s) {
+    g_lastPath[0] = '\0';
+    s->level_path[0] = '\0';
+    s->level_path_gen++;
+    MemoryBarrier();
+    s->level_epoch++;
+    g_frameAtEpochBump = s->frame_count;
+    g_awaitingCycleTick = true;
+}
+
+static void pollLevelContext(TasSharedState* s) {
+    char cur[TAS_LEVEL_PATH_MAX];
+    if (!readLevelPath(cur, sizeof(cur))) {
+        // No level path => no level. This MUST invalidate: leaving the old id
+        // resolved through the menu and the load is the original reported bug,
+        // and it is the same hole the root-based version had when root==0.
+        if (!g_noLevelPath || g_lastPath[0]) {
+            g_noLevelPath = true;
+            if (g_lastPath[0]) invalidateContext(s);
+        }
+        return;
+    }
+    g_noLevelPath = false;
+    if (std::strcmp(cur, g_lastPath) == 0) return;   // same level, nothing to say
+
+    // The level changed. Publish the path, then the epoch that invalidates the
+    // old identification — a reader seeing the new epoch can already see the
+    // path it refers to.
+    size_t n = 0;
+    while (n < TAS_LEVEL_PATH_MAX - 1 && cur[n]) { g_lastPath[n] = cur[n]; n++; }
+    g_lastPath[n] = '\0';
+    for (size_t i = 0; i <= n; i++) s->level_path[i] = g_lastPath[i];
+    s->level_path_gen++;
+    MemoryBarrier();
+    s->level_epoch++;
+    g_frameAtEpochBump = s->frame_count;
+    g_awaitingCycleTick = true;
 }
 
 // Tally "<area>/Tracks/<diff>" occurrences. Anchors on "racks/" (the always-
@@ -188,7 +261,15 @@ static bool confidentEnough(int best, int second) {
 // resources are actually resident. Costs one scan interval (~1.5s) of
 // "resolving" after a change, which is the honest answer during a load anyway.
 
-static int32_t scanLevelId(int* outBest, int* outSecond) {
+// `areaHint` (0..2, or -1) CONSTRAINS the winner to that area.
+//
+// This is the division of labour the RE actually established: the level-path
+// pointer answers AREA reliably, the heap tally answers DIFFICULTY. Previously
+// the path was only a change signal and the tally still chose freely among all
+// nine ids, so the path's reliable half was being thrown away — and a residue
+// winner from a DIFFERENT AREA could beat the real track. Restricting the tally
+// to the known area makes that impossible by construction.
+static int32_t scanLevelId(int* outBest, int* outSecond, int areaHint) {
     int tally[9] = { 0 };
     uint8_t* addr = nullptr;
     const uint8_t* MAXADDR = (const uint8_t*)0x7FFF0000u;
@@ -220,6 +301,8 @@ static int32_t scanLevelId(int* outBest, int* outSecond) {
     // let the caller apply the thresholds.
     int best = -1, bestc = 0, secondc = 0;
     for (int i = 0; i < 9; i++) {
+        // Outside the known area? Cannot be the current track.
+        if (areaHint >= 0 && i / 3 != areaHint) continue;
         if (tally[i] > bestc) { secondc = bestc; bestc = tally[i]; best = i; }
         else if (tally[i] > secondc) { secondc = tally[i]; }
     }
@@ -250,7 +333,8 @@ static DWORD WINAPI threadProc(LPVOID param) {
         }
         bool mayScan = s->game_in_game && !g_noLevelPath && !g_awaitingCycleTick;
         int scanBest = 0, scanSecond = 0;
-        int32_t id = mayScan ? scanLevelId(&scanBest, &scanSecond) : -1;
+        int areaHint = g_lastPath[0] ? areaFromPath(g_lastPath) : -1;
+        int32_t id = mayScan ? scanLevelId(&scanBest, &scanSecond, areaHint) : -1;
         s->level_scan_best_hits = (uint32_t)scanBest;
         s->level_scan_second_hits = (uint32_t)scanSecond;
         // ...and again AFTER, because scanLevelId() walks tens of MiB and the
