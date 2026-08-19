@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 18; // +level_hook_calls (is the file hook firing at all?)
+constexpr uint32_t TAS_SHARED_VERSION = 19; // level context from SG+0x1D3304 path; dead root/hook fields removed
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -316,11 +316,6 @@ struct TasSharedState {
     uint32_t level_scan_second_hits;
 
     // -- Root-null gap diagnostic (DLL-written) --
-    // Duration of the MOST RECENT run of a NULL engine root, in ms. An F5 restart passes
-    // through null transiently; a level teardown holds it. The invalidation
-    // threshold has to sit above the former and below the latter, so the real
-    // number matters more than any reasoning about it.
-    uint32_t last_null_root_ms;
 
     // -- Level path (DLL-written, event-driven) --
     // The engine loads each track from loose files under
@@ -332,10 +327,6 @@ struct TasSharedState {
     // sees a new generation can already see the path it refers to.
     char     level_path[TAS_LEVEL_PATH_MAX];
     uint32_t level_path_gen;
-    // Total CreateFileA/W calls the hook has SEEN. Distinguishes "the hook never
-    // runs" (game does not route file opens through kernel32) from "it runs but
-    // no level path matched" (level files were all opened before injection).
-    uint32_t level_hook_calls;
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -344,7 +335,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1647448,
+static_assert(sizeof(TasSharedState) == 1647440,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 
@@ -454,10 +445,8 @@ public:
         state->level_scan_epoch = 0;
         state->level_scan_best_hits = 0;
         state->level_scan_second_hits = 0;
-        state->last_null_root_ms = 0;
         state->level_path[0] = 0;
         state->level_path_gen = 0;
-        state->level_hook_calls = 0;
         return true;
     }
 
