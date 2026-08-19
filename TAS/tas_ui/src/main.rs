@@ -878,7 +878,14 @@ impl TasApp {
         match cmd {
             transport::Action::Send(c) => self.send_action_command(c, ts),
             transport::Action::RestartThen(c) => self.queue_restart_then(c, ts),
+            // Undo/Redo overwrite the WHOLE shared input/coord buffer, exactly
+            // like a history-row restore — so they need the same guard. The
+            // panel path stops an active REC/PLAY first (see HistoryAction::
+            // Restore) precisely so the DLL is not writing input_log while we
+            // bulk-copy over it; Ctrl+Z did not, and its buttons are
+            // mode-independent, so undo during REC raced the DLL writer.
             transport::Action::Undo => {
+                self.stop_active_session_for_load(ts);
                 if let Some(snap) = self.history.undo() {
                     if let Some(shared) = self.shared.as_mut() {
                         snap.restore_to(shared.state_mut());
@@ -888,6 +895,7 @@ impl TasApp {
                 }
             }
             transport::Action::Redo => {
+                self.stop_active_session_for_load(ts);
                 if let Some(snap) = self.history.redo() {
                     if let Some(shared) = self.shared.as_mut() {
                         snap.restore_to(shared.state_mut());

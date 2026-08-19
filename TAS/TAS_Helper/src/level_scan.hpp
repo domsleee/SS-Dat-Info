@@ -59,9 +59,22 @@ inline uint32_t (*g_readPtr)(uint32_t) = nullptr;
 // several land back-to-back, while a long scanLevelId() can block this thread
 // well past 100 ms. Counting polls would make the threshold anywhere from ~200 ms
 // to seconds depending on scan timing.
+//
+// THRESHOLD SET FROM MEASUREMENT, via last_null_root_ms on this build:
+//   level load  -> 875 ms of null root
+//   F5 restart  -> no null gap observed AT ALL (x3; the value never moved off
+//                  the load's 875, so a restart's transient is shorter than the
+//                  100 ms poll interval)
+// The two are cleanly separated rather than marginally, so this sits well below
+// the load and far above anything a restart produces. 500 rather than a value
+// hugging 875 specifically to catch a SHORTER-than-measured load: a review
+// scenario of "null for 600 ms then the root is reused at the same address"
+// would slip past a 750 ms threshold and leave the stale track resolved (the
+// ABA hole), and 500 closes it while keeping ~375 ms of margin under the
+// measured load.
 inline uint32_t g_nullRootSinceMs = 0;   // GetTickCount when the root went null
 inline bool     g_nullRootReported = false;
-static const uint32_t NULL_ROOT_INVALIDATE_MS = 750;
+static const uint32_t NULL_ROOT_INVALIDATE_MS = 500;
 
 // True while the engine has no root at all — i.e. no level is loaded. Any track
 // strings still in the heap are residue from the level we LEFT, so an
@@ -94,6 +107,9 @@ static void pollLevelContext(TasSharedState* s) {
     }
 
     g_rootIsNull = false;
+    if (g_nullRootSinceMs) {
+        s->last_null_root_ms = GetTickCount() - g_nullRootSinceMs;
+    }
     g_nullRootSinceMs = 0;
     g_nullRootReported = false;
     if (g_lastRoot && cur != g_lastRoot) {

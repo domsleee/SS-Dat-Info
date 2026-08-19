@@ -737,6 +737,7 @@ pub fn print_status(client: &TasSharedMemoryClient) {
         s.level_scan_best_hits,
         s.level_scan_second_hits
     );
+    println!("Root: last_null_gap={}ms", s.last_null_root_ms);
     println!(
         "Ptrs: replay={:#010x} player={:#010x} level_id={:#x} race_time_cs={:#x} pos=({:.2},{:.2},{:.2})",
         s.replay_ptr, s.player_ptr, s.level_id, s.race_time_cs,

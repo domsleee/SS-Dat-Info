@@ -1,5 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 15; // +level_scan_best_hits/second_hits (detection confidence)
+pub const TAS_SHARED_VERSION: u32 = 16; // +max_null_root_ms (root-null gap diagnostic)
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
@@ -312,6 +312,10 @@ pub struct TasSharedState {
     /// invisible in `level_id` alone.
     pub level_scan_best_hits: u32,
     pub level_scan_second_hits: u32,
+    /// Duration of the most recent run of a NULL engine root, in ms. An F5 passes through
+    /// null transiently; a teardown holds it — so the invalidation threshold
+    /// must sit above the former and below the latter.
+    pub last_null_root_ms: u32,
 }
 
 /// A coherent read of the current track: `Some(level_id)` only when that id was
@@ -2056,7 +2060,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_304);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_312);
     }
 
     #[test]
