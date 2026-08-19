@@ -41,9 +41,13 @@
 use crate::harness;
 use std::time::{Duration, Instant};
 
-/// How long to observe. Long enough to span several publisher cycles (the DLL
-/// polls at 200ms while unresolved, 1.5s once settled) without being tedious.
-const OBSERVE: Duration = Duration::from_secs(4);
+/// How long to observe by default. Long enough to span several publisher cycles
+/// (the DLL polls at 200ms while unresolved, 1.5s once settled) without being
+/// tedious. `tas_test level-seq <secs>` soaks for longer — worth it on Village,
+/// where two tracks share a resource path and the difficulty rests entirely on
+/// the heap scan, so scan instability would show up as the context flapping in
+/// and out of resolved.
+const OBSERVE_DEFAULT_SECS: u64 = 4;
 
 /// The grammar the DLL itself requires before it will believe a path. Mirrors
 /// `levelpath::IsPlausible` — a spliced path fails it whenever the two tracks
@@ -53,7 +57,8 @@ fn plausible(path: &str) -> bool {
     l.contains("levels") && l.contains("tracks")
 }
 
-pub fn run() -> bool {
+pub fn run(secs: Option<u64>) -> bool {
+    let observe = Duration::from_secs(secs.unwrap_or(OBSERVE_DEFAULT_SECS).max(1));
     let client = harness::ensure_game_running();
     let state = client.state();
 
@@ -83,9 +88,18 @@ pub fn run() -> bool {
     let mut bad_path: Option<String> = None;
     let mut last_seq = seq0;
     let mut last_ctx: Option<(u32, String)> = None;
+    // Distinct ids seen resolved, and how often the context flipped between
+    // resolved and unresolved. On a stable track both should be 1 and 0: the
+    // DLL only republishes on a real change, and it goes unresolved when two
+    // scans in one context CONTRADICT each other. So flapping here is the scan
+    // being unable to make up its mind, which is exactly what you want to know
+    // on Village, where the path cannot supply the difficulty.
+    let mut ids_seen: Vec<u32> = Vec::new();
+    let mut resolved_flips = 0usize;
+    let mut was_resolved: Option<bool> = None;
 
     let start = Instant::now();
-    while start.elapsed() < OBSERVE {
+    while start.elapsed() < observe {
         samples += 1;
         let seq = state.level_ctx_seq.load(std::sync::atomic::Ordering::Acquire);
         if seq & 1 != 0 {
@@ -96,9 +110,19 @@ pub fn run() -> bool {
             last_seq = seq;
         }
 
-        match tas_shared::level_context(state) {
+        let ctx = tas_shared::level_context(state);
+        let resolved_now = ctx.is_some();
+        if was_resolved.is_some_and(|prev| prev != resolved_now) {
+            resolved_flips += 1;
+        }
+        was_resolved = Some(resolved_now);
+
+        match ctx {
             Some((id, path)) => {
                 reads_ok += 1;
+                if !ids_seen.contains(&id) {
+                    ids_seen.push(id);
+                }
                 if !path.is_empty() && !plausible(&path) && bad_path.is_none() {
                     bad_path = Some(path.clone());
                 }
@@ -112,12 +136,11 @@ pub fn run() -> bool {
     println!(
         "  {} samples over {:?}: {} clean reads, {} rejected, {} sequence advances, \
          {} samples caught mid-write",
-        samples,
-        OBSERVE,
-        reads_ok,
-        reads_none,
-        advances,
-        odd_samples
+        samples, observe, reads_ok, reads_none, advances, odd_samples
+    );
+    println!(
+        "  ids seen resolved: {:?} | resolved<->unresolved flips: {}",
+        ids_seen, resolved_flips
     );
     match &last_ctx {
         Some((id, path)) => println!("  last context: id={:#x} path={:?}", id, path),
@@ -152,6 +175,23 @@ pub fn run() -> bool {
              the scan simply has not identified the track, which is not a seqlock \
              fault — get into a race and re-run.",
             samples
+        );
+        ok = false;
+    }
+
+    // Two different tracks inside one observation window means the scan is
+    // contradicting itself. That does not corrupt anything — the DLL answers a
+    // contradiction by going unresolved, and unresolved matches nothing — but it
+    // means the difficulty is not actually being determined, which the user
+    // would experience as the track chip flickering.
+    if ids_seen.len() > 1 {
+        eprintln!(
+            "\nFAIL: the scan resolved to {} DIFFERENT tracks in one window: {:?}\n  \
+             The level did not change (that would have shown as a path change), so \
+             the heap scan is not converging. Raise MIN_TRACK_HITS / dominance in \
+             level_scan.hpp, or the area hint is not constraining it.",
+            ids_seen.len(),
+            ids_seen
         );
         ok = false;
     }

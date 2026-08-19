@@ -406,7 +406,8 @@ fn main() {
                 // SAFETY: single-threaded startup, before any harness thread.
                 unsafe { std::env::set_var("TAS_TEST_LEVEL", "any") };
             }
-            std::process::exit(if level_seq::run() { 0 } else { 1 });
+            let secs = args.get(2).and_then(|s| s.parse::<u64>().ok());
+            std::process::exit(if level_seq::run(secs) { 0 } else { 1 });
         }
         "gamestate" => {
             // Validate the game_in_game exposure: revive (in-game) + inject, then
