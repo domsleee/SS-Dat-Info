@@ -1,5 +1,5 @@
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 17; // +level_path/level_path_gen (event-driven level identity)
+pub const TAS_SHARED_VERSION: u32 = 18; // +level_hook_calls (is the file hook firing at all?)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -326,6 +326,9 @@ pub struct TasSharedState {
     /// Bumped AFTER `level_path` is written, so a reader that sees a new
     /// generation can already see the path it refers to.
     pub level_path_gen: u32,
+    /// Total `CreateFileA/W` calls the hook has SEEN — separates "never runs"
+    /// from "runs but nothing matched".
+    pub level_hook_calls: u32,
 }
 
 /// A coherent read of the current track: `Some(level_id)` only when that id was
@@ -2070,7 +2073,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_440);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_448);
     }
 
     #[test]

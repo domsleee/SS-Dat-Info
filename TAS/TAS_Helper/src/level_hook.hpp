@@ -51,7 +51,9 @@ static const char* findNoCase(const char* hay, const char* needle) {
 // the level-change event — no root pointer, no epoch, no invalidation window.
 static void notePath(const char* path) {
     auto* s = g_state;
-    if (!s || !path) return;
+    if (!s) return;
+    s->level_hook_calls++;
+    if (!path) return;
     const char* levels = findNoCase(path, "levels");
     if (!levels) return;
     // Need at least "<Area>/<Category>/<Difficulty>/" after "Levels".
