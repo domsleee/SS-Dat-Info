@@ -25,6 +25,7 @@ mod drift_speed;
 mod f5_probe;
 mod gates;
 mod harness;
+mod level_hunt;
 mod patterns;
 mod catchup_speed;
 mod escape_speedup;
@@ -391,6 +392,10 @@ fn main() {
             // must NOT hijack the replay into REC (g_cave2_contArmed gate).
             let ok = cont_hijack::run();
             std::process::exit(if ok { 0 } else { 1 });
+        }
+        "level-hunt" => {
+            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            std::process::exit(if level_hunt::run(sub) { 0 } else { 1 });
         }
         "gamestate" => {
             // Validate the game_in_game exposure: revive (in-game) + inject, then
