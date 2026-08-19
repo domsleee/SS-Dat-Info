@@ -373,7 +373,27 @@ static DWORD WINAPI threadProc(LPVOID param) {
                 publishContext(s, [&] { s->level_id = 0xFFFFFFFFu; });
             }
         } else if (settled && id >= 0) {
-            if (s->level_id != (uint32_t)id || s->level_scan_epoch != epochAtScan) {
+            bool alreadyResolved = (s->level_scan_epoch == epochAtScan);
+            if (alreadyResolved && s->level_id != (uint32_t)id) {
+                // SAME CONTEXT, DIFFERENT TRACK. The path did not change, so
+                // this is either two tracks sharing one path (Village Easy and
+                // Village Hard both load ".../village/Tracks/easy/...") or a
+                // scan that was wrong — and from here the two are
+                // indistinguishable. What is certain is that the id we are about
+                // to publish CONTRADICTS the one we already published, so at
+                // least one of them is false.
+                //
+                // Go unresolved and let the next scan, taken entirely inside
+                // this context, decide. Overwriting one confident answer with
+                // another would hand the UI a fresh wrong track just as readily
+                // as a fresh right one; unknown is the only honest state when
+                // the evidence disagrees with itself. Costs ~200ms (the
+                // unresolved cadence) in the rare case, and nothing otherwise.
+                publishContext(s, [&] {
+                    s->level_id = 0xFFFFFFFFu;
+                    s->level_scan_epoch = s->level_epoch - 1u;   // -> unresolved
+                });
+            } else if (s->level_id != (uint32_t)id || s->level_scan_epoch != epochAtScan) {
                 publishContext(s, [&] {
                     s->level_id = (uint32_t)id;
                     s->level_scan_epoch = epochAtScan;
