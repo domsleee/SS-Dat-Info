@@ -40,6 +40,14 @@ struct GameAddresses {
     std::uint8_t* cave2_site = nullptr;     // SG+0x13FE40: Supreme::Cycle
     std::uint8_t* replay_capture_site = nullptr; // SG+0x9E8F0: replay object capture
     std::uint8_t* player_base = nullptr;    // SG+0x1D5450: root pointer
+    // SG+0x1D3304: pointer to the CURRENT level's resource path string.
+    // Found by differential RE (tas_test level-hunt ptr) and verified on four
+    // tracks. The pointed-to string changes the instant a level loads, which is
+    // the level-change event. RELIABLE FOR AREA, NOT FOR DIFFICULTY: some tracks
+    // share the easy/ shadow asset, so Village Hard reads ".../Tracks/easy/...".
+    // Difficulty still comes from the majority-voted heap scan, which exists
+    // precisely to survive that outlier.
+    std::uint8_t* level_path_ptr = nullptr;
     std::uint8_t* vk_table = nullptr;       // SG+0x9AD8: VK -> keyIndex lookup
 
     // HMG_Cetsup_Win32.dll offsets
@@ -73,6 +81,7 @@ struct GameAddresses {
 
     // Pointer chain: root = [SG+1D5450], kbobj = [root+530], buffer = [kbobj+30]
     static constexpr uint32_t ROOT_PTR_OFFSET = 0x1D5450;
+    static constexpr uint32_t LEVEL_PATH_PTR_OFFSET = 0x1D3304;
     static constexpr uint32_t KEYBOARD_OBJ_OFFSET = 0x530;
     static constexpr uint32_t DI_BUFFER_PTR_OFFSET = 0x30;
 
@@ -137,6 +146,7 @@ struct GameAddresses {
         cave2_site = sgBase + 0x13FE40;
         replay_capture_site = sgBase + 0x9E8F0;
         player_base = sgBase + ROOT_PTR_OFFSET;
+        level_path_ptr = sgBase + GameAddresses::LEVEL_PATH_PTR_OFFSET;
         vk_table = sgBase + 0x9AD8;
 
         // HMG_Cetsup_Win32.dll offsets

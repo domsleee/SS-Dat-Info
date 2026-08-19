@@ -11,7 +11,6 @@
 #include "caves/frame_limit.hpp"
 #include "caves/race_timer.hpp"
 #include "level_scan.hpp"
-#include "level_hook.hpp"
 
 static TasSharedMemory g_sharedMem;
 static GameAddresses g_addr;
@@ -69,12 +68,7 @@ void run() {
     if (GetEnvironmentVariableA("TAS_NO_LEVELSCAN", nls, sizeof(nls)) > 0 && nls[0] == '1') {
         Log("  Level scan thread: SKIPPED (TAS_NO_LEVELSCAN=1)");
     } else {
-        if (levelhook::Install(state)) {
-            Log("  Level path hook: installed (event-driven track identity)");
-        } else {
-            Log("  Level path hook: FAILED — falling back to the heap scan");
-        }
-        levelscan::Start(state, (uint32_t)g_addr.player_base, &SafeReadPtr);
+        levelscan::Start(state, (uint32_t)g_addr.level_path_ptr, &SafeReadPtr);
         if (levelscan::g_thread) {
             Log("  Level scan thread: started");
         } else {

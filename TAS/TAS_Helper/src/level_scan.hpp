@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 #include "shared_state.hpp"
+#include <cstring>
 
 // In-process level detection.
 //
@@ -26,99 +27,86 @@ namespace levelscan {
 inline std::atomic<bool> g_stop{ false };
 inline HANDLE g_thread = nullptr;
 
-// Address of the engine's root pointer ([SG+0x1D5450]) and the last value seen,
-// for the level-context epoch. Polled HERE rather than from the Cave2 hook
-// because Supreme::Cycle FREEZES at static menus, dialogs and LEVEL LOADS
-// (frame_limit.hpp:43-47) — i.e. exactly across the transition we need to
-// detect. A cycle-driven bump would not land until the new level's first tick,
-// leaving the old track asserted for the whole menu + load. This thread runs
-// independently of the cycle, so it sees the swap as it happens.
-// frame_count captured when the context last changed. Supreme::Cycle is FROZEN
-// throughout a level load (frame_limit.hpp:43-47), so the cycle ticking again is
-// proof the load FINISHED. Scanning before that is what let a mid-load scan see
-// the OLD track still dominant and publish it under the NEW epoch — and no
-// threshold can catch that, because the reading is stale rather than noisy.
-// Measured on this build: stale FE reads 55 while a freshly loaded track reads
-// 23, so 55 >= 2*23 passes any dominance ratio. Waiting for the tick removes the
-// window instead of trying to out-threshold it.
+// LEVEL CONTEXT = the engine's own level-path string.
+//
+// `[SG+0x1D3304]` points at the CURRENT level's resource path; found by
+// differential RE (`tas_test level-hunt ptr`) and verified on four tracks. The
+// string changes the instant a level loads, so a change IS the level-change
+// event — direct, immediate, and requiring no inference.
+//
+// This replaces two mechanisms that were MEASURED NOT TO FIRE on a real track
+// switch, rather than assumed to work:
+//   * the root-pointer epoch ([SG+0x1D5450]) — epoch stayed 0 across a switch,
+//     despite cave2's comment claiming the root is reallocated on track changes;
+//   * a CreateFileA/W hook — 305 file opens intercepted, none under Data/Levels,
+//     because the level's resources are not opened via CreateFile after the DLL
+//     is injected.
+// With them went the null-root threshold, the ABA reasoning and the settle gate:
+// all of that existed to make an unreliable change signal trustworthy.
+//
+// The path is RELIABLE FOR AREA but NOT FOR DIFFICULTY — some tracks share the
+// easy/ shadow asset, so Village Hard reads ".../Tracks/easy/...". Difficulty
+// still comes from the majority-voted heap scan below, which exists precisely to
+// survive that outlier. So the path answers WHEN the level changed; the scan
+// answers WHICH track it is.
+inline uint32_t g_levelPathPtrAddr = 0;
+inline uint32_t (*g_readPtr)(uint32_t) = nullptr;
+
+// frame_count at the last context change. Supreme::Cycle is FROZEN for the whole
+// level load (frame_limit.hpp:43-47), so the cycle ticking again is proof the
+// load FINISHED — and scanning only after that removes the mid-load window in
+// which the OLD track's strings are still resident and dominant. No threshold
+// can catch that case: the reading is stale, not noisy.
 inline uint32_t g_frameAtEpochBump = 0;
 inline bool g_awaitingCycleTick = false;
 
-inline uint32_t g_rootPtrAddr = 0;
-inline uint32_t g_lastRoot = 0;
-// SEH-guarded pointer read, supplied by the caller (cave2's SafeReadPtr) so this
-// header does not depend on the cave headers.
-inline uint32_t (*g_readPtr)(uint32_t) = nullptr;
+// Last path we published, for change detection.
+inline char g_lastPath[TAS_LEVEL_PATH_MAX] = { 0 };
+// True while no level path is available — i.e. no level is loaded, so any track
+// strings in the heap are residue from the one we left.
+inline bool g_noLevelPath = true;
 
-// An F5 restart passes through root==0 transiently, but a level TEARDOWN leaves
-// it null — and at a static menu it can stay null indefinitely. So a null root
-// is news once it PERSISTS past anything a restart could produce.
-//
-// Measured in WALL TIME, not poll counts: polls are not evenly spaced (one
-// before the scan, one after, one per 100 ms sleep slice), so at a loop boundary
-// several land back-to-back, while a long scanLevelId() can block this thread
-// well past 100 ms. Counting polls would make the threshold anywhere from ~200 ms
-// to seconds depending on scan timing.
-//
-// THRESHOLD SET FROM MEASUREMENT, via last_null_root_ms on this build:
-//   level load  -> 875 ms of null root
-//   F5 restart  -> no null gap observed AT ALL (x3; the value never moved off
-//                  the load's 875, so a restart's transient is shorter than the
-//                  100 ms poll interval)
-// The two are cleanly separated rather than marginally, so this sits well below
-// the load and far above anything a restart produces. 500 rather than a value
-// hugging 875 specifically to catch a SHORTER-than-measured load: a review
-// scenario of "null for 600 ms then the root is reused at the same address"
-// would slip past a 750 ms threshold and leave the stale track resolved (the
-// ABA hole), and 500 closes it while keeping ~375 ms of margin under the
-// measured load.
-inline uint32_t g_nullRootSinceMs = 0;   // GetTickCount when the root went null
-inline bool     g_nullRootReported = false;
-static const uint32_t NULL_ROOT_INVALIDATE_MS = 500;
-
-// True while the engine has no root at all — i.e. no level is loaded. Any track
-// strings still in the heap are residue from the level we LEFT, so an
-// identification made now would be confidently wrong.
-inline bool g_rootIsNull = false;
+// Read the current level path into `out`. Returns false when unavailable.
+static bool readLevelPath(char* out, size_t cap) {
+    if (!g_levelPathPtrAddr || !g_readPtr) return false;
+    uint32_t p = g_readPtr(g_levelPathPtrAddr);
+    if (!p) return false;
+    __try {
+        const char* src = (const char*)p;
+        size_t n = 0;
+        while (n < cap - 1 && src[n]) n++;
+        if (n == 0) return false;
+        for (size_t i = 0; i < n; i++) out[i] = src[i];
+        out[n] = '\0';
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
 
 static void pollLevelContext(TasSharedState* s) {
-    if (!g_rootPtrAddr || !g_readPtr) return;
-    uint32_t cur = g_readPtr(g_rootPtrAddr);
-
-    if (!cur) {
-        g_rootIsNull = true;
-        uint32_t now = GetTickCount();
-        if (!g_nullRootSinceMs) g_nullRootSinceMs = now ? now : 1;
-        if (!g_nullRootReported &&
-            (now - g_nullRootSinceMs) >= NULL_ROOT_INVALIDATE_MS && g_lastRoot) {
-            // Sustained teardown: we are no longer in the context we identified.
-            s->level_epoch++;
-            g_frameAtEpochBump = s->frame_count;
-            g_awaitingCycleTick = true;
-            g_nullRootReported = true;
-            // NOTE: g_lastRoot is deliberately NOT cleared. Clearing it made the
-            // `g_lastRoot &&` guard below false, so the NEXT root — the new
-            // level — produced no bump at all, and a track identified during the
-            // null window stayed formally resolved into the new level. Keeping
-            // the old value means the new root still reads as a change. A second
-            // bump is harmless; the epoch is a change counter, not a sequence.
-        }
+    char cur[TAS_LEVEL_PATH_MAX];
+    if (!readLevelPath(cur, sizeof(cur))) {
+        g_noLevelPath = true;
         return;
     }
+    g_noLevelPath = false;
+    if (std::strcmp(cur, g_lastPath) == 0) return;   // same level, nothing to say
 
-    g_rootIsNull = false;
-    if (g_nullRootSinceMs) {
-        s->last_null_root_ms = GetTickCount() - g_nullRootSinceMs;
-    }
-    g_nullRootSinceMs = 0;
-    g_nullRootReported = false;
-    if (g_lastRoot && cur != g_lastRoot) {
-        s->level_epoch++;
-        g_frameAtEpochBump = s->frame_count;
-        g_awaitingCycleTick = true;
-    }
-    g_lastRoot = cur;
+    // The level changed. Publish the path first, then the epoch that invalidates
+    // the old identification — a reader seeing the new epoch can already see the
+    // path it refers to.
+    size_t n = 0;
+    while (n < TAS_LEVEL_PATH_MAX - 1 && cur[n]) { g_lastPath[n] = cur[n]; n++; }
+    g_lastPath[n] = '\0';
+    for (size_t i = 0; i <= n; i++) s->level_path[i] = g_lastPath[i];
+    s->level_path_gen++;
+    MemoryBarrier();
+    s->level_epoch++;
+    g_frameAtEpochBump = s->frame_count;
+    g_awaitingCycleTick = true;
 }
+
 
 static const char* AREAS[3] = { "forest", "alpine", "village" };
 static const char* DIFFS[3] = { "easy", "medium", "hard" };
@@ -199,15 +187,6 @@ static bool confidentEnough(int best, int second) {
 // shifts old -> new, so two consecutive scans disagree until the new level's
 // resources are actually resident. Costs one scan interval (~1.5s) of
 // "resolving" after a change, which is the honest answer during a load anyway.
-inline int32_t g_pendingId = -1;
-inline uint32_t g_pendingEpoch = 0;
-
-static bool confirms(int32_t id, uint32_t epoch) {
-    bool agrees = (id == g_pendingId && epoch == g_pendingEpoch);
-    g_pendingId = id;
-    g_pendingEpoch = epoch;
-    return agrees;
-}
 
 static int32_t scanLevelId(int* outBest, int* outSecond) {
     int tally[9] = { 0 };
@@ -269,7 +248,7 @@ static DWORD WINAPI threadProc(LPVOID param) {
         if (g_awaitingCycleTick && s->frame_count != g_frameAtEpochBump) {
             g_awaitingCycleTick = false;
         }
-        bool mayScan = s->game_in_game && !g_rootIsNull && !g_awaitingCycleTick;
+        bool mayScan = s->game_in_game && !g_noLevelPath && !g_awaitingCycleTick;
         int scanBest = 0, scanSecond = 0;
         int32_t id = mayScan ? scanLevelId(&scanBest, &scanSecond) : -1;
         s->level_scan_best_hits = (uint32_t)scanBest;
@@ -284,8 +263,11 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // publish condition with && short-circuited it: a low-confidence scan
         // never reset the pending id, so stale -> unconfident -> stale counted as
         // two "consecutive" agreeing scans when it was nothing of the sort.
-        bool confident = (id >= 0) && confidentEnough(scanBest, scanSecond);
-        bool settled = confirms(confident ? id : -1, epochAtScan) && confident;
+        // No settle gate any more. It existed to survive a mid-load scan, and the
+        // post-tick gate above already removes that window by refusing to scan
+        // until the load has demonstrably finished. Requiring a second confirming
+        // scan only cost the user another ~1.5s of "resolving".
+        bool settled = (id >= 0) && confidentEnough(scanBest, scanSecond);
 
         if (s->level_epoch != epochAtScan) {
             // The context moved under the scan: whatever we found describes the
@@ -344,10 +326,10 @@ static DWORD WINAPI threadProc(LPVOID param) {
 }
 
 // Spawn the detection thread. Safe to call once during DLL init.
-inline void Start(TasSharedState* s, uint32_t rootPtrAddr, uint32_t (*readPtr)(uint32_t)) {
-    g_rootPtrAddr = rootPtrAddr;
+inline void Start(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readPtr)(uint32_t)) {
+    g_levelPathPtrAddr = levelPathPtrAddr;
     g_readPtr = readPtr;
-    g_lastRoot = 0;
+    g_lastPath[0] = 0;
     if (!s) return;
     s->level_id = 0xFFFFFFFFu;
     // Reinjection can happen while a level is already loaded, and shared memory

@@ -737,14 +737,12 @@ pub fn print_status(client: &TasSharedMemoryClient) {
         s.level_scan_best_hits,
         s.level_scan_second_hits
     );
-    println!("Root: last_null_gap={}ms", s.last_null_root_ms);
     {
         let p = &s.level_path;
         let end = p.iter().position(|&c| c == 0).unwrap_or(p.len());
         println!(
-            "Path: gen={} calls={} {:?}",
+            "Path: gen={} {:?}",
             s.level_path_gen,
-            s.level_hook_calls,
             String::from_utf8_lossy(&p[..end])
         );
     }
