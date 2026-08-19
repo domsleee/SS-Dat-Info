@@ -1,0 +1,268 @@
+//! Differential memory hunt for the engine's own level identity.
+//!
+//! The heap-string scan in the DLL is a heuristic: it tallies
+//! `<area>/Tracks/<diff>` occurrences and majority-votes. It needs a confidence
+//! floor, a settle gate and a root-change epoch to be trustworthy, and it still
+//! cannot see Practice/Halfpipe/Ramp. All of that scaffolding exists because we
+//! INFER the level rather than READ it.
+//!
+//! If the engine keeps the current track as an index (area, difficulty, or a
+//! combined id), that value almost certainly lives in a module's WRITABLE STATIC
+//! DATA rather than the heap — which means a stable `Module+offset` we can read
+//! directly, forever, with no polling and no inference.
+//!
+//! This is Cheat Engine's differential scan without Cheat Engine: it reads the
+//! game with `ReadProcessMemory`, so there is no kernel driver and none of the
+//! DBK64 risk, and it is restricted to loaded module images so every hit is
+//! already a static offset rather than a heap address that moves.
+//!
+//! Usage — `begin` on one track, switch tracks in the game, then `diff`:
+//!
+//! ```text
+//! tas_test level-hunt begin
+//!   (switch to a different track in the game)
+//! tas_test level-hunt diff
+//!   (switch again)
+//! tas_test level-hunt diff     // survivors that changed BOTH times
+//! ```
+//!
+//! Each `diff` keeps only addresses that changed since the previous capture, so
+//! two switches usually cuts millions of words down to a handful.
+
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+
+type Dword = u32;
+type Handle = usize;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ModuleEntry32 {
+    dw_size: Dword,
+    th32_module_id: Dword,
+    th32_process_id: Dword,
+    glblcnt_usage: Dword,
+    proccnt_usage: Dword,
+    mod_base_addr: usize,
+    mod_base_size: Dword,
+    h_module: usize,
+    sz_module: [u8; 256],
+    sz_exe_path: [u8; 260],
+}
+
+unsafe extern "system" {
+    fn CreateToolhelp32Snapshot(flags: Dword, pid: Dword) -> Handle;
+    fn Module32First(snap: Handle, me: *mut ModuleEntry32) -> i32;
+    fn Module32Next(snap: Handle, me: *mut ModuleEntry32) -> i32;
+    fn CloseHandle(h: Handle) -> i32;
+    fn OpenProcess(access: Dword, inherit: i32, pid: Dword) -> Handle;
+    fn ReadProcessMemory(h: Handle, addr: usize, buf: *mut u8, size: usize, read: *mut usize)
+        -> i32;
+}
+
+const TH32CS_SNAPMODULE: Dword = 0x08;
+const TH32CS_SNAPMODULE32: Dword = 0x10;
+const PROCESS_VM_READ: Dword = 0x0010;
+const PROCESS_QUERY_INFORMATION: Dword = 0x0400;
+
+/// Modules worth scanning: the engine and its main DLL hold the globals.
+const WANTED: &[&str] = &["supreme_game.dll", "supreme.exe", "supreme_v1.035.exe"];
+
+/// Only values this small are plausible as a track index (0..8), an area or
+/// difficulty index (0..2), or a small combined id. Filtering here keeps the
+/// diff readable instead of drowning it in unrelated churn.
+const MAX_PLAUSIBLE: u32 = 16;
+
+fn state_path() -> PathBuf {
+    std::env::temp_dir().join("tas_level_hunt.tsv")
+}
+
+fn find_pid() -> Option<Dword> {
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "(Get-Process -Name Supreme,Supreme_v1.035 -ErrorAction SilentlyContinue | \
+             Select-Object -First 1).Id",
+        ])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+struct Region {
+    name: String,
+    base: usize,
+    size: usize,
+}
+
+fn modules(pid: Dword) -> Vec<Region> {
+    let mut out = Vec::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+        if snap == 0 || snap == usize::MAX {
+            return out;
+        }
+        let mut me: ModuleEntry32 = std::mem::zeroed();
+        me.dw_size = std::mem::size_of::<ModuleEntry32>() as Dword;
+        let mut ok = Module32First(snap, &mut me);
+        while ok != 0 {
+            let end = me.sz_module.iter().position(|&c| c == 0).unwrap_or(0);
+            let name = String::from_utf8_lossy(&me.sz_module[..end]).to_lowercase();
+            if WANTED.iter().any(|w| name == *w) {
+                out.push(Region {
+                    name,
+                    base: me.mod_base_addr,
+                    size: me.mod_base_size as usize,
+                });
+            }
+            ok = Module32Next(snap, &mut me);
+        }
+        CloseHandle(snap);
+    }
+    out
+}
+
+/// Read every module image and return `(module, offset) -> value` for aligned
+/// words holding a plausible index.
+fn capture(pid: Dword) -> HashMap<(String, usize), u32> {
+    let mut map = HashMap::new();
+    let h = unsafe { OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid) };
+    if h == 0 {
+        eprintln!("ERROR: OpenProcess failed (is the game running?)");
+        return map;
+    }
+    let mods = modules(pid);
+    if mods.is_empty() {
+        eprintln!("ERROR: none of {:?} found in the process", WANTED);
+    }
+    for m in mods {
+        let mut buf = vec![0u8; m.size];
+        let mut got = 0usize;
+        let ok = unsafe { ReadProcessMemory(h, m.base, buf.as_mut_ptr(), m.size, &mut got) };
+        if ok == 0 || got == 0 {
+            // Partial reads are normal (guard pages); only a total failure matters.
+            eprintln!("  {}: read failed", m.name);
+            continue;
+        }
+        println!(
+            "  {}: base={:#x} size={} read={}",
+            m.name, m.base, m.size, got
+        );
+        // 4-byte aligned words only: an index is aligned, and this cuts the
+        // candidate set 4x before any filtering.
+        let mut i = 0usize;
+        while i + 4 <= got {
+            let v = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+            if v <= MAX_PLAUSIBLE {
+                map.insert((m.name.clone(), i), v);
+            }
+            i += 4;
+        }
+    }
+    unsafe { CloseHandle(h) };
+    map
+}
+
+fn save(map: &HashMap<(String, usize), u32>) {
+    let mut s = String::new();
+    for ((m, off), v) in map {
+        s.push_str(&format!("{}\t{}\t{}\n", m, off, v));
+    }
+    let _ = fs::write(state_path(), s);
+}
+
+fn load() -> HashMap<(String, usize), u32> {
+    let mut map = HashMap::new();
+    if let Ok(s) = fs::read_to_string(state_path()) {
+        for line in s.lines() {
+            let mut it = line.split('\t');
+            if let (Some(m), Some(o), Some(v)) = (it.next(), it.next(), it.next()) {
+                if let (Ok(o), Ok(v)) = (o.parse::<usize>(), v.parse::<u32>()) {
+                    map.insert((m.to_string(), o), v);
+                }
+            }
+        }
+    }
+    map
+}
+
+pub fn run(sub: &str) -> bool {
+    let Some(pid) = find_pid() else {
+        eprintln!("ERROR: game not running");
+        return false;
+    };
+    println!("=== LEVEL HUNT ({}) — pid {} ===", sub, pid);
+
+    match sub {
+        "begin" => {
+            let now = capture(pid);
+            if now.is_empty() {
+                return false;
+            }
+            save(&now);
+            println!(
+                "\nCaptured {} candidate words (aligned, value <= {}).",
+                now.len(),
+                MAX_PLAUSIBLE
+            );
+            println!("Now SWITCH TO A DIFFERENT TRACK in the game, then run:");
+            println!("    tas_test level-hunt diff");
+            true
+        }
+        "diff" => {
+            let prev = load();
+            if prev.is_empty() {
+                eprintln!("ERROR: no previous capture — run `level-hunt begin` first");
+                return false;
+            }
+            let now = capture(pid);
+            if now.is_empty() {
+                return false;
+            }
+            // Survivors = present in both AND changed. A level index MUST change
+            // when the level changes; anything constant is not it.
+            let mut survivors: Vec<(String, usize, u32, u32)> = prev
+                .iter()
+                .filter_map(|((m, off), old)| {
+                    now.get(&(m.clone(), *off))
+                        .filter(|new| *new != old)
+                        .map(|new| (m.clone(), *off, *old, *new))
+                })
+                .collect();
+            survivors.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+
+            println!(
+                "\n{} of {} candidates CHANGED across this switch.",
+                survivors.len(),
+                prev.len()
+            );
+            for (m, off, old, new) in survivors.iter().take(60) {
+                println!("  {}+{:#x}   {} -> {}", m, off, old, new);
+            }
+            if survivors.len() > 60 {
+                println!("  ... and {} more", survivors.len() - 60);
+            }
+
+            // Keep only the survivors for the next round.
+            let keep: HashMap<(String, usize), u32> = survivors
+                .into_iter()
+                .map(|(m, off, _, new)| ((m, off), new))
+                .collect();
+            let n = keep.len();
+            save(&keep);
+            println!(
+                "\nKept {} survivors. Switch tracks AGAIN and re-run `diff` to drop\n\
+                 coincidences — a real level index changes EVERY time, so the set\n\
+                 should collapse fast.",
+                n
+            );
+            true
+        }
+        _ => {
+            eprintln!("Usage: tas_test level-hunt <begin|diff>");
+            false
+        }
+    }
+}
