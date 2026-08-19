@@ -26,6 +26,7 @@ mod f5_probe;
 mod gates;
 mod harness;
 mod level_hunt;
+mod level_seq;
 mod patterns;
 mod catchup_speed;
 mod escape_speedup;
@@ -396,6 +397,16 @@ fn main() {
         "level-hunt" => {
             let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
             std::process::exit(if level_hunt::run(sub) { 0 } else { 1 });
+        }
+        "level-seq" => {
+            // Wiring test for the level-context seqlock: proves the DLL actually
+            // publishes through it. Diagnostic — runs on whatever track is
+            // loaded, so it must not refuse on an unexpected one.
+            if std::env::var("TAS_TEST_LEVEL").is_err() {
+                // SAFETY: single-threaded startup, before any harness thread.
+                unsafe { std::env::set_var("TAS_TEST_LEVEL", "any") };
+            }
+            std::process::exit(if level_seq::run() { 0 } else { 1 });
         }
         "gamestate" => {
             // Validate the game_in_game exposure: revive (in-game) + inject, then

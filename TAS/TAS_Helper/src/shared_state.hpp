@@ -327,13 +327,20 @@ struct TasSharedState {
     // sees a new generation can already see the path it refers to.
     char     level_path[TAS_LEVEL_PATH_MAX];
     uint32_t level_path_gen;
-    // SEQLOCK over the whole level-context group (level_path, level_path_gen,
-    // level_epoch). ODD = a write is in progress, EVEN = stable.
+    // SEQLOCK over the WHOLE level-context group: level_epoch,
+    // level_scan_epoch, level_id, level_path, level_path_gen.
+    // ODD = a write is in progress, EVEN = stable.
     //
     // A plain store plus a barrier is not enough: the path is a 128-byte array,
     // so a reader in the OTHER PROCESS can observe it half-copied while the
     // counters still read old. Readers must take the sequence, read the group,
     // re-take the sequence, and accept only an unchanged EVEN value.
+    //
+    // The group is exactly the set of fields a decision is made from, and the
+    // DLL's level_scan.hpp is its only runtime writer — every store to any of
+    // them goes through publishContext(). level_scan_best_hits /
+    // level_scan_second_hits are NOT in the group: they are diagnostics nothing
+    // branches on. If a field ever joins the decision, it joins the window too.
     volatile uint32_t level_ctx_seq;
 };
 

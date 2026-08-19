@@ -136,21 +136,27 @@ static int areaFromPath(const char* path) { return levelpath::AreaFrom(path); }
 // either the compiler or the store buffer — which a plain store plus one
 // MemoryBarrier did not guarantee for a 128-byte array read from another
 // process.
+// MUST NOT NEST: an inner pair would drive the sequence back to EVEN halfway
+// through the outer write, publishing a torn group as if it were stable. Hence
+// the *Locked helpers below rather than self-synchronising mutators.
 template <typename F>
 static void publishContext(TasSharedState* s, F&& fn) {
     InterlockedIncrement((volatile LONG*)&s->level_ctx_seq);   // -> odd: writing
     fn();
     InterlockedIncrement((volatile LONG*)&s->level_ctx_seq);   // -> even: stable
 }
+
 // Invalidate the current identification: the context we identified is gone.
-static void invalidateContext(TasSharedState* s) {
-    g_lastPath[0] = '\0';
+// `Locked` = the caller must already be inside publishContext(). The suffix is
+// there so a naked call reads as the bug it would be.
+static void invalidateContextLocked(TasSharedState* s) {
     s->level_path[0] = '\0';
     s->level_path_gen++;
-    MemoryBarrier();
+    // No MemoryBarrier between the path and the epoch any more: the closing
+    // InterlockedIncrement is the release for the whole group, and ordering
+    // WITHIN the group no longer matters because a reader either sees all of it
+    // or rejects the read.
     s->level_epoch++;
-    g_frameAtEpochBump = s->frame_count;
-    g_awaitingCycleTick = true;
 }
 
 static void pollLevelContext(TasSharedState* s) {
@@ -161,23 +167,31 @@ static void pollLevelContext(TasSharedState* s) {
         // and it is the same hole the root-based version had when root==0.
         if (!g_noLevelPath || g_lastPath[0]) {
             g_noLevelPath = true;
-            if (g_lastPath[0]) invalidateContext(s);
+            if (g_lastPath[0]) {
+                g_lastPath[0] = '\0';
+                publishContext(s, [&] { invalidateContextLocked(s); });
+                g_frameAtEpochBump = s->frame_count;
+                g_awaitingCycleTick = true;
+            }
         }
         return;
     }
     g_noLevelPath = false;
     if (std::strcmp(cur, g_lastPath) == 0) return;   // same level, nothing to say
 
-    // The level changed. Publish the path, then the epoch that invalidates the
-    // old identification — a reader seeing the new epoch can already see the
-    // path it refers to.
+    // The level changed. Publish the new path and the epoch that invalidates the
+    // old identification as ONE seqlock write: the path is 128 bytes copied a
+    // byte at a time, so a reader without the sequence can catch it spliced
+    // between two tracks. Only the shared-memory stores go inside the window —
+    // the g_* locals are DLL-private and no reader can see them.
     size_t n = 0;
     while (n < TAS_LEVEL_PATH_MAX - 1 && cur[n]) { g_lastPath[n] = cur[n]; n++; }
     g_lastPath[n] = '\0';
-    for (size_t i = 0; i <= n; i++) s->level_path[i] = g_lastPath[i];
-    s->level_path_gen++;
-    MemoryBarrier();
-    s->level_epoch++;
+    publishContext(s, [&] {
+        for (size_t i = 0; i <= n; i++) s->level_path[i] = g_lastPath[i];
+        s->level_path_gen++;
+        s->level_epoch++;
+    });
     g_frameAtEpochBump = s->frame_count;
     g_awaitingCycleTick = true;
 }
@@ -315,6 +329,10 @@ static DWORD WINAPI threadProc(LPVOID param) {
         int scanBest = 0, scanSecond = 0;
         int areaHint = g_lastPath[0] ? areaFromPath(g_lastPath) : -1;
         int32_t id = mayScan ? scanLevelId(&scanBest, &scanSecond, areaHint) : -1;
+        // Deliberately OUTSIDE the seqlock. These are diagnostics — how strong
+        // the last scan's evidence was — not part of the identity group, and no
+        // decision is made from them. Putting them in the window would widen it
+        // for nothing. `tas_test status` prints them raw and is the only reader.
         s->level_scan_best_hits = (uint32_t)scanBest;
         s->level_scan_second_hits = (uint32_t)scanSecond;
         // ...and again AFTER, because scanLevelId() walks tens of MiB and the
@@ -333,30 +351,25 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // scan only cost the user another ~1.5s of "resolving".
         bool settled = (id >= 0) && confidentEnough(scanBest, scanSecond);
 
+        // Every one of these mutates the identity half of the group, so every
+        // one goes through the seqlock. The pair (level_id, level_scan_epoch) is
+        // the whole point: a reader that sees the validating epoch without the
+        // id it validates gets "resolved" plus the PREVIOUS track, which is
+        // worse than unresolved because it looks trustworthy.
         if (s->level_epoch != epochAtScan) {
             // The context moved under the scan: whatever we found describes the
             // level we just left. Discard it and stay unresolved — level_scan_epoch
             // is deliberately NOT advanced, so resolved stays false until a scan
             // completes entirely inside one context.
-            s->level_id = 0xFFFFFFFFu;
+            publishContext(s, [&] { s->level_id = 0xFFFFFFFFu; });
         } else if (settled && id >= 0) {
-            // Publish the id BEFORE the marker that validates it: a reader that
-            // sees the new scan epoch must already be able to see the id it
-            // describes, never the previous one.
-            //
-            // The barrier is load-bearing, not decoration. These are plain u32s
-            // in a shared mapping; without it the compiler (and, in principle,
-            // the store buffer) may make the marker visible to the OTHER PROCESS
-            // before the id it validates, handing the reader "resolved" plus the
-            // previous track. Volatile reads on the Rust side prevent load
-            // elision but establish no ordering with this writer — the release
-            // has to come from here.
-            s->level_id = (uint32_t)id;
-            MemoryBarrier();
-            s->level_scan_epoch = epochAtScan;
+            publishContext(s, [&] {
+                s->level_id = (uint32_t)id;
+                s->level_scan_epoch = epochAtScan;
+            });
         } else if (epochAtScan != s->level_scan_epoch) {
             // A context we have not identified yet — stay explicitly unknown.
-            s->level_id = 0xFFFFFFFFu;
+            publishContext(s, [&] { s->level_id = 0xFFFFFFFFu; });
         }
         // else: same context, scan found nothing. The level CANNOT have changed
         // without the root changing, so this is a transient miss (a >4 MiB or
@@ -395,13 +408,23 @@ inline void Start(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readP
     g_readPtr = readPtr;
     g_lastPath[0] = 0;
     if (!s) return;
-    s->level_id = 0xFFFFFFFFu;
-    // Reinjection can happen while a level is already loaded, and shared memory
-    // survives it — so a stale level_scan_epoch could equal level_epoch and make
-    // the cleared level_id read as a trustworthy "we are at the menu". Force the
-    // pair unequal so this reads as "not identified in this context YET", which
-    // is the truth until the first scan of this DLL instance completes.
-    s->level_scan_epoch = s->level_epoch - 1u;
+    // Shared memory SURVIVES reinjection, so a previous DLL instance killed
+    // between the two increments leaves the sequence ODD — and every future read
+    // in every process would be rejected forever, permanently "resolving". We
+    // are the sole writer and nothing is in flight here, so this is the one
+    // place that can honestly re-establish an even sequence.
+    if (InterlockedOr((volatile LONG*)&s->level_ctx_seq, 0) & 1) {
+        InterlockedIncrement((volatile LONG*)&s->level_ctx_seq);
+    }
+    publishContext(s, [&] {
+        s->level_id = 0xFFFFFFFFu;
+        // Reinjection can happen while a level is already loaded — so a stale
+        // level_scan_epoch could equal level_epoch and make the cleared level_id
+        // read as a trustworthy "we are at the menu". Force the pair unequal so
+        // this reads as "not identified in this context YET", which is the truth
+        // until the first scan of this DLL instance completes.
+        s->level_scan_epoch = s->level_epoch - 1u;
+    });
     g_stop.store(false, std::memory_order_relaxed);
     g_thread = CreateThread(nullptr, 0, threadProc, s, 0, nullptr);
     if (!g_thread) {

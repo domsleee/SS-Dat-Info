@@ -88,6 +88,19 @@ pub fn level_code_from_id(level_id: u32) -> Option<&'static str> {
     tas_shared::level::code_from_id(level_id)
 }
 
+/// The live track code (e.g. `"FE"`), or `None` when the game has not (yet)
+/// identified the level.
+///
+/// The only sanctioned way for the UI to ask "which track are we on". Reading
+/// `state.level_id` directly is a bug: across a level change that word still
+/// holds the PREVIOUS track until the scan catches up, so a raw read confidently
+/// names the level you just left. That is not cosmetic — it is how a recording
+/// gets saved into the wrong track's folder (poisoning the level filter for
+/// good) and how the wrong start-line geometry ends up timing a run.
+pub fn resolved_level_code(state: &tas_shared::TasSharedState) -> Option<&'static str> {
+    tas_shared::resolved_level_id(state).and_then(level_code_from_id)
+}
+
 /// The in-race duration of a recording, in centiseconds (= ticks, since the
 /// game runs at exactly 100 ticks/s). Measured from the gate (`first_moving`,
 /// when the character leaves spawn) to the end of the recording — that matches
