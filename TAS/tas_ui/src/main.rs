@@ -479,6 +479,13 @@ struct TasApp {
     cycle_fc: u32,
     cycle_advance_at: std::time::Instant,
 
+    // The last track we were CONFIDENTLY on. Only used to name a save: the
+    // engine stops its cycle for its own post-run dialog, so the live level
+    // reads unknown at exactly the moment the user clicks Save, and a recording
+    // belongs to the track it was recorded on regardless of what is on screen
+    // afterwards. Never used to decide what may be restored — that must be live.
+    last_resolved_level: Option<String>,
+
     // One-shot: force dark title bar on first frame
     #[cfg(windows)]
     dark_title_bar_set: bool,
@@ -651,7 +658,9 @@ impl TasApp {
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
             cycle_fc: 0,
-            cycle_advance_at: std::time::Instant::now(),            #[cfg(windows)]
+            cycle_advance_at: std::time::Instant::now(),
+            last_resolved_level: None,
+            #[cfg(windows)]
             dark_title_bar_set: false,
         };
 
@@ -893,12 +902,30 @@ impl TasApp {
             return;
         };
         match tas_shared::level_context(shared.state()) {
-            Some((id, _path)) => self
-                .history
-                .set_live_level(crate::level::level_code_from_id(id)),
+            Some((id, _path)) => {
+                let code = crate::level::level_code_from_id(id);
+                // Remember the last track we were CONFIDENTLY on. Used only for
+                // naming a save: the engine freezes its cycle for its own post-run
+                // dialog, so the level reads unknown at exactly the moment the user
+                // clicks Save, and a recording must not lose its tag to that.
+                if let Some(c) = code {
+                    self.last_resolved_level = Some(c.to_string());
+                }
+                self.history.set_live_level(code);
+            }
             // Context changed, new track not identified yet.
             None => self.history.enter_resolving(),
         }
+    }
+
+    /// The track a recording being saved right now belongs to: the live level if
+    /// we have it, else the last one we were confidently on. See
+    /// [`recording::save_dialog_with_segments`] for why this is not read live.
+    fn level_for_save(&self) -> Option<&str> {
+        self.shared
+            .as_ref()
+            .and_then(|s| crate::level::resolved_level_code(s.state()))
+            .or(self.last_resolved_level.as_deref())
     }
 
     /// Single dispatch for a transport `Action`, shared by the keyboard-shortcut
@@ -1860,11 +1887,15 @@ impl TasApp {
             self.timeline_view.zoom_center(1.25);
         }
         if save {
+            // Resolve the track BEFORE the dialog: it belongs to the recording,
+            // and the engine may be frozen in its own post-run dialog by now.
+            let level = self.level_for_save().map(str::to_string);
             if let Some(ref shared) = self.shared {
                 if let Some(path) = recording::save_dialog_with_segments(
                     shared.state(),
                     &self.segment_tracker.segments,
                     &mut self.log_lines,
+                    level.as_deref(),
                 ) {
                     self.history.push_save_marker(shared.state(), &path);
                 }
@@ -2141,11 +2172,13 @@ impl eframe::App for TasApp {
                 ui.menu_button("File", |ui| {
                     if ui.button("Save Recording...  Ctrl+S").clicked() {
                         ui.close_menu();
+                        let level = self.level_for_save().map(str::to_string);
                         if let Some(ref shared) = self.shared {
                             if let Some(path) = recording::save_dialog_with_segments(
                                 shared.state(),
                                 &self.segment_tracker.segments,
                                 &mut self.log_lines,
+                                level.as_deref(),
                             ) {
                                 self.history.push_save_marker(shared.state(), &path);
                             }
@@ -3112,7 +3145,9 @@ mod tests {
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
             cycle_fc: 0,
-            cycle_advance_at: std::time::Instant::now(),            #[cfg(windows)]
+            cycle_advance_at: std::time::Instant::now(),
+            last_resolved_level: None,
+            #[cfg(windows)]
             dark_title_bar_set: false,
         }
     }

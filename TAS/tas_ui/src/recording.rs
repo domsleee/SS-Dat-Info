@@ -1548,7 +1548,7 @@ impl SegmentTracker {
 
 #[allow(dead_code)]
 pub fn save_dialog(state: &TasSharedState, log: &mut Vec<String>) -> Option<PathBuf> {
-    save_dialog_with_segments(state, &[], log)
+    save_dialog_with_segments(state, &[], log, None)
 }
 
 /// Per-game recordings folder: `<data_root>/recordings` (created on demand).
@@ -1598,19 +1598,25 @@ fn load_dir_for_level(level: Option<&str>) -> PathBuf {
 /// Default save name. The `<level>-<time>` convention (e.g. `FE-5876`) needs the
 /// level id + finish time from the game (pending the game-awareness RE); until
 /// then we default to a timestamp so saves still land somewhere sensible.
+/// `level` is the track this RECORDING belongs to, supplied by the caller.
+///
+/// Deliberately not read live here. A recording belongs to the track it was
+/// recorded on, not to whatever the game happens to be showing when the user
+/// gets around to clicking Save — and by then the engine may well be sitting in
+/// its post-run dialog, where the cycle is frozen and the level reads UNKNOWN.
+/// Reading live would strand exactly the recording the user just finished as
+/// untagged. `None` still degrades safely to a time-only name.
 pub fn save_dialog_with_segments(
     state: &TasSharedState,
     segments: &[Segment],
     log: &mut Vec<String>,
+    level: Option<&str>,
 ) -> Option<PathBuf> {
-    // Default name: `<level>-<time>` (e.g. FE-5876). The level must come from
-    // the RESOLVED read — a raw level_id here would name and file the recording
-    // under the track we just left, and since the level filter keys off the
-    // saved name/folder, that mislabel is permanent. Unknown (menu, or mid
-    // switch) degrades to a time-only name in the root folder, which is
-    // recoverable. Time is the in-race duration (gate→end) in cs.
+    // Default name: `<level>-<time>` (e.g. FE-5876). Mis-tagging is permanent —
+    // the level filter keys off the saved name and folder — so an unknown level
+    // degrades to a time-only name in the root folder, which is recoverable.
+    // Time is the in-race duration (gate→end) in cs.
     let race_cs = crate::level::race_centiseconds(&state.rec_coords, state.recorded_count);
-    let level = crate::level::resolved_level_code(state);
     let default_name = crate::level::default_recording_name(level, race_cs);
     if let Some(path) = rfd::FileDialog::new()
         .set_title("Save TAS Recording")

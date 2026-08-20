@@ -406,6 +406,12 @@ fn main() {
                 // SAFETY: single-threaded startup, before any harness thread.
                 unsafe { std::env::set_var("TAS_TEST_LEVEL", "any") };
             }
+            // `level-seq watch [secs]` logs transitions instead of asserting —
+            // for when you are about to change level on purpose.
+            if args.get(2).map(|s| s.as_str()) == Some("watch") {
+                let secs = args.get(3).and_then(|s| s.parse::<u64>().ok());
+                std::process::exit(if level_seq::watch(secs) { 0 } else { 1 });
+            }
             let secs = args.get(2).and_then(|s| s.parse::<u64>().ok());
             std::process::exit(if level_seq::run(secs) { 0 } else { 1 });
         }
