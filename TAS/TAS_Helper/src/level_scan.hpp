@@ -341,14 +341,14 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // context — stale id, fresh epoch, and the UI would trust it.
         pollLevelContext(s);
 
-        // Update the pending candidate UNCONDITIONALLY. Folding this into the
-        // publish condition with && short-circuited it: a low-confidence scan
-        // never reset the pending id, so stale -> unconfident -> stale counted as
-        // two "consecutive" agreeing scans when it was nothing of the sort.
-        // No settle gate any more. It existed to survive a mid-load scan, and the
-        // post-tick gate above already removes that window by refusing to scan
-        // until the load has demonstrably finished. Requiring a second confirming
-        // scan only cost the user another ~1.5s of "resolving".
+        // No settle gate (no "wait for two agreeing scans"). It existed to
+        // survive a mid-load scan, and the post-tick gate above already removes
+        // that window by refusing to scan until the load has demonstrably
+        // finished; keeping it only cost the user another ~1.5s of "resolving".
+        // The one case that still demands a second opinion — a scan that
+        // contradicts what we already published — is handled below, where we
+        // know it IS a contradiction rather than guessing that every scan might
+        // be one.
         bool settled = (id >= 0) && confidentEnough(scanBest, scanSecond);
 
         // Every one of these mutates the identity half of the group, so every
@@ -389,9 +389,12 @@ static DWORD WINAPI threadProc(LPVOID param) {
                 // as a fresh right one; unknown is the only honest state when
                 // the evidence disagrees with itself. Costs ~200ms (the
                 // unresolved cadence) in the rare case, and nothing otherwise.
+                // epochAtScan == s->level_epoch here (that is what the outer
+                // branch established, and this thread is the only writer), so
+                // this makes the pair unequal = unresolved.
                 publishContext(s, [&] {
                     s->level_id = 0xFFFFFFFFu;
-                    s->level_scan_epoch = s->level_epoch - 1u;   // -> unresolved
+                    s->level_scan_epoch = epochAtScan - 1u;
                 });
             } else if (s->level_id != (uint32_t)id || s->level_scan_epoch != epochAtScan) {
                 publishContext(s, [&] {
