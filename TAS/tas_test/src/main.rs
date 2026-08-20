@@ -27,6 +27,7 @@ mod gates;
 mod harness;
 mod level_hunt;
 mod level_seq;
+mod video_rate;
 mod patterns;
 mod catchup_speed;
 mod escape_speedup;
@@ -397,6 +398,23 @@ fn main() {
         "level-hunt" => {
             let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
             std::process::exit(if level_hunt::run(sub) { 0 } else { 1 });
+        }
+        "video-rate" => {
+            // Measures the SCREEN, not shared memory, so the same command works
+            // with TAS absent — which is the only way to get a no-TAS baseline
+            // for the menu-video speed complaint.
+            let secs = args.get(2).and_then(|s| s.parse::<u64>().ok());
+            let mut cap: Option<u32> = None;
+            let mut i = 2;
+            while i < args.len() {
+                if args[i] == "--cap" && i + 1 < args.len() {
+                    cap = args[i + 1].parse::<u32>().ok();
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            std::process::exit(if video_rate::run_with_cap(secs, cap) { 0 } else { 1 });
         }
         "level-seq" => {
             // Wiring test for the level-context seqlock: proves the DLL actually
