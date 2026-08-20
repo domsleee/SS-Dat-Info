@@ -78,7 +78,7 @@ fn state_path() -> PathBuf {
     std::env::temp_dir().join("tas_level_hunt.tsv")
 }
 
-fn find_pid() -> Option<Dword> {
+pub fn find_pid() -> Option<Dword> {
     let out = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
@@ -453,4 +453,40 @@ pub fn probe() -> bool {
     }
     unsafe { CloseHandle(h) };
     true
+}
+
+/// Is TAS_Helper.dll actually loaded in the game process?
+///
+/// Ground truth for "is TAS on", and NOT interchangeable with "can I open the
+/// shared memory". A named section outlives the process that created it for as
+/// long as any handle stays open — so with tas_ui still running, the mapping
+/// from a DEAD game is still openable, and a shared-memory probe reports TAS
+/// present against a game that has never seen the DLL. That false positive
+/// would silently invalidate any with-vs-without comparison, which is the one
+/// thing `video-rate` exists to do.
+///
+/// `None` = no game process to ask.
+pub fn tas_dll_loaded() -> Option<bool> {
+    let pid = find_pid()?;
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+        if snap == 0 || snap == usize::MAX {
+            return None;
+        }
+        let mut me: ModuleEntry32 = std::mem::zeroed();
+        me.dw_size = std::mem::size_of::<ModuleEntry32>() as Dword;
+        let mut ok = Module32First(snap, &mut me);
+        let mut found = false;
+        while ok != 0 {
+            let end = me.sz_module.iter().position(|&c| c == 0).unwrap_or(0);
+            let name = String::from_utf8_lossy(&me.sz_module[..end]).to_lowercase();
+            if name == "tas_helper.dll" {
+                found = true;
+                break;
+            }
+            ok = Module32Next(snap, &mut me);
+        }
+        CloseHandle(snap);
+        Some(found)
+    }
 }
