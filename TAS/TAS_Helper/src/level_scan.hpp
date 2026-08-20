@@ -73,6 +73,35 @@ inline char g_lastPath[TAS_LEVEL_PATH_MAX] = { 0 };
 // strings in the heap are residue from the one we left.
 inline bool g_noLevelPath = true;
 
+// ENGINE-CYCLE HEARTBEAT (cave2's g_lastCycleMs, passed in by main.cc so this
+// header stays free of the cave/safetyhook includes).
+//
+// This is the signal the whole design was missing, and it took a live probe at
+// the menu to see it. Returning to the menu does NOT tear the level down:
+// measured at the Arcade menu after quitting Village Easy, the level-path
+// pointer still read ".../village/Tracks/easy/...", the engine root was still
+// non-NULL, and the game's own "in a level" flag still read 1. Nothing we were
+// watching changed, so the UI went on confidently asserting the track the player
+// had already left — which is the bug this whole line of work started from.
+//
+// What DOES change is that Supreme::Cycle STOPS at static menus, at the pause
+// menu, and for the whole of a level load. So a frozen cycle means "the engine
+// is not running a level right now", and that is exactly when our identification
+// must not be trusted: the heap still holds the old track's strings, so even a
+// rescan would confirm the wrong answer.
+//
+// 400ms matches tas_ui's "In Game" chip, which asks the same question of the
+// same heartbeat. Active gameplay ticks every ~7ms, so the margin is enormous.
+inline volatile uint32_t* g_cycleMs = nullptr;
+static const uint32_t CYCLE_FROZEN_MS = 400;
+
+// Is the engine cycle stopped? False when no heartbeat was wired, so a build
+// that does not pass one behaves exactly as before rather than seizing up.
+static bool cycleFrozen() {
+    if (!g_cycleMs) return false;
+    return (GetTickCount() - *g_cycleMs) > CYCLE_FROZEN_MS;
+}
+
 
 
 // Parsing lives in level_path_parse.hpp so it can be unit-tested WITHOUT the
@@ -325,7 +354,38 @@ static DWORD WINAPI threadProc(LPVOID param) {
         if (g_awaitingCycleTick && s->frame_count != g_frameAtEpochBump) {
             g_awaitingCycleTick = false;
         }
-        bool mayScan = s->game_in_game && !g_noLevelPath && !g_awaitingCycleTick;
+
+        // THE ENGINE IS NOT RUNNING A LEVEL. Static menu, pause menu, or a load
+        // in progress — see cycleFrozen(). Give up the identification for as
+        // long as it lasts.
+        //
+        // This is the only mechanism that catches a return to the menu, because
+        // NOTHING ELSE CHANGES there: probed live, the level-path pointer, the
+        // engine root and the game's own in-a-level flag all still describe the
+        // track the player just left. It is also the only thing that catches a
+        // switch between two tracks that SHARE a path (Village Easy and Village
+        // Hard both load ".../village/Tracks/easy/..."), since for those the
+        // path never changes at all and there is no other event to hang off.
+        //
+        // Scanning is suppressed too, not just publication. At a menu the old
+        // level's strings are still resident and dominant, so a scan here would
+        // "confirm" the track we just left and immediately undo this.
+        bool frozen = cycleFrozen();
+        if (frozen) {
+            if (s->level_scan_epoch == s->level_epoch) {
+                publishContext(s, [&] {
+                    s->level_id = 0xFFFFFFFFu;
+                    s->level_scan_epoch = s->level_epoch - 1u;   // -> unresolved
+                });
+            }
+            // Require a fresh tick before believing a scan again: the cycle
+            // resuming is what proves a level is actually running (and, after a
+            // load, that it finished).
+            g_awaitingCycleTick = true;
+            g_frameAtEpochBump = s->frame_count;
+        }
+
+        bool mayScan = s->game_in_game && !g_noLevelPath && !g_awaitingCycleTick && !frozen;
         int scanBest = 0, scanSecond = 0;
         int areaHint = g_lastPath[0] ? areaFromPath(g_lastPath) : -1;
         int32_t id = mayScan ? scanLevelId(&scanBest, &scanSecond, areaHint) : -1;
@@ -440,9 +500,14 @@ static DWORD WINAPI threadProc(LPVOID param) {
 }
 
 // Spawn the detection thread. Safe to call once during DLL init.
-inline void Start(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readPtr)(uint32_t)) {
+// `cycleMs` is cave2's engine-cycle heartbeat (`&g_lastCycleMs`). Passed in
+// rather than included so this header keeps its light dependency set; pass
+// nullptr and the freeze detection simply never fires.
+inline void Start(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readPtr)(uint32_t),
+                  volatile uint32_t* cycleMs) {
     g_levelPathPtrAddr = levelPathPtrAddr;
     g_readPtr = readPtr;
+    g_cycleMs = cycleMs;
     g_lastPath[0] = 0;
     if (!s) return;
     // Shared memory SURVIVES reinjection, so a previous DLL instance killed

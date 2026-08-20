@@ -68,7 +68,11 @@ void run() {
     if (GetEnvironmentVariableA("TAS_NO_LEVELSCAN", nls, sizeof(nls)) > 0 && nls[0] == '1') {
         Log("  Level scan thread: SKIPPED (TAS_NO_LEVELSCAN=1)");
     } else {
-        levelscan::Start(state, (uint32_t)g_addr.level_path_ptr, &SafeReadPtr);
+        // cave2's cycle heartbeat goes in as well: it is the only signal that
+        // notices a return to the menu (nothing else changes there — see
+        // level_scan.hpp's cycleFrozen).
+        levelscan::Start(state, (uint32_t)g_addr.level_path_ptr, &SafeReadPtr,
+                         &g_lastCycleMs);
         if (levelscan::g_thread) {
             Log("  Level scan thread: started");
         } else {

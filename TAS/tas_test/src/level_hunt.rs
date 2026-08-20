@@ -339,6 +339,7 @@ pub fn run(sub: &str) -> bool {
             println!("\n{} static pointer(s) into a level path.", hits);
             hits > 0
         }
+        "probe" => probe(),
         "show" => {
             let prev = load();
             if prev.is_empty() {
@@ -368,4 +369,88 @@ pub fn run(sub: &str) -> bool {
             false
         }
     }
+}
+
+/// `tas_test level-hunt probe` — read the three engine words the level-identity
+/// design rests on, straight out of the live process.
+///
+/// Built to answer one question the in-process publisher cannot: WHAT DOES THE
+/// ENGINE LOOK LIKE AT THE MENU? The DLL's own view is not trustworthy there —
+/// `game_in_game` in shared memory is written by the Cycle hook, and the cycle
+/// STOPS at a static menu, so that copy freezes at its last in-race value. This
+/// reads the game's variable directly instead.
+///
+///   Supreme_Game.dll + 0x1D3304  -> ptr to the current level's resource path
+///   Supreme_Game.dll + 0x1D5450  -> the engine root object (cave2's auto-stop
+///                                   anchor; reallocated on a real teardown)
+///   Supreme.exe      + 0x8895C   -> "engine is running a level"
+pub fn probe() -> bool {
+    const LEVEL_PATH_PTR_OFF: usize = 0x1D3304;
+    const ROOT_PTR_OFF: usize = 0x1D5450;
+    const IN_GAME_OFF: usize = 0x8895C;
+
+    let Some(pid) = find_pid() else {
+        eprintln!("ERROR: no Supreme process");
+        return false;
+    };
+    let mods = modules(pid);
+    let find = |n: &str| mods.iter().find(|m| m.name == n).map(|m| m.base);
+    let Some(sg) = find("supreme_game.dll") else {
+        eprintln!("ERROR: Supreme_Game.dll not found in PID {}", pid);
+        return false;
+    };
+    let exe = find("supreme.exe").or_else(|| find("supreme_v1.035.exe"));
+
+    let h = unsafe { OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid) };
+    if h == 0 {
+        eprintln!("ERROR: OpenProcess failed for PID {}", pid);
+        return false;
+    }
+    let rd32 = |addr: usize| -> Option<u32> {
+        let mut buf = [0u8; 4];
+        let mut got = 0usize;
+        let ok = unsafe { ReadProcessMemory(h, addr, buf.as_mut_ptr(), 4, &mut got) };
+        (ok != 0 && got == 4).then(|| u32::from_le_bytes(buf))
+    };
+    let rdstr = |addr: usize| -> Option<String> {
+        let mut buf = [0u8; 160];
+        let mut got = 0usize;
+        let ok = unsafe { ReadProcessMemory(h, addr, buf.as_mut_ptr(), buf.len(), &mut got) };
+        if ok == 0 || got == 0 {
+            return None;
+        }
+        let end = buf[..got].iter().position(|&c| c == 0).unwrap_or(got);
+        Some(String::from_utf8_lossy(&buf[..end]).into_owned())
+    };
+
+    println!("\n=== engine probe (PID {}) ===", pid);
+    println!("  Supreme_Game.dll @ {:#010x}", sg);
+
+    let path_ptr = rd32(sg + LEVEL_PATH_PTR_OFF);
+    match path_ptr {
+        Some(0) => println!("  level_path_ptr  = NULL  <- no level path"),
+        Some(p) => println!(
+            "  level_path_ptr  = {:#010x} -> {:?}",
+            p,
+            rdstr(p as usize).unwrap_or_else(|| "<unreadable>".into())
+        ),
+        None => println!("  level_path_ptr  = <read failed>"),
+    }
+    match rd32(sg + ROOT_PTR_OFF) {
+        Some(0) => println!("  root_ptr        = NULL  <- level torn down"),
+        Some(r) => println!("  root_ptr        = {:#010x}", r),
+        None => println!("  root_ptr        = <read failed>"),
+    }
+    match exe {
+        Some(e) => {
+            println!("  Supreme.exe      @ {:#010x}", e);
+            match rd32(e + IN_GAME_OFF) {
+                Some(v) => println!("  game_in_game    = {} (LIVE, not the DLL's copy)", v),
+                None => println!("  game_in_game    = <read failed>"),
+            }
+        }
+        None => println!("  Supreme.exe      = <not found>"),
+    }
+    unsafe { CloseHandle(h) };
+    true
 }
