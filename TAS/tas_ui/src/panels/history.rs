@@ -54,15 +54,32 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
              (~1.5s). Rows are hidden until it is — showing the previous track's\n             entries here would also let you restore one over the live buffer.",
         );
     } else if let Some(code) = level_filter.as_deref() {
+        // Only CLAIM untagged entries are shown when some actually are. The
+        // suffix was unconditional, so it kept advertising a caveat that had
+        // stopped applying — and a caveat you can't turn off reads as "this
+        // filter is approximate", which is the opposite of the truth once every
+        // entry is tagged.
+        let any_untagged = history.entries().iter().any(|e| e.level.is_none());
+        let (text, hover) = if any_untagged {
+            (
+                format!("Level: {} · untagged shown", code),
+                "History is per-level: entries made on this track, plus ones \
+                 marked \"untagged\", which belong to no known track and so \
+                 appear everywhere. Switches with the game.",
+            )
+        } else {
+            (
+                format!("Level: {}", code),
+                "History is per-level: only entries made on this track are listed. \
+                 Switches with the game.",
+            )
+        };
         ui.label(
-            egui::RichText::new(format!("Level: {} · untagged shown", code))
+            egui::RichText::new(text)
                 .size(10.0)
                 .color(egui::Color32::from_gray(120)),
         )
-        .on_hover_text(
-            "History is per-level: only entries made on this track (plus \
-             untagged older ones) are listed. Switches with the game.",
-        );
+        .on_hover_text(hover);
     }
 
     // Inline-rename state (which entry is being edited + its text buffer),
@@ -305,6 +322,35 @@ fn render_row(
                                 .color(egui::Color32::from_gray(120))
                                 .monospace(),
                         );
+                        // UNTAGGED marker. These belong to no known track, so
+                        // they show on EVERY one — which is indistinguishable
+                        // from "this row belongs here" unless we say otherwise.
+                        // That ambiguity is what made a screenful of Forest Easy
+                        // favourites look like a broken filter while on another
+                        // track. Dim and glyph-only: it must not compete with the
+                        // run time, which is what the eye is actually scanning.
+                        // (This layout is right-to-left, so adding it AFTER the
+                        // timestamp places it to the LEFT of it.)
+                        //
+                        // A WORD, not a symbol. The first attempt used "◌"
+                        // (U+25CC), which is not in egui's bundled fonts and
+                        // rendered as a tofu box — a marker nobody can read is
+                        // worse than none, and it took a screenshot to catch,
+                        // since the glyph looked fine in the source. Text also
+                        // matches the header's wording, so the row and the
+                        // summary say the same thing.
+                        if entry.level.is_none() {
+                            ui.label(
+                                egui::RichText::new("untagged")
+                                    .size(9.0)
+                                    .color(egui::Color32::from_gray(105)),
+                            )
+                            .on_hover_text(
+                                "No level tag — this recording is not associated \
+                                 with a track, so it appears in every track's \
+                                 history.",
+                            );
+                        }
                     }
                     ui.with_layout(
                         egui::Layout::left_to_right(egui::Align::Center),
