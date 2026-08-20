@@ -481,6 +481,14 @@ pub fn tas_dll_loaded() -> Option<bool> {
             let end = me.sz_module.iter().position(|&c| c == 0).unwrap_or(0);
             let name = String::from_utf8_lossy(&me.sz_module[..end]).to_lowercase();
             if name == "tas_helper.dll" {
+                // Print WHERE it came from. "Is TAS loaded" is not the whole
+                // question when something is injecting it unasked — the path
+                // says which copy, and therefore who put it there.
+                let pend = me.sz_exe_path.iter().position(|&c| c == 0).unwrap_or(0);
+                println!(
+                    "  (TAS_Helper.dll loaded from {})",
+                    String::from_utf8_lossy(&me.sz_exe_path[..pend])
+                );
                 found = true;
                 break;
             }
