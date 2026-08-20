@@ -405,16 +405,26 @@ fn main() {
             // for the menu-video speed complaint.
             let secs = args.get(2).and_then(|s| s.parse::<u64>().ok());
             let mut cap: Option<u32> = None;
+            let mut region: Option<(i32, i32)> = None;
             let mut i = 2;
             while i < args.len() {
                 if args[i] == "--cap" && i + 1 < args.len() {
                     cap = args[i + 1].parse::<u32>().ok();
                     i += 2;
+                } else if args[i] == "--at" && i + 2 < args.len() {
+                    // `--at X Y`: sample a patch with its top-left THERE, instead
+                    // of auto-picking. For pointing at a specific thing (e.g. the
+                    // background video) rather than whatever moves most.
+                    match (args[i + 1].parse::<i32>(), args[i + 2].parse::<i32>()) {
+                        (Ok(x), Ok(y)) => region = Some((x, y)),
+                        _ => eprintln!("WARNING: --at needs two integers; ignoring"),
+                    }
+                    i += 3;
                 } else {
                     i += 1;
                 }
             }
-            std::process::exit(if video_rate::run_with_cap(secs, cap) { 0 } else { 1 });
+            std::process::exit(if video_rate::run_with_cap(secs, cap, region) { 0 } else { 1 });
         }
         "level-seq" => {
             // Wiring test for the level-context seqlock: proves the DLL actually
