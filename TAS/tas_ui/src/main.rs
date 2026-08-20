@@ -922,10 +922,12 @@ impl TasApp {
     /// we have it, else the last one we were confidently on. See
     /// [`recording::save_dialog_with_segments`] for why this is not read live.
     fn level_for_save(&self) -> Option<&str> {
-        self.shared
-            .as_ref()
-            .and_then(|s| crate::level::resolved_level_code(s.state()))
-            .or(self.last_resolved_level.as_deref())
+        crate::level::level_for_save(
+            self.shared
+                .as_ref()
+                .and_then(|s| crate::level::resolved_level_code(s.state())),
+            self.last_resolved_level.as_deref(),
+        )
     }
 
     /// Single dispatch for a transport `Action`, shared by the keyboard-shortcut

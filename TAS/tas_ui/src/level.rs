@@ -101,6 +101,26 @@ pub fn resolved_level_code(state: &tas_shared::TasSharedState) -> Option<&'stati
     tas_shared::resolved_level_id(state).and_then(level_code_from_id)
 }
 
+/// Which track a recording being SAVED belongs to.
+///
+/// Not the same question as "which track are we on", and the difference is not
+/// academic. The engine stops its cycle for its own post-run "Save attack
+/// player?" dialog, and a frozen cycle means the level reads UNKNOWN — so at
+/// exactly the moment the user finishes a run and reaches for Save, the live
+/// answer is None. Reading live there would strand the recording untagged, and
+/// because the level filter keys off the saved name and folder, that is
+/// permanent.
+///
+/// A recording belongs to the track it was RECORDED on, so fall back to the last
+/// track we were confidently on. `live` still wins when we have it.
+///
+/// Deliberately a free function over two `Option`s rather than a method reading
+/// `self`: the version that read `self` could not be tested without running the
+/// whole app, which is exactly how it stayed unverified.
+pub fn level_for_save<'a>(live: Option<&'a str>, last_known: Option<&'a str>) -> Option<&'a str> {
+    live.or(last_known)
+}
+
 /// The in-race duration of a recording, in centiseconds (= ticks, since the
 /// game runs at exactly 100 ticks/s). Measured from the gate (`first_moving`,
 /// when the character leaves spawn) to the end of the recording — that matches
@@ -184,6 +204,40 @@ mod tests {
     #[test]
     fn default_name_formats_level_and_time() {
         assert_eq!(default_recording_name(Some("FE"), Some(5876)), "FE-5876.tasrec");
+    }
+
+    /// The whole point of the fallback: you finish a run, the engine throws up
+    /// its "Save attack player?" dialog, that FREEZES the cycle, and the live
+    /// level goes unknown — right when you click Save. Without the fallback the
+    /// run you just did is saved untagged, into the root folder, and since the
+    /// level filter keys off the name and folder, it never comes back.
+    #[test]
+    fn save_level_survives_the_post_run_dialog() {
+        // Live is unknown (cycle frozen by the dialog); we were on FM.
+        assert_eq!(level_for_save(None, Some("FM")), Some("FM"));
+        assert_eq!(
+            default_recording_name(level_for_save(None, Some("FM")), Some(5876)),
+            "FM-5876.tasrec",
+            "the recording must keep the track it was made on"
+        );
+    }
+
+    #[test]
+    fn save_level_prefers_live_when_known() {
+        // Live wins — the fallback is only for when we genuinely cannot see.
+        assert_eq!(level_for_save(Some("VH"), Some("FE")), Some("VH"));
+        assert_eq!(level_for_save(Some("VH"), None), Some("VH"));
+    }
+
+    #[test]
+    fn save_level_unknown_degrades_to_time_only() {
+        // Nothing known at all (fresh app, never resolved): a time-only name is
+        // recoverable; a WRONG tag would not be.
+        assert_eq!(level_for_save(None, None), None);
+        assert_eq!(
+            default_recording_name(level_for_save(None, None), Some(5876)),
+            "5876.tasrec"
+        );
     }
 
     #[test]
