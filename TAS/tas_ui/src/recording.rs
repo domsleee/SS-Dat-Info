@@ -96,6 +96,19 @@ pub struct RecoverySessionContext {
     pub start_tick: u32,
     pub end_tick: u32,
     pub label: String,
+    /// The track this recording was made on, captured while RECORDING.
+    ///
+    /// A recovered checkpoint is pushed into history during app startup, before
+    /// anything has read the live level — so it was always stamped untagged, and
+    /// untagged entries show on EVERY track. Since recovered entries are also
+    /// pinned, the visible result was "my favourites from Forest Easy are
+    /// showing while I'm on Forest Medium", which is the exact bug report this
+    /// whole line of work started from. The level is known when the checkpoint
+    /// is written, so it is carried here rather than re-derived later.
+    ///
+    /// `serde(default)` so checkpoints written before this field still load.
+    #[serde(default)]
+    pub level: Option<String>,
 }
 
 impl RecoverySessionContext {
@@ -106,7 +119,15 @@ impl RecoverySessionContext {
             start_tick,
             end_tick,
             label,
+            level: None,
         })
+    }
+
+    /// Record which track this is, for when the checkpoint comes back as a
+    /// history entry. See the `level` field.
+    pub fn with_level(mut self, level: Option<&str>) -> Self {
+        self.level = level.map(str::to_string);
+        self
     }
 }
 
@@ -1166,6 +1187,24 @@ impl RecordingHistory {
     /// The stable id of the current (selected) entry, if any.
     pub fn current_entry_id(&self) -> Option<u64> {
         self.current_index.map(|i| self.entries[i].entry_id)
+    }
+
+    /// Tag an entry with the track it belongs to.
+    ///
+    /// For recovered checkpoints, which carry their level from when they were
+    /// RECORDED — at restore time (app startup) the live level is not known yet.
+    /// A `None` level leaves the entry untagged, i.e. visible everywhere, which
+    /// is the honest state when the checkpoint predates level stamping.
+    pub fn set_level(&mut self, entry_id: u64, level: Option<String>) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.level == level {
+            return false;
+        }
+        e.level = level;
+        self.bump();
+        true
     }
 
     pub fn set_pinned(&mut self, entry_id: u64, pinned: bool) -> bool {
@@ -2709,6 +2748,71 @@ mod tests {
             h.restore_index(1).is_none(),
             "must refuse every entry while the track is unknown"
         );
+    }
+
+    /// A RECOVERED recording must not haunt every other track.
+    ///
+    /// This is the reported bug, traced to its actual cause. Recovered
+    /// checkpoints are pushed into history during app STARTUP, before anything
+    /// has read the live level, so `push_*` stamped them untagged — and
+    /// untagged means visible on every track. Recovery also pins them, and
+    /// pinned entries float to the top of their day. So the user's Forest Easy
+    /// favourites sat at the top of the list while they were on Forest Medium.
+    ///
+    /// In the real history this was 16 of the 20 untagged entries — every one
+    /// of them pinned. The fix carries the level in the checkpoint, from when it
+    /// was recorded; this pins the behaviour that fix must produce.
+    #[test]
+    fn a_recovered_entry_is_tagged_and_does_not_leak_across_tracks() {
+        let mut h = RecordingHistory::new(8);
+
+        // Startup: nothing knows the level yet. This is the real ordering — the
+        // recovery push happens in the constructor, before any level sync.
+        h.set_live_level(None);
+        let mut snap = RecordingSnapshot::new_empty();
+        snap.recorded_count = 10;
+        h.push_snapshot_data(snap, "⟲");
+        let id = h.entries().last().unwrap().entry_id;
+        assert_eq!(
+            h.entries().last().unwrap().level,
+            None,
+            "precondition: the push itself cannot know the level"
+        );
+
+        // The checkpoint knew: it was recorded on FE.
+        h.set_level(id, Some("FE".to_string()));
+        h.set_pinned(id, true);
+
+        // On Forest Medium it must be gone — pinning must not exempt it.
+        h.set_live_level(Some("FM"));
+        let idx = h.entries().iter().position(|e| e.entry_id == id).unwrap();
+        assert!(
+            !h.entry_on_current_level(idx),
+            "a recovered FE recording must not show (or restore) on FM, pinned or not"
+        );
+        assert!(h.restore_index(idx).is_none());
+
+        // Back on FE it is available again.
+        h.set_live_level(Some("FE"));
+        assert!(h.entry_on_current_level(idx));
+        assert!(h.restore_index(idx).is_some());
+    }
+
+    /// A checkpoint written before the level was carried still loads, and stays
+    /// visible everywhere — the honest state for one we genuinely cannot place.
+    #[test]
+    fn a_recovered_entry_with_no_recorded_level_stays_untagged() {
+        let mut h = RecordingHistory::new(8);
+        h.set_live_level(None);
+        let mut snap = RecordingSnapshot::new_empty();
+        snap.recorded_count = 10;
+        h.push_snapshot_data(snap, "⟲");
+        let id = h.entries().last().unwrap().entry_id;
+
+        assert!(!h.set_level(id, None), "no-op when there is nothing to set");
+        h.set_live_level(Some("VH"));
+        let idx = h.entries().iter().position(|e| e.entry_id == id).unwrap();
+        assert!(h.entry_on_current_level(idx));
     }
 
     /// Untagged entries stay restorable everywhere, deliberately.
