@@ -147,6 +147,124 @@ fn focus_game_and_rect() -> Option<Rect> {
     }
 }
 
+/// A reusable GDI capture surface, so probing many patches costs one setup.
+struct Grabber {
+    screen: Handle,
+    mem: Handle,
+    bmp: Handle,
+    old: Handle,
+    bi: BitmapInfo,
+    buf: Vec<u8>,
+}
+
+impl Grabber {
+    fn new() -> Self {
+        unsafe {
+            let screen = GetDC(GetDesktopWindow());
+            let mem = CreateCompatibleDC(screen);
+            let bmp = CreateCompatibleBitmap(screen, PATCH_W, PATCH_H);
+            let old = SelectObject(mem, bmp);
+            Grabber {
+                screen,
+                mem,
+                bmp,
+                old,
+                bi: BitmapInfo {
+                    header: BitmapInfoHeader {
+                        size: std::mem::size_of::<BitmapInfoHeader>() as u32,
+                        width: PATCH_W,
+                        height: -PATCH_H, // top-down; only consistency matters
+                        planes: 1,
+                        bit_count: 32,
+                        compression: 0,
+                        size_image: 0,
+                        x_ppm: 0,
+                        y_ppm: 0,
+                        clr_used: 0,
+                        clr_important: 0,
+                    },
+                    colors: [0; 3],
+                },
+                buf: vec![0u8; (PATCH_W * PATCH_H * 4) as usize],
+            }
+        }
+    }
+
+    fn hash_at(&mut self, x: i32, y: i32) -> u64 {
+        unsafe {
+            BitBlt(self.mem, 0, 0, PATCH_W, PATCH_H, self.screen, x, y, SRCCOPY);
+            GetDIBits(
+                self.mem,
+                self.bmp,
+                0,
+                PATCH_H as u32,
+                self.buf.as_mut_ptr(),
+                &mut self.bi,
+                DIB_RGB_COLORS,
+            );
+        }
+        fnv1a(&self.buf)
+    }
+}
+
+impl Drop for Grabber {
+    fn drop(&mut self) {
+        unsafe {
+            SelectObject(self.mem, self.old);
+            DeleteObject(self.bmp);
+            DeleteDC(self.mem);
+            ReleaseDC(GetDesktopWindow(), self.screen);
+        }
+    }
+}
+
+/// Probe a grid over the window and return the origin of the patch that changes
+/// most — i.e. where the video actually is, rather than where we assumed.
+fn pick_liveliest_patch(r: &Rect) -> (i32, i32) {
+    const COLS: i32 = 5;
+    const ROWS: i32 = 4;
+    const PROBE_MS: u64 = 420;
+
+    let w = r.right - r.left;
+    let h = r.bottom - r.top;
+    let mut best = (r.left + w / 2 - PATCH_W / 2, r.top + h / 2 - PATCH_H / 2);
+    let mut best_changes = -1i32;
+    let mut g = Grabber::new();
+
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            // Spread patch CENTRES evenly, then clamp so none hangs off-window.
+            let cx = r.left + (w * (2 * col + 1)) / (2 * COLS) - PATCH_W / 2;
+            let cy = r.top + (h * (2 * row + 1)) / (2 * ROWS) - PATCH_H / 2;
+            let cx = cx.clamp(r.left, r.right - PATCH_W);
+            let cy = cy.clamp(r.top, r.bottom - PATCH_H);
+
+            let mut last = g.hash_at(cx, cy);
+            let mut changes = 0i32;
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_millis(PROBE_MS) {
+                let hh = g.hash_at(cx, cy);
+                if hh != last {
+                    last = hh;
+                    changes += 1;
+                }
+            }
+            if changes > best_changes {
+                best_changes = changes;
+                best = (cx, cy);
+            }
+        }
+    }
+    println!(
+        "  liveliest patch: ({},{})  [{} changes in {}ms while probing a {}x{} grid]",
+        best.0, best.1, best_changes, PROBE_MS, COLS, ROWS
+    );
+    if best_changes == 0 {
+        eprintln!("  WARNING: nothing on screen changed anywhere — there is no video to measure.");
+    }
+    best
+}
+
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
@@ -167,7 +285,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// present cap, though NOT the other half of the story — the 1 ms system timer
 /// the tooling raises, which is what sped sr.dll's Sleep-limiter up in the first
 /// place. Measuring that half needs a game that can run without the DLL.
-pub fn run_with_cap(secs: Option<u64>, cap: Option<u32>) -> bool {
+pub fn run_with_cap(secs: Option<u64>, cap: Option<u32>, region: Option<(i32, i32)>) -> bool {
     if let Some(c) = cap {
         match tas_shared::TasSharedMemoryClient::open() {
             Ok(mut client) => {
@@ -189,10 +307,14 @@ pub fn run_with_cap(secs: Option<u64>, cap: Option<u32>) -> bool {
             }
         }
     }
-    run(secs)
+    run_region(secs, region)
 }
 
 pub fn run(secs: Option<u64>) -> bool {
+    run_region(secs, None)
+}
+
+pub fn run_region(secs: Option<u64>, region: Option<(i32, i32)>) -> bool {
     let observe = Duration::from_secs(secs.unwrap_or(6).max(1));
 
     let Some(r) = focus_game_and_rect() else {
@@ -203,10 +325,31 @@ pub fn run(secs: Option<u64>) -> bool {
         );
         return false;
     };
-    // Centre of the window: the menu video plays behind everything, so the
-    // middle is where motion is guaranteed. Static UI would read as 0 fps.
-    let cx = (r.left + r.right) / 2 - PATCH_W / 2;
-    let cy = (r.top + r.bottom) / 2 - PATCH_H / 2;
+    // FIND THE MOVING PART OF THE PICTURE. Do not assume where it is.
+    //
+    // The first version sampled the window's centre on the theory that "the
+    // video plays behind everything, so the middle must be moving". On the
+    // Arcade menu the centre lands squarely on the Pipe/Air BUTTONS — static UI
+    // — while the actual video (a snowboarder) is up in the top right. It still
+    // produced plausible-looking numbers, because button edges and a sliver of
+    // sky change a bit, so nothing flagged that the measurement was pointed at
+    // the wrong thing. A metric that silently measures the wrong pixels is worse
+    // than one that fails.
+    //
+    // So: probe a grid, and pick the patch that actually changes the most. The
+    // chosen coordinates are printed, so the answer to "what did you measure?"
+    // is in the output rather than in an assumption.
+    // An explicit region wins over the auto-pick: "liveliest" is not always the
+    // thing you mean. On the Arcade menu the liveliest patch is the animated
+    // logo strip, while the background VIDEO — the snowboarder — is elsewhere
+    // and is what the complaint is actually about.
+    let (cx, cy) = match region {
+        Some((x, y)) => {
+            println!("  region: ({},{}) — explicitly requested", x, y);
+            (x, y)
+        }
+        None => pick_liveliest_patch(&r),
+    };
 
     println!("\n=== video-rate: how fast is the picture advancing? ===");
     println!(
