@@ -341,11 +341,13 @@ pub struct TasSharedState {
 
 /// How many times to retry a torn level-context read before giving up.
 ///
-/// The writer's critical section is a few hundred bytes of stores roughly every
-/// 100ms, so a reader that loses 64 races in a row is not racing — the producer
-/// is wedged or dead. Giving up returns UNKNOWN, which every caller treats as
-/// "match nothing", so exhausting the bound fails closed rather than spinning a
-/// UI frame forever.
+/// The writer's critical section is a few hundred bytes of stores, and it only
+/// opens when the level context actually CHANGES — the DLL skips publications
+/// that would write identical values. So the window is both short and rare, and
+/// a reader that loses 64 races in a row is not racing: the producer is wedged
+/// or dead. Giving up returns UNKNOWN, which every caller treats as "match
+/// nothing", so exhausting the bound fails closed rather than spinning a UI
+/// frame forever.
 const LEVEL_CTX_RETRIES: usize = 64;
 
 /// Seqlock acquire over the level-context group (`level_epoch`,
