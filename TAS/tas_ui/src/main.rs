@@ -577,6 +577,7 @@ impl TasApp {
                 Ok(Some(cp)) => {
                     let session_label = cp.session.label.clone();
                     let (start, end) = (cp.session.start_tick, cp.session.end_tick);
+                    let cp_level = cp.session.level.clone();
                     if history.push_snapshot_data_with_session(
                         cp.snapshot,
                         session_label.clone(),
@@ -584,6 +585,14 @@ impl TasApp {
                         end,
                     ) {
                         if let Some(id) = history.entries().last().map(|e| e.entry_id) {
+                            // Restore the track the checkpoint was RECORDED on.
+                            // push_* stamps from the live level, which is None
+                            // here — we are still in the constructor, before any
+                            // level sync — so without this every recovered entry
+                            // lands untagged AND pinned, i.e. permanently
+                            // floating at the top of every track's history. That
+                            // is the "my favourited FE runs show on FM" report.
+                            history.set_level(id, cp_level);
                             history.set_pinned(id, true);
                             // Mark recovery with a compact ⟲ glyph and let the
                             // panel render the duration via the normal parsed
@@ -1533,6 +1542,10 @@ impl TasApp {
     }
 
     fn update_recording_recovery_progress(&mut self, snapshot: &recording::RecordingSnapshot) {
+        // Stamp the track NOW, while we are recording and can still see it. If
+        // this checkpoint ever comes back, it comes back during startup — when
+        // nothing has read the live level yet — so asking then is too late.
+        let level = self.level_for_save().map(str::to_string);
         let maybe_session = {
             let Some(session) = self.active_recording_session.as_mut() else {
                 return;
@@ -1546,6 +1559,7 @@ impl TasApp {
         };
 
         if let Some(session_context) = maybe_session {
+            let session_context = session_context.with_level(level.as_deref());
             self.persist_recovery_snapshot_if_needed(snapshot, &session_context, false);
         }
     }
