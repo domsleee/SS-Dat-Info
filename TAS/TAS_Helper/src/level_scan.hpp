@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 #include "shared_state.hpp"
+#include "caves/frame_limit.hpp"
 #include "level_path_parse.hpp"
 #include <cstring>
 
@@ -461,6 +462,11 @@ static DWORD WINAPI threadProc(LPVOID param) {
                     s->level_id = (uint32_t)id;
                     s->level_scan_epoch = epochAtScan;
                 });
+                // A level has been identified: from here the menu video becomes
+                // present-locked, so the present cap starts earning its cost.
+                // Installing it LAZILY keeps the fresh menu at native speed —
+                // the hook costs ~12ms/frame there merely by existing.
+                EnsureFrameLimitInstalled(s);
             }
         } else if (epochAtScan != s->level_scan_epoch) {
             // A context we have not identified yet — stay explicitly unknown.

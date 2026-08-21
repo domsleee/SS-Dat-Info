@@ -78,8 +78,33 @@ inline BOOL WINAPI SwapBuffers_Detour(HDC hdc) {
     return g_swapHook.stdcall<BOOL, HDC>(hdc);
 }
 
+// The throttle Sleeps, so it is only as accurate as the system timer. At the
+// default ~15.6 ms granularity every wait rounds UP to the next quantum, and the
+// cap lands nowhere near its target: cap=20 (50 ms) measured 62.4 ms = 4 quanta
+// = 16 fps, cap=34 (29.4 ms) measured 31.2 ms = 2 quanta. Every observed present
+// interval was a multiple of 15.6 ms, which is the signature.
+//
+// Raising the resolution to 1 ms makes Sleep accurate and the cap mean what it
+// says. This must be done from INSIDE the game process: Windows 10 2004+/11
+// made timeBeginPeriod PER-PROCESS, which is also why tas_ui raising it no
+// longer affects the game (and why the original 2x stopped reproducing).
+//
+// Loaded dynamically so the project needs no new link dependency.
+inline HMODULE g_winmm = nullptr;
+inline void RaiseTimerResolution() {
+    if (g_winmm) return;
+    g_winmm = LoadLibraryA("winmm.dll");
+    if (!g_winmm) return;
+    using TimeFn = MMRESULT(WINAPI*)(UINT);
+    auto begin = (TimeFn)GetProcAddress(g_winmm, "timeBeginPeriod");
+    if (begin) {
+        begin(1);
+        Log("FrameLimit: timer resolution raised to 1ms (Sleep-accurate throttle)");
+    }
+}
 inline bool InstallFrameLimit(TasSharedState* state) {
     g_flState = state;
+    RaiseTimerResolution();
     QueryPerformanceFrequency(&g_qpcFreq);
 
     HMODULE gdi = GetModuleHandleA("gdi32.dll");
@@ -101,4 +126,25 @@ inline bool InstallFrameLimit(TasSharedState* state) {
     Log(std::format("FrameLimit: gdi32!SwapBuffers hooked at {:p} (menu_fps_cap={})",
         (void*)fn, state->menu_fps_cap));
     return true;
+}
+
+// Install on FIRST USE rather than at DLL init.
+//
+// Measured: the hook costs ~12 ms per frame on the FRESH main menu merely by
+// existing (48.5 ms without it, 59.9 ms with it even at cap=0, so it is not the
+// throttle). But it is genuinely needed AFTER a level round-trip, where the menu
+// video becomes present-locked and runs at 64 fps against a native 20.
+//
+// Those two facts only reconcile if the hook is absent until a level has
+// actually been loaded. Before that it can do nothing useful, and it demonstrably
+// does harm. `levelscan` calls this the first time it identifies a track.
+inline bool g_frameLimitInstalled = false;
+inline void EnsureFrameLimitInstalled(TasSharedState* state) {
+    if (g_frameLimitInstalled) return;
+    g_frameLimitInstalled = true;   // set first: never retry a failed install
+    if (InstallFrameLimit(state)) {
+        Log("FrameLimit: installed on first level load (menu video is present-locked after this)");
+    } else {
+        Log("FrameLimit: first-level-load install FAILED");
+    }
 }

@@ -452,7 +452,7 @@ public:
         // Sleep-based menu limiter to ~68 fps = the "2x menu video"). Engaged
         // only while the engine cycle is frozen (menu/pause); gameplay + CONT
         // are untouched. Set 0 via shared memory to disable.
-        state->menu_fps_cap = 34;
+        state->menu_fps_cap = 20;
         // Start EQUAL: at init nothing has been identified yet, and level_id is
         // already 0xFFFFFFFF, so "trustworthy but unknown" is the honest state
         // (we are at the menu / not yet scanned) rather than "resolving".
