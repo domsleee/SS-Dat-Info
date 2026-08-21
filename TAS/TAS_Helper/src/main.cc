@@ -43,7 +43,18 @@ void run() {
     bool cave1d_ok = InstallCave1D(g_addr, state);
     bool cave1c_ok = InstallCave1C(g_addr, state);
     bool cave2_ok = InstallCave2(g_addr, state);
-    bool cave5_ok = InstallCave5(g_addr, state);
+    // TAS_NO_CAVE5=1 skips the tick-override hook. An A/B switch in the same
+    // spirit as TAS_NO_LEVELSCAN / TAS_NO_RACETIMER, added because cave5's site
+    // (EXE+0x25C81) sits inside the POST-LEVEL MENU dispatcher, not only in
+    // gameplay — so it is the prime suspect for the menu video misbehaving only
+    // after a level round-trip.
+    char nc5[8] = {};
+    bool cave5_ok = false;
+    if (GetEnvironmentVariableA("TAS_NO_CAVE5", nc5, sizeof(nc5)) > 0 && nc5[0] == '1') {
+        Log("  Cave 5: SKIPPED (TAS_NO_CAVE5=1)");
+    } else {
+        cave5_ok = InstallCave5(g_addr, state);
+    }
     // OFF BY DEFAULT — measured to cost more than it fixes.
     //
     // This hook exists for the "2x menu video" bug: tas_ui raised the system
