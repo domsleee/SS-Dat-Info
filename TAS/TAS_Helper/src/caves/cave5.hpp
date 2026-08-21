@@ -73,6 +73,82 @@ static constexpr uint32_t CAVE5_TICK_ADVANCE_OPERANDS[] = {
     0x25CE2, 0x25D8B, 0x25DB4, 0x25E2D,
 };
 
+// Tracks the ORIGINAL protection of every .text page InstallCave5 opens, so it
+// can hand each one back exactly as it found it.
+//
+// One shared record for ALL of cave5's code patches, because they overlap:
+// three of the four fmul operands and the `cmp esi,14h` clamp byte all live on
+// page 0x425000. VirtualProtect reports the protection AT THE TIME OF THE CALL,
+// so the second call on a page reports back the PAGE_EXECUTE_READWRITE the first
+// one installed — only the first observation of a page is the truth, and that is
+// the one kept here.
+//
+// This matters more than "don't leave .text writable". The clamp patch below used
+// PAGE_READWRITE, which drops EXECUTE. On this game it is survivable only because
+// a 1999 binary has no /NXCOMPAT bit and so runs with DEP off; with DEP enforced,
+// leaving a code page PAGE_READWRITE means the next instruction fetched from it
+// faults. Restoring properly costs nothing and removes the whole question.
+struct Cave5CodePages {
+    static constexpr size_t kMax = 8;
+    uintptr_t base[kMax] = {};
+    DWORD original[kMax] = {};
+    size_t count = 0;
+    size_t pageSize = 0;
+
+    size_t PageSize() {
+        if (!pageSize) {
+            SYSTEM_INFO si{};
+            GetSystemInfo(&si);
+            pageSize = si.dwPageSize ? si.dwPageSize : 0x1000;
+        }
+        return pageSize;
+    }
+
+    // Make [addr, addr+len) writable+executable, remembering each page's
+    // protection the first time we see it.
+    bool Open(void* addr, size_t len) {
+        const size_t ps = PageSize();
+        uintptr_t first = (uintptr_t)addr & ~(uintptr_t)(ps - 1);
+        uintptr_t last = ((uintptr_t)addr + len - 1) & ~(uintptr_t)(ps - 1);
+        for (uintptr_t pg = first; pg <= last; pg += ps) {
+            bool seen = false;
+            for (size_t i = 0; i < count; ++i) {
+                if (base[i] == pg) { seen = true; break; }
+            }
+            if (!seen && count >= kMax) return false;
+            DWORD old = 0;
+            if (!VirtualProtect((void*)pg, ps, PAGE_EXECUTE_READWRITE, &old)) return false;
+            if (!seen) {
+                base[count] = pg;
+                original[count] = old;
+                ++count;
+            }
+        }
+        return true;
+    }
+
+    // Flush the icache (VirtualProtect does not) and put every page back.
+    void CloseAll() {
+        const size_t ps = PageSize();
+        for (size_t i = 0; i < count; ++i) {
+            FlushInstructionCache(GetCurrentProcess(), (void*)base[i], ps);
+            DWORD ignored = 0;
+            VirtualProtect((void*)base[i], ps, original[i], &ignored);
+        }
+        count = 0;
+    }
+};
+
+inline Cave5CodePages g_cave5CodePages{};
+
+// Set once the operand redirect is actually live, so UninstallCave5 knows
+// whether there is anything to undo. The patched instructions hold the absolute
+// address of a float inside THIS DLL: if the DLL were ever unloaded without
+// putting the original operand back, four instructions in the game's hot loop
+// would dereference freed memory on the very next frame.
+inline bool g_cave5RedirectApplied = false;
+inline uint8_t* g_cave5ExeBase = nullptr;
+
 // Documented default per-tick time advance — used only as a fallback if we
 // somehow can't read the live value during init.
 static constexpr float TICK_ADVANCE_DEFAULT = 0.01f;
@@ -280,8 +356,19 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
     // escape-speedup) was reading a hardcoded zero. It is the only external
     // signal of how fast the game is SIMULATING rather than rendering, which is
     // exactly what a fast-forward regression changes and a frame counter cannot see.
+    //
+    // Count what the game will actually RUN, not what we asked for: the tick
+    // loop bounds itself with ebx, which the clamp caps at CAVE5_PER_FRAME_TICK_CAP.
+    // esi above that is demand the game discards, and counting it would overstate
+    // the simulation rate — reachable today only via force_fixed_tick > 64, but
+    // this counter exists to answer "how fast is it simulating", so it should not
+    // lie in the one case a test could set up.
     if (auto* sp = g_cave5State) {
-        sp->tick_count += (uint32_t)ctx.esi;
+        uint32_t emitted = (uint32_t)ctx.esi;
+        if (emitted > (uint32_t)CAVE5_PER_FRAME_TICK_CAP) {
+            emitted = (uint32_t)CAVE5_PER_FRAME_TICK_CAP;
+        }
+        sp->tick_count += emitted;
     }
 
     __asm { frstor [fpu_buf] }
@@ -322,7 +409,6 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     g_privateTickAdvance = g_nativeTickAdvance;
     static const uint8_t kFmulTickAdvance[6] = { 0xD8, 0x0D, 0x08, 0xDB, 0x46, 0x00 };
     bool redirected = true;
-    DWORD savedProt[4] = {};
     char nrd[8] = {};
     if (GetEnvironmentVariableA("TAS_NO_REDIRECT", nrd, sizeof(nrd)) > 0 && nrd[0] == '1') {
         redirected = false;
@@ -331,19 +417,15 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
 
     // Pass 1: unprotect and verify.
     const size_t kSiteCount = sizeof(CAVE5_TICK_ADVANCE_OPERANDS) / sizeof(uint32_t);
-    size_t unprotected = 0;
     for (size_t i = 0; i < kSiteCount && redirected; ++i) {
         uint32_t rva = CAVE5_TICK_ADVANCE_OPERANDS[i];
         uint8_t* insn = exeBase + rva - 2;
-        DWORD prot = 0;
-        if (!VirtualProtect(insn, sizeof(kFmulTickAdvance), PAGE_EXECUTE_READWRITE, &prot)) {
+        if (!g_cave5CodePages.Open(insn, sizeof(kFmulTickAdvance))) {
             Log(std::format("Cave 5: VirtualProtect on fmul at EXE+0x{:X} FAILED (err={})",
                             rva - 2, GetLastError()));
             redirected = false;
             break;
         }
-        savedProt[i] = prot;
-        unprotected = i + 1;
         if (memcmp(insn, kFmulTickAdvance, sizeof(kFmulTickAdvance)) != 0) {
             Log(std::format("Cave 5: fmul at EXE+0x{:X} is not the expected instruction; not redirecting",
                             rva - 2));
@@ -354,37 +436,28 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
 
     // Pass 2: commit.
     //
-    // The game loop is running on another thread and may be executing these very
-    // instructions right now, and the operand sits at 2 mod 4 - so a plain store
-    // could in principle be observed torn, and a torn POINTER is not a stale
-    // value, it is a garbage address the fmul would then dereference. Use a
-    // lock-prefixed exchange: on x86 that is atomic even when the access crosses
-    // an alignment boundary (the CPU takes a split lock - slow, but this is
-    // four one-time stores at init). Every reader therefore sees either the old
-    // address or the new one, and at this instant both hold 0.01, because
-    // g_privateTickAdvance was just seeded from the game's own value.
+    // The game loop runs on another thread and may be executing these very
+    // instructions right now. The operands are unaligned (0x25CE2/0x25D8B/
+    // 0x25DB4/0x25E2D are 2/3/0/1 mod 4), so a plain store is not guaranteed to
+    // be observed as one write — and a torn value here is not a stale number, it
+    // is half of one address and half of another, i.e. a garbage pointer the fmul
+    // would dereference. A lock-prefixed exchange removes the question.
+    //
+    // Strictly, the Interlocked* contract asks for an aligned LONG, so this leans
+    // on the x86 lowering rather than the API guarantee: MSVC emits `lock xchg`,
+    // which x86 performs atomically at any alignment. That is a safe thing to
+    // lean on in a DLL that is already 32-bit-x86-only and full of raw opcode
+    // patches. (None of the four crosses a cache line, so no split lock is even
+    // needed here — the lock prefix is belt-and-braces.) Every reader therefore
+    // sees either the old address or the new one, and at this instant both hold
+    // 0.01, because g_privateTickAdvance was seeded from the game's own value.
     if (redirected) {
         LONG target = (LONG)(uintptr_t)&g_privateTickAdvance;
         for (uint32_t rva : CAVE5_TICK_ADVANCE_OPERANDS) {
             InterlockedExchange((volatile LONG*)(exeBase + rva), target);
         }
-    }
-
-    // Flush the instruction cache for the four sites (VirtualProtect does not do
-    // it), then put the original page protection back rather than leaving .text
-    // writable and executable for the life of the process. Done for every site we
-    // unprotected, including on the failure path where nothing was written.
-    //
-    // IN REVERSE, and that matters: all four sites live on the SAME page
-    // (0x25CE0..0x25E2B), so only savedProt[0] holds the real original - every
-    // later call reported back the PAGE_EXECUTE_READWRITE the previous one had
-    // just installed. Restoring forwards would finish by re-applying RWX and
-    // leave .text more permissive than we found it.
-    for (size_t i = unprotected; i-- > 0; ) {
-        uint8_t* insn = exeBase + CAVE5_TICK_ADVANCE_OPERANDS[i] - 2;
-        FlushInstructionCache(GetCurrentProcess(), insn, sizeof(kFmulTickAdvance));
-        DWORD ignored = 0;
-        VirtualProtect(insn, sizeof(kFmulTickAdvance), savedProt[i], &ignored);
+        g_cave5RedirectApplied = true;
+        g_cave5ExeBase = exeBase;
     }
 
     if (redirected) {
@@ -415,10 +488,11 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     {
         uint8_t* cmp_imm = exeBase + 0x25C83;
         uint8_t* mov_imm = exeBase + 0x26001;
-        DWORD cmpProtect = 0;
-        DWORD movProtect = 0;
-        bool cmp_ok = VirtualProtect(cmp_imm, 1, PAGE_READWRITE, &cmpProtect) != 0;
-        bool mov_ok = VirtualProtect(mov_imm, 1, PAGE_READWRITE, &movProtect) != 0;
+        // Same page record as the operand redirect above: cmp_imm shares page
+        // 0x425000 with three of the four fmuls, so its own VirtualProtect would
+        // report back OUR RWX rather than the game's original protection.
+        bool cmp_ok = g_cave5CodePages.Open(cmp_imm, 1);
+        bool mov_ok = g_cave5CodePages.Open(mov_imm, 1);
         if (cmp_ok && mov_ok) {
             // Sanity-check current values before clobbering — refuse to patch
             // if the game's bytes drifted from what we expect (defends against
@@ -439,9 +513,17 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
                 "Cave 5: VirtualProtect on tick clamp bytes FAILED (cmp_ok={} mov_ok={} err={})",
                 cmp_ok, mov_ok, GetLastError()));
         }
-        // Leave page RW — restoring protection on a 1-byte slice would
-        // probably affect surrounding code on the same page anyway.
     }
+
+    // Every code patch is written; hand all touched pages back exactly as we
+    // found them, icache flushed. This used to be "leave page RW" — which not
+    // only left .text writable but, because PAGE_READWRITE drops EXECUTE, left a
+    // code page non-executable. Harmless only because a 1999 binary carries no
+    // /NXCOMPAT bit and so runs with DEP off; not something to keep relying on.
+    //
+    // Done BEFORE create_mid so SafetyHook does its own protect/patch/restore on
+    // normally-protected pages, exactly as it expects to.
+    g_cave5CodePages.CloseAll();
 
     Log(std::format("Cave 5: hooking tick override at {:p} (EXE+0x25C81)", (void*)addr.cave5_site));
 
@@ -455,4 +537,31 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     state->cave5_hooked = 1;
     Log("Cave 5: hook installed successfully");
     return true;
+}
+
+// Put the game's own operand back, so the redirect cannot outlive this DLL.
+//
+// The four patched instructions hold the absolute address of a float in our
+// image. Unloading without undoing that leaves the game's hot loop dereferencing
+// freed memory on its very next frame — a guaranteed crash, and one that would
+// look like it came from anywhere but here. Nothing unloads TAS_Helper today,
+// but DllMain already handles DLL_PROCESS_DETACH, so wiring this up costs one
+// call and removes the trap.
+inline void UninstallCave5() {
+    if (!g_cave5RedirectApplied || !g_cave5ExeBase) return;
+
+    // Point cave5's writes back at the game constant FIRST: after this the
+    // callback can no longer publish anything to the private float, whichever
+    // order the remaining stores land in.
+    g_tickAdvancePtr = (float*)(g_cave5ExeBase + 0x6DB08);
+
+    const LONG original = (LONG)0x0046DB08;
+    for (uint32_t rva : CAVE5_TICK_ADVANCE_OPERANDS) {
+        uint8_t* operand = g_cave5ExeBase + rva;
+        if (!g_cave5CodePages.Open(operand, sizeof(LONG))) continue;
+        InterlockedExchange((volatile LONG*)operand, original);
+    }
+    g_cave5CodePages.CloseAll();
+    g_cave5RedirectApplied = false;
+    Log("Cave 5: tick-advance operands restored to the game's own constant");
 }
