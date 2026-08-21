@@ -35,6 +35,9 @@ inline SafetyHookInline g_swapHook{};
 inline LARGE_INTEGER    g_qpcFreq{};
 inline LONGLONG         g_lastPresentQpc = 0;
 
+// Defined below (it needs g_qpcFreq); declared here so the detour can call it.
+inline void PreciseWaitUntil(LONGLONG targetQpc);
+
 inline BOOL WINAPI SwapBuffers_Detour(HDC hdc) {
     auto* s = g_flState;
     if (s) {
@@ -61,12 +64,8 @@ inline BOOL WINAPI SwapBuffers_Detour(HDC hdc) {
             QueryPerformanceCounter(&now);
             LONGLONG elapsed = now.QuadPart - g_lastPresentQpc;
             if (g_lastPresentQpc != 0 && elapsed >= 0 && elapsed < minTicks) {
-                // Sleep the bulk (coarse), then spin the final <1 ms for accuracy.
-                LONGLONG remainMs = ((minTicks - elapsed) * 1000) / g_qpcFreq.QuadPart;
-                if (remainMs > 1) Sleep((DWORD)(remainMs - 1));
-                do {
-                    QueryPerformanceCounter(&now);
-                } while (now.QuadPart - g_lastPresentQpc < minTicks);
+                PreciseWaitUntil(g_lastPresentQpc + minTicks);
+                QueryPerformanceCounter(&now);
             }
             g_lastPresentQpc = now.QuadPart;
         } else {
@@ -99,13 +98,83 @@ inline void RaiseTimerResolution() {
     auto begin = (TimeFn)GetProcAddress(g_winmm, "timeBeginPeriod");
     if (begin) {
         begin(1);
-        Log("FrameLimit: timer resolution raised to 1ms (Sleep-accurate throttle)");
+        Log("FrameLimit: timer resolution raised to 1ms (fallback wait path)");
     }
 }
+
+// PREFERRED WAIT: a high-resolution waitable timer, NOT timeBeginPeriod.
+//
+// Accuracy here was a local problem — one Sleep in one hook — and raising the
+// process-wide timer resolution is a global answer to it. That global answer is
+// uncomfortably close to the original bug: a 1 ms timer speeding sr.dll's own
+// Sleep-based limiter is what made the menu video run 2x in the first place. Fix
+// it that way and the menu is only correct because the cap happens to clamp it —
+// with the cap off after a level round-trip it measures 64 fps against a native
+// 20, i.e. the old bug, still there, held back by a throttle.
+//
+// CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (Win10 1803+) gives sub-millisecond
+// waits WITHOUT changing anything process-wide, so the game's Sleep behaviour
+// stays exactly as it is un-injected. timeBeginPeriod remains only as the
+// fallback for an OS that lacks the flag.
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+inline HANDLE g_waitTimer = nullptr;
+inline bool   g_waitTimerHighRes = false;
+
+inline void InitPrecisionWait() {
+    if (g_waitTimer) return;
+    g_waitTimer = CreateWaitableTimerExW(nullptr, nullptr,
+                                         CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                         TIMER_ALL_ACCESS);
+    if (g_waitTimer) {
+        g_waitTimerHighRes = true;
+        Log("FrameLimit: high-resolution waitable timer (process timer untouched)");
+        return;
+    }
+    // No high-res flag on this OS — fall back to the coarse timer plus a raised
+    // process resolution, which is what makes Sleep usable at all.
+    Log("FrameLimit: no high-res timer; falling back to timeBeginPeriod(1)");
+    RaiseTimerResolution();
+}
+
+/// Block until QPC reaches `targetQpc`.
+///
+/// Waits for the bulk minus a margin, then spins the remainder. The margin is
+/// what makes this correct at ANY timer granularity: the old code slept
+/// `remain - 1ms`, which at the default ~15.6 ms quantum ROUNDS UP past the
+/// target, so the following spin exited immediately and every interval landed on
+/// a multiple of 15.6 ms.
+inline void PreciseWaitUntil(LONGLONG targetQpc) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (now.QuadPart >= targetQpc) return;
+
+    if (g_waitTimer) {
+        LONGLONG remain = targetQpc - now.QuadPart;
+        // QPC ticks -> 100ns units. remain is at most one frame, so no overflow.
+        LONGLONG remain100ns = (remain * 10000000LL) / g_qpcFreq.QuadPart;
+        // Leave enough slack to absorb wake-up jitter, then spin the rest.
+        const LONGLONG margin100ns = g_waitTimerHighRes ? 5000LL     // 0.5 ms
+                                                        : 20000LL;   // 2 ms
+        if (remain100ns > margin100ns) {
+            LARGE_INTEGER due;
+            due.QuadPart = -(remain100ns - margin100ns);  // negative = relative
+            if (SetWaitableTimer(g_waitTimer, &due, 0, nullptr, nullptr, FALSE)) {
+                WaitForSingleObject(g_waitTimer, INFINITE);
+            }
+        }
+    }
+    do {
+        QueryPerformanceCounter(&now);
+    } while (now.QuadPart < targetQpc);
+}
+
 inline bool InstallFrameLimit(TasSharedState* state) {
     g_flState = state;
-    RaiseTimerResolution();
     QueryPerformanceFrequency(&g_qpcFreq);
+    InitPrecisionWait();
 
     HMODULE gdi = GetModuleHandleA("gdi32.dll");
     if (!gdi) {
