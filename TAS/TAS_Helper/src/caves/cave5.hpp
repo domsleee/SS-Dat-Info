@@ -308,35 +308,57 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     Log(std::format("Cave 5: native tick advance constant = {}", g_nativeTickAdvance));
 
     // Point the four in-game readers at our own float so that scaling it can
-    // never reach the menu. If any site fails to verify or patch we fall back
-    // to writing the game's constant directly - the old, leaky behaviour, but
-    // working speed control beats silently losing it.
+    // never reach the menu.
+    //
+    // Verify EVERY site before writing ANY of them. A half-applied redirect is
+    // worse than none: the fallback below goes back to writing the game's shared
+    // constant, and any site already redirected would then be stuck reading a
+    // private float that nothing updates again - a frozen tick advance for part
+    // of the tick loop. All four or none.
     g_privateTickAdvance = g_nativeTickAdvance;
+    static const uint8_t kFmulTickAdvance[6] = { 0xD8, 0x0D, 0x08, 0xDB, 0x46, 0x00 };
     bool redirected = true;
     char nrd[8] = {};
     if (GetEnvironmentVariableA("TAS_NO_REDIRECT", nrd, sizeof(nrd)) > 0 && nrd[0] == '1') {
         redirected = false;
         Log("  Cave 5: TAS_NO_REDIRECT=1 - keeping the shared game constant");
     }
+
+    // Pass 1: unprotect and verify.
     for (uint32_t rva : CAVE5_TICK_ADVANCE_OPERANDS) {
-        if (!redirected) break;   // TAS_NO_REDIRECT, or an earlier site failed
+        if (!redirected) break;
         uint8_t* insn = exeBase + rva - 2;
-        static const uint8_t kExpected[6] = { 0xD8, 0x0D, 0x08, 0xDB, 0x46, 0x00 };
         DWORD prot = 0;
-        if (!VirtualProtect(insn, 6, PAGE_EXECUTE_READWRITE, &prot)) {
+        if (!VirtualProtect(insn, sizeof(kFmulTickAdvance), PAGE_EXECUTE_READWRITE, &prot)) {
             Log(std::format("Cave 5: VirtualProtect on fmul at EXE+0x{:X} FAILED (err={})",
                             rva - 2, GetLastError()));
             redirected = false;
             break;
         }
-        if (memcmp(insn, kExpected, sizeof(kExpected)) != 0) {
+        if (memcmp(insn, kFmulTickAdvance, sizeof(kFmulTickAdvance)) != 0) {
             Log(std::format("Cave 5: fmul at EXE+0x{:X} is not the expected instruction; not redirecting",
                             rva - 2));
             redirected = false;
             break;
         }
-        uint32_t target = (uint32_t)(uintptr_t)&g_privateTickAdvance;
-        memcpy(exeBase + rva, &target, sizeof(target));
+    }
+
+    // Pass 2: commit.
+    //
+    // The game loop is running on another thread and may be executing these very
+    // instructions right now, and the operand sits at 2 mod 4 - so a plain store
+    // could in principle be observed torn, and a torn POINTER is not a stale
+    // value, it is a garbage address the fmul would then dereference. Use a
+    // lock-prefixed exchange: on x86 that is atomic even when the access crosses
+    // an alignment boundary (the CPU takes a split lock - slow, but this is
+    // four one-time stores at init). Every reader therefore sees either the old
+    // address or the new one, and at this instant both hold 0.01, because
+    // g_privateTickAdvance was just seeded from the game's own value.
+    if (redirected) {
+        LONG target = (LONG)(uintptr_t)&g_privateTickAdvance;
+        for (uint32_t rva : CAVE5_TICK_ADVANCE_OPERANDS) {
+            InterlockedExchange((volatile LONG*)(exeBase + rva), target);
+        }
     }
 
     if (redirected) {
