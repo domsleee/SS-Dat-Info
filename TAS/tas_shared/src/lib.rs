@@ -623,6 +623,19 @@ mod platform {
             }
         }
 
+        /// Volatile read of tick_count (poll-hot field written by DLL).
+        ///
+        /// This is the PHYSICS tick counter (cave5 emits it per frame), not
+        /// the render-frame counter. Anything asking "is the game simulating
+        /// faster than real time?" has to read this one: fast-forward means
+        /// more ticks per frame, and frame_count cannot see that.
+        pub fn tick_count_volatile(&self) -> u32 {
+            unsafe {
+                let ptr = std::ptr::addr_of!((*self.ptr).tick_count);
+                std::ptr::read_volatile(ptr)
+            }
+        }
+
         /// Volatile read of playback_pos (poll-hot field written by DLL).
         pub fn playback_pos_volatile(&self) -> u32 {
             unsafe {
