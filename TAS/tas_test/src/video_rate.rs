@@ -385,6 +385,11 @@ pub fn run_region(secs: Option<u64>, region: Option<(i32, i32)>) -> bool {
     // actually acting on.
     let shm = tas_shared::TasSharedMemoryClient::open().ok();
     let presents_before = shm.as_ref().map(|c| c.state().present_count);
+    // The game's own tick/frame counters. If the menu's animation is advancing
+    // too fast, the question is whether the TICK SOURCE is running fast — which
+    // these answer directly, where the screen metric only shows the consequence.
+    let ticks_before = shm.as_ref().map(|c| c.state().tick_count);
+    let frames_before = shm.as_ref().map(|c| c.state().frame_count);
 
     let mut changes: Vec<Instant> = Vec::with_capacity(4096);
     let mut samples = 0u64;
@@ -474,6 +479,19 @@ pub fn run_region(secs: Option<u64>, region: Option<(i32, i32)>) -> bool {
             presents as f64 / elapsed
         );
         println!("  menu_fps_cap in effect: {}", c.state().menu_fps_cap);
+        if let (Some(t0), Some(f0)) = (ticks_before, frames_before) {
+            let dt = c.state().tick_count.wrapping_sub(t0);
+            let df = c.state().frame_count.wrapping_sub(f0);
+            println!(
+                "  cave5 ticks: {} ({:.1} /s)   cave2 frames: {} ({:.1} /s)   speed={:.2} fixed_tick={}",
+                dt,
+                dt as f64 / elapsed,
+                df,
+                df as f64 / elapsed,
+                c.state().playback_speed,
+                c.state().force_fixed_tick
+            );
+        }
     }
     if !gaps_ms.is_empty() {
         println!(
