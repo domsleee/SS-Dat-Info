@@ -57,7 +57,11 @@ static float* g_tickAdvancePtr = nullptr;
 // bit-identical (those four instructions see exactly the values cave5 writes
 // today); the menu becomes structurally incapable of seeing them, whether the
 // scale came from the drain, from playback_speed, or from anything added later.
-static float g_privateTickAdvance = 0.01f;
+// inline, NOT static: the game code is patched to ONE fixed address, so a second
+// translation unit getting its own copy would mean cave5 updating a different
+// object than the one the patched instructions read. `inline` makes that
+// impossible by definition rather than relying on a link error to catch it.
+inline float g_privateTickAdvance = 0.01f;
 
 // RVAs of the 4-byte operand inside each in-game `fmul dword ptr [0x46db08]`
 // (the instruction itself starts 2 bytes earlier):
@@ -318,6 +322,7 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     g_privateTickAdvance = g_nativeTickAdvance;
     static const uint8_t kFmulTickAdvance[6] = { 0xD8, 0x0D, 0x08, 0xDB, 0x46, 0x00 };
     bool redirected = true;
+    DWORD savedProt[4] = {};
     char nrd[8] = {};
     if (GetEnvironmentVariableA("TAS_NO_REDIRECT", nrd, sizeof(nrd)) > 0 && nrd[0] == '1') {
         redirected = false;
@@ -325,8 +330,10 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     }
 
     // Pass 1: unprotect and verify.
-    for (uint32_t rva : CAVE5_TICK_ADVANCE_OPERANDS) {
-        if (!redirected) break;
+    const size_t kSiteCount = sizeof(CAVE5_TICK_ADVANCE_OPERANDS) / sizeof(uint32_t);
+    size_t unprotected = 0;
+    for (size_t i = 0; i < kSiteCount && redirected; ++i) {
+        uint32_t rva = CAVE5_TICK_ADVANCE_OPERANDS[i];
         uint8_t* insn = exeBase + rva - 2;
         DWORD prot = 0;
         if (!VirtualProtect(insn, sizeof(kFmulTickAdvance), PAGE_EXECUTE_READWRITE, &prot)) {
@@ -335,6 +342,8 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
             redirected = false;
             break;
         }
+        savedProt[i] = prot;
+        unprotected = i + 1;
         if (memcmp(insn, kFmulTickAdvance, sizeof(kFmulTickAdvance)) != 0) {
             Log(std::format("Cave 5: fmul at EXE+0x{:X} is not the expected instruction; not redirecting",
                             rva - 2));
@@ -359,6 +368,23 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
         for (uint32_t rva : CAVE5_TICK_ADVANCE_OPERANDS) {
             InterlockedExchange((volatile LONG*)(exeBase + rva), target);
         }
+    }
+
+    // Flush the instruction cache for the four sites (VirtualProtect does not do
+    // it), then put the original page protection back rather than leaving .text
+    // writable and executable for the life of the process. Done for every site we
+    // unprotected, including on the failure path where nothing was written.
+    //
+    // IN REVERSE, and that matters: all four sites live on the SAME page
+    // (0x25CE0..0x25E2B), so only savedProt[0] holds the real original - every
+    // later call reported back the PAGE_EXECUTE_READWRITE the previous one had
+    // just installed. Restoring forwards would finish by re-applying RWX and
+    // leave .text more permissive than we found it.
+    for (size_t i = unprotected; i-- > 0; ) {
+        uint8_t* insn = exeBase + CAVE5_TICK_ADVANCE_OPERANDS[i] - 2;
+        FlushInstructionCache(GetCurrentProcess(), insn, sizeof(kFmulTickAdvance));
+        DWORD ignored = 0;
+        VirtualProtect(insn, sizeof(kFmulTickAdvance), savedProt[i], &ignored);
     }
 
     if (redirected) {
