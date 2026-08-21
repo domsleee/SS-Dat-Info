@@ -138,6 +138,9 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
         Log("TAS_Helper.dll unloading");
         racetimer::Stop();
         levelscan::Stop();
+        // Must run before the image goes away: cave5 patches four of the game's
+        // instructions to read a float that lives in THIS DLL.
+        UninstallCave5();
         g_sharedMem.Destroy();
         return TRUE;
     }
