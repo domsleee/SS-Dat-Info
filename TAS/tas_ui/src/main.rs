@@ -2935,8 +2935,30 @@ impl eframe::App for TasApp {
 
         self.persist_history_if_needed();
 
-        // Auto-refresh at ~30fps
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        // AUTO-REFRESH, but only as fast as there is something to show.
+        //
+        // Repainting at a flat 30fps costs the GAME about 10ms per menu frame —
+        // measured, and reversible within one session: 48.4ms with tas_ui closed,
+        // 58.4ms with it open, 48.4ms again once closed (3/3 each way). MINIMIZING
+        // tas_ui also removes it completely, which is what identifies our own
+        // RENDERING as the cost rather than the shared-memory polling. Two
+        // processes competing for the GPU, and the game loses ~20% of its menu
+        // video speed to a window that, while idle, is drawing the same pixels.
+        //
+        // So: full rate whenever anything is actually moving — a TAS mode is
+        // armed, or the engine cycle is ticking (in a level) — and a lazy rate
+        // when the game is sitting still at a menu. This does NOT make the UI
+        // feel sluggish: egui repaints immediately on input regardless, so
+        // `request_repaint_after` only sets the IDLE floor.
+        let mode_active = self
+            .shared
+            .as_ref()
+            .map(|s| s.mode_volatile() != TasMode::Off as u32)
+            .unwrap_or(false);
+        let cycle_ticking =
+            self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400);
+        let refresh_ms = if mode_active || cycle_ticking { 33 } else { 250 };
+        ctx.request_repaint_after(std::time::Duration::from_millis(refresh_ms));
     }
 }
 
