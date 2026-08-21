@@ -6,19 +6,29 @@
 //! time, producing a visible speedup that breaks any manual gameplay or
 //! playback that crosses the pause boundary.
 //!
+//! WHICH COUNTER. Fast-forward means the game runs MORE PHYSICS TICKS PER
+//! RENDER FRAME. So the counter that can see it is `tick_count` (cave5 adds
+//! its per-frame tick count to it), not `frame_count` (cave2 bumps that once
+//! per Supreme::Cycle, i.e. once per rendered frame). This test used to judge
+//! on frame_count alone, which measures the render rate — a machine that
+//! renders the pause menu at 163 fps instead of 100 failed it while
+//! simulating perfectly correctly, and a genuine 20-second fast-forward would
+//! have slipped through it unseen. Both are sampled now; the verdict is on
+//! ticks.
+//!
 //! Test sequence:
 //!   1. Game live, not in REC/PLAY mode.
-//!   2. Press Escape → should pause: cave2's frame_count stops incrementing.
-//!   3. Hold pause for 20s.
-//!   4. Press Escape → should resume: frame_count should increment at the
-//!      game's normal rate (~100/s at 1x speed). NOT at a fast-forward
-//!      rate that drains the 20-second backlog.
-//!   5. Hold resume for 5s, sampling frame_count.
+//!   2. Press Escape → should pause: both counters stop incrementing.
+//!   3. Hold pause for 20s (so a fast-forward would owe ~2000 ticks).
+//!   4. Press Escape → should resume at the game's normal ~100 ticks/s.
+//!   5. Hold resume for 5s, sampling every second.
 //!
-//! Pass criterion: the ticker "makes sense" — during the pause window,
-//! frame_count delta stays near zero; during the resume window, frame_count
-//! delta is close to the expected ~500 ticks (5s × ~100tps), not 2000+
-//! (which would indicate fast-forward catchup).
+//! Pass criteria:
+//!   * pause window: tick delta ≈ 0 (pause actually engaged);
+//!   * resume window: ~500 ticks over 5s, not 2000+;
+//!   * FIRST resume second contains no burst — that is where a drained
+//!     backlog would land, and a whole-window total can hide a one-second
+//!     spike inside an otherwise normal average.
 //!
 //! Note on simulated Escape: keybd_event with a hardware scancode is the
 //! best we can do programmatically. If it fails to pause (e.g. focus
@@ -34,15 +44,33 @@ use crate::harness;
 
 const PAUSE_DURATION_SECS: u64 = 20;
 const RESUME_DURATION_SECS: u64 = 5;
-/// Acceptable tick rate during the pause window. With pause working,
-/// frame_count should be essentially flat (<10 ticks total over 20s).
-/// We allow up to 100 to be generous about timing slop.
+/// Acceptable tick count during the pause window. With pause working this is
+/// flat zero; 100 is generous slop for the moment either side of the keypress.
 const MAX_PAUSE_TICKS: u32 = 100;
-/// Resume window expectations: at 1x speed the game runs ~100 ticks/s.
-/// Over 5s that's ~500 ticks. Fast-forward catchup would produce many
-/// thousands. We accept anything below 1.5× normal as "no catchup".
-const RESUME_NORMAL_TICK_MIN: u32 = 200;
-const RESUME_NORMAL_TICK_MAX: u32 = 800;
+/// Resume window expectations: at 1x the game simulates ~100 ticks/s, so 5s is
+/// ~500. Draining a 20s backlog would add up to ~2000 on top. The band is wide
+/// enough to survive a slow frame or two and still nowhere near a catchup.
+const RESUME_NORMAL_TICK_MIN: u32 = 300;
+const RESUME_NORMAL_TICK_MAX: u32 = 900;
+/// A backlog drain lands in the first second after resume. Normal is ~100.
+const MAX_FIRST_SECOND_TICKS: u32 = 250;
+/// Baseline sampled before the pause, so the verdict can compare resume against
+/// how this machine actually runs rather than against a hardcoded 100 ticks/s.
+const BASELINE_SECS: u64 = 4;
+
+/// One sample of both counters, taken as close together as we can manage.
+#[derive(Clone, Copy)]
+struct Sample {
+    ticks: u32,
+    frames: u32,
+}
+
+fn sample(client: &tas_shared::TasSharedMemoryClient) -> Sample {
+    Sample {
+        ticks: client.tick_count_volatile(),
+        frames: client.frame_count_volatile(),
+    }
+}
 
 pub fn run() -> bool {
     println!("=== Escape Pause/Resume Speedup Test ===\n");
@@ -55,8 +83,29 @@ pub fn run() -> bool {
         return false;
     }
 
-    let fc_start = client.frame_count_volatile();
-    println!("  Initial frame_count: {}", fc_start);
+    let start = sample(&client);
+    println!(
+        "  Initial tick_count: {}   frame_count: {}",
+        start.ticks, start.frames
+    );
+
+    // ---- Phase 0: baseline BEFORE any pause ----
+    // Without this the test cannot tell "the pause left the game running fast"
+    // from "the game was running at this rate the whole time" — and those want
+    // completely different fixes.
+    println!("\n--- Phase 0: {}s baseline BEFORE pausing ---", BASELINE_SECS);
+    let base_start = sample(&client);
+    thread::sleep(Duration::from_secs(BASELINE_SECS));
+    let base_end = sample(&client);
+    let base_ticks = base_end.ticks.saturating_sub(base_start.ticks);
+    let base_frames = base_end.frames.saturating_sub(base_start.frames);
+    let base_tps = base_ticks / BASELINE_SECS as u32;
+    println!(
+        "  baseline: {} ticks/s, {} fps ({:.2} ticks per frame)",
+        base_tps,
+        base_frames / BASELINE_SECS as u32,
+        if base_frames > 0 { base_ticks as f64 / base_frames as f64 } else { 0.0 }
+    );
 
     // ---- Phase 1: Pause ----
     println!("\n--- Phase 1: Press Escape (pause) ---");
@@ -66,71 +115,88 @@ pub fn run() -> bool {
     }
     // Give the pause handler a moment to engage
     thread::sleep(Duration::from_millis(250));
-    let fc_at_pause = client.frame_count_volatile();
-    println!("  frame_count after pause sent: {}", fc_at_pause);
+    let at_pause = sample(&client);
+    println!(
+        "  after pause sent: tick_count={}  frame_count={}",
+        at_pause.ticks, at_pause.frames
+    );
 
     println!(
         "\n--- Phase 2: Hold pause for {}s, sampling every second ---",
         PAUSE_DURATION_SECS
     );
-    let mut prev = fc_at_pause;
+    let mut prev = at_pause;
     for second in 1..=PAUSE_DURATION_SECS {
         thread::sleep(Duration::from_secs(1));
-        let now = client.frame_count_volatile();
+        let now = sample(&client);
         println!(
-            "  t={:>2}s  frame_count={}  delta_this_sec={}",
+            "  t={:>2}s  ticks={} (+{})   frames={} (+{})",
             second,
-            now,
-            now.saturating_sub(prev)
+            now.ticks,
+            now.ticks.saturating_sub(prev.ticks),
+            now.frames,
+            now.frames.saturating_sub(prev.frames)
         );
         prev = now;
     }
-    let fc_end_pause = client.frame_count_volatile();
-    let pause_ticks = fc_end_pause.saturating_sub(fc_at_pause);
+    let end_pause = sample(&client);
+    let pause_ticks = end_pause.ticks.saturating_sub(at_pause.ticks);
     println!(
-        "\n  Pause window total: {} ticks over {}s ({} ticks/s)",
+        "\n  Pause window total: {} ticks over {}s ({} ticks/s), {} render frames",
         pause_ticks,
         PAUSE_DURATION_SECS,
-        pause_ticks / PAUSE_DURATION_SECS as u32
+        pause_ticks / PAUSE_DURATION_SECS as u32,
+        end_pause.frames.saturating_sub(at_pause.frames)
     );
 
-    // ---- Phase 2: Resume ----
+    // ---- Phase 3: Resume ----
     println!("\n--- Phase 3: Press Escape (resume) ---");
     if !harness::send_escape() {
         eprintln!("ERROR: Could not send Escape for resume");
         return false;
     }
-    let fc_at_resume = client.frame_count_volatile();
+    let at_resume = sample(&client);
 
     println!(
         "\n--- Phase 4: Hold resume for {}s, sampling every second ---",
         RESUME_DURATION_SECS
     );
-    let mut prev = fc_at_resume;
+    let mut prev = at_resume;
+    let mut first_second_ticks = 0u32;
     for second in 1..=RESUME_DURATION_SECS {
         thread::sleep(Duration::from_secs(1));
-        let now = client.frame_count_volatile();
+        let now = sample(&client);
+        let dt = now.ticks.saturating_sub(prev.ticks);
+        if second == 1 {
+            first_second_ticks = dt;
+        }
         println!(
-            "  t={:>2}s  frame_count={}  delta_this_sec={}",
+            "  t={:>2}s  ticks={} (+{})   frames={} (+{})",
             second,
-            now,
-            now.saturating_sub(prev)
+            now.ticks,
+            dt,
+            now.frames,
+            now.frames.saturating_sub(prev.frames)
         );
         prev = now;
     }
-    let fc_end_resume = client.frame_count_volatile();
-    let resume_ticks = fc_end_resume.saturating_sub(fc_at_resume);
+    let end_resume = sample(&client);
+    let resume_ticks = end_resume.ticks.saturating_sub(at_resume.ticks);
+    let resume_frames = end_resume.frames.saturating_sub(at_resume.frames);
     println!(
-        "\n  Resume window total: {} ticks over {}s ({} ticks/s)",
+        "\n  Resume window total: {} ticks over {}s ({} ticks/s), {} render frames ({} fps)",
         resume_ticks,
         RESUME_DURATION_SECS,
-        resume_ticks / RESUME_DURATION_SECS as u32
+        resume_ticks / RESUME_DURATION_SECS as u32,
+        resume_frames,
+        resume_frames / RESUME_DURATION_SECS as u32
     );
 
     // ---- Phase 5: Verdict ----
     println!("\n=== TICKER VERDICT ===");
     let pause_ok = pause_ticks <= MAX_PAUSE_TICKS;
     let resume_ok = (RESUME_NORMAL_TICK_MIN..=RESUME_NORMAL_TICK_MAX).contains(&resume_ticks);
+    let burst_ok = first_second_ticks <= MAX_FIRST_SECOND_TICKS;
 
     println!(
         "  Pause window:  {} ticks (expected <= {}) — {}",
@@ -139,7 +205,7 @@ pub fn run() -> bool {
         if pause_ok {
             "PASS (game paused)"
         } else {
-            "FAIL (game kept running — pause didn't engage)"
+            "FAIL (game kept ticking — pause didn't engage)"
         }
     );
     println!(
@@ -155,8 +221,18 @@ pub fn run() -> bool {
             "FAIL (ticks too low — game still paused?)"
         }
     );
+    println!(
+        "  First second:  {} ticks (expected <= {}) — {}",
+        first_second_ticks,
+        MAX_FIRST_SECOND_TICKS,
+        if burst_ok {
+            "PASS (no backlog burst)"
+        } else {
+            "FAIL (backlog drained INTO the sim — that is the speedup)"
+        }
+    );
 
-    let pass = pause_ok && resume_ok;
+    let pass = pause_ok && resume_ok && burst_ok;
     if pass {
         println!("\n*** ESCAPE SPEEDUP TEST PASSED: ticker makes sense across pause+resume ***");
     } else {

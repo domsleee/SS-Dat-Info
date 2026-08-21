@@ -33,6 +33,42 @@ static SafetyHookMid cave5Hook{};
 // VirtualProtect'd to PAGE_READWRITE during init so we can write it.
 static float* g_tickAdvancePtr = nullptr;
 
+// The game keeps its per-tick time advance in ONE read-only float at
+// EXE+0x46DB08, and sixteen `fmul dword ptr [0x46db08]` instructions read it.
+// Four of them are in the game-cycle function this cave hooks; the other
+// twelve are the menu. Nothing in the game ever WRITES it - it is a constant,
+// and cave5 writing it was the only thing that ever did.
+//
+// That is what made the menu background video run fast. cave5 scales the
+// constant for speed playback and for the catch-up drain, and relies on its
+// next call to put it back. On the quit-to-level->menu transition there is no
+// next call: the census says cave5 fires ~167 times/second in a level, drains
+// once on the transition (realTick=591, i.e. 5.9s of backlog), and is then
+// NEVER CALLED AGAIN while the menu is up. The scaled value the drain left
+// behind - 5.91 instead of 0.01 - stayed there, twelve menu instructions read
+// it, Menu::Paint derived its animation dt from it, and the video decoder gate
+// (dt >= 0.04s) passed on every rendered frame instead of ~20 times a second.
+// Measured 63 fps of video against a native 20.
+//
+// So: give the four in-game readers a private copy and never touch the game's
+// constant again. The operand is a 4-byte absolute address inside a 6-byte
+// instruction, so this is a same-length rewrite of four immediates - no
+// relocation, no trampoline, nothing to keep in sync. In-game behaviour is
+// bit-identical (those four instructions see exactly the values cave5 writes
+// today); the menu becomes structurally incapable of seeing them, whether the
+// scale came from the drain, from playback_speed, or from anything added later.
+static float g_privateTickAdvance = 0.01f;
+
+// RVAs of the 4-byte operand inside each in-game `fmul dword ptr [0x46db08]`
+// (the instruction itself starts 2 bytes earlier):
+//   +0x25CE0  fmul -> per-tick timestamp offset   (i * advance)
+//   +0x25D89  fmul -> Time::Add(clock,  ticks_run * advance)
+//   +0x25DB2  fmul -> Time::Add(clock2, ticks_demanded * advance)
+//   +0x25E2B  fmul -> prev_time += ticks_demanded * advance   ([ebp+0x0C])
+static constexpr uint32_t CAVE5_TICK_ADVANCE_OPERANDS[] = {
+    0x25CE2, 0x25D8B, 0x25DB4, 0x25E2D,
+};
+
 // Documented default per-tick time advance — used only as a fallback if we
 // somehow can't read the live value during init.
 static constexpr float TICK_ADVANCE_DEFAULT = 0.01f;
@@ -234,6 +270,16 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         }
     }
 
+
+    // Publish the per-frame tick count. tick_count was declared in shared state
+    // but nothing ever wrote it, so every consumer (video-rate's "cave5 ticks",
+    // escape-speedup) was reading a hardcoded zero. It is the only external
+    // signal of how fast the game is SIMULATING rather than rendering, which is
+    // exactly what a fast-forward regression changes and a frame counter cannot see.
+    if (auto* sp = g_cave5State) {
+        sp->tick_count += (uint32_t)ctx.esi;
+    }
+
     __asm { frstor [fpu_buf] }
     auto* s2 = g_cave5State;
     if (s2) {
@@ -261,12 +307,53 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     g_nativeTickAdvance = *g_tickAdvancePtr;
     Log(std::format("Cave 5: native tick advance constant = {}", g_nativeTickAdvance));
 
-    DWORD oldProtect = 0;
-    if (!VirtualProtect(g_tickAdvancePtr, sizeof(float), PAGE_READWRITE, &oldProtect)) {
-        Log(std::format("Cave 5: VirtualProtect on tick advance constant FAILED (err={})", GetLastError()));
-        // Non-fatal: speed scaling won't work but fixed tick still does
+    // Point the four in-game readers at our own float so that scaling it can
+    // never reach the menu. If any site fails to verify or patch we fall back
+    // to writing the game's constant directly - the old, leaky behaviour, but
+    // working speed control beats silently losing it.
+    g_privateTickAdvance = g_nativeTickAdvance;
+    bool redirected = true;
+    char nrd[8] = {};
+    if (GetEnvironmentVariableA("TAS_NO_REDIRECT", nrd, sizeof(nrd)) > 0 && nrd[0] == '1') {
+        redirected = false;
+        Log("  Cave 5: TAS_NO_REDIRECT=1 - keeping the shared game constant");
+    }
+    for (uint32_t rva : CAVE5_TICK_ADVANCE_OPERANDS) {
+        if (!redirected) break;   // TAS_NO_REDIRECT, or an earlier site failed
+        uint8_t* insn = exeBase + rva - 2;
+        static const uint8_t kExpected[6] = { 0xD8, 0x0D, 0x08, 0xDB, 0x46, 0x00 };
+        DWORD prot = 0;
+        if (!VirtualProtect(insn, 6, PAGE_EXECUTE_READWRITE, &prot)) {
+            Log(std::format("Cave 5: VirtualProtect on fmul at EXE+0x{:X} FAILED (err={})",
+                            rva - 2, GetLastError()));
+            redirected = false;
+            break;
+        }
+        if (memcmp(insn, kExpected, sizeof(kExpected)) != 0) {
+            Log(std::format("Cave 5: fmul at EXE+0x{:X} is not the expected instruction; not redirecting",
+                            rva - 2));
+            redirected = false;
+            break;
+        }
+        uint32_t target = (uint32_t)(uintptr_t)&g_privateTickAdvance;
+        memcpy(exeBase + rva, &target, sizeof(target));
+    }
+
+    if (redirected) {
+        g_tickAdvancePtr = &g_privateTickAdvance;
+        Log(std::format("Cave 5: {} in-game tick-advance readers redirected to DLL float at {:p} "
+                        "(game constant at EXE+0x6DB08 left untouched for the menu)",
+                        (int)(sizeof(CAVE5_TICK_ADVANCE_OPERANDS) / sizeof(uint32_t)),
+                        (void*)&g_privateTickAdvance));
     } else {
-        Log(std::format("Cave 5: tick advance constant at {:p} unprotected (was 0x{:X})", (void*)g_tickAdvancePtr, oldProtect));
+        DWORD oldProtect = 0;
+        if (!VirtualProtect(g_tickAdvancePtr, sizeof(float), PAGE_READWRITE, &oldProtect)) {
+            Log(std::format("Cave 5: VirtualProtect on tick advance constant FAILED (err={})", GetLastError()));
+            // Non-fatal: speed scaling won't work but fixed tick still does
+        } else {
+            Log(std::format("Cave 5: FALLBACK - writing the game's shared constant at {:p} (was 0x{:X}); "
+                            "the menu video will speed up after a level", (void*)g_tickAdvancePtr, oldProtect));
+        }
     }
 
     // Raise the game's per-frame tick clamp from 14h (20) to 40h (64) so
