@@ -102,6 +102,38 @@ inline void RaiseTimerResolution() {
     }
 }
 
+// WHY THE CAP VALUE MATTERS SO MUCH: THE MENU DECODER HAS A 40 ms GATE.
+//
+// The menu background is a decoded video, not a render, and Main_Menu.dll drives
+// it as:
+//     Menu::Cycle  -> ++tick_count
+//     Menu::Paint  -> dt = tick_count * 0.01; tick_count = 0
+//     Anim_Player::Cycle(dt) -> decode AT MOST ONE frame per Paint,
+//                               and only once >= 0.04 s has accumulated
+//
+// So video speed is a STEP FUNCTION of the present interval, not proportional to
+// it. Measured by sweeping the cap on a fresh menu (screen fps vs presents/s):
+//
+//     cap=18  55.6ms/Paint   18.0 presents  18.0 fps   <- 1:1, above the gate
+//     cap=22  45.5ms         22.1           19.8
+//     cap=25  40.0ms         25.0           15.6       <- falls off AT the gate
+//     cap=28  35.7ms         28.0           17.2
+//     cap=32  31.2ms         32.0           16.9       <- plateau ~17 fps
+//     cap=40  25.0ms         40.1           17.1          regardless of presents
+//
+// Above ~40 ms per Paint every Paint crosses the gate and decodes; below it, the
+// gate is crossed only every other Paint and the video runs at roughly half
+// speed no matter how fast we present. That is why cap=34 (29.4 ms) looked
+// "1.6x fast" in one state and slow in another, and why 20 (50 ms) lands
+// cleanly above the gate and matches native in both. Do not raise the cap past
+// ~24 without re-measuring: 25 is already the cliff edge.
+//
+// (Mechanism identified by codex from the retail binary; the sweep above is the
+// hook-free confirmation. The remaining state-dependence — the same 31.2 ms
+// Paint giving 16.9 fps fresh but 32.1 fps after a level round-trip — is
+// consistent with the post-level dispatcher feeding MORE menu ticks per Paint,
+// pushing dt over 0.04 every Paint. Not yet confirmed directly.)
+
 // PREFERRED WAIT: a high-resolution waitable timer, NOT timeBeginPeriod.
 //
 // Accuracy here was a local problem — one Sleep in one hook — and raising the
