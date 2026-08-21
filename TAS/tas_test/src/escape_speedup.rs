@@ -52,8 +52,26 @@ const MAX_PAUSE_TICKS: u32 = 100;
 /// enough to survive a slow frame or two and still nowhere near a catchup.
 const RESUME_NORMAL_TICK_MIN: u32 = 300;
 const RESUME_NORMAL_TICK_MAX: u32 = 900;
-/// A backlog drain lands in the first second after resume. Normal is ~100.
+/// A backlog drain lands in the first second after resume. Normal is ~100. This
+/// is only a secondary, absolute plausibility guard - the real check is
+/// MAX_RATE_RATIO below, measured against this machine.
 const MAX_FIRST_SECOND_TICKS: u32 = 250;
+/// THE ACTUAL ASSERTION. Every one-second slice after the resume must stay
+/// within this multiple of the pre-pause baseline.
+///
+/// Absolute bands alone are not enough, and the gap was real: an implementation
+/// that drained the backlog by advancing the wrong accumulator left the sim
+/// running 1.63x fast forever after a pause (baseline 100 ticks/s, resume 163),
+/// and 163 ticks/s clears BOTH a 300..=900 five-second band (815) and a 250
+/// first-second cap. Only a comparison against the baseline catches it. 1.30 sits
+/// well clear of observed jitter (99..102 against a 100 baseline) and well under
+/// the 1.63 it has to reject.
+const MAX_RATE_RATIO: f64 = 1.30;
+/// ...and the game must not come back stalled either.
+const MIN_RATE_RATIO: f64 = 0.70;
+/// Baseline sanity: below this the machine is not simulating and the ratio test
+/// would be meaningless, so say so rather than silently passing everything.
+const MIN_PLAUSIBLE_BASELINE_TPS: u32 = 40;
 /// Baseline sampled before the pause, so the verdict can compare resume against
 /// how this machine actually runs rather than against a hardcoded 100 ticks/s.
 const BASELINE_SECS: u64 = 4;
@@ -163,6 +181,8 @@ pub fn run() -> bool {
     );
     let mut prev = at_resume;
     let mut first_second_ticks = 0u32;
+    let mut max_second_ticks = 0u32;
+    let mut min_second_ticks = u32::MAX;
     for second in 1..=RESUME_DURATION_SECS {
         thread::sleep(Duration::from_secs(1));
         let now = sample(&client);
@@ -170,6 +190,8 @@ pub fn run() -> bool {
         if second == 1 {
             first_second_ticks = dt;
         }
+        if dt > max_second_ticks { max_second_ticks = dt; }
+        if dt < min_second_ticks { min_second_ticks = dt; }
         println!(
             "  t={:>2}s  ticks={} (+{})   frames={} (+{})",
             second,
@@ -197,6 +219,14 @@ pub fn run() -> bool {
     let pause_ok = pause_ticks <= MAX_PAUSE_TICKS;
     let resume_ok = (RESUME_NORMAL_TICK_MIN..=RESUME_NORMAL_TICK_MAX).contains(&resume_ticks);
     let burst_ok = first_second_ticks <= MAX_FIRST_SECOND_TICKS;
+
+    // The baseline-relative check, applied to EVERY one-second slice rather than
+    // to the window total: a burst hides inside an otherwise normal average, and
+    // Escape handling can push it out of the first slice into the second.
+    let baseline_ok = base_tps >= MIN_PLAUSIBLE_BASELINE_TPS;
+    let max_allowed = (base_tps as f64 * MAX_RATE_RATIO) as u32;
+    let min_allowed = (base_tps as f64 * MIN_RATE_RATIO) as u32;
+    let rate_ok = baseline_ok && max_second_ticks <= max_allowed && min_second_ticks >= min_allowed;
 
     println!(
         "  Pause window:  {} ticks (expected <= {}) — {}",
@@ -232,7 +262,25 @@ pub fn run() -> bool {
         }
     );
 
-    let pass = pause_ok && resume_ok && burst_ok;
+    println!(
+        "  Rate vs baseline: per-second {}..{} ticks against a {} baseline (allowed {}..{}) - {}",
+        min_second_ticks,
+        max_second_ticks,
+        base_tps,
+        min_allowed,
+        max_allowed,
+        if !baseline_ok {
+            "INCONCLUSIVE (baseline too low to judge)"
+        } else if max_second_ticks > max_allowed {
+            "FAIL (game is simulating faster than before the pause)"
+        } else if min_second_ticks < min_allowed {
+            "FAIL (game is simulating slower than before the pause)"
+        } else {
+            "PASS (same rate as before the pause)"
+        }
+    );
+
+    let pass = pause_ok && resume_ok && burst_ok && rate_ok;
     if pass {
         println!("\n*** ESCAPE SPEEDUP TEST PASSED: ticker makes sense across pause+resume ***");
     } else {
