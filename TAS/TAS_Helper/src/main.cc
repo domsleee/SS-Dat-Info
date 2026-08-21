@@ -44,7 +44,34 @@ void run() {
     bool cave1c_ok = InstallCave1C(g_addr, state);
     bool cave2_ok = InstallCave2(g_addr, state);
     bool cave5_ok = InstallCave5(g_addr, state);
-    bool framelimit_ok = InstallFrameLimit(state);
+    // OFF BY DEFAULT — measured to cost more than it fixes.
+    //
+    // This hook exists for the "2x menu video" bug: tas_ui raised the system
+    // timer to 1 ms, sr.dll's Sleep-based limiter stopped undershooting, and the
+    // menu presented at ~68 fps instead of ~34. Capping presents fixed that.
+    //
+    // Two things have since been MEASURED (same process, same menu, 30s windows):
+    //   1. The hook costs ~12 ms on EVERY menu frame merely by EXISTING. Not the
+    //      throttle — cap=0 is just as slow — but the inline patch on
+    //      gdi32!SwapBuffers itself. Native 48.8 ms; hooked 60.6 ms (cap=34) and
+    //      59.9 ms (cap=0); hook skipped 48.5 ms, i.e. native restored.
+    //   2. The 2x no longer reproduces. With tas_ui RUNNING and this hook off,
+    //      the menu measures 48.4 ms — native, and smoother than native
+    //      (p90 49.9 vs 66.4). Windows 10 2004+/11 made timeBeginPeriod
+    //      PER-PROCESS, so tas_ui can no longer raise the game's timer at all.
+    //      The original diagnosis was right for its OS and has been overtaken.
+    //
+    // So it now makes the menu ~25% SLOWER than doing nothing, to fix something
+    // the OS already fixed. Kept rather than deleted — if the 2x ever returns,
+    // set TAS_FRAMELIMIT=1; menu_fps_cap remains live-tunable.
+    char fl[8] = {0};
+    bool framelimit_ok = false;
+    if (GetEnvironmentVariableA("TAS_FRAMELIMIT", fl, sizeof(fl)) > 0 && fl[0] == '1') {
+        framelimit_ok = InstallFrameLimit(state);
+        Log("  FrameLimit: ENABLED by TAS_FRAMELIMIT=1");
+    } else {
+        Log("  FrameLimit: off by default (costs ~12ms/menu-frame; 2x no longer reproduces)");
+    }
 
     Log("=== Hook installation summary ===");
     Log(std::format("  Replay capture (SG+9E8F0):  {}", replay_ok ? "OK" : "FAILED"));
@@ -52,7 +79,8 @@ void run() {
     Log(std::format("  Cave 1C (handler gate):      {}", cave1c_ok ? "OK" : "FAILED"));
     Log(std::format("  Cave 2  (Supreme::Cycle):    {}", cave2_ok ? "OK" : "FAILED"));
     Log(std::format("  Cave 5  (fixed tick):        {}", cave5_ok ? "OK" : "FAILED"));
-    Log(std::format("  FrameLimit (SwapBuffers):    {}", framelimit_ok ? "OK" : "FAILED"));
+    Log(std::format("  FrameLimit (SwapBuffers):    {}",
+        framelimit_ok ? "OK" : "off (default — see TAS_FRAMELIMIT)"));
 
     if (!cave2_ok) {
         Log("CRITICAL: Cave 2 hook failed - TAS will not function");
