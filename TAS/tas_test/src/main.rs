@@ -40,6 +40,7 @@ mod fe_cont_reliability;
 mod fe10065_cont;
 mod fe_cont_stress;
 mod pause_resume;
+mod gate_predict;
 mod play_judge;
 mod play_pace;
 mod rec_start;
@@ -258,6 +259,19 @@ fn main() {
             }
             f5_probe::run(iterations);
             std::process::exit(0);
+        }
+        "gate-predict" => {
+            let mut iterations = 3u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(3);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            std::process::exit(if gate_predict::run(iterations) { 0 } else { 1 });
         }
         "play-judge" => {
             let mut iterations = 5u32;

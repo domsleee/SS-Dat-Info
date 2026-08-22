@@ -291,6 +291,20 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
             memcpy(&s->play_coords[index][1], &raw[1], 4);
             memcpy(&s->play_coords[index][2], &raw[2], 4);
         }
+
+        // Stamp the countdown gate: the first frame of this session whose
+        // position differs from frame 0. Stamped HERE rather than derived from
+        // the coordinate array afterwards because the TICK it happened on is
+        // what the prediction model needs, and that is only available now.
+        // Integer compare on the raw bits - no float ops inside the hook.
+        if (s->gate_tick == 0 && index > 0) {
+            const uint32_t* z = isRec ? (const uint32_t*)&s->rec_coords[0][0]
+                                      : (const uint32_t*)&s->play_coords[0][0];
+            if (raw[0] != z[0] || raw[1] != z[1] || raw[2] != z[2]) {
+                s->gate_tick = s->tick_count;
+                s->gate_index = index;
+            }
+        }
     }
 }
 
@@ -644,6 +658,15 @@ static void ProcessCommand(TasSharedState* s) {
     // indistinguishable from a refused arm). And it must count REFUSED arms
     // too, which take an early `break`: a refusal leaves the mode OFF forever,
     // and that is exactly the state the judge would otherwise spin on.
+    if (cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE || cmd == CMD_ARM_REC) {
+        // Stamp the arm tick for EVERY arm, not just a deferred one. The
+        // deferral path above returns early while it is still waiting, so
+        // reaching here always means the command was really consumed, now.
+        s->arm_consumed_tick = s->tick_count;
+        // Fresh session: the gate has not fired yet.
+        s->gate_tick = 0;
+        s->gate_index = 0;
+    }
     if (cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE) {
         s->arm_generation++;
     }
@@ -749,6 +772,7 @@ static void __declspec(noinline) Cave2_Logic() {
             if (s->restart_frames_held >= RESTART_F5_HOLD_FRAMES) {
                 // Release F5 after holding long enough
                 InjectF5(s, addr, kbobj, false);
+                s->restart_done_tick = s->tick_count;
                 s->restart_state = 2;  // Done
                 LogRootDiag(s, "f5-released");
                 g_cave2_pendingLog = 8;
