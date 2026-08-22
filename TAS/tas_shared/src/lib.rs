@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
 use std::sync::atomic::compiler_fence;
 
-pub const TAS_SHARED_VERSION: u32 = 24; // +arm_generation (durable "the arm landed" signal)
+pub const TAS_SHARED_VERSION: u32 = 25; // +restart_done_tick, gate_tick, gate_index (is the gate predictable?)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -390,6 +390,21 @@ pub struct TasSharedState {
     /// Counting REFUSED arms too is deliberate: a refusal leaves the mode OFF
     /// forever, which is precisely the state that used to spin.
     pub arm_generation: u32,
+    /// tick_count when the in-process F5 restart completed (restart_state -> 2).
+    ///
+    /// The three fields below exist to answer one question: is `first_moving`
+    /// COMPUTABLE at arm time instead of observable only after replaying the
+    /// whole countdown? The model says the countdown is a fixed number of ticks
+    /// from the restart, and `first_moving` is measured from the ARM - so it
+    /// should be `(restart_done_tick + K) - arm_consumed_tick`, with every term
+    /// known before a single tick is replayed.
+    pub restart_done_tick: u32,
+    /// tick_count at the first captured frame whose position differs from the
+    /// session's frame 0 — i.e. when the countdown gate actually fired.
+    pub gate_tick: u32,
+    /// The REC/PLAY index at that same moment. This is `first_moving` stamped
+    /// by the DLL, rather than re-derived from coordinates afterwards.
+    pub gate_index: u32,
     pub arm_at_tick: u32,
     /// The tick at which ARM was actually consumed (diagnostic).
     pub arm_consumed_tick: u32,
@@ -3201,7 +3216,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_472);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_480);
     }
 
     #[test]
