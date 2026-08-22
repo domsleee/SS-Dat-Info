@@ -1,0 +1,12 @@
+# deploy.ps1 compares these against the device BYTE FOR BYTE, so git must not
+# rewrite their line endings. With core.autocrlf=true a checkout would convert
+# them to CRLF and -Check would report a permanent false difference.
+#
+# The device genuinely has MIXED endings: code.py is LF, boot.py is CRLF, which
+# is just how they were authored. Each file is pinned to the form actually on the
+# board so the repo mirrors it exactly. Nothing here has been flashed — if the
+# device is ever normalised, update these lines to match.
+code.py          text eol=lf
+test.py          text eol=lf
+code.proposed.py text eol=lf
+boot.py          text eol=crlf
