@@ -1789,15 +1789,27 @@ pub mod transport {
             // It ASSERTS the resume speed rather than just going quiet, because
             // this read and the write below are not one operation: a step can
             // read "still pending", have cave2 fire underneath it, and then
-            // write the catch-up speed over the handover. Going quiet would
-            // leave that lost race uncorrected for the rest of the replay;
-            // asserting repairs it on the very next step (~3ms later).
-            let handed_over = self.handoff_sent && !port.speed_handoff_pending();
-            port.set_playback_speed(if handed_over {
-                self.cfg.resume_speed
+            // write the catch-up speed over the handover.
+            if self.handoff_sent && !port.speed_handoff_pending() {
+                port.set_playback_speed(self.cfg.resume_speed);
             } else {
-                self.cfg.catchup_speed
-            });
+                port.set_playback_speed(self.cfg.catchup_speed);
+                // Re-read the marker AFTER that write, and repair it if the
+                // handover fired in between. Relying on the next step to repair
+                // it is not enough: the window has no timing bound, and cave5
+                // programs its next tick batch from playback_speed - so a few
+                // ticks of the run could be issued at the catch-up rate,
+                // which is exactly the exact-tick guarantee this is all for.
+                //
+                // This closes it rather than narrowing it. cave2 releases its
+                // claim BEFORE installing the speed, so a marker still set at
+                // this second read means cave2's own store has not happened yet
+                // and will land after ours; a marker cleared by now means the
+                // speed is ours to restore.
+                if self.handoff_sent && !port.speed_handoff_pending() {
+                    port.set_playback_speed(self.cfg.resume_speed);
+                }
+            }
             match self.phase {
                 Phase::Start => {
                     port.set_playback_speed(self.cfg.catchup_speed);
@@ -2327,6 +2339,111 @@ pub mod transport {
             assert!(!TransportController::new(cfg(Arm::Rec, None, 0)).owns_playback_speed());
         }
 
+        /// The check and the write are two operations, so cave2 can fire between
+        /// them and the catch-up store lands last with nothing to correct it.
+        /// Waiting for the next step to repair that is not enough: the window has
+        /// no timing bound and cave5 programs its next tick batch from
+        /// playback_speed, so the run can be issued fast for those ticks.
+        #[test]
+        fn a_handover_that_fires_mid_step_is_repaired_within_the_same_step() {
+            /// Fires the handover on the FIRST speed write of a step - i.e.
+            /// exactly inside the window between the controller's check and its
+            /// store, which is the interleaving the second read exists for.
+            #[derive(Default)]
+            struct RacyPort {
+                inner: FakePort,
+                armed: bool,
+            }
+            impl TransportPort for RacyPort {
+                fn send_command(&mut self, cmd: TasCommand) {
+                    self.inner.send_command(cmd)
+                }
+                fn mode(&self) -> u32 {
+                    self.inner.mode()
+                }
+                fn restart_state(&self) -> u32 {
+                    self.inner.restart_state()
+                }
+                fn reset_restart_state(&mut self) {
+                    self.inner.reset_restart_state()
+                }
+                fn playback_pos(&self) -> u32 {
+                    self.inner.playback_pos()
+                }
+                fn play_coords(&self) -> &[[f32; 3]] {
+                    self.inner.play_coords()
+                }
+                fn rec_coords(&self) -> &[[f32; 3]] {
+                    self.inner.rec_coords()
+                }
+                fn recorded_count(&self) -> u32 {
+                    self.inner.recorded_count()
+                }
+                fn set_continue_from_frame(&mut self, frame: u32) {
+                    self.inner.set_continue_from_frame(frame)
+                }
+                fn set_playback_speed(&mut self, speed: f32) {
+                    if self.armed {
+                        // cave2 fires BEFORE this store lands - clearing the claim
+                        // and installing the resume speed, in that order, as the
+                        // DLL does. That is the losing interleaving: the
+                        // controller decided on the catch-up while the marker was
+                        // still set, and its store now arrives last.
+                        self.armed = false;
+                        self.inner.playback_pos = self.inner.speed_handoff_pos;
+                        self.inner.dll_tick();
+                    }
+                    self.inner.set_playback_speed(speed);
+                }
+                fn set_speed_handoff(&mut self, pos: u32, speed: f32) {
+                    self.inner.set_speed_handoff(pos, speed)
+                }
+                fn speed_handoff_pending(&self) -> bool {
+                    self.inner.speed_handoff_pending()
+                }
+                fn arm_generation(&self) -> u32 {
+                    self.inner.arm_generation()
+                }
+            }
+
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = RacyPort::default();
+            p.inner.mode = TasMode::Rec as u32;
+            let mut a = cfg(Arm::Play, Some(target), 30);
+            a.catchup_speed = 64.0;
+            a.resume_speed = 1.0;
+            let mut c = TransportController::new(a);
+            let mut coords = vec![[1.0f32, 2.0, 3.0]; 400];
+            coords[250] = [1.0, 2.0, 3.5];
+            p.inner.rec_coords = coords.clone();
+            p.inner.recorded_count = 400;
+
+            // Drive to JudgeBucket by hand: RacyPort wraps FakePort, and the
+            // shared helper takes a FakePort.
+            c.step(&mut p);
+            p.inner.mode = TasMode::Off as u32;
+            c.step(&mut p);
+            p.inner.restart_state = 2;
+            c.step(&mut p);
+            c.step(&mut p); // ArmSettle: stages the handover, sends ArmPlay
+            p.inner.mode = TasMode::Play as u32;
+            p.inner.play_coords = coords;
+            assert_eq!(p.inner.speed_handoff_pos, 251);
+
+            // Next step: the handover fires DURING the controller's own speed
+            // write. Without the second read the catch-up store wins and the
+            // run keeps fast-forwarding until some later poll notices.
+            p.armed = true;
+            p.inner.playback_pos = 200;
+            c.step(&mut p);
+            assert_eq!(
+                p.inner.playback_speed, 1.0,
+                "a handover that fired mid-step was left overwritten"
+            );
+        }
         #[test]
         fn cont_stages_no_speed_handover() {
             let target = BucketTarget {
