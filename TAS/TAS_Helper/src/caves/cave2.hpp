@@ -402,6 +402,23 @@ static void ProcessCommand(TasSharedState* s) {
     uint32_t cmd = s->command;
     if (cmd == CMD_IDLE) return;
 
+    // Deterministic arm scheduling. If the caller asked for a specific tick,
+    // leave the command PENDING until the counter reaches it — do not consume,
+    // do not clear. The command slot is a single u32 and nothing else writes it
+    // while an arm is outstanding, so holding it is safe.
+    //
+    // This exists because the arm consumption tick was never controlled: an
+    // external send is a memory store, and consumption happens on whichever
+    // Supreme::Cycle comes next. first_moving counts from consumption.
+    if (s->arm_at_tick != 0 &&
+        (cmd == CMD_ARM_REC || cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE)) {
+        // Unsigned wrap-safe "have we reached it yet".
+        if ((s->tick_count - s->arm_at_tick) >= 0x80000000u) {
+            return;
+        }
+        s->arm_consumed_tick = s->tick_count;
+        s->arm_at_tick = 0;
+    }
     // Integer zero for clearing float fields without x87 instructions
     static constexpr uint32_t ZERO_BITS = 0;
 

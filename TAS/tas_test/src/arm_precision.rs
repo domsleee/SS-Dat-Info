@@ -75,6 +75,9 @@ const TARGET_OFFSET_TICKS: u32 = 40;
 const WAIT_TIMEOUT_MS: u64 = 4000;
 const RECORD_SECS: u64 = 5;
 const MIN_TICKS: usize = 260;
+/// Engine clock units in one 10ms tick — QPC at 10MHz, measured in-process
+/// (9,999,900 units/sec => 99,999 per tick).
+const TICK_UNITS: u32 = 99_999;
 
 pub fn run(iterations: u32) -> bool {
     println!("=== ARM-PRECISION: is the bucket lottery our own arm jitter? ===\n");
@@ -89,6 +92,7 @@ pub fn run(iterations: u32) -> bool {
     let mut fms: Vec<u32> = Vec::new();
     let mut offsets: Vec<u32> = Vec::new();
     let mut totals: Vec<u32> = Vec::new();
+    let mut phases: Vec<u32> = Vec::new();
 
     for iter in 1..=iterations {
         if !harness::restart_and_stabilize_inprocess(&mut client) {
@@ -98,28 +102,37 @@ pub fn run(iterations: u32) -> bool {
         let t0 = client.tick_count_volatile();
         let target = t0.wrapping_add(TARGET_OFFSET_TICKS);
 
-        // Tight poll. No sleep: sleeping is the very thing under test, and a 1ms
-        // sleep is a tenth of a tick anyway — spinning briefly is cheaper than
-        // being wrong about what we are measuring.
+        // Schedule the arm INSIDE the game thread instead of racing it from here.
+        //
+        // Spinning outside and firing on the target tick only controlled when the
+        // command was WRITTEN. cave2 consumes it on whichever Supreme::Cycle comes
+        // next, and first_moving counts from CONSUMPTION — so the tick that
+        // actually mattered was never pinned. arm_at_tick makes cave2 hold the
+        // command until the counter reaches the target, then consume it exactly
+        // there and report the tick it used.
+        client.state_mut().arm_consumed_tick = 0;
+        client.state_mut().arm_at_tick = target;
+        client.send_command(TasCommand::ArmRec);
+
+        // Wait for the DLL to report consumption rather than assuming it.
         let deadline = Instant::now() + Duration::from_millis(WAIT_TIMEOUT_MS);
-        let mut reached = false;
+        let mut consumed = 0u32;
         while Instant::now() < deadline {
-            if client.tick_count_volatile().wrapping_sub(t0) >= TARGET_OFFSET_TICKS {
-                reached = true;
+            let c = client.state().arm_consumed_tick;
+            if c != 0 {
+                consumed = c;
                 break;
             }
             std::hint::spin_loop();
         }
-        if !reached {
-            eprintln!("  iter {}: tick target never reached", iter);
+        if consumed == 0 {
+            eprintln!("  iter {}: arm never consumed", iter);
+            client.state_mut().arm_at_tick = 0;
             continue;
         }
-        // Fire immediately — no focus_game here, it costs ~200ms and would
-        // reintroduce exactly the jitter being measured.
-        client.send_command(TasCommand::ArmRec);
-        let armed_at = client.tick_count_volatile();
-        let actual_offset = armed_at.wrapping_sub(t0);
-        let _ = target;
+        let actual_offset = consumed.wrapping_sub(t0);
+        let clk_at_arm = client.state().clock_delta_lo;
+
 
         thread::sleep(Duration::from_secs(RECORD_SECS));
         let count = client.state().recorded_count as usize;
@@ -136,19 +149,74 @@ pub fn run(iterations: u32) -> bool {
         };
 
         println!(
-            "  iter {:>2}: armed at +{} ticks (target +{})  fm={}  total={}",
+            "  iter {:>2}: armed +{} (target +{})  fm={}  total={}  clk%tick={}",
             iter,
             actual_offset,
             TARGET_OFFSET_TICKS,
             fm,
-            fm + actual_offset
+            fm + actual_offset,
+            clk_at_arm % TICK_UNITS
         );
+        phases.push(clk_at_arm);
         fms.push(fm);
         offsets.push(actual_offset);
         totals.push(fm + actual_offset);
     }
 
-    report(&fms, &offsets, &totals)
+    let ok = report(&fms, &offsets, &totals);
+    phase_split(&fms, &phases);
+    ok
+}
+
+/// THE TEST THAT MATTERS. With the arm offset held identical, any remaining
+/// spread in first_moving is the game's +/-1. If the absolute clock phase at the
+/// arm frame separates those groups, it is a fast judge: read it at ARM and know
+/// the bucket, with no replay at all.
+fn phase_split(fms: &[u32], phases: &[u32]) {
+    if fms.len() != phases.len() || fms.is_empty() {
+        return;
+    }
+    println!("\n--- absolute clock phase at ARM, grouped by first_moving ---");
+    let mut by_fm: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for (fm, ph) in fms.iter().zip(phases.iter()) {
+        by_fm.entry(*fm).or_default().push(*ph % TICK_UNITS);
+    }
+    let mut ranges: Vec<(u32, u32, u32)> = Vec::new();
+    for (fm, mut ph) in by_fm {
+        ph.sort_unstable();
+        let lo = *ph.first().unwrap();
+        let hi = *ph.last().unwrap();
+        println!("  fm={:<5} n={:<3} phase {:>6}..{:<6}  {:?}", fm, ph.len(), lo, hi, ph);
+        ranges.push((fm, lo, hi));
+    }
+    if ranges.len() < 2 {
+        println!("\n  Only one bucket occurred — cannot tell whether phase separates them.");
+        return;
+    }
+    // Separable if no two buckets overlap in phase.
+    let mut sorted = ranges.clone();
+    sorted.sort_by_key(|r| r.1);
+    let mut overlap = false;
+    for w in sorted.windows(2) {
+        if w[0].2 >= w[1].1 {
+            overlap = true;
+        }
+    }
+    println!();
+    if overlap {
+        println!("  PHASE DOES NOT SEPARATE THE BUCKETS — the ranges overlap, so the same");
+        println!("  phase at ARM occurs for more than one first_moving. Reading it early");
+        println!("  would accept wrong buckets.");
+    } else {
+        println!("  *** PHASE SEPARATES THE BUCKETS CLEANLY ***");
+        println!("  Each first_moving occupies its own phase band, so the bucket is");
+        println!("  knowable AT ARM from a single u32 — no replay, no 3.1s wait.");
+        println!("  Thresholds (midpoints between adjacent bands):");
+        for w in sorted.windows(2) {
+            println!("    phase < {:>6} => fm {}   |   phase > {:>6} => fm {}",
+                (w[0].2 + w[1].1) / 2, w[0].0, (w[0].2 + w[1].1) / 2, w[1].0);
+        }
+    }
 }
 
 fn hist(vals: &[u32]) -> BTreeMap<u32, usize> {
