@@ -28,12 +28,14 @@ pub struct Settings {
     /// near-miss diverges from the recording as soon as the boarder moves
     /// (~tick 299) — the replay silently stops being the run you recorded.
     ///
-    /// ON costs time before playback settles: the judge needs
-    /// first_moving + BUCKET_MATCH_WINDOW ticks of replay (~3.6s at 1x) plus the
-    /// restart (~1.8s), so a reroll is ~5s and the measured mean of 3.88
-    /// attempts is ~20s. That is the whole reason this is a switch and not just
-    /// always-on — CONT hides the same cost behind a 256x catch-up, and PLAY at
-    /// 1x cannot.
+    /// ON used to cost real time: the judge cannot rule until the replay has
+    /// passed the recording's first moving frame, which at 1x is ~3s of a
+    /// stationary boarder on the attempt that succeeds AND on every reroll.
+    /// `play_judge_speed` removed most of that by replaying the countdown fast
+    /// and handing back the moment the boarder moves - measured on FE-10065,
+    /// 3161 ms to first movement at 1x against 331 ms at 64x, with the replay
+    /// bit-identical either way. The switch stays because the judge speed can
+    /// be set to 1x, and because a user may simply not want rerolls.
     pub play_bucket_match: bool,
 
     /// Speed to replay the pre-movement countdown at while a bucket-matched
@@ -155,6 +157,14 @@ mod tests {
         }"#;
         let s: Settings = serde_json::from_str(old).expect("old file must still parse");
         assert!(s.play_bucket_match, "new field defaults on");
+        // The struct-level #[serde(default)] would give this f32 0.0, which
+        // reads as "no catch-up" and silently returns every old settings file
+        // to the slow judge. The per-field default is what stops that.
+        assert_eq!(
+            s.play_judge_speed,
+            default_play_judge_speed(),
+            "a missing judge speed must default to the catch-up, not 0"
+        );
         // and the user's existing choices survive
         assert!(s.show_pico_panel);
         assert!(s.show_log);
