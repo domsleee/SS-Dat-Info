@@ -22,6 +22,7 @@ mod cont_stress;
 mod cont_restart_race;
 mod drift;
 mod drift_speed;
+mod bucket_predict;
 mod f5_probe;
 mod gates;
 mod harness;
@@ -251,6 +252,23 @@ fn main() {
                 }
             }
             f5_probe::run(iterations);
+            std::process::exit(0);
+        }
+        "bucket-predict" => {
+            // Measurement, not a gate: pairs the early post-restart state with
+            // the bucket that restart actually produced, to see whether any of
+            // it predicts the bucket before the boarder moves.
+            let mut iterations = 24u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(24);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            bucket_predict::run(iterations);
             std::process::exit(0);
         }
         "benchmark" => {
@@ -656,6 +674,7 @@ fn main() {
             println!("  speed-reset Speed reset verification (2x stop restores normal)");
             println!("  drift-speed Drift-at-speed verification (2x same, 1x/2x cross)");
             println!("  f5-probe    F5 bucket characterization (records starting positions)");
+            println!("  bucket-predict  can the F5 bucket be identified before the boarder moves?");
             println!("  benchmark   Cave hook perf benchmark (frame-window repeats)");
             println!(
                 "  reliability N consecutive REC+PLAY cycles at Nx speed (default 10x at 12x)"
