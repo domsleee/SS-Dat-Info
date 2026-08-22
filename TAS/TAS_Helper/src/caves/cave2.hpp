@@ -1,5 +1,6 @@
 #pragma once
 #include "../stdafx.h"
+#include <atomic>
 #include "../log.hpp"
 #include "../helper.hpp"
 #include "../shared_state.hpp"
@@ -381,6 +382,15 @@ static void LogRootDiag(TasSharedState* s, const char* stage) {
 // killed writer, or inherited across an arm, could apply a stale PLAY resume
 // speed and clock reset partway through somebody else's replay.
 static volatile uint32_t g_cave2_handoffArmed = 0;
+
+// Drop any staged PLAY speed handover. Called from every path that ends or
+// invalidates a replay - stop, refusal, restart, playback completion, the
+// level-swap auto-stop. A marker that outlives its replay would fire against
+// whatever runs next, at a position that means nothing there.
+static inline void ClearSpeedHandoff(TasSharedState* s) {
+    s->speed_handoff_pos = 0;
+    g_cave2_handoffArmed = 0;
+}
 static volatile uint32_t g_cave2_pendingLog = 0;  // 0=none, 1=REC, 2=PLAY, 3=STOP, 4=playback_done
 static volatile uint32_t g_cave2_logParam = 0;
 
@@ -449,8 +459,7 @@ static void ProcessCommand(TasSharedState* s) {
             g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
             g_cave2_contArmed = 0;
             // REC never hands over a speed; make sure it cannot inherit one.
-            s->speed_handoff_pos = 0;
-            g_cave2_handoffArmed = 0;
+            ClearSpeedHandoff(s);
             g_diagInjectLogged = 0;
             g_cave2_pendingLog = 1;
             LogRootDiag(s, "arm-rec");
@@ -503,6 +512,7 @@ static void ProcessCommand(TasSharedState* s) {
                 s->mode = MODE_OFF;
                 s->continue_from_frame = 0;  // refused — don't leave a stale marker armed
                 g_cave2_contArmed = 0;
+                ClearSpeedHandoff(s);
                 g_cave2_pendingLog = 3;  // "stopped"
                 break;
             }
@@ -522,6 +532,7 @@ static void ProcessCommand(TasSharedState* s) {
                 s->mode = MODE_OFF;
                 s->continue_from_frame = 0;  // refused — don't leave a stale marker armed
                 g_cave2_contArmed = 0;
+                ClearSpeedHandoff(s);
                 g_cave2_pendingLog = 3;  // "stopped"
                 break;
             }
@@ -539,8 +550,7 @@ static void ProcessCommand(TasSharedState* s) {
             g_cave2_contArmed = 1;  // the ONLY place the splice gate opens
             // CONT hands over at its splice (cont_resume_speed), never
             // mid-replay. Refuse any marker it might have inherited.
-            s->speed_handoff_pos = 0;
-            g_cave2_handoffArmed = 0;
+            ClearSpeedHandoff(s);
             g_cave2_pendingLog = 5;
             break;
 
@@ -561,9 +571,8 @@ static void ProcessCommand(TasSharedState* s) {
             // when its position happens to pass that number. Every armer stages
             // its own handover immediately before the arm command, so clearing
             // here cannot break a legitimate cycle.
-            s->speed_handoff_pos = 0;
+            ClearSpeedHandoff(s);
             memcpy((void*)&s->speed_after_handoff, &ZERO_BITS, 4);
-            g_cave2_handoffArmed = 0;
             g_cave2_pendingLog = 3;
             break;
 
@@ -571,6 +580,11 @@ static void ProcessCommand(TasSharedState* s) {
             // Begin in-process F5 restart sequence
             s->restart_state = 1;
             s->restart_frames_held = 0;
+            // The replay a handover was staged for is about to stop existing.
+            // Every armer stages its own AFTER its restart, so clearing here
+            // cannot break a controller cycle - it only stops a bare F5 from
+            // leaving one armed for whatever replays next.
+            ClearSpeedHandoff(s);
             // Clock-phase pin: restart the canonical [1,1,0] tick cycle here so
             // every in-process restart replays the same settle schedule (the
             // F5 bucket). See cave5's pin block.
@@ -766,6 +780,7 @@ static void __declspec(noinline) Cave2_Logic() {
             ReleaseTasInput(s, addr);  // clears the NEW level's input state
             s->continue_from_frame = 0;
             g_cave2_contArmed = 0;
+            ClearSpeedHandoff(s);
             g_armedRoot = 0;
             LogRing(s, LOG_WARN,
                 "TAS auto-stopped: level context changed (left the race / menu demo loaded)");
@@ -842,6 +857,7 @@ static void __declspec(noinline) Cave2_Logic() {
             s->mode = MODE_OFF;
             ReleaseTasInput(s, addr);  // replay done — un-stick its held keys
             g_cave2_contArmed = 0;  // hygiene — an armed CONT always splices before here
+            ClearSpeedHandoff(s);   // ...and a handover always fires before here
             g_cave2_logParam = pos;
             g_cave2_pendingLog = 4;
             return;
@@ -870,9 +886,9 @@ static void __declspec(noinline) Cave2_Logic() {
         // A bucket-matched PLAY replays the countdown purely so the judge can see
         // where the boarder leaves the spawn; nothing before that is worth
         // watching, and at 1x it costs ~3s on the accepted run AND on every
-        // reroll. So the UI replays it at catch-up speed and asks for the drop
-        // back here, at the tick it names. Doing it from the UI thread instead
-        // would be unbounded: cave5 can already have issued a batch of up to
+        // reroll. So the controller replays it at catch-up speed and asks for
+        // the drop back here, at the tick it names. Doing it from a polling
+        // thread instead would be unbounded: cave5 can already have issued up to
         // CAVE5_PER_FRAME_TICK_CAP ticks before the poll even runs, so the run
         // would start fast-forwarded by a variable amount — precisely the
         // "Problem B" overshoot the CONT splice was changed to avoid.
@@ -891,8 +907,13 @@ static void __declspec(noinline) Cave2_Logic() {
             // Clearing first inverts that: a reader either still sees the marker
             // (and this store lands last, winning) or sees it gone (and asserts
             // the resume speed itself).
-            s->speed_handoff_pos = 0;
-            g_cave2_handoffArmed = 0;
+            ClearSpeedHandoff(s);
+            // playback_speed is a PLAIN float, so the volatile clears above do
+            // not by themselves stop the compiler hoisting this store past
+            // them - MSVC's volatile writes constrain what precedes them, not
+            // what follows. The barrier is what makes "release the claim,
+            // THEN install" true in the emitted code as well as the source.
+            std::atomic_signal_fence(std::memory_order_seq_cst);
             if (resume > 0.0f) {
                 s->playback_speed = resume;
             }

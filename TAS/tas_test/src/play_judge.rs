@@ -42,7 +42,6 @@ use crate::replay;
 const RECORDING_REL: &str = "TAS/recordings/FE-10065.tasrec";
 /// Catch-up speeds to compare. 1.0 is the control (no handover at all).
 const SPEEDS: &[f32] = &[1.0, 64.0];
-const ITERATIONS: u32 = 5;
 const MAX_RETRIES: u32 = 30;
 /// The handover must land ON the tick it was staged for. cave5 caps the
 /// catch-up batch to do exactly that, so anything above 0 is that cap failing.

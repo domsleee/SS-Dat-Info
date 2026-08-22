@@ -1532,6 +1532,11 @@ pub mod transport {
         /// because it replays the prefix at 256x and splices; a bucket-matched
         /// PLAY has no splice to hand over at, so it needs its own.
         ///
+        /// Captured when the cycle is armed, so changing the speed control
+        /// during the judge does not move it. The UI restores the speed the user
+        /// last chose when the cycle finishes; only the window between the
+        /// handover and Done runs at the speed they had when they pressed PLAY.
+        ///
         /// The handover is performed by the DLL at the exact tick (cave2, with
         /// cave5 capping the batch to land on it), not by whoever is polling:
         /// a poll-driven drop can be a whole catch-up batch late, which at 64x
@@ -1699,6 +1704,13 @@ pub mod transport {
         /// The DLL's arm counter as it stood just before this attempt armed.
         /// Once it differs, the mode and position being read describe THIS
         /// attempt; until then they still describe the previous replay.
+        ///
+        /// ASSUMES ONE WRITER. The counter is global, not per-request, so a
+        /// second process arming the same game would move it and this cycle
+        /// would read that replay as its own. That is the same assumption the
+        /// single-u32 command slot already makes of every caller, and the same
+        /// mitigation applies - the harness calls
+        /// `stop_competing_tas_ui_writer()` before it drives anything.
         arm_generation_at_arm: u32,
     }
 
@@ -1713,6 +1725,19 @@ pub mod transport {
                 handoff_sent: false,
                 arm_generation_at_arm: 0,
             }
+        }
+
+        /// True when this cycle owns `playback_speed` outright: it stages a
+        /// speed handover, so it asserts the catch-up before that fires and the
+        /// resume speed after, on every step.
+        ///
+        /// Exists so a UI that also syncs the speed can step aside for exactly
+        /// the controller's lifetime. Deriving it from the controller means
+        /// there is no separate flag to forget to clear on a reroll, an abort or
+        /// a STOP - the earlier version of this was a UI latch, and it was
+        /// cleared on reroll while the same controller was still running.
+        pub fn owns_playback_speed(&self) -> bool {
+            self.cfg.resume_speed > 0.0
         }
 
         pub fn is_terminal(&self) -> bool {
@@ -1844,16 +1869,19 @@ pub mod transport {
                     }
                 }
                 Phase::JudgeBucket => {
+                    // Until the DLL has processed the arm, the mode and position
+                    // being read still describe the PREVIOUS replay - so nothing
+                    // here can be concluded from them yet. This has to come
+                    // before EVERY mode interpretation, the REC one included: a
+                    // stale REC from before the arm would otherwise read as
+                    // "the splice already fired".
+                    if port.arm_generation() == self.arm_generation_at_arm {
+                        return StepOutcome::InProgress;
+                    }
                     let mode = port.mode();
                     if mode == rec {
                         // Splice already fired (PLAY→REC) — bucket accepted.
                         return self.finish(CompletedVia::Unjudged);
-                    }
-                    // Until the DLL has processed the arm, the mode and position
-                    // being read still describe the PREVIOUS replay - so nothing
-                    // here can be concluded from them yet.
-                    if port.arm_generation() == self.arm_generation_at_arm {
-                        return StepOutcome::InProgress;
                     }
                     // Past the arm, "not in PLAY" means the replay ENDED (or the
                     // DLL refused the arm outright, which leaves it OFF forever).
@@ -1865,7 +1893,18 @@ pub mod transport {
                     let pos = port.playback_pos();
                     if pos == 0 {
                         if replay_ended {
-                            return self.finish(CompletedVia::Unjudged);
+                            // The arm was processed, the mode is not PLAY, and
+                            // not one tick replayed: the DLL REFUSED the arm
+                            // (cave2 bounces ARM_CONTINUE from mid-run, for
+                            // one). Nothing ran and nothing was judged, so this
+                            // is a failure, not a quiet success - reporting it
+                            // as Done left a refused CONT's 256x catch-up
+                            // asserted with no splice ever coming to undo it.
+                            self.phase = Phase::Aborted;
+                            return StepOutcome::Aborted {
+                                reason: "the DLL refused the arm (nothing replayed)"
+                                    .to_string(),
+                            };
                         }
                         return StepOutcome::InProgress;
                     }
@@ -2248,6 +2287,27 @@ pub mod transport {
         /// CONT hands over at its splice (cont_resume_speed, inside the DLL), so
         /// it must stage nothing here and must keep its catch-up asserted for the
         /// whole replay.
+        /// The UI also writes playback_speed every frame, and a judged PLAY's
+        /// handover fires mid-replay with no mode change to notice it by. Rather
+        /// than race, the UI steps aside for exactly this controller's lifetime -
+        /// so "does this cycle own the speed" has to be answerable from the
+        /// controller itself, not from a flag the UI keeps in step with it.
+        #[test]
+        fn only_a_handover_cycle_owns_the_speed() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut a = cfg(Arm::Play, Some(target), 30);
+            a.resume_speed = 1.0;
+            assert!(TransportController::new(a).owns_playback_speed());
+
+            // CONT hands over at its splice instead, and REC never replays.
+            assert!(!TransportController::new(cfg(Arm::Continue, Some(target), 30))
+                .owns_playback_speed());
+            assert!(!TransportController::new(cfg(Arm::Rec, None, 0)).owns_playback_speed());
+        }
+
         #[test]
         fn cont_stages_no_speed_handover() {
             let target = BucketTarget {
@@ -2510,8 +2570,13 @@ pub mod transport {
         /// enters PLAY and never replays anything, so the judge waits on a replay
         /// that will not happen. The arm counter counts refusals too, which is
         /// what turns that from a spin into a terminal outcome.
+        ///
+        /// And the outcome is ABORTED, not a quiet Done: nothing ran and nothing
+        /// was judged. Reporting success left a refused CONT's 256x catch-up
+        /// asserted with no splice ever coming to restore the speed - the UI only
+        /// tears that down on Aborted.
         #[test]
-        fn judge_finishes_when_the_arm_was_refused() {
+        fn a_refused_arm_aborts_rather_than_reporting_success() {
             let target = BucketTarget {
                 expected_start_bits: bits(1.0, 2.0, 3.0),
                 expected_first_moving: Some(250),
@@ -2530,13 +2595,7 @@ pub mod transport {
             // Refused: mode never became PLAY and nothing replayed.
             p.mode = TasMode::Off as u32;
             p.playback_pos = 0;
-            assert_eq!(
-                c.step(&mut p),
-                StepOutcome::Done {
-                    retries_used: 0,
-                    completed_via: CompletedVia::Unjudged
-                }
-            );
+            assert!(matches!(c.step(&mut p), StepOutcome::Aborted { .. }));
             assert!(c.is_terminal());
         }
         #[test]

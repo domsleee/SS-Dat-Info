@@ -429,17 +429,6 @@ struct TasApp {
     play_bucket_match: bool,
     /// Speed the pre-movement countdown of a bucket-matched PLAY replays at.
     play_judge_speed: f32,
-    /// This cycle is a judged PLAY that staged a speed handover, so the
-    /// controller owns playback_speed from end to end and the per-frame sync
-    /// below must not write it.
-    ///
-    /// Set from INTENT, at the moment the cycle is armed - not by watching the
-    /// handover marker in shared memory. The marker can be staged by the
-    /// controller and consumed by the DLL entirely between two egui frames (at
-    /// 64x the countdown takes ~47ms and this closure runs on vsync), so a UI
-    /// that waits to observe it can miss the whole handover and then cheerfully
-    /// write the catch-up speed back over it.
-    play_handoff_armed: bool,
     /// Which transport the in-flight controller cycle is for, for log lines.
     /// The reroll/abort messages used to hardcode "CONT" because only CONT was
     /// ever judged; PLAY can be judged now, and a PLAY that exhausts its
@@ -672,7 +661,6 @@ impl TasApp {
             cont_catchup_multiplier: settings.cont_catchup_speed,
             play_bucket_match: settings.play_bucket_match,
             play_judge_speed: settings.play_judge_speed,
-            play_handoff_armed: false,
             cont_cycle_label: "CONT",
             log_read_cursor: 0,
             finish_scan_cursor: 0,
@@ -796,9 +784,6 @@ impl TasApp {
     fn reset_continue_runtime_state(&mut self) {
         self.pending_session_kind = None;
         self.pending_continue_start_tick = None;
-        // STOP means the controller is gone, so it is not asserting anything
-        // any more - the UI has to take the speed back or nothing writes it.
-        self.play_handoff_armed = false;
         // Cancel any in-flight restart/arm/reroll cycle. STOP must mean STOP —
         // without this the controller would keep stepping and silently start
         // recording/playback after the restart completes.
@@ -1091,10 +1076,6 @@ impl TasApp {
                 return;
             }
         }
-        // Every arm starts from "the UI owns the speed"; only the judged-PLAY
-        // branch below hands that over. Resetting here rather than after the
-        // branches means a REC or CONT can never inherit a PLAY's ownership.
-        self.play_handoff_armed = false;
         let arm = match command {
             TasCommand::ArmPlay => tas_shared::transport::Arm::Play,
             TasCommand::ArmContinue => tas_shared::transport::Arm::Continue,
@@ -1159,9 +1140,9 @@ impl TasApp {
                             self.cont_catchup_speed = Some(self.playback_speed);
                         }
                         self.playback_speed = self.play_judge_speed;
-                        // From here until the cycle ends, the controller owns the
-                        // speed (see the field's doc).
-                        self.play_handoff_armed = true;
+                        // From here the CONTROLLER owns playback_speed: it will
+                        // be built with a non-zero resume_speed below, which is
+                        // what makes the per-frame sync step aside.
                     }
                 }
             }
@@ -1313,8 +1294,7 @@ impl TasApp {
                     // The controller drops the staged handover on a reroll, so
                     // un-latch here too or the sync would read the next attempt's
                     // not-yet-staged handover as one that already fired.
-                    self.play_handoff_armed = false;
-                    // Vary the wall clock so the next F5 lands at a different
+                            // Vary the wall clock so the next F5 lands at a different
                     // accumulator-modulo-tick phase, then loop immediately.
                     std::thread::sleep(std::time::Duration::from_millis(suggested_delay_ms));
                 }
@@ -1337,8 +1317,7 @@ impl TasApp {
                     // still running toward the splice.
                     if self.cont_cycle_label == "PLAY" {
                         self.clear_cont_catchup();
-                        self.play_handoff_armed = false;
-                    }
+                                }
                     // Stash for the resume summary emitted at the REC-start splice,
                     // where the actual resume frame is known. attempts = rerolls + 1.
                     self.cont_last_outcome = Some((retries_used + 1, completed_via));
@@ -1353,8 +1332,7 @@ impl TasApp {
                 StepOutcome::Aborted { reason } => {
                     self.push_log(&format!("{} aborted: {}", self.cont_cycle_label, reason));
                     self.clear_cont_catchup();
-                    self.play_handoff_armed = false;
-                    // Drop any handover the aborted attempt had staged, and push
+                            // Drop any handover the aborted attempt had staged, and push
                     // the restored speed through: an aborted PLAY must not leave
                     // the game fast-forwarding at the judge speed.
                     if let Some(shared) = self.shared.as_mut() {
@@ -2211,9 +2189,19 @@ impl eframe::App for TasApp {
                     self.start_recording_session(continue_from, recorded);
                     self.log_cont_resume_summary();
                     self.clear_cont_catchup();
-                    // Splice fired (or REC began) — the controller already
-                    // cleared itself at bucket-accept, but be defensive.
-                    self.cont_controller = None;
+                    // Splice fired (or REC began).
+                    //
+                    // The controller has normally cleared itself long before
+                    // this: it accepts the bucket at first_moving + 64 while the
+                    // splice sits thousands of ticks later. But a splice EARLIER
+                    // than the judge window (a redo from a low frame) can reach
+                    // REC first, and this handler runs before step_cont_controller
+                    // in the same frame. Dropping the controller without its Done
+                    // path would strand cont_suppress_input SET - and the whole
+                    // point of the resumed REC is to record live input.
+                    if self.cont_controller.take().is_some() {
+                        self.set_cont_suppress_input(false);
+                    }
                     // Fresh finish-line watch for this session. A CONT splice
                     // resumes mid-run, so start the scan at the resume tick —
                     // the prefix was already checked when it was recorded.
@@ -2731,8 +2719,10 @@ impl eframe::App for TasApp {
                 // least as often as this runs. Two writers with different views of
                 // the same handover is exactly how the catch-up got reinstated
                 // over it.
-                let controller_owns_speed =
-                    self.play_handoff_armed && self.cont_controller.is_some();
+                let controller_owns_speed = self
+                    .cont_controller
+                    .as_ref()
+                    .is_some_and(|c| c.owns_playback_speed());
                 let catchup_active = self.cont_catchup_speed.is_some();
                 let mode = shared.state().mode;
                 let speed_to_assert = if catchup_active && mode == TasMode::Rec as u32 {
@@ -3330,7 +3320,6 @@ mod tests {
             cont_catchup_multiplier: 12.0,
             play_bucket_match: true,
             play_judge_speed: 64.0,
-            play_handoff_armed: false,
             cont_cycle_label: "CONT",
             log_read_cursor: 0,
             cached_max_drift_x: 0.0,
