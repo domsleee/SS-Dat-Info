@@ -25,6 +25,42 @@
 //!
 //! Reports the distribution both ways so the two cannot be confused.
 
+//! ==========================================================================
+//! OUTCOME: measured true, SHIPPED FALSE. Do not wire this into the controller.
+//! ==========================================================================
+//!
+//! The measurement below is real: arming on a tick does collapse first_moving
+//! from 3-6 scattered values to two adjacent ones. But turning that into a
+//! controller change made CONT WORSE, and the reason is worth keeping.
+//!
+//! The change: TransportPort gained tick_count, RestartWaitDone set a tick
+//! target instead of returning Wait{ms}, and a new ArmTickWait phase polled for
+//! it. All 332 unit tests passed and fe10065-cont still passed with zero drift
+//! and zero overshoot — correctness was never in question. The rerolls were:
+//!
+//!     baseline (slept settle)   first-try 7/8, 5/8, 6/8   mean 0.2 - 0.6
+//!     tick-precise arm          first-try 1/8, 3/8        mean 3.5, 2.4
+//!
+//! Six to ten times more rerolls. Reverted.
+//!
+//! WHY IT BACKFIRED. arm_settle_ms is calibrated IN MILLISECONDS against the
+//! slept path — base = (OBSERVED_AT_ZERO_SETTLE - fm) * ARM_SETTLE_MS_PER_FRAME,
+//! clamped to 0..48ms. Re-expressing that as ticks (div_ceil(10), so 0..5 ticks)
+//! keeps the number and throws away what it was tuned against: a different
+//! reference point, a different rounding, and a poll delay before the arm fires.
+//! Precision the calibration was not built for is not an improvement.
+//!
+//! AND THE PREMISE WAS STALE. The estimate of a 3.3x win came from a recorded
+//! "19% first-try, mean 3.88 attempts". The shipped path measures 0.2-0.6 mean
+//! rerolls today — first-try 60-88%. There was never 3.3x of headroom; that
+//! figure predates the arm calibration and should not be used again.
+//!
+//! What survives is the physics, and it is worth knowing: the countdown is
+//! deterministic to +/-1 tick, the bucket follows the arm tick, and the shipped
+//! ms calibration already lands it most of the time. If anyone revisits this,
+//! the only honest path is to re-derive the calibration IN TICKS from scratch
+//! against the real game — not to convert the existing constants.
+
 use std::collections::BTreeMap;
 use std::thread;
 use std::time::{Duration, Instant};
