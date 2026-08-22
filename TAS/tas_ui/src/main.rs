@@ -425,6 +425,13 @@ struct TasApp {
     last_mode: u32,
     cont_catchup_speed: Option<f32>, // saved speed to restore after CONT catch-up
     cont_catchup_multiplier: f32,    // configurable CONT catch-up speed (default 12x)
+    /// Reroll PLAY until it lands the recording spawn bucket (see settings).
+    play_bucket_match: bool,
+    /// Which transport the in-flight controller cycle is for, for log lines.
+    /// The reroll/abort messages used to hardcode "CONT" because only CONT was
+    /// ever judged; PLAY can be judged now, and a PLAY that exhausts its
+    /// rerolls reporting "CONT aborted" would send someone hunting the wrong bug.
+    cont_cycle_label: &'static str,
     log_read_cursor: u32,
     /// Finish-line watcher (1.7): scan cursor into rec_coords during REC so
     /// each frame only examines new ticks, and the tick the run crossed the
@@ -650,6 +657,8 @@ impl TasApp {
             last_mode: 0,
             cont_catchup_speed: None,
             cont_catchup_multiplier: settings.cont_catchup_speed,
+            play_bucket_match: settings.play_bucket_match,
+            cont_cycle_label: "CONT",
             log_read_cursor: 0,
             finish_scan_cursor: 0,
             finished_at_tick: None,
@@ -1092,15 +1101,26 @@ impl TasApp {
             if command == TasCommand::ArmRec {
                 self.playback_speed = DEFAULT_PLAYBACK_SPEED;
             }
-            // PLAY always starts from tick 0. NOTE: PLAY does not currently
-            // bucket-match (target stays None), so the F5 lottery can land a
-            // near-miss bucket that diverges once the player moves (~tick 299).
-            // The controller supports PLAY bucket-matching (target.is_some()),
-            // but at 1x each reroll replays ~3s before it can judge — a UX
-            // decision pending (see the diagnosis to the user).
+            // PLAY always starts from tick 0.
+            //
+            // PLAY now bucket-matches too, when play_bucket_match is on. The
+            // controller was always capable of it — it judges whenever a target
+            // is given, regardless of arm — and the reason it was left off was
+            // cost, not capability: at 1x the judge cannot rule until the replay
+            // reaches first_moving + BUCKET_MATCH_WINDOW (~3.6s), so a reroll is
+            // that plus the restart, and the measured mean is 3.88 attempts.
+            // CONT hides the same cost behind a 256x catch-up; PLAY at 1x cannot.
+            //
+            // Off, the F5 lottery can land a near-miss bucket that diverges the
+            // moment the boarder moves (~tick 299) — the replay silently stops
+            // being the recording, with nothing on screen to say so. That is the
+            // worse failure, so this defaults on.
             if command == TasCommand::ArmPlay {
                 self.continue_from_frame = 0;
                 self.continue_from_text = "0".to_string();
+                if self.play_bucket_match {
+                    target = self.cont_bucket_target();
+                }
             }
             continue_from_frame = 0;
         }
@@ -1134,14 +1154,26 @@ impl TasApp {
             max_retries: CONT_START_MATCH_MAX_RETRIES,
         };
         self.cont_controller = Some(tas_shared::transport::TransportController::new(cfg));
-        // Block live input for the whole CONT — set BEFORE the controller's
-        // first command so it covers every restart's OFF-mode spawn countdown
-        // (the window the mode-based handler block misses). Cleared when the
-        // bucket aligns (step_cont_controller / Done) — from there the catch-up
-        // PLAY and resumed REC are handler-blocked by mode, and post-splice REC
-        // must see live input. REC/PLAY don't need it (the countdown isn't
-        // replayed against a bucket), so scope it to CONT.
-        if command == TasCommand::ArmContinue {
+        self.cont_cycle_label = match command {
+            TasCommand::ArmContinue => "CONT",
+            TasCommand::ArmPlay => "PLAY",
+            _ => "REC",
+        };
+        // Block live input for the whole judged cycle — set BEFORE the
+        // controller's first command so it covers every restart's OFF-mode spawn
+        // countdown (the window the mode-based handler block misses). Cleared
+        // when the bucket aligns (step_cont_controller / Done) — from there the
+        // catch-up PLAY and resumed REC are handler-blocked by mode, and
+        // post-splice REC must see live input.
+        //
+        // Gated on target.is_some(), i.e. "this cycle will be judged", NOT on
+        // the arm. It used to be scoped to CONT on the reasoning that "REC/PLAY
+        // don't need it — the countdown isn't replayed against a bucket", and
+        // that reasoning stops being true the moment PLAY bucket-matches: a
+        // stray keypress during the countdown perturbs the very bucket the judge
+        // is about to rule on, so a bucket-matched PLAY would reroll against
+        // input it caused itself. REC still has no target and is unaffected.
+        if target.is_some() {
             if let Some(shared) = self.shared.as_mut() {
                 shared.state_mut().cont_suppress_input = 1;
             }
@@ -1221,7 +1253,8 @@ impl TasApp {
                     expected,
                 } => {
                     self.push_log(&format!(
-                        "CONT bucket reroll {}/{} (observed first-moving={:?} expected={:?})",
+                        "{} bucket reroll {}/{} (observed first-moving={:?} expected={:?})",
+                        self.cont_cycle_label,
                         attempt, CONT_START_MATCH_MAX_RETRIES, observed, expected
                     ));
                     // Vary the wall clock so the next F5 lands at a different
@@ -1251,7 +1284,7 @@ impl TasApp {
                     return;
                 }
                 StepOutcome::Aborted { reason } => {
-                    self.push_log(&format!("CONT aborted: {}", reason));
+                    self.push_log(&format!("{} aborted: {}", self.cont_cycle_label, reason));
                     self.clear_cont_catchup();
                     // also clears cont_controller
                     self.reset_continue_runtime_state();
@@ -1993,6 +2026,7 @@ impl eframe::App for TasApp {
             show_log: self.show_log,
             playback_speed: self.playback_speed_for_settings(),
             cont_catchup_speed: self.cont_catchup_multiplier,
+            play_bucket_match: self.play_bucket_match,
             history_cap: self.history_cap,
         };
         s.save();
@@ -2237,6 +2271,17 @@ impl eframe::App for TasApp {
                              unaffected.",
                         );
                     });
+                    ui.checkbox(&mut self.play_bucket_match, "PLAY matches spawn bucket")
+                        .on_hover_text(
+                            "Reroll the F5 restart on PLAY until it lands the \
+                             recording's spawn bucket, the way CONT does.\n\n\
+                             ON: the replay is the run you recorded. Costs time before \
+                             it settles — the judge can't rule until ~3.6s of replay, \
+                             so each reroll is ~5s and the average is ~4 attempts.\n\n\
+                             OFF: playback starts immediately, but a near-miss bucket \
+                             diverges from the recording once the boarder moves \
+                             (~tick 299), with nothing on screen to tell you.",
+                        );
                 });
                 ui.menu_button("View", |ui| {
                     // Everyday toggles, grouped under "Panels". The
@@ -3168,6 +3213,8 @@ mod tests {
             last_mode: 0,
             cont_catchup_speed: None,
             cont_catchup_multiplier: 12.0,
+            play_bucket_match: true,
+            cont_cycle_label: "CONT",
             log_read_cursor: 0,
             cached_max_drift_x: 0.0,
             cached_max_drift_z: 0.0,
