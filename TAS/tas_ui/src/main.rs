@@ -429,13 +429,17 @@ struct TasApp {
     play_bucket_match: bool,
     /// Speed the pre-movement countdown of a bucket-matched PLAY replays at.
     play_judge_speed: f32,
-    /// True once the DLL has been seen holding a staged PLAY speed handover.
+    /// This cycle is a judged PLAY that staged a speed handover, so the
+    /// controller owns playback_speed from end to end and the per-frame sync
+    /// below must not write it.
     ///
-    /// The per-frame speed sync below needs to tell "the handover has fired"
-    /// from "no handover was ever staged" - both read speed_handoff_pos == 0.
-    /// Latching the armed state distinguishes them, exactly as the controller's
-    /// own handoff_sent flag does.
-    play_handoff_seen: bool,
+    /// Set from INTENT, at the moment the cycle is armed - not by watching the
+    /// handover marker in shared memory. The marker can be staged by the
+    /// controller and consumed by the DLL entirely between two egui frames (at
+    /// 64x the countdown takes ~47ms and this closure runs on vsync), so a UI
+    /// that waits to observe it can miss the whole handover and then cheerfully
+    /// write the catch-up speed back over it.
+    play_handoff_armed: bool,
     /// Which transport the in-flight controller cycle is for, for log lines.
     /// The reroll/abort messages used to hardcode "CONT" because only CONT was
     /// ever judged; PLAY can be judged now, and a PLAY that exhausts its
@@ -668,7 +672,7 @@ impl TasApp {
             cont_catchup_multiplier: settings.cont_catchup_speed,
             play_bucket_match: settings.play_bucket_match,
             play_judge_speed: settings.play_judge_speed,
-            play_handoff_seen: false,
+            play_handoff_armed: false,
             cont_cycle_label: "CONT",
             log_read_cursor: 0,
             finish_scan_cursor: 0,
@@ -792,6 +796,9 @@ impl TasApp {
     fn reset_continue_runtime_state(&mut self) {
         self.pending_session_kind = None;
         self.pending_continue_start_tick = None;
+        // STOP means the controller is gone, so it is not asserting anything
+        // any more - the UI has to take the speed back or nothing writes it.
+        self.play_handoff_armed = false;
         // Cancel any in-flight restart/arm/reroll cycle. STOP must mean STOP —
         // without this the controller would keep stepping and silently start
         // recording/playback after the restart completes.
@@ -1084,6 +1091,10 @@ impl TasApp {
                 return;
             }
         }
+        // Every arm starts from "the UI owns the speed"; only the judged-PLAY
+        // branch below hands that over. Resetting here rather than after the
+        // branches means a REC or CONT can never inherit a PLAY's ownership.
+        self.play_handoff_armed = false;
         let arm = match command {
             TasCommand::ArmPlay => tas_shared::transport::Arm::Play,
             TasCommand::ArmContinue => tas_shared::transport::Arm::Continue,
@@ -1148,10 +1159,12 @@ impl TasApp {
                             self.cont_catchup_speed = Some(self.playback_speed);
                         }
                         self.playback_speed = self.play_judge_speed;
+                        // From here until the cycle ends, the controller owns the
+                        // speed (see the field's doc).
+                        self.play_handoff_armed = true;
                     }
                 }
             }
-            self.play_handoff_seen = false;
             continue_from_frame = 0;
         }
 
@@ -1300,7 +1313,7 @@ impl TasApp {
                     // The controller drops the staged handover on a reroll, so
                     // un-latch here too or the sync would read the next attempt's
                     // not-yet-staged handover as one that already fired.
-                    self.play_handoff_seen = false;
+                    self.play_handoff_armed = false;
                     // Vary the wall clock so the next F5 lands at a different
                     // accumulator-modulo-tick phase, then loop immediately.
                     std::thread::sleep(std::time::Duration::from_millis(suggested_delay_ms));
@@ -1324,7 +1337,7 @@ impl TasApp {
                     // still running toward the splice.
                     if self.cont_cycle_label == "PLAY" {
                         self.clear_cont_catchup();
-                        self.play_handoff_seen = false;
+                        self.play_handoff_armed = false;
                     }
                     // Stash for the resume summary emitted at the REC-start splice,
                     // where the actual resume frame is known. attempts = rerolls + 1.
@@ -1340,7 +1353,7 @@ impl TasApp {
                 StepOutcome::Aborted { reason } => {
                     self.push_log(&format!("{} aborted: {}", self.cont_cycle_label, reason));
                     self.clear_cont_catchup();
-                    self.play_handoff_seen = false;
+                    self.play_handoff_armed = false;
                     // Drop any handover the aborted attempt had staged, and push
                     // the restored speed through: an aborted PLAY must not leave
                     // the game fast-forwarding at the judge speed.
@@ -2687,28 +2700,27 @@ impl eframe::App for TasApp {
                 // frame(s) before our mode-transition handler runs. This closes
                 // the post-splice overshoot (Problem B).
                 //
-                // The same applies to a judged PLAY's speed handover, which fires
-                // at the first moving frame with no mode change to notice it by:
-                // once cave2 has cleared the staged position, asserting the
-                // catch-up here would drag the run the user is watching back up
-                // to 64x for the rest of the judge window. play_handoff_seen
-                // latches "a handover was staged" so a cleared position can be
-                // read as "already fired" rather than "never armed".
+                // A judged PLAY is different again: its handover fires mid-replay
+                // with no mode change to notice it by, and it can be staged and
+                // consumed between two frames of this closure. So rather than
+                // race it, this yields the field entirely - the controller owns
+                // playback_speed for that whole cycle, asserting the catch-up
+                // before the handover and the resume speed after, and it steps at
+                // least as often as this runs. Two writers with different views of
+                // the same handover is exactly how the catch-up got reinstated
+                // over it.
+                let controller_owns_speed =
+                    self.play_handoff_armed && self.cont_controller.is_some();
                 let catchup_active = self.cont_catchup_speed.is_some();
                 let mode = shared.state().mode;
-                let handoff_pos = shared.state().speed_handoff_pos;
-                if handoff_pos != 0 {
-                    self.play_handoff_seen = true;
-                }
-                let handed_over = self.play_handoff_seen && handoff_pos == 0;
-                let speed_to_assert = if catchup_active
-                    && (mode == TasMode::Rec as u32 || handed_over)
-                {
+                let speed_to_assert = if catchup_active && mode == TasMode::Rec as u32 {
                     self.cont_catchup_speed.unwrap_or(self.playback_speed)
                 } else {
                     self.playback_speed
                 };
-                shared.state_mut().playback_speed = speed_to_assert;
+                if !controller_owns_speed {
+                    shared.state_mut().playback_speed = speed_to_assert;
+                }
 
                 ui.separator();
 
@@ -3296,7 +3308,7 @@ mod tests {
             cont_catchup_multiplier: 12.0,
             play_bucket_match: true,
             play_judge_speed: 64.0,
-            play_handoff_seen: false,
+            play_handoff_armed: false,
             cont_cycle_label: "CONT",
             log_read_cursor: 0,
             cached_max_drift_x: 0.0,

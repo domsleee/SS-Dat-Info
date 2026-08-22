@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 23; // +speed_handoff_pos, speed_after_handoff (atomic PLAY speed handover)
+use std::sync::atomic::compiler_fence;
+
+pub const TAS_SHARED_VERSION: u32 = 24; // +arm_generation (durable "the arm landed" signal)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -374,6 +376,20 @@ pub struct TasSharedState {
     pub speed_handoff_pos: u32,
     /// Speed to assert at the handoff (0 = leave the speed alone).
     pub speed_after_handoff: f32,
+    /// Bumped by cave2 every time it PROCESSES an arm that starts a replay
+    /// (ARM_PLAY / ARM_CONTINUE), including one it refuses.
+    ///
+    /// The judge needs to know whether the mode and position it is reading
+    /// describe this attempt or the previous one, and neither of those fields
+    /// can answer it: mode is transient (a short replay at 256x can begin and
+    /// end between two polls, leaving every later poll reading OFF), and the
+    /// position still holds the previous replay's final value until the arm
+    /// resets it. This counter is monotonic and changes exactly once per arm,
+    /// so "has it moved since I armed" is a question with a durable answer.
+    ///
+    /// Counting REFUSED arms too is deliberate: a refusal leaves the mode OFF
+    /// forever, which is precisely the state that used to spin.
+    pub arm_generation: u32,
     pub arm_at_tick: u32,
     /// The tick at which ARM was actually consumed (diagnostic).
     pub arm_consumed_tick: u32,
@@ -1452,6 +1468,9 @@ pub mod transport {
         /// not fired yet. The DLL clears it when it fires, which is how the
         /// controller knows to stop re-asserting the catch-up speed.
         fn speed_handoff_pending(&self) -> bool;
+        /// Monotonic counter the DLL bumps once per processed arm. Used to tell
+        /// this attempt's replay state from the previous one's.
+        fn arm_generation(&self) -> u32;
     }
 
     /// Fixed wall-clock delay (ms) between sending Stop and sending Restart.
@@ -1581,10 +1600,10 @@ pub mod transport {
         completed_via: CompletedVia,
         /// A speed handover has been staged with the DLL for this attempt.
         handoff_sent: bool,
-        /// The replay has been observed in PLAY mode at least once, so a
-        /// later "not in PLAY" reading means it ENDED rather than "not yet
-        /// started".
-        seen_play: bool,
+        /// The DLL's arm counter as it stood just before this attempt armed.
+        /// Once it differs, the mode and position being read describe THIS
+        /// attempt; until then they still describe the previous replay.
+        arm_generation_at_arm: u32,
     }
 
     impl TransportController {
@@ -1596,7 +1615,7 @@ pub mod transport {
                 retries_remaining,
                 completed_via: CompletedVia::Unjudged,
                 handoff_sent: false,
-                seen_play: false,
+                arm_generation_at_arm: 0,
             }
         }
 
@@ -1619,17 +1638,26 @@ pub mod transport {
             // to do this via an ungated per-frame sync; the controller owns it
             // now.)
             //
-            // EXCEPT once a staged speed handover has fired. The DLL dropped the
-            // speed at an exact tick precisely so the run plays at normal speed
-            // from there; re-asserting the catch-up here would immediately undo
-            // it and the user would watch the whole run at 64x. `handoff_sent`
-            // keeps the assertion alive for the phases BEFORE the handover is
-            // staged (Start..ArmSettle), where `speed_handoff_pending()` is also
-            // false but for the opposite reason.
+            // EXCEPT once a staged speed handover has fired: from there the
+            // speed to hold is the resume speed, and re-asserting the catch-up
+            // would undo the handover and leave the user watching the run at
+            // 64x. `handoff_sent` keeps the catch-up alive for the phases
+            // BEFORE the handover is staged (Start..ArmSettle), where
+            // `speed_handoff_pending()` is also false but for the opposite
+            // reason.
+            //
+            // It ASSERTS the resume speed rather than just going quiet, because
+            // this read and the write below are not one operation: a step can
+            // read "still pending", have cave2 fire underneath it, and then
+            // write the catch-up speed over the handover. Going quiet would
+            // leave that lost race uncorrected for the rest of the replay;
+            // asserting repairs it on the very next step (~3ms later).
             let handed_over = self.handoff_sent && !port.speed_handoff_pending();
-            if !handed_over {
-                port.set_playback_speed(self.cfg.catchup_speed);
-            }
+            port.set_playback_speed(if handed_over {
+                self.cfg.resume_speed
+            } else {
+                self.cfg.catchup_speed
+            });
             match self.phase {
                 Phase::Start => {
                     port.set_playback_speed(self.cfg.catchup_speed);
@@ -1639,7 +1667,6 @@ pub mod transport {
                     // wrong replay.
                     port.set_speed_handoff(0, 0.0);
                     self.handoff_sent = false;
-                    self.seen_play = false;
                     // Always Stop then settle a FIXED delay before Restart (like
                     // the legacy loop), so the Restart fires at a consistent
                     // wall-clock phase → consistent (good) F5 bucket.
@@ -1703,6 +1730,10 @@ pub mod transport {
                             self.handoff_sent = false;
                         }
                     }
+                    // Snapshot the arm counter BEFORE the command goes out, so
+                    // the judge can tell this attempt's replay state from the
+                    // previous one's no matter how the polling lands.
+                    self.arm_generation_at_arm = port.arm_generation();
                     port.send_command(self.cfg.arm.command());
                     // Judge the F5 bucket whenever a fingerprint was given — CONT
                     // always has one; PLAY can too, so a replay rerolls until it
@@ -1722,22 +1753,19 @@ pub mod transport {
                         // Splice already fired (PLAY→REC) — bucket accepted.
                         return self.finish(CompletedVia::Unjudged);
                     }
-                    // "Not in PLAY" means two opposite things depending on when
-                    // it is read. Before the first PLAY sighting the arm simply
-                    // has not taken effect yet, so keep waiting. AFTER one, the
-                    // replay has ENDED - and if it ended before reaching
-                    // first_moving + BUCKET_MATCH_WINDOW the judge can never rule,
-                    // so treating its KeepWaiting as InProgress hung the cycle
-                    // forever (a recording shorter than fm+64 did exactly that).
-                    let replay_ended = if mode == play {
-                        self.seen_play = true;
-                        false
-                    } else {
-                        if !self.seen_play {
-                            return StepOutcome::InProgress;
-                        }
-                        true
-                    };
+                    // Until the DLL has processed the arm, the mode and position
+                    // being read still describe the PREVIOUS replay - so nothing
+                    // here can be concluded from them yet.
+                    if port.arm_generation() == self.arm_generation_at_arm {
+                        return StepOutcome::InProgress;
+                    }
+                    // Past the arm, "not in PLAY" means the replay ENDED (or the
+                    // DLL refused the arm outright, which leaves it OFF forever).
+                    // Either way nothing more will arrive, so the judge's
+                    // KeepWaiting has to become terminal rather than InProgress -
+                    // a recording shorter than first_moving + BUCKET_MATCH_WINDOW
+                    // can never be ruled on and used to spin the cycle forever.
+                    let replay_ended = mode != play;
                     let pos = port.playback_pos();
                     if pos == 0 {
                         if replay_ended {
@@ -1832,6 +1860,13 @@ pub mod transport {
             detail: String,
             observed: Option<u32>,
         ) -> StepOutcome {
+            // Drop the staged handover FIRST, so the terminal abort below leaves
+            // nothing armed either. A last-attempt failure returns early, and a
+            // marker surviving that return is inherited by whatever arms next -
+            // including a CONT, which would then take a PLAY's resume speed and
+            // clock reset partway through its catch-up.
+            port.set_speed_handoff(0, 0.0);
+            self.handoff_sent = false;
             if self.retries_remaining == 0 {
                 port.send_command(TasCommand::Stop);
                 self.phase = Phase::Aborted;
@@ -1841,13 +1876,6 @@ pub mod transport {
             }
             self.retries_remaining -= 1;
             let attempt = self.cfg.max_retries - self.retries_remaining;
-            // Drop any staged handover before the next attempt. A reroll goes
-            // to StopSettle, NOT back through Phase::Start, so this is the only
-            // place it gets cleared - and leaving it armed would let it fire
-            // against the next attempt's replay at the wrong position.
-            port.set_speed_handoff(0, 0.0);
-            self.handoff_sent = false;
-            self.seen_play = false;
             port.set_continue_from_frame(self.cfg.continue_from_frame);
             port.set_playback_speed(self.cfg.catchup_speed);
             port.send_command(TasCommand::Stop);
@@ -1879,6 +1907,7 @@ pub mod transport {
             playback_speed: f32,
             speed_handoff_pos: u32,
             speed_after_handoff: f32,
+            arm_generation: u32,
             commands: Vec<TasCommand>,
             /// Invariant tracker: Restart must NEVER be sent while mode != OFF.
             restart_while_not_off: bool,
@@ -1888,6 +1917,10 @@ pub mod transport {
             fn send_command(&mut self, cmd: TasCommand) {
                 if cmd == TasCommand::Restart && self.mode != TasMode::Off as u32 {
                     self.restart_while_not_off = true;
+                }
+                // Stand in for cave2 processing the arm.
+                if matches!(cmd, TasCommand::ArmPlay | TasCommand::ArmContinue) {
+                    self.arm_generation = self.arm_generation.wrapping_add(1);
                 }
                 self.commands.push(cmd);
             }
@@ -1924,6 +1957,9 @@ pub mod transport {
             }
             fn speed_handoff_pending(&self) -> bool {
                 self.speed_handoff_pos != 0
+            }
+            fn arm_generation(&self) -> u32 {
+                self.arm_generation
             }
         }
 
@@ -2239,8 +2275,8 @@ pub mod transport {
             };
             let mut c = TransportController::new(cfg(Arm::Play, Some(target), 30));
             let mut rec = vec![[1.0f32, 2.0, 3.0]; 800];
-            for k in 250..800 {
-                rec[k] = [1.0, 2.0, 3.0 + (k - 249) as f32 * 0.01];
+            for (k, item) in rec.iter_mut().enumerate().take(800).skip(250) {
+                *item = [1.0, 2.0, 3.0 + (k - 249) as f32 * 0.01];
             }
             p.rec_coords = rec.clone();
             p.recorded_count = 800;
@@ -2263,6 +2299,150 @@ pub mod transport {
 
             p.playback_pos = 600;
             assert!(matches!(c.step(&mut p), StepOutcome::Reroll { .. }));
+        }
+        /// The controller and cave2 both write playback_speed, and the read that
+        /// decides which speed to write is not part of the write. A step can read
+        /// "handover still pending", have cave2 fire underneath it, and land its
+        /// catch-up store AFTER the resume speed was installed - with the marker
+        /// by then cleared, so nothing would ever look at it again. Going quiet
+        /// once the handover fires is therefore not enough; the controller has to
+        /// keep asserting the resume speed so a lost race is repaired.
+        #[test]
+        fn a_lost_speed_race_is_repaired_on_the_next_step() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut a = cfg(Arm::Play, Some(target), 30);
+            a.catchup_speed = 64.0;
+            a.resume_speed = 1.0;
+            let mut c = TransportController::new(a);
+            let mut coords = vec![[1.0f32, 2.0, 3.0]; 400];
+            coords[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = coords.clone();
+            p.recorded_count = 400;
+            drive_to_judge(&mut c, &mut p);
+            p.play_coords = coords;
+
+            p.playback_pos = 251;
+            p.dll_tick();
+            assert_eq!(p.playback_speed, 1.0);
+
+            // The lost race: a catch-up store lands after the handover.
+            p.playback_speed = 64.0;
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress);
+            assert_eq!(
+                p.playback_speed, 1.0,
+                "the controller must put the resume speed back, not just stay quiet"
+            );
+        }
+
+        /// A final-attempt failure returns from reroll() early. A handover left
+        /// staged across that return is inherited by whatever arms next -
+        /// including a CONT, which would take a PLAY's resume speed and clock
+        /// reset partway through its catch-up.
+        #[test]
+        fn abort_leaves_no_handover_armed() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut a = cfg(Arm::Play, Some(target), 0); // no retries left
+            a.catchup_speed = 64.0;
+            a.resume_speed = 1.0;
+            let mut c = TransportController::new(a);
+            let mut rec = vec![[1.0f32, 2.0, 3.0]; 400];
+            rec[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = rec;
+            p.recorded_count = 400;
+            drive_to_judge(&mut c, &mut p);
+            assert_eq!(p.speed_handoff_pos, 251);
+
+            // Spawned somewhere else entirely: WrongStart, and no retries left.
+            p.play_coords = vec![[9.0f32, 9.0, 9.0]; 400];
+            p.playback_pos = 320;
+            assert!(matches!(c.step(&mut p), StepOutcome::Aborted { .. }));
+            assert_eq!(p.speed_handoff_pos, 0, "abort left a handover armed");
+            assert_eq!(p.speed_after_handoff, 0.0);
+        }
+
+        /// Mode is transient: a short replay at catch-up speed can begin and end
+        /// entirely between two polls, so "we saw PLAY mode" is not a sound way to
+        /// know the replay ran. Every later poll then reads OFF with no sighting
+        /// and the cycle spins forever. The arm also zeroes playback_pos, and
+        /// seeing THAT is durable.
+        #[test]
+        fn judge_finishes_when_play_mode_is_never_observed() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Play, Some(target), 30));
+            let mut coords = vec![[1.0f32, 2.0, 3.0]; 400];
+            coords[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = coords.clone();
+            p.recorded_count = 400;
+            drive_to_judge(&mut c, &mut p);
+
+            // The whole replay ran between two polls: PLAY mode is never
+            // sampled, and the only evidence it happened is that the arm counter
+            // moved and the position is past the end.
+            p.mode = TasMode::Off as u32;
+            p.play_coords = coords;
+            p.playback_pos = 400;
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 0,
+                    completed_via: CompletedVia::BucketMatched
+                }
+            );
+        }
+
+        /// A refused arm (cave2 bounces ARM_CONTINUE from mid-run, for one) never
+        /// enters PLAY and never replays anything, so the judge waits on a replay
+        /// that will not happen. The arm counter counts refusals too, which is
+        /// what turns that from a spin into a terminal outcome.
+        #[test]
+        fn judge_finishes_when_the_arm_was_refused() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Play, Some(target), 30));
+            let mut coords = vec![[1.0f32, 2.0, 3.0]; 400];
+            coords[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = coords;
+            p.recorded_count = 400;
+            drive_to_judge(&mut c, &mut p);
+
+            // Refused: mode never became PLAY and nothing replayed.
+            p.mode = TasMode::Off as u32;
+            p.playback_pos = 0;
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 0,
+                    completed_via: CompletedVia::Unjudged
+                }
+            );
+            assert!(c.is_terminal());
         }
         #[test]
         fn cont_matches_correct_bucket() {
@@ -2620,15 +2800,32 @@ impl transport::TransportPort for TasSharedMemoryClient {
         self.state_mut().playback_speed = speed;
     }
     fn set_speed_handoff(&mut self, pos: u32, speed: f32) {
+        // Payload first, THEN the marker that arms it. cave2 tests the marker
+        // and reads the speed only when it is armed, so this order is what
+        // stops it acting on an armed handover with a stale speed beside it -
+        // and a stale 0.0 there reads as "leave the speed alone", i.e. the run
+        // would keep fast-forwarding with the request already consumed.
+        //
+        // Volatile, not plain, and with a compiler fence between. The other
+        // side of these words is a different PROCESS, which Rust's memory model
+        // cannot see: plain accesses may be reordered, merged, cached in a
+        // register or elided entirely because nothing in this program appears
+        // to read them. x86 not reordering stores only matters once the
+        // compiler has emitted them in that order.
         let s = self.state_mut();
-        // Speed first: cave2 tests the position, so publishing the
-        // position last means it can never see an armed handover with a
-        // stale speed beside it.
-        s.speed_after_handoff = speed;
-        s.speed_handoff_pos = pos;
+        unsafe {
+            std::ptr::write_volatile(&mut s.speed_after_handoff as *mut f32, speed);
+            compiler_fence(std::sync::atomic::Ordering::SeqCst);
+            std::ptr::write_volatile(&mut s.speed_handoff_pos as *mut u32, pos);
+        }
     }
     fn speed_handoff_pending(&self) -> bool {
-        self.state().speed_handoff_pos != 0
+        // Volatile for the same reason: cave2 clears this from the game
+        // process, and a plain load can be hoisted out of the caller's loop.
+        unsafe { std::ptr::read_volatile(&self.state().speed_handoff_pos as *const u32) != 0 }
+    }
+    fn arm_generation(&self) -> u32 {
+        unsafe { std::ptr::read_volatile(&self.state().arm_generation as *const u32) }
     }
 }
 
@@ -2665,15 +2862,32 @@ impl transport::TransportPort for TasSharedMemoryClient {
         self.state_mut().playback_speed = speed;
     }
     fn set_speed_handoff(&mut self, pos: u32, speed: f32) {
+        // Payload first, THEN the marker that arms it. cave2 tests the marker
+        // and reads the speed only when it is armed, so this order is what
+        // stops it acting on an armed handover with a stale speed beside it -
+        // and a stale 0.0 there reads as "leave the speed alone", i.e. the run
+        // would keep fast-forwarding with the request already consumed.
+        //
+        // Volatile, not plain, and with a compiler fence between. The other
+        // side of these words is a different PROCESS, which Rust's memory model
+        // cannot see: plain accesses may be reordered, merged, cached in a
+        // register or elided entirely because nothing in this program appears
+        // to read them. x86 not reordering stores only matters once the
+        // compiler has emitted them in that order.
         let s = self.state_mut();
-        // Speed first: cave2 tests the position, so publishing the
-        // position last means it can never see an armed handover with a
-        // stale speed beside it.
-        s.speed_after_handoff = speed;
-        s.speed_handoff_pos = pos;
+        unsafe {
+            std::ptr::write_volatile(&mut s.speed_after_handoff as *mut f32, speed);
+            compiler_fence(std::sync::atomic::Ordering::SeqCst);
+            std::ptr::write_volatile(&mut s.speed_handoff_pos as *mut u32, pos);
+        }
     }
     fn speed_handoff_pending(&self) -> bool {
-        self.state().speed_handoff_pos != 0
+        // Volatile for the same reason: cave2 clears this from the game
+        // process, and a plain load can be hoisted out of the caller's loop.
+        unsafe { std::ptr::read_volatile(&self.state().speed_handoff_pos as *const u32) != 0 }
+    }
+    fn arm_generation(&self) -> u32 {
+        unsafe { std::ptr::read_volatile(&self.state().arm_generation as *const u32) }
     }
 }
 
@@ -2697,7 +2911,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_464);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_472);
     }
 
     #[test]

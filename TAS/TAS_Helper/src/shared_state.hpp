@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 23; // +speed_handoff_pos, speed_after_handoff
+constexpr uint32_t TAS_SHARED_VERSION = 24; // +arm_generation
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -357,6 +357,11 @@ struct TasSharedState {
     // and hand back to 1x exactly where the run becomes worth watching.
     volatile uint32_t speed_handoff_pos;
     volatile float speed_after_handoff;
+    // Bumped every time cave2 PROCESSES a replay-starting arm (ARM_PLAY /
+    // ARM_CONTINUE), refusals included. The judge uses it to tell this
+    // attempt's mode/position from the previous replay's - neither of those
+    // fields can answer that on its own. See the Rust doc.
+    volatile uint32_t arm_generation;
     volatile uint32_t arm_at_tick;
     volatile uint32_t arm_consumed_tick;
     volatile uint32_t clock_delta_lo;
@@ -369,7 +374,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1647464,
+static_assert(sizeof(TasSharedState) == 1647472,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 
