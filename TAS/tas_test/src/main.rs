@@ -23,6 +23,8 @@ mod cont_restart_race;
 mod drift;
 mod drift_speed;
 mod bucket_predict;
+mod arm_precision;
+mod bucket_scan;
 mod countdown_probe;
 mod f5_probe;
 mod gates;
@@ -253,6 +255,76 @@ fn main() {
                 }
             }
             f5_probe::run(iterations);
+            std::process::exit(0);
+        }
+        "arm-precision" => {
+            let mut iterations = 16u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(16);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            arm_precision::run(iterations);
+            std::process::exit(0);
+        }
+        "bucket-scan-heap" => {
+            let mut iterations = 14u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(14);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            bucket_scan::bucket_scan_heap(iterations);
+            std::process::exit(0);
+        }
+        "countdown-find-heap" => {
+            let mut iterations = 4u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(4);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            bucket_scan::find_countdown_heap(iterations);
+            std::process::exit(0);
+        }
+        "countdown-find" => {
+            let mut iterations = 6u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(6);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            bucket_scan::find_countdown(iterations);
+            std::process::exit(0);
+        }
+        "bucket-scan" => {
+            let mut iterations = 16u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(16);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            bucket_scan::run(iterations);
             std::process::exit(0);
         }
         "countdown-probe" => {
