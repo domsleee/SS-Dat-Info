@@ -23,6 +23,7 @@ mod cont_restart_race;
 mod drift;
 mod drift_speed;
 mod bucket_predict;
+mod countdown_probe;
 mod f5_probe;
 mod gates;
 mod harness;
@@ -252,6 +253,20 @@ fn main() {
                 }
             }
             f5_probe::run(iterations);
+            std::process::exit(0);
+        }
+        "countdown-probe" => {
+            let mut iterations = 20u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(20);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            countdown_probe::run(iterations);
             std::process::exit(0);
         }
         "bucket-predict" => {
