@@ -1234,7 +1234,21 @@ pub fn restart_continue_and_splice_inprocess(
         match controller.step(client) {
             StepOutcome::InProgress => {
                 if Instant::now() > attempt_deadline {
-                    eprintln!("  ERROR: CONT attempt stalled (no progress within budget)");
+                    // Name the phase and the state it is reading. "No progress"
+                    // is the same message for an F5 restart that never
+                    // completed, an arm the DLL never processed, and a judge
+                    // waiting on a replay that will not arrive - and those are
+                    // three unrelated bugs.
+                    let st = client.state();
+                    eprintln!(
+                        "  ERROR: CONT attempt stalled in {} | mode={} restart_state={} playback_pos={} arm_generation={} recorded={}",
+                        controller.phase_name(),
+                        st.mode,
+                        st.restart_state,
+                        st.playback_pos,
+                        st.arm_generation,
+                        st.recorded_count
+                    );
                     client.send_command(TasCommand::Stop);
                     return None;
                 }

@@ -1740,6 +1740,25 @@ pub mod transport {
             self.cfg.resume_speed > 0.0
         }
 
+        /// Which transition the cycle is waiting on, for diagnostics.
+        ///
+        /// A stalled cycle reports only "no progress within budget", which is
+        /// the same message whether the F5 restart never completed, the arm was
+        /// never processed, or the judge is waiting on a replay that will not
+        /// arrive. Those have completely different causes and the log could not
+        /// tell them apart.
+        pub fn phase_name(&self) -> &'static str {
+            match self.phase {
+                Phase::Start => "Start",
+                Phase::StopSettle => "StopSettle (waiting out the fixed Stop->Restart delay)",
+                Phase::RestartWaitDone => "RestartWaitDone (waiting for the F5 restart)",
+                Phase::ArmSettle => "ArmSettle",
+                Phase::JudgeBucket => "JudgeBucket (waiting on the replay)",
+                Phase::Done => "Done",
+                Phase::Aborted => "Aborted",
+            }
+        }
+
         pub fn is_terminal(&self) -> bool {
             matches!(self.phase, Phase::Done | Phase::Aborted)
         }
