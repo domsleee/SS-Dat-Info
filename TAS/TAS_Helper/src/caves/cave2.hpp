@@ -610,6 +610,7 @@ static void FlushPendingLog() {
         case 8: Log("Cave 2: F5 released, restart complete"); break;
         case 9: Log(std::format("Cave 2: [snap] captured {} bytes", param)); break;
         case 10: Log(std::format("Cave 2: [snap] restored; player revert match {}/3 (3=bit-exact)", param)); break;
+        case 11: Log(std::format("Cave 2: PLAY speed handover at frame {}", param)); break;
     }
 }
 
@@ -819,6 +820,33 @@ static void __declspec(noinline) Cave2_Logic() {
         CapturePlayerCoords(s, pos, false);
 
         s->playback_pos = pos + 1;
+
+        // Judged-PLAY speed handover, the same trick as the CONT splice below.
+        //
+        // A bucket-matched PLAY replays the countdown purely so the judge can see
+        // where the boarder leaves the spawn; nothing before that is worth
+        // watching, and at 1x it costs ~3s on the accepted run AND on every
+        // reroll. So the UI replays it at catch-up speed and asks for the drop
+        // back here, at the tick it names. Doing it from the UI thread instead
+        // would be unbounded: cave5 can already have issued a batch of up to
+        // CAVE5_PER_FRAME_TICK_CAP ticks before the poll even runs, so the run
+        // would start fast-forwarded by a variable amount — precisely the
+        // "Problem B" overshoot the CONT splice was changed to avoid.
+        //
+        // cave5 caps the batch to land on this position, so the handover is
+        // exact and not up to a batch late.
+        if (s->speed_handoff_pos > 0 && s->playback_pos >= s->speed_handoff_pos) {
+            if (s->speed_after_handoff > 0.0f) {
+                s->playback_speed = s->speed_after_handoff;
+            }
+            // Clear the catch-up clock backlog on cave5's next tick, exactly as
+            // the splice does, so the replay resumes frame-exact at the new speed
+            // instead of burning down the accumulated fast-forward debt.
+            s->cont_reset_pending = 1;
+            s->speed_handoff_pos = 0;
+            g_cave2_logParam = s->playback_pos;
+            g_cave2_pendingLog = 11;
+        }
 
         // Continue Record: auto-switch to REC AFTER processing the splice frame.
         // This ensures the splice frame gets normal PLAY processing (input injection
