@@ -64,15 +64,22 @@ History is not carried over by a file copy, so it is recorded here instead —
     f3266df  2026-02-28  cleanup: archive old probes, fix UI/test infrastructure
     0eb44e2  2026-02-28  achieve verified steering + zero drift
 
-### Loose end in the old repo
+### The old location is retired
 
-`cheatengine-mcp-bridge` still has `tasks/pico/` with the uncommitted Escape fix in
-its working tree. Nothing here depends on it any more, but leaving it there invites
-someone to edit the wrong copy. Either delete it and point at this directory, or
-commit the fix first so the two do not silently disagree — not done from here,
-because it is a separate repo.
+Done, in `cheatengine-mcp-bridge` on branch `tas-loop`:
 
-Note also that this repo's harness still calls into that one for
+* `a73d325` commits the Escape fix that had been sitting uncommitted, so it exists
+  in that repo's history instead of vanishing with the directory.
+* `c0c57f0` removes `code.py`, `boot.py`, `test.py` and `pico.log`, and leaves a
+  README there pointing here.
+
+`serial.lua` stayed behind on purpose: it is the Cheat Engine Lua driver for the
+same board, belongs with CE rather than with the firmware, and 16 files under
+`tasks/archive/` still reference it. **It speaks this same bitmask protocol**, so
+if the bit assignments below ever change, that file has to change with them — it
+is the one remaining place the protocol is duplicated.
+
+Note that this repo's harness still calls into that one for
 `skills/revive-supreme`, so the cross-repo dependency is not gone entirely; what
 has gone is the *protocol* being split across two repos.
 
