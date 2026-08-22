@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 21; // +clock_delta_{lo,hi} (sub-tick phase for fast bucket judging)
+pub const TAS_SHARED_VERSION: u32 = 22; // +arm_at_tick, arm_consumed_tick (deterministic arm scheduling)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -349,6 +349,20 @@ pub struct TasSharedState {
     /// measurement. This is the pre-truncation quantity — the fraction __ftol
     /// throws away — and `lo` is the sub-unit component (the BB3B10 arg4 work
     /// found that FLOORING lo to 0 is what made injected stamps bit-exact).
+    /// Defer ARM until the physics tick counter reaches this value (0 = consume
+    /// immediately, the historical behaviour).
+    ///
+    /// WHY. Writing CMD_ARM_REC is a shared-memory store from another process;
+    /// cave2 CONSUMES it on some later Supreme::Cycle. So "armed at tick +40"
+    /// only ever meant "written at +40" — consumption could be +40 or +41, and
+    /// first_moving is measured from consumption. With the gate itself landing on
+    /// G or G+1, the difference of two +/-1 quantities produces exactly three
+    /// adjacent values with the middle one commonest, which is precisely the
+    /// observed 258 x2 / 259 x14 / 260 x4. Scheduling the arm INSIDE the game
+    /// thread removes one of the two.
+    pub arm_at_tick: u32,
+    /// The tick at which ARM was actually consumed (diagnostic).
+    pub arm_consumed_tick: u32,
     pub clock_delta_lo: u32,
     pub clock_delta_hi: u32,
 }
@@ -2280,7 +2294,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_448);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_456);
     }
 
     #[test]

@@ -24,6 +24,7 @@ mod drift;
 mod drift_speed;
 mod bucket_predict;
 mod arm_precision;
+mod restart_precision;
 mod bucket_scan;
 mod countdown_probe;
 mod f5_probe;
@@ -255,6 +256,20 @@ fn main() {
                 }
             }
             f5_probe::run(iterations);
+            std::process::exit(0);
+        }
+        "restart-precision" => {
+            let mut iterations = 10u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(10);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            restart_precision::run(iterations);
             std::process::exit(0);
         }
         "arm-precision" => {
