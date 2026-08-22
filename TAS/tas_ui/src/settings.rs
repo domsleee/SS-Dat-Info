@@ -35,6 +35,28 @@ pub struct Settings {
     /// always-on — CONT hides the same cost behind a 256x catch-up, and PLAY at
     /// 1x cannot.
     pub play_bucket_match: bool,
+
+    /// Speed to replay the pre-movement countdown at while a bucket-matched
+    /// PLAY is being judged. 1.0 disables the catch-up and plays it at normal
+    /// speed.
+    ///
+    /// The judge cannot rule on the bucket until the replay has passed the
+    /// recording's first moving frame, and for a real recording that is ~2.6s
+    /// of watching a boarder stand still through the countdown - paid on the
+    /// attempt that succeeds AND on every reroll. Nothing in that stretch is
+    /// worth watching, so it is replayed fast; the DLL hands the speed back at
+    /// the exact tick the boarder starts moving.
+    #[serde(default = "default_play_judge_speed")]
+    pub play_judge_speed: f32,
+}
+
+/// Default judge-time catch-up speed for a bucket-matched PLAY.
+///
+/// 64x, matching the CONT catch-up multiplier's usual setting. Higher is
+/// possible - CONT judges at 256x - but the countdown is only ~2.6s, so
+/// past ~64x the restart dominates and there is nothing left to win.
+fn default_play_judge_speed() -> f32 {
+    64.0
 }
 
 impl Default for Settings {
@@ -65,6 +87,7 @@ impl Default for Settings {
             // worse than a replay that takes longer to start, and until now PLAY
             // had no way to tell you it had landed the wrong bucket.
             play_bucket_match: true,
+            play_judge_speed: default_play_judge_speed(),
         }
     }
 }

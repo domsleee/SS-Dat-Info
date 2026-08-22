@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 22; // +arm_at_tick, arm_consumed_tick (deterministic arm scheduling)
+pub const TAS_SHARED_VERSION: u32 = 23; // +speed_handoff_pos, speed_after_handoff (atomic PLAY speed handover)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -360,6 +360,20 @@ pub struct TasSharedState {
     /// adjacent values with the middle one commonest, which is precisely the
     /// observed 258 x2 / 259 x14 / 260 x4. Scheduling the arm INSIDE the game
     /// thread removes one of the two.
+    /// Replay position at which the DLL drops playback_speed to
+    /// `speed_after_handoff`, atomically, on that exact tick. 0 = no handoff.
+    ///
+    /// This is CONT's splice mechanism generalised. A bucket-matched PLAY wants
+    /// to replay the countdown fast — the judge cannot rule until the replay
+    /// passes first_moving, and at 1x that is ~2.6s of a stationary boarder on
+    /// every attempt including the failures — and then hand back to normal speed
+    /// the instant the run becomes worth watching. Doing that from the UI thread
+    /// has no bound: cave5 may already have issued a batch of up to
+    /// CAVE5_PER_FRAME_TICK_CAP ticks, and the poll adds scheduler latency on
+    /// top. Doing it here is exact.
+    pub speed_handoff_pos: u32,
+    /// Speed to assert at the handoff (0 = leave the speed alone).
+    pub speed_after_handoff: f32,
     pub arm_at_tick: u32,
     /// The tick at which ARM was actually consumed (diagnostic).
     pub arm_consumed_tick: u32,
@@ -1394,6 +1408,25 @@ pub mod transport {
         pub target: Option<BucketTarget>,
         /// Max F5 rerolls to land the recording's bucket (CONT only).
         pub max_retries: u32,
+        /// Speed to hand back to once the replay reaches the first moving
+        /// frame - 0 disables the handover and the whole cycle stays at
+        /// `catchup_speed`.
+        ///
+        /// WHY THIS EXISTS. A judged cycle replays the spawn countdown purely
+        /// so the judge can see which frame the boarder leaves the spawn on.
+        /// Nothing before that frame is worth watching - the boarder is
+        /// stationary - and for FE-10065 it is ~2.6 seconds, paid on the
+        /// accepted attempt AND on every reroll. CONT never had this problem
+        /// because it replays the prefix at 256x and splices; a bucket-matched
+        /// PLAY has no splice to hand over at, so it needs its own.
+        ///
+        /// The handover is performed by the DLL at the exact tick (cave2, with
+        /// cave5 capping the batch to land on it), not by whoever is polling:
+        /// a poll-driven drop can be a whole catch-up batch late, which at 64x
+        /// means starting the run the user asked to watch already
+        /// fast-forwarded. Same reasoning as the CONT splice's
+        /// `cont_resume_speed`.
+        pub resume_speed: f32,
     }
 
     /// The few shared-memory operations the transport machine performs. Returns
@@ -1411,6 +1444,14 @@ pub mod transport {
         fn recorded_count(&self) -> u32;
         fn set_continue_from_frame(&mut self, frame: u32);
         fn set_playback_speed(&mut self, speed: f32);
+        /// Ask the DLL to drop the playback speed to `speed` at replay
+        /// position `pos`, atomically on that tick. `pos == 0` clears any
+        /// pending handover.
+        fn set_speed_handoff(&mut self, pos: u32, speed: f32);
+        /// True while a handover written by [`Self::set_speed_handoff`] has
+        /// not fired yet. The DLL clears it when it fires, which is how the
+        /// controller knows to stop re-asserting the catch-up speed.
+        fn speed_handoff_pending(&self) -> bool;
     }
 
     /// Fixed wall-clock delay (ms) between sending Stop and sending Restart.
@@ -1538,6 +1579,12 @@ pub mod transport {
         phase: Phase,
         retries_remaining: u32,
         completed_via: CompletedVia,
+        /// A speed handover has been staged with the DLL for this attempt.
+        handoff_sent: bool,
+        /// The replay has been observed in PLAY mode at least once, so a
+        /// later "not in PLAY" reading means it ENDED rather than "not yet
+        /// started".
+        seen_play: bool,
     }
 
     impl TransportController {
@@ -1548,6 +1595,8 @@ pub mod transport {
                 phase: Phase::Start,
                 retries_remaining,
                 completed_via: CompletedVia::Unjudged,
+                handoff_sent: false,
+                seen_play: false,
             }
         }
 
@@ -1569,11 +1618,28 @@ pub mod transport {
             // replays at 1x for ~3s until the next phase re-sets it. (tas_ui used
             // to do this via an ungated per-frame sync; the controller owns it
             // now.)
-            port.set_playback_speed(self.cfg.catchup_speed);
+            //
+            // EXCEPT once a staged speed handover has fired. The DLL dropped the
+            // speed at an exact tick precisely so the run plays at normal speed
+            // from there; re-asserting the catch-up here would immediately undo
+            // it and the user would watch the whole run at 64x. `handoff_sent`
+            // keeps the assertion alive for the phases BEFORE the handover is
+            // staged (Start..ArmSettle), where `speed_handoff_pending()` is also
+            // false but for the opposite reason.
+            let handed_over = self.handoff_sent && !port.speed_handoff_pending();
+            if !handed_over {
+                port.set_playback_speed(self.cfg.catchup_speed);
+            }
             match self.phase {
                 Phase::Start => {
                     port.set_playback_speed(self.cfg.catchup_speed);
                     port.set_continue_from_frame(self.cfg.continue_from_frame);
+                    // Clear any handover left over from a previous cycle before
+                    // the replay position resets, so it cannot fire against the
+                    // wrong replay.
+                    port.set_speed_handoff(0, 0.0);
+                    self.handoff_sent = false;
+                    self.seen_play = false;
                     // Always Stop then settle a FIXED delay before Restart (like
                     // the legacy loop), so the Restart fires at a consistent
                     // wall-clock phase → consistent (good) F5 bucket.
@@ -1611,6 +1677,32 @@ pub mod transport {
                     // cave2 reads these at ARM time — re-assert post-restart.
                     port.set_continue_from_frame(self.cfg.continue_from_frame);
                     port.set_playback_speed(self.cfg.catchup_speed);
+                    // Stage the speed handover BEFORE arming: the arm resets the
+                    // replay position to 0, and cave2 only tests the handover
+                    // inside the PLAY tick path, so there is no window where a
+                    // stale position could trip it.
+                    //
+                    // Position is first_moving + 1 - the first tick at which the
+                    // recording is actually moving. Handing over at the JUDGE
+                    // point (fm + BUCKET_MATCH_WINDOW) instead would fast-forward
+                    // through the opening 64 ticks of the run, which is the part
+                    // the user pressed PLAY to watch.
+                    let handoff_at = self
+                        .cfg
+                        .target
+                        .and_then(|t| t.expected_first_moving)
+                        .filter(|_| self.cfg.resume_speed > 0.0)
+                        .map(|fm| fm.saturating_add(1));
+                    match handoff_at {
+                        Some(pos) => {
+                            port.set_speed_handoff(pos, self.cfg.resume_speed);
+                            self.handoff_sent = true;
+                        }
+                        None => {
+                            port.set_speed_handoff(0, 0.0);
+                            self.handoff_sent = false;
+                        }
+                    }
                     port.send_command(self.cfg.arm.command());
                     // Judge the F5 bucket whenever a fingerprint was given — CONT
                     // always has one; PLAY can too, so a replay rerolls until it
@@ -1630,11 +1722,27 @@ pub mod transport {
                         // Splice already fired (PLAY→REC) — bucket accepted.
                         return self.finish(CompletedVia::Unjudged);
                     }
-                    if mode != play {
-                        return StepOutcome::InProgress;
-                    }
+                    // "Not in PLAY" means two opposite things depending on when
+                    // it is read. Before the first PLAY sighting the arm simply
+                    // has not taken effect yet, so keep waiting. AFTER one, the
+                    // replay has ENDED - and if it ended before reaching
+                    // first_moving + BUCKET_MATCH_WINDOW the judge can never rule,
+                    // so treating its KeepWaiting as InProgress hung the cycle
+                    // forever (a recording shorter than fm+64 did exactly that).
+                    let replay_ended = if mode == play {
+                        self.seen_play = true;
+                        false
+                    } else {
+                        if !self.seen_play {
+                            return StepOutcome::InProgress;
+                        }
+                        true
+                    };
                     let pos = port.playback_pos();
                     if pos == 0 {
+                        if replay_ended {
+                            return self.finish(CompletedVia::Unjudged);
+                        }
                         return StepOutcome::InProgress;
                     }
                     let target = match self.cfg.target {
@@ -1649,13 +1757,38 @@ pub mod transport {
                         pos,
                         target.expected_start_bits,
                         target.expected_first_moving,
+                        // Validate as deep as CONT does.
+                        //
+                        // CONT passes its splice frame here. PLAY has no splice
+                        // and used to pass continue_from_frame == 0, which the
+                        // judge floors at first_moving + BUCKET_MATCH_WINDOW - so
+                        // a bucket-matched PLAY stopped checking 64 ticks after
+                        // the boarder moved while CONT kept checking for up to
+                        // 1024. That is backwards: PLAY is watched end to end, so
+                        // a late divergence is MORE visible there, not less.
+                        // Passing the recording length makes both arms use the
+                        // same rule (the judge still caps at
+                        // fm + BUCKET_VALIDATE_WINDOW).
                         // Validate the bucket clean through the splice point —
                         // not just the settle window — so a late divergence
                         // rerolls instead of splicing onto a wrong trajectory.
-                        self.cfg.continue_from_frame,
+                        if self.cfg.continue_from_frame > 0 {
+                            self.cfg.continue_from_frame
+                        } else {
+                            port.recorded_count()
+                        },
                     );
                     match verdict {
-                        BucketVerdict::KeepWaiting => StepOutcome::InProgress,
+                        BucketVerdict::KeepWaiting => {
+                            if replay_ended {
+                                // Ran out of replay before the judge could rule.
+                                // Nothing more will arrive, so stop rather than
+                                // spin.
+                                self.finish(CompletedVia::Unjudged)
+                            } else {
+                                StepOutcome::InProgress
+                            }
+                        }
                         BucketVerdict::Match => self.finish(CompletedVia::BucketMatched),
                         // Accepted but NOT positively confirmed — flag it so the
                         // UI can warn that the resume may be on a near-miss bucket.
@@ -1708,6 +1841,13 @@ pub mod transport {
             }
             self.retries_remaining -= 1;
             let attempt = self.cfg.max_retries - self.retries_remaining;
+            // Drop any staged handover before the next attempt. A reroll goes
+            // to StopSettle, NOT back through Phase::Start, so this is the only
+            // place it gets cleared - and leaving it armed would let it fire
+            // against the next attempt's replay at the wrong position.
+            port.set_speed_handoff(0, 0.0);
+            self.handoff_sent = false;
+            self.seen_play = false;
             port.set_continue_from_frame(self.cfg.continue_from_frame);
             port.set_playback_speed(self.cfg.catchup_speed);
             port.send_command(TasCommand::Stop);
@@ -1737,6 +1877,8 @@ pub mod transport {
             recorded_count: u32,
             continue_from_frame: u32,
             playback_speed: f32,
+            speed_handoff_pos: u32,
+            speed_after_handoff: f32,
             commands: Vec<TasCommand>,
             /// Invariant tracker: Restart must NEVER be sent while mode != OFF.
             restart_while_not_off: bool,
@@ -1776,6 +1918,27 @@ pub mod transport {
             fn set_playback_speed(&mut self, speed: f32) {
                 self.playback_speed = speed;
             }
+            fn set_speed_handoff(&mut self, pos: u32, speed: f32) {
+                self.speed_handoff_pos = pos;
+                self.speed_after_handoff = speed;
+            }
+            fn speed_handoff_pending(&self) -> bool {
+                self.speed_handoff_pos != 0
+            }
+        }
+
+        impl FakePort {
+            /// Stand in for cave2: when the replay reaches the staged handover
+            /// position, drop the speed on that tick and clear the request.
+            fn dll_tick(&mut self) {
+                if self.speed_handoff_pos != 0 && self.playback_pos >= self.speed_handoff_pos
+                {
+                    if self.speed_after_handoff > 0.0 {
+                        self.playback_speed = self.speed_after_handoff;
+                    }
+                    self.speed_handoff_pos = 0;
+                }
+            }
         }
 
         fn cfg(arm: Arm, target: Option<BucketTarget>, max_retries: u32) -> ArmConfig {
@@ -1789,6 +1952,7 @@ pub mod transport {
                 continue_from_frame: if arm == Arm::Continue { 320 } else { 0 },
                 target,
                 max_retries,
+                resume_speed: 0.0,
             }
         }
 
@@ -1888,6 +2052,218 @@ pub mod transport {
             p.mode = TasMode::Play as u32;
         }
 
+        /// The whole point of the handover: the countdown replays fast, and the
+        /// speed drops at the first moving frame - not at the judge point 64
+        /// ticks later, which would fast-forward through the opening of the very
+        /// run the user pressed PLAY to watch.
+        #[test]
+        fn play_hands_speed_back_at_the_first_moving_frame() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut a = cfg(Arm::Play, Some(target), 30);
+            a.catchup_speed = 64.0;
+            a.resume_speed = 1.0;
+            let mut c = TransportController::new(a);
+            let mut coords = vec![[1.0f32, 2.0, 3.0]; 400];
+            coords[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = coords.clone();
+            p.recorded_count = 400;
+            drive_to_judge(&mut c, &mut p);
+
+            assert_eq!(p.speed_handoff_pos, 251, "handover staged at first_moving + 1");
+            assert_eq!(p.speed_after_handoff, 1.0);
+            assert_eq!(p.playback_speed, 64.0);
+
+            // The countdown replays at the catch-up speed.
+            p.play_coords = coords.clone();
+            p.playback_pos = 200;
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress);
+            p.dll_tick();
+            assert_eq!(p.playback_speed, 64.0);
+            assert_eq!(p.speed_handoff_pos, 251, "not reached yet");
+
+            // The DLL fires the handover on the tick it was asked for.
+            p.playback_pos = 251;
+            p.dll_tick();
+            assert_eq!(p.speed_handoff_pos, 0);
+            assert_eq!(p.playback_speed, 1.0);
+
+            // REGRESSION: the controller re-asserts the catch-up speed on every
+            // step. Left ungated it would undo the handover on the very next one
+            // and the run would be watched at 64x after all.
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress);
+            assert_eq!(
+                p.playback_speed, 1.0,
+                "catch-up speed re-asserted after the handover fired"
+            );
+
+            p.playback_pos = 400;
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 0,
+                    completed_via: CompletedVia::BucketMatched
+                }
+            );
+            assert_eq!(p.playback_speed, 1.0);
+        }
+
+        /// CONT hands over at its splice (cont_resume_speed, inside the DLL), so
+        /// it must stage nothing here and must keep its catch-up asserted for the
+        /// whole replay.
+        #[test]
+        fn cont_stages_no_speed_handover() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Continue, Some(target), 30));
+            drive_to_judge(&mut c, &mut p);
+            assert_eq!(p.speed_handoff_pos, 0);
+            assert_eq!(p.speed_after_handoff, 0.0);
+
+            // Something else knocks the speed down mid-replay (the in-process F5
+            // restart does exactly this) - the controller must put it back.
+            p.playback_speed = 1.0;
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress);
+            assert_eq!(p.playback_speed, 12.0);
+        }
+
+        /// A reroll re-arms from StopSettle, never through Phase::Start, so the
+        /// staged handover has to be dropped in the reroll itself - otherwise it
+        /// would fire against the next attempt at a position that means nothing.
+        #[test]
+        fn reroll_drops_the_staged_handover() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut a = cfg(Arm::Play, Some(target), 30);
+            a.catchup_speed = 64.0;
+            a.resume_speed = 1.0;
+            let mut c = TransportController::new(a);
+            let mut rec = vec![[1.0f32, 2.0, 3.0]; 400];
+            rec[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = rec;
+            p.recorded_count = 400;
+            drive_to_judge(&mut c, &mut p);
+            assert_eq!(p.speed_handoff_pos, 251);
+
+            // This replay leaves the spawn one frame late: wrong bucket.
+            let mut play = vec![[1.0f32, 2.0, 3.0]; 400];
+            play[251] = [1.0, 2.0, 3.5];
+            p.play_coords = play;
+            p.playback_pos = 320;
+            p.dll_tick();
+            assert_eq!(p.speed_handoff_pos, 0, "fired during the failed attempt");
+
+            assert!(matches!(c.step(&mut p), StepOutcome::Reroll { .. }));
+            assert_eq!(p.speed_handoff_pos, 0, "no handover left armed by the reroll");
+            assert_eq!(p.speed_after_handoff, 0.0);
+            assert_eq!(
+                p.playback_speed, 64.0,
+                "the next attempt replays its countdown fast again"
+            );
+
+            // Re-arming stages a fresh handover for the new attempt.
+            drive_reroll_to_judge(&mut c, &mut p);
+            assert_eq!(p.speed_handoff_pos, 251);
+        }
+
+        /// A recording shorter than first_moving + BUCKET_MATCH_WINDOW can never
+        /// be judged. The judge answers KeepWaiting forever, and mapping that
+        /// straight to InProgress left the cycle spinning with nothing left to
+        /// arrive. Once the replay has ended, KeepWaiting has to be terminal.
+        #[test]
+        fn judge_stops_when_the_replay_ends_before_it_can_rule() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Play, Some(target), 30));
+            let mut coords = vec![[1.0f32, 2.0, 3.0]; 260];
+            coords[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = coords.clone();
+            p.recorded_count = 260; // < 250 + BUCKET_MATCH_WINDOW
+            drive_to_judge(&mut c, &mut p);
+
+            p.play_coords = coords;
+            p.playback_pos = 260;
+            // Still replaying: keep waiting, the window might still be reached.
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress);
+
+            // Replay over. Nothing more will arrive.
+            p.mode = TasMode::Off as u32;
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 0,
+                    completed_via: CompletedVia::Unjudged
+                }
+            );
+            assert!(c.is_terminal());
+        }
+
+        /// PLAY passes continue_from_frame == 0 to the judge, which floors the
+        /// validation depth at first_moving + BUCKET_MATCH_WINDOW - so a PLAY used
+        /// to stop checking 64 ticks after the boarder moved while CONT kept
+        /// checking for up to 1024. A PLAY is watched end to end, so a late
+        /// divergence is more visible there, not less.
+        #[test]
+        fn play_validates_as_deep_as_cont() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Play, Some(target), 30));
+            let mut rec = vec![[1.0f32, 2.0, 3.0]; 800];
+            for k in 250..800 {
+                rec[k] = [1.0, 2.0, 3.0 + (k - 249) as f32 * 0.01];
+            }
+            p.rec_coords = rec.clone();
+            p.recorded_count = 800;
+            drive_to_judge(&mut c, &mut p);
+
+            // Same first-moving frame, same settle - then it veers off long after
+            // the old window closed.
+            let mut play = rec;
+            for item in play.iter_mut().take(800).skip(500) {
+                item[2] += 3.0;
+            }
+            p.play_coords = play;
+
+            p.playback_pos = 320;
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::InProgress,
+                "accepted at first_moving + 64 instead of validating deeper"
+            );
+
+            p.playback_pos = 600;
+            assert!(matches!(c.step(&mut p), StepOutcome::Reroll { .. }));
+        }
         #[test]
         fn cont_matches_correct_bucket() {
             let target = BucketTarget {
@@ -1927,10 +2303,11 @@ pub mod transport {
             // UI reroll a PLAY onto the recording's spawn bucket instead of
             // replaying whatever bucket the F5 happened to land.
             //
-            // Note continue_from_frame is 0 for PLAY, so the judge's
-            // match_through is 0 and validate_to collapses to the settle window
-            // (first_moving + BUCKET_MATCH_WINDOW). That is the intended scope:
-            // there is no splice to validate through.
+            // PLAY has no splice to validate through, so the controller passes
+            // the recording length as the depth instead - the same rule CONT
+            // uses for its splice, and still capped inside the judge at
+            // first_moving + BUCKET_VALIDATE_WINDOW. So Match is only declared
+            // once the replay has actually been validated that far.
             let target = BucketTarget {
                 expected_start_bits: bits(1.0, 2.0, 3.0),
                 expected_first_moving: Some(250),
@@ -1947,7 +2324,11 @@ pub mod transport {
             drive_to_judge(&mut c, &mut p);
 
             p.play_coords = coords;
+            // Clean, but not yet validated to the recording length.
             p.playback_pos = 320;
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress);
+
+            p.playback_pos = 400;
             assert_eq!(
                 c.step(&mut p),
                 StepOutcome::Done {
@@ -2238,6 +2619,17 @@ impl transport::TransportPort for TasSharedMemoryClient {
     fn set_playback_speed(&mut self, speed: f32) {
         self.state_mut().playback_speed = speed;
     }
+    fn set_speed_handoff(&mut self, pos: u32, speed: f32) {
+        let s = self.state_mut();
+        // Speed first: cave2 tests the position, so publishing the
+        // position last means it can never see an armed handover with a
+        // stale speed beside it.
+        s.speed_after_handoff = speed;
+        s.speed_handoff_pos = pos;
+    }
+    fn speed_handoff_pending(&self) -> bool {
+        self.state().speed_handoff_pos != 0
+    }
 }
 
 #[cfg(not(windows))]
@@ -2272,6 +2664,17 @@ impl transport::TransportPort for TasSharedMemoryClient {
     fn set_playback_speed(&mut self, speed: f32) {
         self.state_mut().playback_speed = speed;
     }
+    fn set_speed_handoff(&mut self, pos: u32, speed: f32) {
+        let s = self.state_mut();
+        // Speed first: cave2 tests the position, so publishing the
+        // position last means it can never see an armed handover with a
+        // stale speed beside it.
+        s.speed_after_handoff = speed;
+        s.speed_handoff_pos = pos;
+    }
+    fn speed_handoff_pending(&self) -> bool {
+        self.state().speed_handoff_pos != 0
+    }
 }
 
 #[cfg(test)]
@@ -2294,7 +2697,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_456);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_464);
     }
 
     #[test]

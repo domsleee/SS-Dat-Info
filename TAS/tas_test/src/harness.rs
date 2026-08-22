@@ -1211,6 +1211,9 @@ pub fn restart_continue_and_splice_inprocess(
             expected_first_moving,
         }),
         max_retries,
+        // CONT hands the speed back at the splice (cont_resume_speed), not
+        // mid-replay, so it stages no handover here.
+        resume_speed: 0.0,
     };
     let mut controller = TransportController::new(cfg);
 
