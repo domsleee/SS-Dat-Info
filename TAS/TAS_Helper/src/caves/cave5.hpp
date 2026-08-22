@@ -369,6 +369,27 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             emitted = (uint32_t)CAVE5_PER_FRAME_TICK_CAP;
         }
         sp->tick_count += emitted;
+
+        // Publish the engine's own 64-bit elapsed-time delta for this cycle —
+        // the sub-tick phase, which is the last candidate for judging an F5
+        // bucket without replaying 3.1s to watch where the boarder leaves spawn.
+        //
+        // Provenance, from the disassembly of this function:
+        //   0x425C4A  call [0x46D15C]        Kernel::Time::Current -> now
+        //   0x425C63  lea  edx,[esp+0x40]    out param
+        //   0x425C6E  call [0x46D164]        delta = now - prev, WRITTEN TO [esp+0x40]
+        //   0x425C74  fmul [0x46DB0C]        * 100.0
+        //   0x425C7A  call __ftol            <- the fraction dies HERE
+        //   0x425C81  cmp esi,0x14           <- our hook site, esp unchanged
+        //
+        // So [esp+0x40] still holds the full-precision delta when we run: nothing
+        // between the lea and here pushes without popping (two calls, both of
+        // which restore esp; __ftol takes its argument on the FPU, not the stack).
+        // Reading it costs two loads and cannot perturb the game.
+        if (ctx.esp) {
+            sp->clock_delta_lo = *(volatile uint32_t*)(uintptr_t)(ctx.esp + 0x40);
+            sp->clock_delta_hi = *(volatile uint32_t*)(uintptr_t)(ctx.esp + 0x44);
+        }
     }
 
     __asm { frstor [fpu_buf] }

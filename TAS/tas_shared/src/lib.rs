@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-pub const TAS_SHARED_VERSION: u32 = 20; // +level_ctx_seq (seqlock over the level-context group)
+pub const TAS_SHARED_VERSION: u32 = 21; // +clock_delta_{lo,hi} (sub-tick phase for fast bucket judging)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -337,6 +337,20 @@ pub struct TasSharedState {
     /// align 4) so the C++ side stays a plain `volatile uint32_t` bumped with
     /// `InterlockedIncrement`.
     pub level_ctx_seq: AtomicU32,
+
+    /// The game`s own 64-bit elapsed-time delta for the current cycle, as cave5
+    /// sees it: the {lo,hi} pair the engine computed at EXE+0x25C6E and left at
+    /// [esp+0x40] before __ftol truncated it into a tick count.
+    ///
+    /// WHY: the F5 bucket is decided sub-tick. bucket-predict proved the spawn
+    /// state is CONSTANT across buckets and that the arm phase, measured to exact
+    /// tick granularity (0-tick measurement window), does not determine the
+    /// bucket either. Everything at tick resolution has been ruled out by
+    /// measurement. This is the pre-truncation quantity — the fraction __ftol
+    /// throws away — and `lo` is the sub-unit component (the BB3B10 arg4 work
+    /// found that FLOORING lo to 0 is what made injected stamps bit-exact).
+    pub clock_delta_lo: u32,
+    pub clock_delta_hi: u32,
 }
 
 /// How many times to retry a torn level-context read before giving up.
@@ -2266,7 +2280,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_440);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_448);
     }
 
     #[test]

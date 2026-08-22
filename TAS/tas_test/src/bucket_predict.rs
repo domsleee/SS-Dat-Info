@@ -122,6 +122,18 @@ struct Sample {
     /// Ticks elapsed while the ARM command was in flight — the measurement
     /// uncertainty on the arm phase.
     arm_window: u32,
+    /// The engine's own 64-bit elapsed-time delta at the ARM frame, {lo,hi},
+    /// read by cave5 from [esp+0x40] before __ftol truncates it to a tick
+    /// count. The sub-tick phase - the last candidate standing after every
+    /// tick-resolution signal was ruled out by measurement.
+    /// Engine clock at the moment the restart finished, same units as clk_lo.
+    /// (clk_lo - clk_at_restart) is the arm delay at FULL resolution, where the
+    /// tick-granular version of the same quantity was already shown not to
+    /// determine the bucket.
+    clk_at_restart: u32,
+    units_per_tick: u32,
+    clk_lo: u32,
+    clk_hi: u32,
     ticks_restart_to_arm: u32,
     frames_restart_to_arm: u32,
     tick_at_arm_mod2: u32,
@@ -146,6 +158,20 @@ pub fn run(iterations: u32) -> bool {
 
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
+
+    // Calibrate the clock rate before assuming anything about units. cave5
+    // publishes a raw engine counter; whether it is QPC 10MHz, 1MHz, or
+    // something else decides what "one tick" is in these units, and guessing
+    // would silently invalidate every phase computed below.
+    let cal_a = client.state().clock_delta_lo;
+    thread::sleep(Duration::from_millis(1000));
+    let cal_b = client.state().clock_delta_lo;
+    let units_per_sec = cal_b.wrapping_sub(cal_a);
+    let units_per_tick = units_per_sec / 100; // the game ticks at 100/s
+    println!(
+        "  clock calibration: {} units/sec  =>  {} units per 10ms tick",
+        units_per_sec, units_per_tick
+    );
 
     let mut samples: Vec<Sample> = Vec::new();
 
@@ -174,6 +200,7 @@ pub fn run(iterations: u32) -> bool {
             )
         };
 
+        let clk_at_restart = client.state().clock_delta_lo;
         let tick_after_restart = client.tick_count_volatile();
         let frame_after_restart = client.frame_count_volatile();
         harness::focus_game();
@@ -185,6 +212,8 @@ pub fn run(iterations: u32) -> bool {
         let tick_before_cmd = client.tick_count_volatile();
         client.send_command(tas_shared::TasCommand::ArmRec);
         let tick_after_cmd = client.tick_count_volatile();
+        let clk_lo = client.state().clock_delta_lo;
+        let clk_hi = client.state().clock_delta_hi;
         let arm_window = tick_after_cmd.wrapping_sub(tick_before_cmd);
         harness::arm_rec(&mut client);
         let tick_at_arm = tick_before_cmd;
@@ -200,14 +229,18 @@ pub fn run(iterations: u32) -> bool {
         let fm = tas_shared::cont::detect_first_moving(&coords, n as u32);
 
         println!(
-            "  iter {:>2}: ticks={:<5} fm={:?}  arm_phase=+{} (window {} ticks)  sum={:?}",
+            "  iter {:>2}: fm={:?}  arm_phase=+{} ticks  fine={:>9} units  subtick={:>7}",
             iter,
-            n,
             fm,
             ticks_restart_to_arm,
-            arm_window,
-            fm.map(|v| v + ticks_restart_to_arm)
+            clk_lo.wrapping_sub(clk_at_restart),
+            if units_per_tick > 0 {
+                clk_lo.wrapping_sub(clk_at_restart) % units_per_tick
+            } else {
+                0
+            }
         );
+        let _ = (n, arm_window);
 
         samples.push(Sample {
             iter,
@@ -216,6 +249,10 @@ pub fn run(iterations: u32) -> bool {
             vel,
             race_time_cs,
             speed,
+            clk_at_restart,
+            units_per_tick,
+            clk_lo,
+            clk_hi,
             arm_window,
             ticks_restart_to_arm,
             frames_restart_to_arm,
@@ -294,6 +331,41 @@ fn analyze(samples: &[Sample]) -> bool {
         Candidate {
             name: "race_time_cs",
             key: |s| format!("{}", s.race_time_cs),
+        },
+        // The fine arm delay, bucketed at a few resolutions. Raw units are
+        // noise (unique per sample); the question is whether some coarser slice
+        // of the SUB-TICK REMAINDER lines up with the bucket.
+        Candidate {
+            name: "subtick/8th",
+            key: |s| {
+                let d = s.clk_lo.wrapping_sub(s.clk_at_restart);
+                let t = s.units_per_tick.max(1);
+                format!("{}", (d % t) * 8 / t)
+            },
+        },
+        Candidate {
+            name: "subtick/4th",
+            key: |s| {
+                let d = s.clk_lo.wrapping_sub(s.clk_at_restart);
+                let t = s.units_per_tick.max(1);
+                format!("{}", (d % t) * 4 / t)
+            },
+        },
+        Candidate {
+            name: "subtick/half",
+            key: |s| {
+                let d = s.clk_lo.wrapping_sub(s.clk_at_restart);
+                let t = s.units_per_tick.max(1);
+                format!("{}", (d % t) * 2 / t)
+            },
+        },
+        Candidate {
+            name: "fine delay /tick",
+            key: |s| {
+                let d = s.clk_lo.wrapping_sub(s.clk_at_restart);
+                let t = s.units_per_tick.max(1);
+                format!("{}", d / t)
+            },
         },
         Candidate {
             name: "fm+arm_phase (const?)",
