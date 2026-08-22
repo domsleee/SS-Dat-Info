@@ -1507,22 +1507,34 @@ pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep], fallback_ms: Opt
     // pattern — seconds at a time — which makes it by far the most exposed place
     // for an interrupted run to leave a key physically stuck. Drop releases on
     // every exit path, including a panic.
-    // KEEPALIVE, not just edge-triggered writes.
+    // KNOWN ISSUE — holds longer than 500ms are truncated, and DO NOT "fix" it
+    // with a keepalive without changing the suite with it. Measured, both ways.
     //
     // The firmware (F:\code.py on the CIRCUITPY volume) latches a mask until the
-    // next byte, BUT it also runs a safety watchdog:
+    // next byte, but also runs a watchdog:
     //
     //     TIMEOUT_S = 0.5   # release all if no command in 500ms
     //     if current_mask != 0 and (monotonic() - last_rx_time) > TIMEOUT_S:
     //         kbd.release_all()
     //
-    // This loop used to write only when the mask CHANGED, and a pattern step is
-    // DEFAULT_HOLD_TICKS (56) * 10ms = 560ms — longer than the watchdog. So every
-    // hold longer than half a second had its key released by the firmware at the
-    // 500ms mark and never re-pressed, silently truncating the last ~60ms of that
-    // input. Longer holds lost proportionally more. Re-sending the live mask well
-    // inside the timeout keeps the press alive for as long as the pattern says.
-    const PICO_KEEPALIVE_MS: u64 = 200;
+    // This loop writes only when the mask CHANGES, and a pattern step is
+    // DEFAULT_HOLD_TICKS (56) * 10ms = 560ms — longer than the watchdog. So the
+    // firmware releases the key at the 500ms mark and nothing re-presses it. Held
+    // against the device with GetAsyncKeyState: LEFT is down at t=200ms, up at
+    // t=1200ms with no keepalive, and stays down at t=1200ms if the mask is
+    // re-sent every 200ms. So the truncation is real.
+    //
+    // BUT THE SUITE DEPENDS ON THE RELEASE HAPPENING THERE. That watchdog release
+    // lands INSIDE the recording window; the explicit 0xFF at the end of this
+    // function lands after it. Adding a 200ms keepalive therefore turned every
+    // recording from press+release into press-only, and `regression` Case 1 went
+    // from ALL GATES PASS in 4 retries (transitions=2, activeTicks=56, zero drift)
+    // to Gate 1 FAIL with transitions=0/`Live transitions: 1` and the start match
+    // exhausting all 60 retries. Same binary otherwise, A/B'd back to back.
+    //
+    // Fixing this properly means making the pattern hold and the recording window
+    // agree — shorten DEFAULT_HOLD_TICKS under the watchdog, or lengthen the
+    // window and re-baseline the gates — not a unilateral keepalive here.
 
     let mut port = match PicoKeys::open() {
         Some(p) => p,
@@ -1541,7 +1553,6 @@ pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep], fallback_ms: Opt
     let start = Instant::now();
     let mut prev_mask = 0xFFu8;
     let mut current_step = 0usize;
-    let mut last_send = Instant::now();
 
     for tick in 0..total {
         while current_step < steps.len() && tick >= steps[current_step].stop_tick {
@@ -1553,12 +1564,9 @@ pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep], fallback_ms: Opt
             0
         };
 
-        let due_for_keepalive =
-            mask != 0 && last_send.elapsed() >= Duration::from_millis(PICO_KEEPALIVE_MS);
-        if mask != prev_mask || due_for_keepalive {
+        if mask != prev_mask {
             let send_byte = if mask == 0 { 0xFF } else { mask };
             port.send(send_byte);
-            last_send = Instant::now();
             prev_mask = mask;
         }
 
