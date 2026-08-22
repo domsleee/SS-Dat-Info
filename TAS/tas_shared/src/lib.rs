@@ -1126,9 +1126,29 @@ pub mod cont {
             Some(f) => f,
             None => return BucketVerdict::NoSignal,
         };
-        // Minimum settle trajectory before we judge the fingerprint at all.
-        let min_judge = expected_fm + BUCKET_MATCH_WINDOW;
-        if playback_pos < min_judge {
+        // The fingerprint is decidable the moment the replay has passed the
+        // recording's first moving frame - 63 ticks earlier than this used to
+        // rule, and it is the SAME ruling, not a looser one.
+        //
+        // `detect_first_moving` returns the FIRST index that differs from
+        // frame 0, so widening the scanned prefix can never change an answer it
+        // already gave, only supply one where it previously had none. Three
+        // cases, and all of them agree with what fm+64 would have said:
+        //
+        //   found k < expected  -> wrong bucket; scanning further still finds k
+        //   found k == expected -> fingerprint matches
+        //   found nothing yet   -> the replay left spawn LATER than the
+        //                          recording, so any k a longer scan finds is
+        //                          > expected and would be rejected anyway
+        //
+        // Only `observed` in the rejection differs: the third case reports None
+        // instead of the exact late frame, which is diagnostic, not a decision.
+        //
+        // Worth 63 ticks because of where they are spent. A judged PLAY hands
+        // back to 1x at first_moving + 1, so a failed attempt used to watch a
+        // known-wrong replay in real time for 0.63s before rerolling - most of
+        // the cost of the reroll itself.
+        if playback_pos < expected_fm + 1 {
             return BucketVerdict::KeepWaiting;
         }
         // The bucket fingerprint: the replay must leave spawn on the SAME frame
@@ -1138,6 +1158,13 @@ pub mod cont {
             return BucketVerdict::WrongBucket {
                 observed: observed_fm,
             };
+        }
+        // Accepting, on the other hand, still needs the settle window: the
+        // blowup guard below wants trajectory to judge, and BUCKET_MATCH_WINDOW
+        // is the minimum that has ever been trusted for it.
+        let min_judge = expected_fm + BUCKET_MATCH_WINDOW;
+        if playback_pos < min_judge {
+            return BucketVerdict::KeepWaiting;
         }
         // Validate clean through the splice target, capped so a deep splice
         // still confirms before running the whole catch-up. Never below the
@@ -1222,6 +1249,75 @@ pub mod cont {
             );
         }
 
+        /// The early fingerprint rejection has to be the SAME ruling as the old
+        /// fm+64 one, not a looser one - a judge that rejects buckets the field
+        /// proved good is exactly how CONT once went from "3-4 retries" to
+        /// "never lands". So: for every way a replay can leave the spawn, the
+        /// verdict at first_moving+1 must agree with the verdict at
+        /// first_moving+BUCKET_MATCH_WINDOW.
+        #[test]
+        fn early_rejection_agrees_with_the_old_window() {
+            const FM: usize = 250;
+            let mut rec = vec![[1.0f32, 2.0, 3.0]; 400];
+            for (k, item) in rec.iter_mut().enumerate().take(400).skip(FM) {
+                item[2] = 3.0 + (k - FM + 1) as f32 * 0.001;
+            }
+            let start = bits(1.0, 2.0, 3.0);
+
+            // Departure frames either side of the recording's, plus the exact
+            // match, plus a replay that never leaves the spawn at all.
+            for depart in [Some(FM - 8), Some(FM - 1), Some(FM), Some(FM + 1), Some(FM + 30), None] {
+                let mut play = vec![[1.0f32, 2.0, 3.0]; 400];
+                if let Some(d) = depart {
+                    for (k, item) in play.iter_mut().enumerate().take(400).skip(d) {
+                        item[2] = 3.0 + (k - d + 1) as f32 * 0.001;
+                    }
+                }
+                let early = judge_cont_bucket(
+                    &play, &rec, 400, (FM + 1) as u32, start, Some(FM as u32), 400,
+                );
+                let late = judge_cont_bucket(
+                    &play,
+                    &rec,
+                    400,
+                    (FM + BUCKET_MATCH_WINDOW as usize) as u32,
+                    start,
+                    Some(FM as u32),
+                    400,
+                );
+                let agree = match (&early, &late) {
+                    // Same rejection. `observed` may differ - a replay that has
+                    // not moved yet reports None early and the exact late frame
+                    // later - and that field is diagnostic, not a decision.
+                    (BucketVerdict::WrongBucket { .. }, BucketVerdict::WrongBucket { .. }) => true,
+                    // Matching bucket: rejected by neither. Accepting still waits
+                    // for the settle window, so early is KeepWaiting there.
+                    (BucketVerdict::KeepWaiting, BucketVerdict::KeepWaiting) => true,
+                    _ => false,
+                };
+                assert!(
+                    agree,
+                    "depart={:?}: early={:?} but old window said {:?}",
+                    depart, early, late
+                );
+            }
+        }
+
+        /// ...and it really is EARLIER: a wrong bucket is rejected at
+        /// first_moving+1, where the old judge still answered KeepWaiting.
+        #[test]
+        fn a_wrong_bucket_is_rejected_at_first_moving_plus_one() {
+            let mut rec = vec![[1.0f32, 2.0, 3.0]; 400];
+            rec[250] = [1.0, 2.0, 3.5];
+            let mut play = vec![[1.0f32, 2.0, 3.0]; 400];
+            play[249] = [1.0, 2.0, 3.5]; // left the spawn a frame early
+            assert_eq!(
+                judge_cont_bucket(&play, &rec, 400, 251, bits(1.0, 2.0, 3.0), Some(250), 400),
+                BucketVerdict::WrongBucket {
+                    observed: Some(249)
+                }
+            );
+        }
         #[test]
         fn judge_match_vs_wrong_bucket() {
             let mut rec = vec![[1.0, 2.0, 3.0]; 400];
@@ -1796,10 +1892,9 @@ pub mod transport {
                         // a late divergence is MORE visible there, not less.
                         // Passing the recording length makes both arms use the
                         // same rule (the judge still caps at
-                        // fm + BUCKET_VALIDATE_WINDOW).
-                        // Validate the bucket clean through the splice point —
-                        // not just the settle window — so a late divergence
-                        // rerolls instead of splicing onto a wrong trajectory.
+                        // fm + BUCKET_VALIDATE_WINDOW). Either way the bucket is
+                        // validated clean through that depth before Match, so a
+                        // late divergence rerolls instead of being accepted.
                         if self.cfg.continue_from_frame > 0 {
                             self.cfg.continue_from_frame
                         } else {

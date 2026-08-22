@@ -2354,13 +2354,35 @@ impl eframe::App for TasApp {
                         .on_hover_text(
                             "Reroll the F5 restart on PLAY until it lands the \
                              recording's spawn bucket, the way CONT does.\n\n\
-                             ON: the replay is the run you recorded. Costs time before \
-                             it settles — the judge can't rule until ~3.6s of replay, \
-                             so each reroll is ~5s and the average is ~4 attempts.\n\n\
-                             OFF: playback starts immediately, but a near-miss bucket \
-                             diverges from the recording once the boarder moves \
-                             (~tick 299), with nothing on screen to tell you.",
+                             ON: the replay is the run you recorded.\n\n\
+                             OFF: playback starts immediately, but a near-miss \
+                             bucket diverges from the recording once the boarder \
+                             moves (~tick 299), with nothing on screen to tell you.",
                         );
+                    ui.add_enabled_ui(self.play_bucket_match, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("PLAY judge speed");
+                            ui.add(
+                                egui::DragValue::new(&mut self.play_judge_speed)
+                                    .range(1.0..=384.0)
+                                    .prefix("\u{00D7}")
+                                    .speed(1.0),
+                            )
+                            .on_hover_text(
+                                "Speed to replay the spawn countdown at while the \
+                                 bucket is being judged. The boarder is stationary \
+                                 for the whole countdown, so there is nothing to \
+                                 watch and nothing to lose.\n\n\
+                                 The game drops back to your normal speed at the \
+                                 exact tick the boarder starts moving — measured on \
+                                 FE-10065: 3161 ms to first movement at ×1, 331 ms \
+                                 at ×64, with the replay bit-identical either way. \
+                                 A reroll costs ~0.9s instead of ~3.8s.\n\n\
+                                 ×1 disables it and replays the countdown in real \
+                                 time.",
+                            );
+                        });
+                    });
                 });
                 ui.menu_button("View", |ui| {
                     // Everyday toggles, grouped under "Panels". The
