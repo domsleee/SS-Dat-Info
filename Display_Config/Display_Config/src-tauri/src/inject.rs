@@ -136,7 +136,7 @@ fn wait_for_shared_memory(name: &str, timeout: Duration) -> bool {
     type BOOL = i32;
     const FILE_MAP_READ: DWORD = 0x0004;
 
-    extern "system" {
+    unsafe extern "system" {
         fn OpenFileMappingW(access: DWORD, inherit: BOOL, name: *const u16) -> HANDLE;
         fn CloseHandle(h: HANDLE) -> BOOL;
     }
