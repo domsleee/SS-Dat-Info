@@ -375,6 +375,12 @@ static void LogRootDiag(TasSharedState* s, const char* stage) {
     LogRing(s, LOG_INFO, buf);
 }
 
+// A judged PLAY armed this attempt's speed handover. Mirrors g_cave2_contArmed:
+// the marker in shared memory says WHERE to hand over, this says the current
+// attempt is the one that asked for it. Without it a marker left behind by a
+// killed writer, or inherited across an arm, could apply a stale PLAY resume
+// speed and clock reset partway through somebody else's replay.
+static volatile uint32_t g_cave2_handoffArmed = 0;
 static volatile uint32_t g_cave2_pendingLog = 0;  // 0=none, 1=REC, 2=PLAY, 3=STOP, 4=playback_done
 static volatile uint32_t g_cave2_logParam = 0;
 
@@ -442,6 +448,9 @@ static void ProcessCommand(TasSharedState* s) {
             s->mode = MODE_REC;
             g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
             g_cave2_contArmed = 0;
+            // REC never hands over a speed; make sure it cannot inherit one.
+            s->speed_handoff_pos = 0;
+            g_cave2_handoffArmed = 0;
             g_diagInjectLogged = 0;
             g_cave2_pendingLog = 1;
             LogRootDiag(s, "arm-rec");
@@ -466,6 +475,13 @@ static void ProcessCommand(TasSharedState* s) {
             // the stale frame and truncates/overwrites the recording.
             s->continue_from_frame = 0;
             g_cave2_contArmed = 0;
+            // Claim this attempt's speed handover, for the same reason the
+            // splice marker above is gated: the marker alone says only WHERE to
+            // hand over, not that the replay about to start is the one that
+            // asked. Every armer stages it immediately before this command, so
+            // a marker present now belongs to this attempt; one that arrives by
+            // any other route never opens the gate.
+            g_cave2_handoffArmed = (s->speed_handoff_pos != 0) ? 1 : 0;
             LogRootDiag(s, "arm-play");
 
             // No position forcing — F5 matching must happen naturally.
@@ -521,6 +537,10 @@ static void ProcessCommand(TasSharedState* s) {
             s->mode = MODE_PLAY;  // Start as PLAY, will auto-switch in PLAY handler
             g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
             g_cave2_contArmed = 1;  // the ONLY place the splice gate opens
+            // CONT hands over at its splice (cont_resume_speed), never
+            // mid-replay. Refuse any marker it might have inherited.
+            s->speed_handoff_pos = 0;
+            g_cave2_handoffArmed = 0;
             g_cave2_pendingLog = 5;
             break;
 
@@ -534,6 +554,16 @@ static void ProcessCommand(TasSharedState* s) {
             // can't break a legitimate cycle.
             s->continue_from_frame = 0;
             g_cave2_contArmed = 0;
+            // Same for a PLAY speed handover. Without this, a judged PLAY that
+            // is stopped before it reaches first_moving leaves the request armed
+            // - and the NEXT replay, which may be a plain PLAY the user set to
+            // 4x on purpose, gets silently dropped to the stale resume speed
+            // when its position happens to pass that number. Every armer stages
+            // its own handover immediately before the arm command, so clearing
+            // here cannot break a legitimate cycle.
+            s->speed_handoff_pos = 0;
+            memcpy((void*)&s->speed_after_handoff, &ZERO_BITS, 4);
+            g_cave2_handoffArmed = 0;
             g_cave2_pendingLog = 3;
             break;
 
@@ -588,6 +618,20 @@ static void ProcessCommand(TasSharedState* s) {
             g_cave2_pendingLog = 10; // "snapshot restored"
             break;
         }
+    }
+
+    // Durable "the arm landed" signal for the judge, published AFTER the switch.
+    //
+    // Two reasons it lives here and not at the top of each arm case. It must be
+    // the LAST store of the arm, so an observer that sees the counter move is
+    // guaranteed to see the mode and position the arm wrote (x86 keeps store
+    // order, so the reverse - bumping first - leaves a window reading
+    // "armed, but mode still OFF and position still 0", which is
+    // indistinguishable from a refused arm). And it must count REFUSED arms
+    // too, which take an early `break`: a refusal leaves the mode OFF forever,
+    // and that is exactly the state the judge would otherwise spin on.
+    if (cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE) {
+        s->arm_generation++;
     }
 
     s->command = CMD_IDLE;
@@ -835,15 +879,27 @@ static void __declspec(noinline) Cave2_Logic() {
         //
         // cave5 caps the batch to land on this position, so the handover is
         // exact and not up to a batch late.
-        if (s->speed_handoff_pos > 0 && s->playback_pos >= s->speed_handoff_pos) {
-            if (s->speed_after_handoff > 0.0f) {
-                s->playback_speed = s->speed_after_handoff;
+        if (g_cave2_handoffArmed && s->speed_handoff_pos > 0
+                && s->playback_pos >= s->speed_handoff_pos) {
+            float resume = s->speed_after_handoff;
+            // Release the claim BEFORE installing the speed, not after.
+            //
+            // The controller re-asserts a speed every step, gated on this marker.
+            // Clearing last leaves a window where it reads "still handing over",
+            // writes the catch-up speed, and lands AFTER the speed was installed
+            // - with the marker then cleared, so nothing ever corrects it.
+            // Clearing first inverts that: a reader either still sees the marker
+            // (and this store lands last, winning) or sees it gone (and asserts
+            // the resume speed itself).
+            s->speed_handoff_pos = 0;
+            g_cave2_handoffArmed = 0;
+            if (resume > 0.0f) {
+                s->playback_speed = resume;
             }
             // Clear the catch-up clock backlog on cave5's next tick, exactly as
             // the splice does, so the replay resumes frame-exact at the new speed
             // instead of burning down the accumulated fast-forward debt.
             s->cont_reset_pending = 1;
-            s->speed_handoff_pos = 0;
             g_cave2_logParam = s->playback_pos;
             g_cave2_pendingLog = 11;
         }
