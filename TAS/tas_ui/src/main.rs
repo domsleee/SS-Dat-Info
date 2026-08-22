@@ -1291,10 +1291,7 @@ impl TasApp {
                         self.cont_cycle_label,
                         attempt, CONT_START_MATCH_MAX_RETRIES, observed, expected
                     ));
-                    // The controller drops the staged handover on a reroll, so
-                    // un-latch here too or the sync would read the next attempt's
-                    // not-yet-staged handover as one that already fired.
-                            // Vary the wall clock so the next F5 lands at a different
+                    // Vary the wall clock so the next F5 lands at a different
                     // accumulator-modulo-tick phase, then loop immediately.
                     std::thread::sleep(std::time::Duration::from_millis(suggested_delay_ms));
                 }
@@ -1317,7 +1314,7 @@ impl TasApp {
                     // still running toward the splice.
                     if self.cont_cycle_label == "PLAY" {
                         self.clear_cont_catchup();
-                                }
+                    }
                     // Stash for the resume summary emitted at the REC-start splice,
                     // where the actual resume frame is known. attempts = rerolls + 1.
                     self.cont_last_outcome = Some((retries_used + 1, completed_via));
@@ -1332,7 +1329,7 @@ impl TasApp {
                 StepOutcome::Aborted { reason } => {
                     self.push_log(&format!("{} aborted: {}", self.cont_cycle_label, reason));
                     self.clear_cont_catchup();
-                            // Drop any handover the aborted attempt had staged, and push
+                    // Drop any handover the aborted attempt had staged, and push
                     // the restored speed through: an aborted PLAY must not leave
                     // the game fast-forwarding at the judge speed.
                     if let Some(shared) = self.shared.as_mut() {
