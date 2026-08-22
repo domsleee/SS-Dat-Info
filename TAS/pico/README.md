@@ -64,8 +64,15 @@ The recurring failure in the session logs is
 
     Failed to open COM7: The system cannot find the file specified. (os error 2)
 
-94 genuine occurrences across two sessions. `os error 2` means the COM port is
-GONE — the device has left the bus — not that it is busy or that a write failed.
+94 genuine occurrences across two sessions. `os error 2` is ERROR_FILE_NOT_FOUND:
+the COM7 device path **did not exist** at that instant. Note what that does and
+does not prove — it is not "busy" (that would be ERROR_ACCESS_DENIED) and not a
+failed write, but neither does it establish that the whole composite device left
+the bus. HID may well have stayed up, or the CDC data interface may have come back
+under a different COM number while the harness kept asking for COM7.
+
+Count episodes, not log lines, too: 94 failed opens across retry loops could be a
+much smaller number of actual disconnects.
 
 It is expensive because the harness degrades silently instead of stopping: F5
 falls back to PostMessage, Escape falls back to `keybd_event` (which cannot pause
@@ -73,54 +80,107 @@ the game), and the run continues and reports things like
 `VERDICT: steering=FAIL replay_steered=FAIL zero_drift=FAIL` — which reads as a
 physics or determinism bug rather than a missing keyboard.
 
-## Improvement candidates (NOT yet applied)
+## Improvement candidates — reviewed (gpt-5.6-sol, xhigh)
 
-Ranked by evidence. Nothing here has been flashed; the device still runs the
-backed-up firmware verbatim.
+An earlier version of this file claimed auto-reload was the best-evidenced cause
+of the vanishing COM port. **That was wrong** and the review said so plainly.
+Corrected below; the ranking is now the reviewed one.
 
-1. **Disable auto-reload** — `supervisor.runtime.autoreload = False`.
-   CircuitPython restarts `code.py` on ANY write to the CIRCUITPY filesystem, and
-   a restart re-initialises USB. Windows indexing/antivirus/Explorer touch
-   removable drives on their own schedule, and this volume demonstrably has been
-   written by two different operating systems. That is a direct mechanism for
-   "the port disappeared for no reason". Cheapest, safest, best-evidenced change.
+### Confirmed correct
 
-2. **Give the main loop a sleep.** The `while True` has no sleep on the
-   no-data path, so it spins as fast as the interpreter runs. On a Pico that
-   competes with USB servicing for no benefit — the protocol tick is 10ms, so
-   `time.sleep(0.001)` costs nothing and calms the loop.
+* **The exception handler can kill `code.py`.** `except Exception: kbd.release_all()`
+  — if HID is what broke, `release_all()` raises *inside the handler*, escapes, and
+  ends the program. The device then stays enumerated but deaf: the port opens,
+  writes "succeed", nothing happens. The review found a second instance I missed —
+  **the 500ms timeout's `kbd.release_all()` is outside the `try` as well**, and so
+  is the initial `Keyboard(...)` / `memorymap.AddressRange(...)` construction.
+  Explains "enumerated but deaf", NOT a missing COM7.
 
-3. **Make the exception handler unable to kill the program.** It is currently
-   `except Exception: kbd.release_all()` — but if HID is what broke,
-   `release_all()` raises *inside the handler*, escapes to top level, and ends
-   `code.py`. The device then stays enumerated but deaf, which is the worst
-   failure shape: the port opens, writes "succeed", nothing happens. Wants a
-   nested try, re-acquisition of `usb_cdc.data` and `Keyboard`, and a backoff.
+* **Only the last byte of a batch is processed.** `cmd = data[-1]` discards
+  everything else in the same CDC read. If a press and its release land in one
+  batch the press is erased entirely — a real input-correctness bug, independent
+  of any disconnect.
 
-4. **Hardware watchdog** — `microcontroller.watchdog` in RESET mode, fed each
-   loop. If the loop wedges, the board resets and re-enumerates by itself instead
-   of staying dead until a human notices.
+* **The health check is write-only and therefore lies.** A write succeeds into a
+  driver buffer even when `code.py` is wedged. Needs a correlated reply. But
+  **do not invent a new command byte for it**: every one of the 256 values is a
+  potentially valid mask (`0xF0` is Ctrl+Shift+F5+Escape), and the protocol has
+  already spent `0xFD`/`0xFE`/`0xFF`. ACK the existing `0xFF` instead, and drain
+  stale replies before reading.
 
-5. **Make the health check real.** `PicoState::health_check` only writes `0xFF`
-   and calls that success — but a write into a buffer succeeds even when
-   `code.py` is wedged. A ping/pong (host sends e.g. `0xF0`, firmware replies
-   with a magic byte plus `current_mask`) would distinguish "alive" from
-   "enumerated but deaf". Needs a firmware and a host change together.
+* **Port discovery must not be VID:PID alone.** COM7 and COM8 share the composite
+  parent's VID/PID, so "first match" can select the REPL console — where a `0x03`
+  byte is Ctrl-C and kills `code.py`. Discriminate on VID/PID **plus** serial
+  (`719613738D55C04D`) **plus** the CDC data interface (`MI_02`), and fail closed
+  unless exactly one matches.
 
-6. **Find the port by VID:PID, not by name.** `tas_test` hardcodes COM7
-   (`TAS_PICO_PORT` overrides); `tas_ui` already scans. After a re-enumeration the
-   number can move, and then every test silently takes its fallback path.
+* **`0xFE` is badly sequenced** — detach 300ms, reattach, allow Windows only 200ms,
+  then reset the MCU: detach → partial enumeration → second reset. It is also
+  **dead code: nothing in this repo sends it.** Delete it or reset while detached.
 
-7. **Consider `storage.disable_usb_drive()`** in `boot.py`. This removes the
-   host-writes-the-filesystem vector entirely and subsumes (1). It is the most
-   effective and the least reversible — with the drive gone you cannot edit
-   `code.py` by drag-and-drop, so it needs a deliberate escape hatch (e.g. only
-   disable the drive when a GPIO pin is not grounded at boot) before it is safe
-   to apply.
+### Wrong, or oversold
 
-Also worth checking on the HOST, not the firmware: Windows **USB selective
-suspend** powering the port down, which matches the symptom exactly and is
-independent of anything the firmware does.
+* **Auto-reload does NOT delete the COM port.** It is a soft VM reload — equivalent
+  to Ctrl-D — and CircuitPython keeps its USB stack up across it; `boot.py` is not
+  re-run. So it cannot produce `ERROR_FILE_NOT_FOUND`. Disabling it is still worth
+  doing, but for a different and smaller reason: a reload mid-test silently loses
+  `current_mask` and buffered commands, and can leave a key held that the 500ms
+  timeout will then never release because `current_mask` came back as 0. (Which is
+  also why the firmware should `release_all()` at startup.)
+
+* **A 1ms loop sleep is cargo cult for this symptom.** A hot Python loop does not
+  starve RP2350 USB; servicing is interrupt-driven. Harmless housekeeping, not a fix.
+
+* **The hardware watchdog is underdesigned as I proposed it.** `WatchDogMode.RESET`
+  lives in the `watchdog` module, not `microcontroller.watchdog`. Worse, a timeout
+  at or below ~2.3s **fires during `0xFD`'s own 0.3s + 2s sleeps**. And feeding it
+  every loop means a loop that is catching USB exceptions forever still feeds it —
+  it would not recover the failure it is aimed at. A reset also risks corrupting
+  CIRCUITPY if MSC is mounted and being written.
+
+* **`storage.disable_usb_drive()` is more reversible than I claimed** — safe mode
+  bypasses `boot.py`, and the REPL and BOOTSEL remain. Still good hardening, and a
+  clean A/B, but not proven causal.
+
+* **"USB selective suspend matches exactly" was too strong.** Selective suspend
+  preserves the device stack and resumes on I/O; it does not normally delete the
+  COM symbolic link. (It *is* enabled on this machine — AC and DC both `0x1` — so
+  it stays on the list, just not at the top.)
+
+### What the evidence actually supports
+
+`ERROR_FILE_NOT_FOUND` proves only that **the COM7 path did not exist at that
+instant** — not that the whole composite device left the bus. COM7 could have
+vanished while HID stayed up, or the CDC data interface could have come back under
+a different COM number against a hardcoded name.
+
+The review's leading suspect was the firmware disconnecting itself via `0xFD`/`0xFE`.
+**Checked: it is not that for these failures.** `0xFD` is sent only by a manual
+button in the tas_ui panel, `0xFE` is sent by nothing, and all 94 failures occurred
+in `tas_test`, which has no `0xFD`/`0xFE` path at all — it only ever writes masks,
+`0x40`, `0x80` and `0xFF`. So the remaining live hypotheses are a stale COM number
+after a re-enumeration, or Windows losing just the CDC child of the composite.
+
+**The decisive missing observation is what is still present when COM7 is gone.**
+Nothing records that today, which is why 94 occurrences produced no diagnosis. The
+cheapest real improvement is therefore not in the firmware at all: when a port open
+fails, enumerate the `VID_2E8A` device tree and log which interfaces survive. That
+turns the next occurrence into evidence instead of another shrug.
+
+### Highest-value change, and it is host-side
+
+**Make the harness fail closed.** Today a missing Pico degrades silently: F5 falls
+back to PostMessage, Escape to `keybd_event` (which cannot pause the game), steering
+to nothing at all — and the run continues to a verdict. That is how a missing
+keyboard gets reported as `steering=FAIL replay_steered=FAIL zero_drift=FAIL` and
+costs a debugging session. A required-but-absent Pico should abort the run.
+
+### Descriptor trimming (worth doing, not proven causal)
+
+This device only needs HID-keyboard + CDC. `usb_hid.enable((usb_hid.Device.KEYBOARD,))`
+drops mouse and consumer control; `usb_midi.disable()` drops what Windows shows as
+the audio function; MSC can be dropped conditionally. Fewer interfaces, fewer
+drivers, fewer things to go wrong — but treat it as hardening and an A/B, not a fix.
 
 ## Restoring
 
