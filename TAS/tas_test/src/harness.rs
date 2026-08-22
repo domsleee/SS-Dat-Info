@@ -14,6 +14,71 @@ pub fn pico_port() -> String {
     std::env::var("TAS_PICO_PORT").unwrap_or_else(|_| "COM7".into())
 }
 
+/// Release every Pico key. `0xFF` is the firmware's "all up" mask.
+///
+/// The device is a Pico 2 running CircuitPython (VID_2E8A PID_000B) which
+/// enumerates a real HID Keyboard collection alongside this CDC port, so a mask
+/// byte presses actual keys and they stay pressed until a later byte clears them.
+///
+/// This is defence in depth rather than the only thing standing between us and a
+/// stuck key: the firmware already self-protects, releasing everything if it goes
+/// 500ms without a command (`TIMEOUT_S` in code.py). So a run killed between a
+/// press and its release cannot leave a key down for longer than that. What this
+/// call buys is releasing NOW instead of up to half a second later, and a defined
+/// starting state that does not depend on how the previous run died.
+///
+/// Best effort: if the port will not open there is nothing to release.
+pub fn pico_release_all() -> bool {
+    let com_path = format!("\\\\.\\{}", pico_port());
+    match std::fs::OpenOptions::new().write(true).open(&com_path) {
+        Ok(mut p) => p.write_all(&[0xFF]).and_then(|_| p.flush()).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Holds the Pico port open for a press/release pair and guarantees the release.
+///
+/// `Drop` runs on early return, on `?`, and while a panic unwinds, so the only
+/// way to leave a key down is for the process to be killed outright — which is
+/// what the startup release in `ensure_game_running` is for. Between the two,
+/// a held key cannot outlive the code that pressed it.
+pub struct PicoKeys {
+    port: std::fs::File,
+    port_name: String,
+}
+
+impl PicoKeys {
+    pub fn open() -> Option<PicoKeys> {
+        let port_name = pico_port();
+        let com_path = format!("\\\\.\\{}", port_name);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&com_path)
+            .ok()
+            .map(|port| PicoKeys { port, port_name })
+    }
+
+    /// Send a raw mask. Returns false if the write did not reach the device —
+    /// callers must not report success on a write they never landed.
+    pub fn send(&mut self, mask: u8) -> bool {
+        self.port
+            .write_all(&[mask])
+            .and_then(|_| self.port.flush())
+            .is_ok()
+    }
+
+    pub fn port_name(&self) -> &str {
+        &self.port_name
+    }
+}
+
+impl Drop for PicoKeys {
+    fn drop(&mut self) {
+        let _ = self.port.write_all(&[0xFF]);
+        let _ = self.port.flush();
+    }
+}
+
 /// How long to wait after F5 for the game to restart loading.
 const F5_SETTLE_MS: u64 = 4000;
 /// Frames to wait for physics stabilization after restart.
@@ -56,16 +121,21 @@ pub fn focus_game() {
 /// `escape-speedup` test will report "pause didn't engage" in that mode.
 pub fn send_escape() -> bool {
     focus_game();
-    let port_name = pico_port();
-    let com_path = format!("\\\\.\\{}", port_name);
-    if let Ok(mut p) = std::fs::OpenOptions::new().write(true).open(&com_path) {
+    if let Some(mut keys) = PicoKeys::open() {
         // Bit 7 = Escape per the updated Pico firmware (BIT_TO_KEY[7] = Keycode.ESCAPE).
-        let _ = p.write_all(&[0x80]);
-        let _ = p.flush();
+        // Report failure if the press did not land, rather than returning true
+        // and leaving the caller to blame the game for "pause didn't engage".
+        // The release is PicoKeys::drop's job, so it happens even if we return
+        // early or panic in between.
+        if !keys.send(0x80) {
+            eprintln!(
+                "  WARNING: Pico on {} opened but the Escape press failed to write",
+                keys.port_name()
+            );
+            return false;
+        }
         thread::sleep(Duration::from_millis(80));
-        let _ = p.write_all(&[0xFF]); // release all
-        let _ = p.flush();
-        println!("  Escape sent via Pico ({})", port_name);
+        println!("  Escape sent via Pico ({})", keys.port_name());
         return true;
     }
 
@@ -74,7 +144,7 @@ pub fn send_escape() -> bool {
     // but it's better than nothing.
     eprintln!(
         "  WARNING: Pico not available on {} — falling back to keybd_event (likely won't pause the game)",
-        port_name
+        pico_port()
     );
     let script = r#"
 Add-Type @'
@@ -243,20 +313,23 @@ public class W {{ [DllImport("user32.dll")] public static extern bool PostMessag
 pub fn send_f5_pico() {
     focus_game();
     let port = pico_port();
-    let com_path = format!("\\\\.\\{}", port);
-    match std::fs::OpenOptions::new().write(true).open(&com_path) {
-        Ok(mut p) => {
-            let _ = p.write_all(&[0x40]); // F5 press (bit 6)
-            let _ = p.flush();
+    match PicoKeys::open() {
+        Some(mut keys) => {
+            // Release is PicoKeys::drop's job — a panic or early return here can
+            // no longer leave F5 physically held.
+            if !keys.send(0x40) {
+                eprintln!("  WARNING: Pico F5 press failed to write; using PostMessage fallback.");
+                drop(keys);
+                send_f5_postmessage();
+                return;
+            }
             thread::sleep(Duration::from_millis(100));
-            let _ = p.write_all(&[0xFF]); // release all
-            let _ = p.flush();
             println!("  F5 sent via Pico ({})", port);
         }
-        Err(e) => {
+        None => {
             eprintln!(
-                "  WARNING: Failed to open {}: {}. Using PostMessage fallback.",
-                port, e
+                "  WARNING: Failed to open {}. Using PostMessage fallback.",
+                port
             );
             send_f5_postmessage();
         }
@@ -627,6 +700,15 @@ pub fn verify_expected_level(client: &TasSharedMemoryClient) {
 /// Set `NO_REVIVE=1` to skip the automatic launch — `ensure_game_running`
 /// will then behave like the old `connect()` and exit if the game isn't up.
 pub fn ensure_game_running() -> TasSharedMemoryClient {
+    // Start every test from a known Pico state. The firmware's own 500ms watchdog
+    // means a previous run cannot really have left a key down by now, but this
+    // costs one byte, makes the starting state explicit rather than inferred, and
+    // logs whether the device is reachable at all before a test starts leaning on
+    // it — which is the failure that otherwise shows up as "pause didn't engage".
+    if pico_release_all() {
+        println!("  Pico: released all keys ({})", pico_port());
+    }
+
     // Fast path: game already up and hooks firing.
     if let Ok(c) = TasSharedMemoryClient::open() {
         if check_liveness(&c) {
@@ -1421,26 +1503,45 @@ fn poll_cont_verdict(
 /// (allows the test to wait for the equivalent recording duration).
 pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep], fallback_ms: Option<u64>) {
     let port_name = pico_port();
-    let com_path = format!("\\\\.\\{}", port_name);
-    let port = match std::fs::OpenOptions::new().write(true).open(&com_path) {
-        Ok(p) => p,
-        Err(e) => {
+    // PicoKeys, not a bare File: this loop holds movement keys down for the whole
+    // pattern — seconds at a time — which makes it by far the most exposed place
+    // for an interrupted run to leave a key physically stuck. Drop releases on
+    // every exit path, including a panic.
+    // KEEPALIVE, not just edge-triggered writes.
+    //
+    // The firmware (F:\code.py on the CIRCUITPY volume) latches a mask until the
+    // next byte, BUT it also runs a safety watchdog:
+    //
+    //     TIMEOUT_S = 0.5   # release all if no command in 500ms
+    //     if current_mask != 0 and (monotonic() - last_rx_time) > TIMEOUT_S:
+    //         kbd.release_all()
+    //
+    // This loop used to write only when the mask CHANGED, and a pattern step is
+    // DEFAULT_HOLD_TICKS (56) * 10ms = 560ms — longer than the watchdog. So every
+    // hold longer than half a second had its key released by the firmware at the
+    // 500ms mark and never re-pressed, silently truncating the last ~60ms of that
+    // input. Longer holds lost proportionally more. Re-sending the live mask well
+    // inside the timeout keeps the press alive for as long as the pattern says.
+    const PICO_KEEPALIVE_MS: u64 = 200;
+
+    let mut port = match PicoKeys::open() {
+        Some(p) => p,
+        None => {
             eprintln!(
-                "  ERROR: Cannot open {}: {}. Steering will be absent.",
-                port_name, e
+                "  ERROR: Cannot open {}. Steering will be absent.",
+                port_name
             );
             let ms = fallback_ms.unwrap_or_else(|| crate::patterns::total_ticks(steps) as u64 * 10);
             thread::sleep(Duration::from_millis(ms));
             return;
         }
     };
-
-    let mut port = port;
     let total = crate::patterns::total_ticks(steps);
     let ms_per_tick = 10u64;
     let start = Instant::now();
     let mut prev_mask = 0xFFu8;
     let mut current_step = 0usize;
+    let mut last_send = Instant::now();
 
     for tick in 0..total {
         while current_step < steps.len() && tick >= steps[current_step].stop_tick {
@@ -1452,10 +1553,12 @@ pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep], fallback_ms: Opt
             0
         };
 
-        if mask != prev_mask {
+        let due_for_keepalive =
+            mask != 0 && last_send.elapsed() >= Duration::from_millis(PICO_KEEPALIVE_MS);
+        if mask != prev_mask || due_for_keepalive {
             let send_byte = if mask == 0 { 0xFF } else { mask };
-            let _ = port.write_all(&[send_byte]);
-            let _ = port.flush();
+            port.send(send_byte);
+            last_send = Instant::now();
             prev_mask = mask;
         }
 
@@ -1465,7 +1568,7 @@ pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep], fallback_ms: Opt
         }
     }
 
-    // Release all
-    let _ = port.write_all(&[0xFF]);
-    let _ = port.flush();
+    // Explicit release on the normal path so the keys go up at a known instant
+    // rather than whenever `port` happens to drop; Drop then makes it idempotent.
+    port.send(0xFF);
 }
