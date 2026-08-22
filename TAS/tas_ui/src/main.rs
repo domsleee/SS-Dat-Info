@@ -334,6 +334,15 @@ const PLAYBACK_SPEED_PRESETS: [f32; 4] = [0.25, 0.5, 1.0, 2.0];
 // headroom now lives inside judge_cont_bucket (one source of truth).
 const CONT_START_MATCH_MAX_RETRIES: u32 = tas_shared::cont::START_MATCH_MAX_RETRIES;
 
+/// How long one judged cycle may run before the UI gives up on it.
+///
+/// Generous on purpose — this is a stall guard, not a performance bound. A
+/// deep CONT catch-up plus its rerolls, or a PLAY judged all the way to
+/// first_moving + BUCKET_VALIDATE_WINDOW at 1x, legitimately take tens of
+/// seconds. What it must not do is let a cycle that will never finish hold
+/// the input block forever.
+const CONT_CYCLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// Open `tas_ui.log` in append mode next to the history JSON for this
 /// session. Returns `None` if the file system isn't usable — silent
 /// failure mode, since losing the on-disk mirror is preferable to
@@ -459,6 +468,16 @@ struct TasApp {
     /// `command` slot is a single u32, so Stop and Restart can't be written on
     /// the same frame) plus the CONT bucket judge/reroll loop.
     cont_controller: Option<tas_shared::transport::TransportController>,
+    /// Wall-clock deadline for the in-flight cycle to make a terminal
+    /// transition. `None` when idle.
+    ///
+    /// The controller has no clock and never blocks, so a phase that stops
+    /// progressing — an F5 restart that never completes, an arm the DLL never
+    /// processes — returns InProgress forever. The tas_test harness has always
+    /// had its own budget for this; the UI had none, so the same stall left the
+    /// cycle spinning with cont_suppress_input SET and the user's keyboard
+    /// swallowed until they found the STOP button.
+    cont_cycle_deadline: Option<std::time::Instant>,
     /// Carries the last CONT cycle's result (bucket attempts, how the bucket
     /// was accepted) from controller-`Done` to the REC-start transition, where
     /// the actual resume frame is known — so we can log one "resumed at frame X
@@ -672,6 +691,7 @@ impl TasApp {
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
             cont_controller: None,
+            cont_cycle_deadline: None,
             cont_last_outcome: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
@@ -784,6 +804,7 @@ impl TasApp {
     fn reset_continue_runtime_state(&mut self) {
         self.pending_session_kind = None;
         self.pending_continue_start_tick = None;
+        self.cont_cycle_deadline = None;
         // Cancel any in-flight restart/arm/reroll cycle. STOP must mean STOP —
         // without this the controller would keep stepping and silently start
         // recording/playback after the restart completes.
@@ -1188,6 +1209,7 @@ impl TasApp {
             },
         };
         self.cont_controller = Some(tas_shared::transport::TransportController::new(cfg));
+        self.cont_cycle_deadline = Some(std::time::Instant::now() + CONT_CYCLE_BUDGET);
         self.cont_cycle_label = match command {
             TasCommand::ArmContinue => "CONT",
             TasCommand::ArmPlay => "PLAY",
@@ -1264,6 +1286,38 @@ impl TasApp {
             };
             match outcome {
                 StepOutcome::InProgress => {
+                    // Only InProgress can stall: every other outcome either
+                    // advances a phase or ends the cycle. Name the phase in the
+                    // log — an F5 restart that never completed and an arm the
+                    // DLL never processed look identical from here otherwise.
+                    if self.cont_cycle_deadline.is_some_and(|d| std::time::Instant::now() > d) {
+                        let phase = self
+                            .cont_controller
+                            .as_ref()
+                            .map(|c| c.phase_name())
+                            .unwrap_or("?");
+                        self.push_log(&format!(
+                            "{} gave up: stalled in {} for {}s",
+                            self.cont_cycle_label,
+                            phase,
+                            CONT_CYCLE_BUDGET.as_secs()
+                        ));
+                        self.clear_cont_catchup();
+                        if let Some(shared) = self.shared.as_mut() {
+                            // Straight to the DLL, the same route the controller
+                            // takes for its own abort - send_action_command is the
+                            // button path and wants a timestamp we do not have here.
+                            shared.send_command(TasCommand::Stop);
+                            let sp = self.playback_speed;
+                            let st = shared.state_mut();
+                            st.speed_handoff_pos = 0;
+                            st.speed_after_handoff = 0.0;
+                            st.playback_speed = sp;
+                        }
+                        self.reset_continue_runtime_state();
+                        self.set_cont_suppress_input(false);
+                        return;
+                    }
                     // Safe to yield here: restart-done polling / bucket judging
                     // don't set the F5 arm phase. Spin tightly for a bounded
                     // budget (so detection stays ~3ms, not vsync-quantized), then
@@ -2197,6 +2251,7 @@ impl eframe::App for TasApp {
                     // path would strand cont_suppress_input SET - and the whole
                     // point of the resumed REC is to record live input.
                     if self.cont_controller.take().is_some() {
+                        self.cont_cycle_deadline = None;
                         self.set_cont_suppress_input(false);
                     }
                     // Fresh finish-line watch for this session. A CONT splice
@@ -3326,6 +3381,7 @@ mod tests {
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
             cont_controller: None,
+            cont_cycle_deadline: None,
             cont_last_outcome: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
