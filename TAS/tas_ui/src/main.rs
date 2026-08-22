@@ -1202,6 +1202,7 @@ impl TasApp {
             // REC never replays at all, so both stage nothing here. A PLAY that
             // did not raise the speed leaves cont_catchup_speed None -> 0.0 ->
             // no handover.
+            predict_bucket: true,
             resume_speed: if command == TasCommand::ArmPlay {
                 self.cont_catchup_speed.unwrap_or(0.0)
             } else {
@@ -3643,6 +3644,7 @@ mod tests {
                 target: None,
                 max_retries: 30,
                 resume_speed: 0.0,
+                predict_bucket: true,
             },
         ));
         app.prepare_send_action(TasCommand::Stop);

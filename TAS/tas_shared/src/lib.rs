@@ -1071,6 +1071,35 @@ pub mod cont {
     /// per the field's 4500+ logged successes) confirms Match at the cap.
     pub const BUCKET_VALIDATE_WINDOW: u32 = 1024;
 
+    /// How far the countdown's length can move between restarts, in ticks.
+    ///
+    /// `gate_tick - restart_done_tick` measured 300 or 301 over 42 cycles and
+    /// six deliberately varied arm delays — a spread of exactly one tick, with
+    /// no trend against the arm. So a predicted first-moving frame is good to
+    /// +/-1, and anything further out cannot be the recording's bucket no
+    /// matter which way the countdown rounds.
+    ///
+    /// This is a REJECTION tolerance only. Loosening it costs a missed instant
+    /// reject (the replay judge then rules as before); tightening it risks
+    /// rerolling a bucket that would have matched. Neither can accept a wrong
+    /// one, which is what makes the whole predictive path safe to be wrong.
+    pub const COUNTDOWN_K_JITTER: i64 = 1;
+
+    /// Predictive rejects in a row before the learned countdown length is
+    /// thrown away and re-learned.
+    ///
+    /// K is learned from an attempt's observed first-moving frame. A bucket
+    /// that lands somewhere else entirely can teach a WRONG K — and a wrong K
+    /// rejects good buckets at arm time, which means they never replay, which
+    /// means nothing ever observes a first-moving frame to correct it. That is
+    /// a deadlock, and the cycle would burn every retry without replaying once.
+    ///
+    /// So a run of rejections with no confirming observation is treated as
+    /// evidence against K rather than against the buckets. Bounded at a few,
+    /// because legitimate runs of rejections are common — the arm offset has to
+    /// land in a narrow window — but an endless one never is.
+    pub const MAX_BLIND_PREDICTIVE_REJECTS: u32 = 4;
+
     /// Per-axis BLOWUP guard (game units) over the judge window.
     ///
     /// This is deliberately GENEROUS, not a tracking tolerance. The judge's real
@@ -1475,7 +1504,10 @@ pub mod cont {
 /// implemented for the real shared-memory client and for a `FakePort` in tests
 /// (so the serialization invariants are checked without a running game).
 pub mod transport {
-    use super::cont::{judge_cont_bucket, BucketVerdict};
+    use super::cont::{
+        detect_first_moving, judge_cont_bucket, BucketVerdict, COUNTDOWN_K_JITTER,
+        MAX_BLIND_PREDICTIVE_REJECTS,
+    };
     use super::{TasCommand, TasMode};
 
     /// First N rerolls use NO jitter — the plain restart already has natural
@@ -1559,6 +1591,16 @@ pub mod transport {
         /// fast-forwarded. Same reasoning as the CONT splice's
         /// `cont_resume_speed`.
         pub resume_speed: f32,
+        /// Throw a determined-wrong bucket away at arm time instead of
+        /// replaying the countdown to confirm it. See
+        /// `TransportController::learned_countdown_k`.
+        ///
+        /// An escape hatch, not a tuning knob: the predictive path can only
+        /// ever reject, so switching it off costs speed and nothing else. It
+        /// exists so the model can be A/B'd against itself, and so a machine
+        /// where the countdown turns out not to be fixed-length has somewhere
+        /// to go that is not "edit the source".
+        pub predict_bucket: bool,
     }
 
     /// The few shared-memory operations the transport machine performs. Returns
@@ -1587,6 +1629,10 @@ pub mod transport {
         /// Monotonic counter the DLL bumps once per processed arm. Used to tell
         /// this attempt's replay state from the previous one's.
         fn arm_generation(&self) -> u32;
+        /// tick_count when this attempt's F5 restart completed.
+        fn restart_done_tick(&self) -> u32;
+        /// tick_count when this attempt's arm was consumed.
+        fn arm_consumed_tick(&self) -> u32;
     }
 
     /// Fixed wall-clock delay (ms) between sending Stop and sending Restart.
@@ -1708,6 +1754,18 @@ pub mod transport {
         Unjudged,
     }
 
+    /// Ticks between this attempt's restart completing and its arm being
+    /// consumed — the only thing that moves `first_moving`. `None` when either
+    /// stamp is missing, which just disables the predictive path.
+    fn arm_offset(port: &impl TransportPort) -> Option<i64> {
+        let r = port.restart_done_tick();
+        let a = port.arm_consumed_tick();
+        if r == 0 || a == 0 {
+            return None;
+        }
+        Some(a.wrapping_sub(r) as i64)
+    }
+
     /// Drives one restart→arm(→judge→reroll) cycle to a terminal outcome.
     pub struct TransportController {
         cfg: ArmConfig,
@@ -1716,6 +1774,25 @@ pub mod transport {
         completed_via: CompletedVia,
         /// A speed handover has been staged with the DLL for this attempt.
         handoff_sent: bool,
+        /// The countdown's length in ticks, LEARNED from an attempt that
+        /// actually replayed rather than assumed from a constant.
+        ///
+        /// `first_moving = K - (arm_consumed_tick - restart_done_tick)`, so one
+        /// observed first-moving frame plus that attempt's arm offset gives K,
+        /// and every LATER attempt's bucket is then computable the moment it
+        /// arms — before a single tick is replayed.
+        ///
+        /// Learned rather than hardcoded on purpose. A constant that is wrong
+        /// for some other track or machine would reject every attempt and the
+        /// cycle would never land; a value learned from this cycle's own first
+        /// attempt cannot be wrong about this cycle. The first attempt pays the
+        /// full replay either way — something has to be tried first.
+        learned_countdown_k: Option<i64>,
+        /// How many rerolls this cycle threw away without replaying anything.
+        predictive_rejects: u32,
+        /// Consecutive predictive rejects with no replay in between, i.e. with
+        /// nothing confirming the K they were based on.
+        blind_predictive_rejects: u32,
         /// The DLL's arm counter as it stood just before this attempt armed.
         /// Once it differs, the mode and position being read describe THIS
         /// attempt; until then they still describe the previous replay.
@@ -1738,6 +1815,9 @@ pub mod transport {
                 retries_remaining,
                 completed_via: CompletedVia::Unjudged,
                 handoff_sent: false,
+                learned_countdown_k: None,
+                predictive_rejects: 0,
+                blind_predictive_rejects: 0,
                 arm_generation_at_arm: 0,
             }
         }
@@ -1751,6 +1831,11 @@ pub mod transport {
         /// there is no separate flag to forget to clear on a reroll, an abort or
         /// a STOP - the earlier version of this was a UI latch, and it was
         /// cleared on reroll while the same controller was still running.
+        /// Rerolls this cycle rejected at arm time, with nothing replayed.
+        pub fn predictive_rejects(&self) -> u32 {
+            self.predictive_rejects
+        }
+
         pub fn owns_playback_speed(&self) -> bool {
             self.cfg.resume_speed > 0.0
         }
@@ -1924,6 +2009,45 @@ pub mod transport {
                     if port.arm_generation() == self.arm_generation_at_arm {
                         return StepOutcome::InProgress;
                     }
+                    // THE PREDICTIVE REJECT. first_moving is decided by the arm
+                    // offset, not by anything that happens during the replay, so
+                    // once K is known this attempt's bucket is already determined
+                    // and a wrong one can be thrown away here — at zero replayed
+                    // ticks instead of after the whole countdown.
+                    //
+                    // It only ever REJECTS. A wrong prediction costs a reroll that
+                    // might have matched; it can never let a wrong bucket through,
+                    // because everything that survives still faces the full judge.
+                    if let (true, Some(k), Some(expected)) = (
+                        self.cfg.predict_bucket,
+                        self.learned_countdown_k,
+                        self.cfg.target.and_then(|t| t.expected_first_moving),
+                    ) {
+                        if let Some(off) = arm_offset(port) {
+                            let predicted = k - off;
+                            if (predicted - expected as i64).abs() > COUNTDOWN_K_JITTER {
+                                if self.blind_predictive_rejects >= MAX_BLIND_PREDICTIVE_REJECTS {
+                                    // Nothing has replayed in a while, so nothing
+                                    // has confirmed this K. Distrust it rather than
+                                    // the buckets: drop it, let the next attempt
+                                    // replay, and learn it again.
+                                    self.learned_countdown_k = None;
+                                    self.blind_predictive_rejects = 0;
+                                } else {
+                                    self.blind_predictive_rejects += 1;
+                                    self.predictive_rejects += 1;
+                                    return self.reroll(
+                                        port,
+                                        format!(
+                                            "arm landed {} tick(s) after the restart, which puts first-moving at {} not {}",
+                                            off, predicted, expected
+                                        ),
+                                        Some(predicted.max(0) as u32),
+                                    );
+                                }
+                            }
+                        }
+                    }
                     let mode = port.mode();
                     if mode == rec {
                         // Splice already fired (PLAY→REC) — bucket accepted.
@@ -1953,6 +2077,18 @@ pub mod transport {
                             };
                         }
                         return StepOutcome::InProgress;
+                    }
+                    // Learn K from the first attempt that gets far enough to show
+                    // its first-moving frame. From here on this cycle predicts.
+                    if self.learned_countdown_k.is_none() {
+                        if let (Some(o), Some(off)) =
+                            (detect_first_moving(port.play_coords(), pos), arm_offset(port))
+                        {
+                            self.learned_countdown_k = Some(o as i64 + off);
+                            // An actual observation: the streak of unconfirmed
+                            // rejections is over.
+                            self.blind_predictive_rejects = 0;
+                        }
                     }
                     let target = match self.cfg.target {
                         Some(t) => t,
@@ -2088,6 +2224,8 @@ pub mod transport {
             speed_handoff_pos: u32,
             speed_after_handoff: f32,
             arm_generation: u32,
+            restart_done_tick: u32,
+            arm_consumed_tick: u32,
             commands: Vec<TasCommand>,
             /// Invariant tracker: Restart must NEVER be sent while mode != OFF.
             restart_while_not_off: bool,
@@ -2141,6 +2279,12 @@ pub mod transport {
             fn arm_generation(&self) -> u32 {
                 self.arm_generation
             }
+            fn restart_done_tick(&self) -> u32 {
+                self.restart_done_tick
+            }
+            fn arm_consumed_tick(&self) -> u32 {
+                self.arm_consumed_tick
+            }
         }
 
         impl FakePort {
@@ -2169,6 +2313,7 @@ pub mod transport {
                 target,
                 max_retries,
                 resume_speed: 0.0,
+                predict_bucket: true,
             }
         }
 
@@ -2418,6 +2563,12 @@ pub mod transport {
                 }
                 fn arm_generation(&self) -> u32 {
                     self.inner.arm_generation()
+                }
+                fn restart_done_tick(&self) -> u32 {
+                    self.inner.restart_done_tick()
+                }
+                fn arm_consumed_tick(&self) -> u32 {
+                    self.inner.arm_consumed_tick()
                 }
             }
 
@@ -2748,6 +2899,174 @@ pub mod transport {
             p.playback_pos = 0;
             assert!(matches!(c.step(&mut p), StepOutcome::Aborted { .. }));
             assert!(c.is_terminal());
+        }
+        /// Build a port whose restart/arm stamps put the arm `off` ticks after
+        /// the restart — the only quantity that moves first_moving.
+        fn arm_at_offset(p: &mut FakePort, off: u32) {
+            p.restart_done_tick = 1000;
+            p.arm_consumed_tick = 1000 + off;
+        }
+
+        /// THE POINT OF ALL THIS. Once the countdown length is known, a wrong
+        /// bucket is thrown away at ZERO replayed ticks — no countdown, no
+        /// coordinates, nothing. Before this, ruling on the fingerprint meant
+        /// replaying ~300 ticks of a stationary boarder first.
+        #[test]
+        fn a_wrong_bucket_is_rejected_before_replaying_anything() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Play, Some(target), 30));
+            let mut rec = vec![[1.0f32, 2.0, 3.0]; 400];
+            rec[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = rec;
+            p.recorded_count = 400;
+
+            // Attempt 1 armed 2 ticks after the restart, and replayed a bucket
+            // that leaves the spawn at 248. That teaches K = 248 + 2 = 250.
+            arm_at_offset(&mut p, 2);
+            drive_to_judge(&mut c, &mut p);
+            let mut play = vec![[1.0f32, 2.0, 3.0]; 400];
+            play[248] = [1.0, 2.0, 3.5];
+            p.play_coords = play;
+            p.playback_pos = 320;
+            assert!(matches!(c.step(&mut p), StepOutcome::Reroll { .. }));
+
+            // Attempt 2 lands its arm 10 ticks late, so first_moving is already
+            // determined to be 240 — nowhere near 250. Nothing has been replayed:
+            // no coordinates, position still 0.
+            arm_at_offset(&mut p, 10);
+            drive_reroll_to_judge(&mut c, &mut p);
+            p.play_coords = Vec::new();
+            p.playback_pos = 0;
+            assert!(
+                matches!(c.step(&mut p), StepOutcome::Reroll { .. }),
+                "a determined-wrong bucket should not need to be replayed"
+            );
+        }
+
+        /// ...but not before it has any idea what the countdown length is. A
+        /// hardcoded K that was wrong for some other track or machine would
+        /// reject every attempt and the cycle would never land, so the first
+        /// attempt always replays and teaches it.
+        #[test]
+        fn nothing_is_predicted_until_the_countdown_length_is_known() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Play, Some(target), 30));
+            p.recorded_count = 400;
+            // An arm offset that WOULD be rejected if K were assumed.
+            arm_at_offset(&mut p, 99);
+            drive_to_judge(&mut c, &mut p);
+            p.playback_pos = 0;
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::InProgress,
+                "rejected on a guess instead of replaying to learn K"
+            );
+        }
+
+        /// The prediction is good to +/-1 because the countdown itself rounds by
+        /// a tick (measured: K is 300 or 301 over 42 cycles). A bucket inside
+        /// that band must survive to the real judge rather than being rerolled
+        /// on arithmetic.
+        #[test]
+        fn a_bucket_within_the_countdown_jitter_still_gets_judged() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Play, Some(target), 30));
+            let mut rec = vec![[1.0f32, 2.0, 3.0]; 400];
+            rec[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = rec;
+            p.recorded_count = 400;
+
+            arm_at_offset(&mut p, 2);
+            drive_to_judge(&mut c, &mut p);
+            let mut play = vec![[1.0f32, 2.0, 3.0]; 400];
+            play[248] = [1.0, 2.0, 3.5];
+            p.play_coords = play;
+            p.playback_pos = 320;
+            assert!(matches!(c.step(&mut p), StepOutcome::Reroll { .. })); // K = 250
+
+            // Offset 1 predicts 249 — one off, inside the jitter. Must replay.
+            arm_at_offset(&mut p, 1);
+            drive_reroll_to_judge(&mut c, &mut p);
+            p.play_coords = Vec::new();
+            p.playback_pos = 0;
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress);
+        }
+        /// A bucket that lands somewhere else entirely teaches a WRONG countdown
+        /// length. A wrong K rejects good buckets at arm time, so they never
+        /// replay, so nothing ever observes a first-moving frame to correct it —
+        /// the cycle would burn every retry without replaying once. The guard
+        /// treats a run of unconfirmed rejections as evidence against K.
+        #[test]
+        fn a_wrong_countdown_length_cannot_deadlock_the_cycle() {
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Play, Some(target), 40));
+            let mut rec = vec![[1.0f32, 2.0, 3.0]; 400];
+            rec[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = rec;
+            p.recorded_count = 400;
+            arm_at_offset(&mut p, 2);
+
+            // Attempt 1 replays a bucket that left the spawn at 100 — nothing like
+            // the recording. K is learned as 100 + 2 = 102, which is wrong, and
+            // now predicts ~100 for every arm offset we can reach.
+            drive_to_judge(&mut c, &mut p);
+            let mut play = vec![[1.0f32, 2.0, 3.0]; 400];
+            play[100] = [1.0, 2.0, 3.5];
+            p.play_coords = play;
+            p.playback_pos = 320;
+            assert!(matches!(c.step(&mut p), StepOutcome::Reroll { .. }));
+
+            // The bad K now rejects everything, blind — nothing replays, so
+            // nothing can correct it.
+            for i in 0..MAX_BLIND_PREDICTIVE_REJECTS {
+                drive_reroll_to_judge(&mut c, &mut p);
+                p.play_coords = Vec::new();
+                p.playback_pos = 0;
+                assert!(
+                    matches!(c.step(&mut p), StepOutcome::Reroll { .. }),
+                    "blind reject {} should still fire",
+                    i
+                );
+            }
+
+            // ...until the streak is long enough to indict K instead. This
+            // attempt must be allowed to replay and re-learn.
+            drive_reroll_to_judge(&mut c, &mut p);
+            p.play_coords = Vec::new();
+            p.playback_pos = 0;
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::InProgress,
+                "a bad countdown length kept rejecting with nothing left to correct it"
+            );
         }
         #[test]
         fn cont_matches_correct_bucket() {
@@ -3132,6 +3451,12 @@ impl transport::TransportPort for TasSharedMemoryClient {
     fn arm_generation(&self) -> u32 {
         unsafe { std::ptr::read_volatile(&self.state().arm_generation as *const u32) }
     }
+    fn restart_done_tick(&self) -> u32 {
+        unsafe { std::ptr::read_volatile(&self.state().restart_done_tick as *const u32) }
+    }
+    fn arm_consumed_tick(&self) -> u32 {
+        unsafe { std::ptr::read_volatile(&self.state().arm_consumed_tick as *const u32) }
+    }
 }
 
 #[cfg(not(windows))]
@@ -3193,6 +3518,12 @@ impl transport::TransportPort for TasSharedMemoryClient {
     }
     fn arm_generation(&self) -> u32 {
         unsafe { std::ptr::read_volatile(&self.state().arm_generation as *const u32) }
+    }
+    fn restart_done_tick(&self) -> u32 {
+        unsafe { std::ptr::read_volatile(&self.state().restart_done_tick as *const u32) }
+    }
+    fn arm_consumed_tick(&self) -> u32 {
+        unsafe { std::ptr::read_volatile(&self.state().arm_consumed_tick as *const u32) }
     }
 }
 

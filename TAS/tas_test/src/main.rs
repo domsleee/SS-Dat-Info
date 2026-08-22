@@ -42,6 +42,7 @@ mod fe_cont_stress;
 mod pause_resume;
 mod gate_predict;
 mod play_judge;
+mod reroll_cost;
 mod play_pace;
 mod rec_start;
 mod refresh_recording;
@@ -272,6 +273,9 @@ fn main() {
                 }
             }
             std::process::exit(if gate_predict::run(iterations) { 0 } else { 1 });
+        }
+        "reroll-cost" => {
+            std::process::exit(if reroll_cost::run() { 0 } else { 1 });
         }
         "play-judge" => {
             let mut iterations = 5u32;

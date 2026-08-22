@@ -217,6 +217,7 @@ fn one_cycle(
         }),
         max_retries: MAX_RETRIES,
         resume_speed,
+        predict_bucket: true,
     };
     let mut c = TransportController::new(cfg);
 
