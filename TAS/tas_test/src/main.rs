@@ -40,6 +40,7 @@ mod fe_cont_reliability;
 mod fe10065_cont;
 mod fe_cont_stress;
 mod pause_resume;
+mod play_judge;
 mod play_pace;
 mod rec_start;
 mod refresh_recording;
@@ -257,6 +258,19 @@ fn main() {
             }
             f5_probe::run(iterations);
             std::process::exit(0);
+        }
+        "play-judge" => {
+            let mut iterations = 5u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(5);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            std::process::exit(if play_judge::run(iterations) { 0 } else { 1 });
         }
         "restart-precision" => {
             let mut iterations = 10u32;
