@@ -1842,8 +1842,10 @@ pub mod transport {
             c.step(p);
             p.restart_state = 2;
             c.step(p); // RestartWaitDone -> ArmSettle (Wait)
-            c.step(p); // ArmSettle -> ArmContinue, phase -> JudgeBucket
-            assert_eq!(p.commands.last(), Some(&TasCommand::ArmContinue));
+            c.step(p); // ArmSettle -> arm command, phase -> JudgeBucket
+            // Assert against the configured arm, not a hardcoded ArmContinue:
+            // PLAY is judged too when it is given a target.
+            assert_eq!(p.commands.last(), Some(&c.cfg.arm.command()));
             // game enters PLAY for the replay
             p.mode = TasMode::Play as u32;
         }
@@ -1888,6 +1890,97 @@ pub mod transport {
                 }
             );
             assert!(c.is_terminal());
+        }
+
+        #[test]
+        fn play_with_target_judges_and_matches() {
+            // PLAY is judged whenever a target is supplied — the controller
+            // gates on target.is_some(), not on the arm. This is what lets the
+            // UI reroll a PLAY onto the recording's spawn bucket instead of
+            // replaying whatever bucket the F5 happened to land.
+            //
+            // Note continue_from_frame is 0 for PLAY, so the judge's
+            // match_through is 0 and validate_to collapses to the settle window
+            // (first_moving + BUCKET_MATCH_WINDOW). That is the intended scope:
+            // there is no splice to validate through.
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Play, Some(target), 30));
+            let mut coords = vec![[1.0f32, 2.0, 3.0]; 400];
+            coords[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = coords.clone();
+            p.recorded_count = 400;
+            drive_to_judge(&mut c, &mut p);
+
+            p.play_coords = coords;
+            p.playback_pos = 320;
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 0,
+                    completed_via: CompletedVia::BucketMatched
+                }
+            );
+        }
+
+        #[test]
+        fn play_with_target_rerolls_wrong_bucket() {
+            // The near-miss the UI toggle exists to prevent: same spawn bits, but
+            // the boarder starts moving on a different frame, so the replay
+            // diverges from the recording. Must reroll, not accept.
+            let target = BucketTarget {
+                expected_start_bits: bits(1.0, 2.0, 3.0),
+                expected_first_moving: Some(250),
+            };
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Play, Some(target), 30));
+            let mut rec = vec![[1.0f32, 2.0, 3.0]; 400];
+            rec[250] = [1.0, 2.0, 3.5];
+            p.rec_coords = rec;
+            p.recorded_count = 400;
+            drive_to_judge(&mut c, &mut p);
+
+            // identical spawn, movement one frame late
+            let mut play = vec![[1.0f32, 2.0, 3.0]; 400];
+            play[251] = [1.0, 2.0, 3.5];
+            p.play_coords = play;
+            p.playback_pos = 320;
+            assert!(matches!(c.step(&mut p), StepOutcome::Reroll { .. }));
+            assert!(!c.is_terminal());
+        }
+
+        #[test]
+        fn play_without_target_finishes_unjudged() {
+            // The toggle OFF path, and the pre-existing behaviour: no target, so
+            // the controller arms and is done — no judging, no rerolls, playback
+            // starts immediately on whatever bucket the restart landed.
+            let mut p = FakePort {
+                mode: TasMode::Rec as u32,
+                ..Default::default()
+            };
+            let mut c = TransportController::new(cfg(Arm::Play, None, 30));
+            c.step(&mut p); // Stop
+            p.mode = TasMode::Off as u32;
+            c.step(&mut p); // -> Restart
+            c.step(&mut p);
+            p.restart_state = 2;
+            c.step(&mut p); // -> ArmSettle (Wait)
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 0,
+                    completed_via: CompletedVia::Unjudged
+                }
+            );
         }
 
         #[test]
