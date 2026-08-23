@@ -317,6 +317,7 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
                 s->gate_index = index;
                 s->gate_clk = racetimer::ReadClk();
                 s->gate_reset_tick = s->reset_tick;
+                s->gate_seq = s->frame_count;
                 s->gate_qpc_lo = s->clock_delta_lo;
                 s->gate_qpc_hi = s->clock_delta_hi;
                 s->gate_secs_lo = s->secs_since_reset_lo;
@@ -611,6 +612,7 @@ static void ProcessCommand(TasSharedState* s) {
 
         case CMD_RESTART:
             // Begin in-process F5 restart sequence
+            s->trace_count = 0;   // trace from HERE, so the reset is inside it
             s->restart_state = 1;
             s->restart_frames_held = 0;
             // The replay a handover was staged for is about to stop existing.
@@ -687,6 +689,7 @@ static void ProcessCommand(TasSharedState* s) {
         s->arm_restart_tick = s->restart_done_tick;
         s->arm_clk = racetimer::ReadClk();
         s->arm_reset_tick = s->reset_tick;
+        s->arm_seq = s->frame_count;
         s->arm_qpc_lo = s->clock_delta_lo;
         s->arm_qpc_hi = s->clock_delta_hi;
         s->arm_secs_lo = s->secs_since_reset_lo;
@@ -811,6 +814,27 @@ static void __declspec(noinline) Cave2_Logic() {
                 }
             }
 
+            // Record the frame. Runs from the F5 press until the buffer fills,
+            // which covers the whole countdown — the reset, the settle and the
+            // gate all land inside it.
+            {
+                uint32_t n = s->trace_count;
+                if (n < TRACE_FRAMES) {
+                    s->trace[n][0] = s->tick_count;
+                    memcpy((void*)&s->trace[n][1], &new_x, 4);
+                    memcpy((void*)&s->trace[n][2], &new_y, 4);
+                    memcpy((void*)&s->trace[n][3], &new_z, 4);
+                    s->trace[n][4] = s->clock_delta_lo;
+                    s->trace[n][5] = s->clock_delta_hi;
+                    {
+                        uint32_t ph = 0;
+                        memcpy(&ph, (uint8_t*)s->player_ptr + GameAddresses::PLAYER_PHYSICS, 4);
+                        s->trace[n][6] = ph;
+                    }
+                    s->trace_count = n + 1;
+                }
+            }
+
             // Update current position
             s->player_x = new_x;
             s->player_y = new_y;
@@ -841,6 +865,7 @@ static void __declspec(noinline) Cave2_Logic() {
                 // making later, and measuring from it put that hold length
                 // straight into the prediction error.
                 s->f5_press_tick = s->tick_count;
+                s->press_seq = s->frame_count;
                 s->f5_press_qpc_lo = s->clock_delta_lo;
                 s->f5_press_qpc_hi = s->clock_delta_hi;
                 InjectF5(s, addr, kbobj, true);

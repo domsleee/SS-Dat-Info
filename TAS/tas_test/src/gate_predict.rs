@@ -162,6 +162,11 @@ fn one_cycle(client: &mut TasSharedMemoryClient, delay_ms: u64) -> Option<Cycle>
     while Instant::now() < deadline {
         let s = client.state();
         if s.gate_tick != 0 && s.restart_done_tick != 0 && s.arm_consumed_tick != 0 {
+            // Ride for a moment before this cycle ends. The reset is detected as
+            // the position changing, so the boarder has to be somewhere else
+            // first; stopping at the gate leaves it AT the spawn and the next
+            // restart's teleport is invisible.
+            thread::sleep(Duration::from_millis(600));
             return Some(Cycle {
                 delay_ms,
                 restart_tick: s.restart_done_tick,
@@ -429,6 +434,40 @@ fn analyse(cycles: &[Cycle]) -> bool {
             v.sort_unstable();
             println!("  K={}: sub-tick phase of (arm-reset) min={} max={} n={}",
                      k, v[0], v[v.len()-1], v.len());
+        }
+    }
+
+    // Does the sub-tick phase at the RESET decide 310 vs 311? The gate is at a
+    // fixed real time, so the tick it lands on is decided by where the tick
+    // accumulator's fraction sat when the countdown began.
+    println!("
+-- sub-tick phase at the reset, grouped by the countdown length --");
+    {
+        let tick = 99_999.007f64;
+        let mut any = false;
+        let mut ks: Vec<i64> = cycles.iter().map(|c| c.k_reset()).collect();
+        ks.sort_unstable();
+        ks.dedup();
+        for k in ks {
+            let mut v: Vec<f64> = cycles
+                .iter()
+                .filter(|c| c.k_reset() == k && c.reset_qpc != 0)
+                .map(|c| (c.reset_qpc as f64 % tick) / tick)
+                .collect();
+            if v.is_empty() {
+                continue;
+            }
+            any = true;
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!(
+                "  K_reset={:>4}: phase min={:.4} max={:.4} n={}",
+                k, v[0], v[v.len() - 1], v.len()
+            );
+        }
+        if !any {
+            println!("  no reset QPC captured");
+        } else {
+            println!("  (non-overlapping ranges => the phase decides the gate)");
         }
     }
 
