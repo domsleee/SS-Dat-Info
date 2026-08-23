@@ -32,14 +32,26 @@ use crate::harness;
 use crate::replay;
 
 const RECORDING_REL: &str = "TAS/recordings/FE-10065.tasrec";
-/// Compare this many ticks past each side's gate. Long enough that a
-/// misalignment of even one tick diverges visibly, short enough to stay well
-/// inside the recording.
-const COMPARE_TICKS: u32 = 1200;
-const PLAY_TIMEOUT_SECS: u64 = 60;
+/// Compare the WHOLE overlap past each side's gate, not a window. The first
+/// version compared 1200 of 7162 ticks, which cannot see the failure this
+/// project has a documented history of: a bucket that tracks through the
+/// settle and veers off hundreds of ticks later.
+const COMPARE_TICKS: u32 = 6000;
+/// Replayed fast. Judging during a catch-up was already measured bit-exact
+/// (drift 0.0000 at 64x on this same recording), so this buys depth without
+/// buying a new variable.
+const COMPARE_SPEED: f32 = 16.0;
+const PLAY_TIMEOUT_SECS: u64 = 180;
+/// Arm delays swept across attempts, in milliseconds. The gate is measured
+/// from the ARM, so delaying the arm moves the gate — which is the only way to
+/// exercise offsets bigger than the +1 the first run happened to produce.
+const ARM_DELAYS_MS: &[u64] = &[0, 8, 16, 24, 32, 40];
 
 struct Attempt {
     aligned: bool,
+    /// How many ticks were actually compared. A pass on three ticks is not a
+    /// pass, so this is reported and asserted rather than assumed.
+    compared: u32,
     play_gate: u32,
     rec_gate: u32,
     /// Max per-axis |play - rec| over COMPARE_TICKS past each side's own gate.
@@ -93,15 +105,20 @@ pub fn run(iterations: u32) -> bool {
 
     let mut attempts = Vec::new();
     for i in 1..=iterations {
-        // Alternate so both arms see the same spread of gates.
+        // Alternate alignment, and sweep the arm delay so both arms see the
+        // same spread of gates rather than whatever the machine felt like.
         let aligned = i % 2 == 0;
-        if let Some(a) = one_attempt(&mut client, rec_gate, aligned) {
+        let delay = ARM_DELAYS_MS[(i as usize / 2) % ARM_DELAYS_MS.len()];
+        if let Some(a) = one_attempt(&mut client, rec_gate, aligned, delay) {
             println!(
-                "  attempt {:>2} {:<9} play_gate={} (rec {}) | gate-relative drift {:.5} | index drift {:.5}",
+                "  attempt {:>2} {:<9} d{:>2}ms play_gate={} (rec {}, off {:+}) | {} ticks | gate-rel {:.5} | index {:.5}",
                 i,
                 if aligned { "ALIGNED" } else { "baseline" },
+                delay,
                 a.play_gate,
                 a.rec_gate,
+                a.play_gate as i64 - a.rec_gate as i64,
+                a.compared,
                 a.gate_rel_drift,
                 a.index_drift
             );
@@ -118,8 +135,9 @@ fn one_attempt(
     client: &mut TasSharedMemoryClient,
     rec_gate: u32,
     aligned: bool,
+    delay_ms: u64,
 ) -> Option<Attempt> {
-    client.state_mut().playback_speed = 1.0;
+    client.state_mut().playback_speed = COMPARE_SPEED;
     // The whole point: no bucket matching. The gate lands where it lands.
     client.state_mut().gate_align_rec = if aligned { rec_gate } else { 0 };
     client.state_mut().gate_index = 0;
@@ -127,6 +145,9 @@ fn one_attempt(
 
     if !harness::restart_and_stabilize_inprocess(client) {
         return None;
+    }
+    if delay_ms > 0 {
+        thread::sleep(Duration::from_millis(delay_ms));
     }
     harness::arm_play(client);
 
@@ -157,6 +178,7 @@ fn one_attempt(
     }
     let mut gate_rel = 0f32;
     let mut idx = 0f32;
+    let mut compared = 0u32;
     for k in 0..COMPARE_TICKS {
         let pi = (play_gate + k) as usize;
         let ri = (rec_gate + k) as usize;
@@ -172,6 +194,7 @@ fn one_attempt(
             .max((p[0] - r[0]).abs())
             .max((p[1] - r[1]).abs())
             .max((p[2] - r[2]).abs());
+        compared += 1;
         // Same window, compared index-against-index the old way.
         let r2 = s.rec_coords[pi.min(s.recorded_count as usize - 1)];
         idx = idx
@@ -181,6 +204,7 @@ fn one_attempt(
     }
     let a = Attempt {
         aligned,
+        compared,
         play_gate,
         rec_gate,
         gate_rel_drift: gate_rel,
@@ -224,13 +248,23 @@ fn report(attempts: &[Attempt], rec_gate: u32) -> bool {
         println!("  (Re-run; the gate has to differ for the test to mean anything.)");
         return false;
     }
+    // A pass on a handful of ticks is not a pass.
+    let shallow = mismatched.iter().filter(|a| a.compared < 2000).count();
+    if shallow > 0 {
+        println!("  WARNING: {} mismatched attempts compared fewer than 2000 ticks", shallow);
+    }
+    let offsets: Vec<i64> = mismatched
+        .iter()
+        .map(|a| a.play_gate as i64 - a.rec_gate as i64)
+        .collect();
+    println!("  offsets exercised by aligned attempts: {:?}", offsets);
     let worst = mismatched.iter().map(|a| a.gate_rel_drift).fold(0.0, f32::max);
     println!(
         "\n  {} aligned attempts landed a different gate than the recording; worst drift {:.5}",
         mismatched.len(),
         worst
     );
-    if worst < 0.001 {
+    if worst < 0.001 && shallow == 0 {
         println!("  *** The gate index no longer matters. Alignment reproduces the run. ***");
         true
     } else {
