@@ -60,18 +60,19 @@ struct Attempt {
     index_drift: f32,
 }
 
-pub fn run(iterations: u32) -> bool {
+pub fn run(iterations: u32, rec: Option<&str>) -> bool {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
+    let rel = rec.unwrap_or(RECORDING_REL);
     let candidates = [
-        exe_dir.join("../../..").join(RECORDING_REL),
-        PathBuf::from(RECORDING_REL),
-        PathBuf::from("recordings/FE-10065.tasrec"),
+        exe_dir.join("../../..").join(rel),
+        PathBuf::from(rel),
+        exe_dir.join("../../..").join("TAS/recordings").join(rel),
     ];
     let Some(path) = candidates.iter().find(|p| p.exists()) else {
-        eprintln!("ERROR: couldn't locate {}", RECORDING_REL);
+        eprintln!("ERROR: couldn't locate {}", rel);
         return false;
     };
     let path = path.to_string_lossy().into_owned();
@@ -101,6 +102,30 @@ pub fn run(iterations: u32) -> bool {
         }
     };
     println!("  recording first-moving = {}", rec_gate);
+    // Does this recording have input BEFORE its gate? Alignment holds
+    // input_log[rec_gate] through the countdown instead of replaying whatever
+    // the recording had there, on the argument that pre-gate input is inert
+    // because the boarder cannot move. If the recording DOES have pre-gate
+    // input, zero drift is evidence for that argument rather than an untested
+    // assumption — and if it does not, the argument is simply unexercised.
+    {
+        let s = client.state();
+        let gate_mask = s.input_log[rec_gate as usize];
+        let nonzero = s.input_log[..rec_gate as usize].iter().filter(|b| **b != 0).count();
+        let differing = s.input_log[..rec_gate as usize]
+            .iter()
+            .filter(|b| **b != gate_mask)
+            .count();
+        println!(
+            "  pre-gate input: {} of {} frames non-zero, {} differ from input_log[rec_gate]=0x{:02x}",
+            nonzero, rec_gate, differing, gate_mask
+        );
+        if differing == 0 {
+            println!("  (so holding the gate input changes nothing here — assumption UNEXERCISED)");
+        } else {
+            println!("  (so holding the gate input DOES differ from the recording — assumption under test)");
+        }
+    }
     harness::focus_game();
 
     let mut attempts = Vec::new();
