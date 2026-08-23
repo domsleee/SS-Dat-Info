@@ -3,7 +3,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
 use std::sync::atomic::compiler_fence;
 
-pub const TAS_SHARED_VERSION: u32 = 32; // +f5_press_tick/qpc (the level resets on the PRESS, not the release)
+/// Frames of post-restart trace kept. The countdown is ~311 ticks, so this
+/// covers it end to end with room for the settle either side.
+pub const TRACE_FRAMES: usize = 384;
+
+pub const TAS_SHARED_VERSION: u32 = 36; // +cave2 cycle ordinals (tick_count batches; first_moving counts cycles)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -491,6 +495,49 @@ pub struct TasSharedState {
     /// level resets when the keypress lands, and every measurement so far was
     /// taken from the RELEASE ten frames later. So the reference point was
     /// wrong, and the hold length is what was leaking into it.
+    /// Frame-by-frame trace from the F5 press: [tick, x, y, z] raw bits.
+    ///
+    /// Every detector so far has been a guess about WHERE the countdown starts
+    /// — last position change, first position change, the press, the release —
+    /// and each guess left a residual of one or two ticks. Rather than guess
+    /// again, record what actually happens: the exact frame the level resets,
+    /// how long the boarder settles, and the exact frame it leaves. With the
+    /// whole sequence in hand the reference point is read off, not inferred.
+    pub trace_count: u32,
+    /// Per frame: [tick_count, x, y, z, now_lo, now_hi].
+    ///
+    /// `now` is the engine's absolute 10MHz clock, and consecutive tick_count
+    /// values give the ticks the game emitted that frame. Those two are exactly
+    /// what the game's own tick rule consumes —
+    ///     ticks = floor((now - prev) / tick_len);  prev += ticks * tick_len
+    /// — so the residual `now - prev`, which is the sub-tick phase that decides
+    /// whether the countdown takes 310 ticks or 311, can be RECONSTRUCTED from
+    /// the trace instead of hunted for in the game's memory.
+    /// Per frame: [tick, x, y, z, now_lo, now_hi, physics_ptr].
+    ///
+    /// The physics pointer is there because position cannot always see the
+    /// reset: if the boarder was ALREADY at the spawn when the level reloaded,
+    /// nothing about its position changes and the reset is invisible. Every run
+    /// where the reset was genuinely observed gave gate - reset = 308 exactly,
+    /// six for six; every deviation was a run where it was not. So the whole
+    /// problem is a reset signal that does not depend on the boarder having
+    /// moved, and a reallocated sub-object is one that cannot miss.
+    pub trace: [[u32; 7]; TRACE_FRAMES],
+    /// cave2 CYCLE ordinals at the F5 press, the arm and the gate.
+    ///
+    /// `tick_count` is the wrong unit and has been all along. cave5 adds the
+    /// whole batch (`esi`, up to 3) to it BEFORE the game runs those cycles, so
+    /// every cave2 call in a batch reads the same already-advanced value — the
+    /// counter cannot distinguish cycles inside a batch.
+    ///
+    /// `first_moving` is a cave2 CYCLE ordinal: playback_pos advances once per
+    /// cave2 call. So the thing being predicted was always counted in cycles
+    /// while the prediction was computed in batched ticks, and the 310/311
+    /// split may be nothing but that aliasing. frame_count already advances
+    /// exactly once per cave2 call, which is the right unit.
+    pub press_seq: u32,
+    pub arm_seq: u32,
+    pub gate_seq: u32,
     pub f5_press_tick: u32,
     pub f5_press_qpc_lo: u32,
     pub f5_press_qpc_hi: u32,
@@ -3717,7 +3764,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_584);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_658_352);
     }
 
     #[test]

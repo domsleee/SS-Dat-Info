@@ -41,6 +41,7 @@ mod fe10065_cont;
 mod fe_cont_stress;
 mod pause_resume;
 mod gate_predict;
+mod gate_trace;
 mod play_judge;
 mod reroll_cost;
 mod play_pace;
@@ -260,6 +261,10 @@ fn main() {
             }
             f5_probe::run(iterations);
             std::process::exit(0);
+        }
+        "gate-trace" => {
+            let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(6u32);
+            std::process::exit(if gate_trace::run(n) { 0 } else { 1 });
         }
         "gate-predict" => {
             let mut iterations = 3u32;

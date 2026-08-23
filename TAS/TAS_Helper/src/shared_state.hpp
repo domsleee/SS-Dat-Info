@@ -6,7 +6,9 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 32; // +f5_press_tick/qpc
+constexpr size_t TRACE_FRAMES = 384;
+
+constexpr uint32_t TAS_SHARED_VERSION = 36; // +cave2 cycle ordinals
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -392,6 +394,23 @@ struct TasSharedState {
     // __ftol; that truncation IS the bucket lottery. See the Rust doc.
     // tick_count and 10MHz clock at the frame F5 is PRESSED. The level resets
     // then, not at the release RESTART_F5_HOLD_FRAMES later. See the Rust doc.
+    // Frame-by-frame trace from the F5 press: [tick, x, y, z] raw bits. Every
+    // "where does the countdown start" detector so far was a guess that left a
+    // one or two tick residual; this records what actually happens instead.
+    volatile uint32_t trace_count;
+    // [tick_count, x, y, z, now_lo, now_hi] — the clock and the emitted ticks
+    // are what the game's own tick rule consumes, so the sub-tick residual can
+    // be reconstructed from this rather than found in memory. See Rust doc.
+    // [tick, x, y, z, now_lo, now_hi, physics_ptr]. The physics pointer is the
+    // reset signal that position cannot provide: a boarder already AT the spawn
+    // when the level reloads shows no position change at all. See the Rust doc.
+    volatile uint32_t trace[TRACE_FRAMES][7];
+    // cave2 CYCLE ordinals at press / arm / gate. tick_count is batched by
+    // cave5 (esi added before the cycles run), so it cannot tell cycles apart
+    // inside a batch — and first_moving counts cycles. See the Rust doc.
+    volatile uint32_t press_seq;
+    volatile uint32_t arm_seq;
+    volatile uint32_t gate_seq;
     volatile uint32_t f5_press_tick;
     volatile uint32_t f5_press_qpc_lo;
     volatile uint32_t f5_press_qpc_hi;
@@ -428,7 +447,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1647584,
+static_assert(sizeof(TasSharedState) == 1658352,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 
