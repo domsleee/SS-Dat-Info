@@ -1091,7 +1091,7 @@ impl TasApp {
             _ => tas_shared::transport::Arm::Rec,
         };
 
-        let mut target = None;
+        let target: Option<tas_shared::transport::BucketTarget> = None;
         let mut gate_align_rec = 0;
         let continue_from_frame;
         if command == TasCommand::ArmContinue {
@@ -1101,7 +1101,18 @@ impl TasApp {
             self.playback_speed = self.cont_catchup_multiplier;
             self.pending_session_kind = Some(RecordingSessionKind::Continue);
             self.pending_continue_start_tick = Some(self.continue_from_frame);
-            target = self.cont_bucket_target();
+            // CONT is gate-aligned too: the prefix input is indexed from the
+            // observed gate and the splice fires at the aligned position, so a
+            // countdown landing on a different tick no longer forces a reroll
+            // (fe10065-cont: 5/8 -> 8/8 first-try). The recording stays in
+            // rec-index space at the splice, so the resumed recording is
+            // byte-consistent with the loaded one. target stays None so the
+            // controller runs the gate-relative watcher, not the old bucket
+            // fingerprint.
+            gate_align_rec = self
+                .cont_bucket_target()
+                .and_then(|t| t.expected_first_moving)
+                .unwrap_or(0);
             continue_from_frame = self.continue_from_frame;
         } else {
             self.clear_cont_catchup();
