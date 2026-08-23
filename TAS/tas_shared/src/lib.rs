@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
 use std::sync::atomic::compiler_fence;
 
-pub const TAS_SHARED_VERSION: u32 = 31; // +secs_since_reset (the sub-tick phase, accumulated at full precision)
+pub const TAS_SHARED_VERSION: u32 = 32; // +f5_press_tick/qpc (the level resets on the PRESS, not the release)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -484,6 +484,16 @@ pub struct TasSharedState {
     /// comparing against 3 seconds. Every tick-quantised observable failed to
     /// separate a 300 from a 301 (measured: identical position bits, identical
     /// clock phase, 36/36); this is the one that cannot be quantised away.
+    /// tick_count and 10MHz clock at the frame F5 is PRESSED.
+    ///
+    /// The countdown is 3.10000s = 310.003 ticks, and `gate - restart_done`
+    /// measured 300/301 — a gap of ~10, which is RESTART_F5_HOLD_FRAMES. The
+    /// level resets when the keypress lands, and every measurement so far was
+    /// taken from the RELEASE ten frames later. So the reference point was
+    /// wrong, and the hold length is what was leaking into it.
+    pub f5_press_tick: u32,
+    pub f5_press_qpc_lo: u32,
+    pub f5_press_qpc_hi: u32,
     pub secs_since_reset_lo: u32,
     pub secs_since_reset_hi: u32,
     /// The same accumulator latched at the arm — what a predictor would read.
@@ -3707,7 +3717,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_576);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_584);
     }
 
     #[test]

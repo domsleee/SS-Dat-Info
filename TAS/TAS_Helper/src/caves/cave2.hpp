@@ -836,7 +836,13 @@ static void __declspec(noinline) Cave2_Logic() {
         uint32_t kbobj = GetKeyboardObject(addr);
         if (kbobj) {
             if (s->restart_frames_held == 0) {
-                // First frame: press F5
+                // First frame: press F5. THIS is when the level resets and the
+                // countdown starts — the release is ten frames of our own
+                // making later, and measuring from it put that hold length
+                // straight into the prediction error.
+                s->f5_press_tick = s->tick_count;
+                s->f5_press_qpc_lo = s->clock_delta_lo;
+                s->f5_press_qpc_hi = s->clock_delta_hi;
                 InjectF5(s, addr, kbobj, true);
             }
             s->restart_frames_held++;
