@@ -212,16 +212,31 @@ fn render_day_header(
 
 fn month_abbr(m: u32) -> &'static str {
     match m {
-        1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr", 5 => "May", 6 => "Jun",
-        7 => "Jul", 8 => "Aug", 9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        12 => "Dec",
         _ => "???",
     }
 }
 
 fn weekday_abbr(d: u32) -> &'static str {
     match d {
-        0 => "Mon", 1 => "Tue", 2 => "Wed", 3 => "Thu",
-        4 => "Fri", 5 => "Sat", 6 => "Sun",
+        0 => "Mon",
+        1 => "Tue",
+        2 => "Wed",
+        3 => "Thu",
+        4 => "Fri",
+        5 => "Sat",
+        6 => "Sun",
         _ => "???",
     }
 }
@@ -287,7 +302,12 @@ fn render_row(
                 ui.painter().rect_filled(
                     star.rect,
                     3.0,
-                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, if down { 40 } else { 22 }),
+                    egui::Color32::from_rgba_unmultiplied(
+                        255,
+                        255,
+                        255,
+                        if down { 40 } else { 22 },
+                    ),
                 );
                 let hc = if entry.pinned {
                     egui::Color32::from_rgb(255, 210, 100)
@@ -304,7 +324,11 @@ fn render_row(
             }
             let star = star
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text(if entry.pinned { "Unpin" } else { "Pin (keep forever)" });
+                .on_hover_text(if entry.pinned {
+                    "Unpin"
+                } else {
+                    "Pin (keep forever)"
+                });
             if star.clicked() {
                 actions.push(HistoryAction::SetPin(entry.entry_id, !entry.pinned));
             }
@@ -312,120 +336,113 @@ fn render_row(
             // --- Body: time (right), then ▶ + name/duration — or the rename
             //     box if this row is being edited. ---
             let editing = edit.as_ref().is_some_and(|(id, _)| *id == entry.entry_id);
-            let body = ui.with_layout(
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    if !editing {
+            let body = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !editing {
+                    ui.label(
+                        egui::RichText::new(&time_str)
+                            .size(11.0)
+                            .color(egui::Color32::from_gray(120))
+                            .monospace(),
+                    );
+                    // UNTAGGED marker. These belong to no known track, so
+                    // they show on EVERY one — which is indistinguishable
+                    // from "this row belongs here" unless we say otherwise.
+                    // That ambiguity is what made a screenful of Forest Easy
+                    // favourites look like a broken filter while on another
+                    // track. Dim and glyph-only: it must not compete with the
+                    // run time, which is what the eye is actually scanning.
+                    // (This layout is right-to-left, so adding it AFTER the
+                    // timestamp places it to the LEFT of it.)
+                    //
+                    // A WORD, not a symbol. The first attempt used "◌"
+                    // (U+25CC), which is not in egui's bundled fonts and
+                    // rendered as a tofu box — a marker nobody can read is
+                    // worse than none, and it took a screenshot to catch,
+                    // since the glyph looked fine in the source. Text also
+                    // matches the header's wording, so the row and the
+                    // summary say the same thing.
+                    if entry.level.is_none() {
                         ui.label(
-                            egui::RichText::new(&time_str)
-                                .size(11.0)
-                                .color(egui::Color32::from_gray(120))
-                                .monospace(),
-                        );
-                        // UNTAGGED marker. These belong to no known track, so
-                        // they show on EVERY one — which is indistinguishable
-                        // from "this row belongs here" unless we say otherwise.
-                        // That ambiguity is what made a screenful of Forest Easy
-                        // favourites look like a broken filter while on another
-                        // track. Dim and glyph-only: it must not compete with the
-                        // run time, which is what the eye is actually scanning.
-                        // (This layout is right-to-left, so adding it AFTER the
-                        // timestamp places it to the LEFT of it.)
-                        //
-                        // A WORD, not a symbol. The first attempt used "◌"
-                        // (U+25CC), which is not in egui's bundled fonts and
-                        // rendered as a tofu box — a marker nobody can read is
-                        // worse than none, and it took a screenshot to catch,
-                        // since the glyph looked fine in the source. Text also
-                        // matches the header's wording, so the row and the
-                        // summary say the same thing.
-                        if entry.level.is_none() {
-                            ui.label(
-                                egui::RichText::new("untagged")
-                                    .size(9.0)
-                                    .color(egui::Color32::from_gray(105)),
-                            )
-                            .on_hover_text(
-                                "No level tag — this recording is not associated \
+                            egui::RichText::new("untagged")
+                                .size(9.0)
+                                .color(egui::Color32::from_gray(105)),
+                        )
+                        .on_hover_text(
+                            "No level tag — this recording is not associated \
                                  with a track, so it appears in every track's \
                                  history.",
+                        );
+                    }
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    // A recovered entry is just a normal CONT entry that
+                    // was auto-pinned after a crash — it renders through
+                    // the SAME path as any entry (total + "from …"); the
+                    // only difference is a ⟲ leading glyph instead of ▶.
+                    // (Detected from the legacy "Recovered · …" name or the
+                    // new "⟲" marker, so old histories normalize too.)
+                    let recovered = entry
+                        .custom_name
+                        .as_deref()
+                        .is_some_and(|n| n == "⟲" || n.starts_with("Recovered ·"));
+                    ui.label(
+                        egui::RichText::new(if recovered { "⟲" } else { "▶" })
+                            .color(kind_color(entry.kind))
+                            .size(13.0),
+                    );
+                    if editing {
+                        let id = egui::Id::new(("hist_rename", entry.entry_id));
+                        let (done, esc, name) = {
+                            let buf = &mut edit.as_mut().unwrap().1;
+                            let te = ui.add(
+                                egui::TextEdit::singleline(buf)
+                                    .id(id)
+                                    .desired_width(170.0)
+                                    .hint_text("name…"),
+                            );
+                            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                            (te.lost_focus(), esc, buf.clone())
+                        };
+                        // Enter or click-away commits; Esc cancels.
+                        if esc {
+                            *edit = None;
+                        } else if done {
+                            actions.push(HistoryAction::Rename(entry.entry_id, name));
+                            *edit = None;
+                        }
+                    } else if let Some(name) = entry.custom_name.as_deref().filter(|_| !recovered) {
+                        // Genuine user-typed name. Name leads + the total
+                        // (color gold is reserved for pin status).
+                        ui.label(egui::RichText::new(name).size(13.0).strong());
+                        if !parts.total.is_empty() {
+                            ui.label(
+                                egui::RichText::new(parts.total.trim())
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(egui::Color32::from_gray(120)),
                             );
                         }
-                    }
-                    ui.with_layout(
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            // A recovered entry is just a normal CONT entry that
-                            // was auto-pinned after a crash — it renders through
-                            // the SAME path as any entry (total + "from …"); the
-                            // only difference is a ⟲ leading glyph instead of ▶.
-                            // (Detected from the legacy "Recovered · …" name or the
-                            // new "⟲" marker, so old histories normalize too.)
-                            let recovered = entry.custom_name.as_deref().is_some_and(|n| {
-                                n == "⟲" || n.starts_with("Recovered ·")
-                            });
-                            ui.label(
-                                egui::RichText::new(if recovered { "⟲" } else { "▶" })
-                                    .color(kind_color(entry.kind))
-                                    .size(13.0),
-                            );
-                            if editing {
-                                let id = egui::Id::new(("hist_rename", entry.entry_id));
-                                let (done, esc, name) = {
-                                    let buf = &mut edit.as_mut().unwrap().1;
-                                    let te = ui.add(
-                                        egui::TextEdit::singleline(buf)
-                                            .id(id)
-                                            .desired_width(170.0)
-                                            .hint_text("name…"),
-                                    );
-                                    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                                    (te.lost_focus(), esc, buf.clone())
-                                };
-                                // Enter or click-away commits; Esc cancels.
-                                if esc {
-                                    *edit = None;
-                                } else if done {
-                                    actions.push(HistoryAction::Rename(entry.entry_id, name));
-                                    *edit = None;
-                                }
-                            } else if let Some(name) =
-                                entry.custom_name.as_deref().filter(|_| !recovered)
-                            {
-                                // Genuine user-typed name. Name leads + the total
-                                // (color gold is reserved for pin status).
-                                ui.label(egui::RichText::new(name).size(13.0).strong());
-                                if !parts.total.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new(parts.total.trim())
-                                            .monospace()
-                                            .size(11.0)
-                                            .color(egui::Color32::from_gray(120)),
-                                    );
-                                }
-                            } else {
-                                if !parts.total.is_empty() {
-                                    let mut rt = egui::RichText::new(format!("{:>7}", parts.total))
-                                        .monospace()
-                                        .size(12.0)
-                                        .color(row_color);
-                                    if parts.is_marker {
-                                        rt = rt.italics();
-                                    }
-                                    ui.label(rt);
-                                }
-                                let mut ctx_rt = egui::RichText::new(&parts.context)
-                                    .size(12.0)
-                                    .color(row_color);
-                                if parts.is_marker {
-                                    ctx_rt = ctx_rt.italics();
-                                }
-                                ui.add(egui::Label::new(ctx_rt).truncate());
+                    } else {
+                        if !parts.total.is_empty() {
+                            let mut rt = egui::RichText::new(format!("{:>7}", parts.total))
+                                .monospace()
+                                .size(12.0)
+                                .color(row_color);
+                            if parts.is_marker {
+                                rt = rt.italics();
                             }
-                        },
-                    );
-                },
-            );
+                            ui.label(rt);
+                        }
+                        let mut ctx_rt = egui::RichText::new(&parts.context)
+                            .size(12.0)
+                            .color(row_color);
+                        if parts.is_marker {
+                            ctx_rt = ctx_rt.italics();
+                        }
+                        ui.add(egui::Label::new(ctx_rt).truncate());
+                    }
+                });
+            });
 
             if !editing {
                 let r = body
@@ -441,7 +458,11 @@ fn render_row(
                         actions.push(HistoryAction::Restore(idx));
                         ui.close_menu();
                     }
-                    let pin_label = if entry.pinned { "☆  Unpin" } else { "★  Pin" };
+                    let pin_label = if entry.pinned {
+                        "☆  Unpin"
+                    } else {
+                        "★  Pin"
+                    };
                     if ui.button(pin_label).clicked() {
                         actions.push(HistoryAction::SetPin(entry.entry_id, !entry.pinned));
                         ui.close_menu();

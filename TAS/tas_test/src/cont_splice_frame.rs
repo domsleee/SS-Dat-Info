@@ -52,7 +52,10 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
         }
     };
     if rec.count <= splice_frame {
-        eprintln!("ERROR: recording has {} frames, need > {}", rec.count, splice_frame);
+        eprintln!(
+            "ERROR: recording has {} frames, need > {}",
+            rec.count, splice_frame
+        );
         return false;
     }
     println!("  Recording: {} ({} frames)", path.display(), rec.count);
@@ -69,8 +72,12 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
     // speed before arming.
     client.state_mut().playback_speed = catchup_speed;
 
-    let spliced =
-        harness::restart_continue_and_splice_inprocess(&mut client, rec_start, splice_frame, RETRIES);
+    let spliced = harness::restart_continue_and_splice_inprocess(
+        &mut client,
+        rec_start,
+        splice_frame,
+        RETRIES,
+    );
     if spliced.is_none() {
         println!("*** CONT-SPLICE-FRAME FAILED: never landed a CONT bucket ***");
         return false;
@@ -114,7 +121,10 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
         "  splice boundary frame:  {}   (segment_count={})",
         splice_boundary, seg_count
     );
-    println!("  mode after splice:      {}", if mode_rec { "REC" } else { "NOT REC" });
+    println!(
+        "  mode after splice:      {}",
+        if mode_rec { "REC" } else { "NOT REC" }
+    );
     println!(
         "  recorded_count:         {}   (= splice frame + post-splice frames)",
         recorded

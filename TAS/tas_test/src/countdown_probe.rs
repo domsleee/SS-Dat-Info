@@ -9,12 +9,12 @@
 //!
 //! Those have different consequences:
 //!
-//!   * fixed TICKS  -> first_moving should be constant, and the variation must
-//!                     come from where the recording starts relative to it.
-//!   * fixed WALL   -> the tick it lands on depends on where the tick boundaries
-//!                     fall inside that interval, i.e. on the sub-tick phase.
-//!                     The observed 261/262/263 spread is then a rounding
-//!                     artifact, and the phase is genuinely the thing to capture.
+//!   * fixed TICKS -> first_moving should be constant, and the variation must
+//!     come from where the recording starts relative to it.
+//!   * fixed WALL -> the tick it lands on depends on where the tick boundaries
+//!     fall inside that interval, i.e. on the sub-tick phase. The observed
+//!     261/262/263 spread is then a rounding artifact, and the phase is genuinely
+//!     the thing to capture.
 //!
 //! Method: ignore REC entirely and watch the LIVE player position, which the DLL
 //! publishes every frame regardless of mode. Restart, note the spawn bits, then

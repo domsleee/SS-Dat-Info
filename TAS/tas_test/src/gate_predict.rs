@@ -235,7 +235,10 @@ fn analyse(cycles: &[Cycle]) -> bool {
         .map(|c| c.first_moving as i64 - (kt_med - c.arm_offset_tick()))
         .collect();
     err_tick.sort_unstable();
-    println!("\n-- TICK model error: fm - (K_tick - arm_offset_tick), K={} --", kt_med);
+    println!(
+        "\n-- TICK model error: fm - (K_tick - arm_offset_tick), K={} --",
+        kt_med
+    );
     print_histogram(&err_tick);
 
     let mut err_clk: Vec<i64> = cycles
@@ -243,7 +246,10 @@ fn analyse(cycles: &[Cycle]) -> bool {
         .map(|c| c.first_moving as i64 - (kc_med - c.arm_offset_clk()))
         .collect();
     err_clk.sort_unstable();
-    println!("\n-- CLOCK model error: fm - (K_clk - arm_offset_clk), K={} --", kc_med);
+    println!(
+        "\n-- CLOCK model error: fm - (K_clk - arm_offset_clk), K={} --",
+        kc_med
+    );
     print_histogram(&err_clk);
 
     // THE QUESTION: does the settle frame the arm landed on determine the
@@ -274,7 +280,11 @@ fn analyse(cycles: &[Cycle]) -> bool {
             f32::from_bits(pos[2]),
             ks.len(),
             distinct,
-            if distinct.len() > 1 { "   <-- AMBIGUOUS" } else { "" }
+            if distinct.len() > 1 {
+                "   <-- AMBIGUOUS"
+            } else {
+                ""
+            }
         );
     }
     println!(
@@ -293,8 +303,10 @@ fn analyse(cycles: &[Cycle]) -> bool {
     // gate - restart_done measured 300/301 — a gap of ~10, which is exactly
     // RESTART_F5_HOLD_FRAMES. If the level resets on the PRESS, measuring from
     // there should collapse the spread that measuring from the release created.
-    println!("
--- countdown length from the F5 PRESS (gate_tick - f5_press_tick) --");
+    println!(
+        "
+-- countdown length from the F5 PRESS (gate_tick - f5_press_tick) --"
+    );
     let mut kp: Vec<i64> = cycles
         .iter()
         .map(|c| c.gate_tick as i64 - c.f5_press_tick as i64)
@@ -305,10 +317,7 @@ fn analyse(cycles: &[Cycle]) -> bool {
         let med = kp[kp.len() / 2];
         cycles
             .iter()
-            .map(|c| {
-                c.first_moving as i64
-                    - (med - (c.arm_tick as i64 - c.f5_press_tick as i64))
-            })
+            .map(|c| c.first_moving as i64 - (med - (c.arm_tick as i64 - c.f5_press_tick as i64)))
             .collect()
     };
     errp.sort_unstable();
@@ -329,8 +338,10 @@ fn analyse(cycles: &[Cycle]) -> bool {
     // the gate is the first tick at or after press + 3.1s, and ticks are ~99,999
     // apart at 10MHz. Every term is a measured QPC value, so if the countdown
     // duration is genuinely fixed this is exact by construction.
-    println!("
--- QPC: press -> gate, and the measured tick length --");
+    println!(
+        "
+-- QPC: press -> gate, and the measured tick length --"
+    );
     let mut span: Vec<i64> = cycles
         .iter()
         .map(|c| c.gate_qpc as i64 - c.f5_press_qpc as i64)
@@ -341,7 +352,9 @@ fn analyse(cycles: &[Cycle]) -> bool {
     } else {
         println!(
             "  press->gate  min={} max={} spread={} ({:.4} ticks)",
-            span[0], span[span.len() - 1], span[span.len() - 1] - span[0],
+            span[0],
+            span[span.len() - 1],
+            span[span.len() - 1] - span[0],
             (span[span.len() - 1] - span[0]) as f64 / 99_999.0
         );
         let mut tl: Vec<f64> = cycles
@@ -352,7 +365,9 @@ fn analyse(cycles: &[Cycle]) -> bool {
         tl.sort_by(|a, b| a.partial_cmp(b).unwrap());
         println!(
             "  tick length  min={:.3} max={:.3} median={:.3} QPC units",
-            tl[0], tl[tl.len() - 1], tl[tl.len() / 2]
+            tl[0],
+            tl[tl.len() - 1],
+            tl[tl.len() / 2]
         );
 
         // Predict fm purely from QPC measured at the arm.
@@ -367,7 +382,10 @@ fn analyse(cycles: &[Cycle]) -> bool {
             })
             .collect();
         errq.sort_unstable();
-        println!("-- QPC model error: fm - ceil((press_qpc + {} - arm_qpc) / {:.1}) --", dur, tick);
+        println!(
+            "-- QPC model error: fm - ceil((press_qpc + {} - arm_qpc) / {:.1}) --",
+            dur, tick
+        );
         print_histogram(&errq);
         let worst = errq.iter().map(|e| e.abs()).max().unwrap_or(i64::MAX);
         println!(
@@ -384,31 +402,48 @@ fn analyse(cycles: &[Cycle]) -> bool {
     // THE SUB-TICK TEST. Seconds accumulated since the reset, at the gate.
     // If the countdown trips at a fixed elapsed time, this is constant; and the
     // FRACTIONAL part at the arm is then exactly what decides 300 vs 301.
-    println!("
--- engine SECONDS since the reset, at the gate --");
+    println!(
+        "
+-- engine SECONDS since the reset, at the gate --"
+    );
     let mut gs: Vec<i64> = cycles.iter().map(|c| c.gate_secs as i64).collect();
     gs.sort_unstable();
     if gs.last().copied().unwrap_or(0) == 0 {
         println!("  all zero — the accumulator never ran");
     } else {
-        println!("  min={} max={} spread={} ({:.3} ticks of 99999)",
-                 gs[0], gs[gs.len()-1], gs[gs.len()-1]-gs[0],
-                 (gs[gs.len()-1]-gs[0]) as f64 / 99_999.0);
+        println!(
+            "  min={} max={} spread={} ({:.3} ticks of 99999)",
+            gs[0],
+            gs[gs.len() - 1],
+            gs[gs.len() - 1] - gs[0],
+            (gs[gs.len() - 1] - gs[0]) as f64 / 99_999.0
+        );
         for k in [300i64, 301] {
-            let mut v: Vec<i64> = cycles.iter().filter(|c| c.k_tick() == k)
+            let mut v: Vec<i64> = cycles
+                .iter()
+                .filter(|c| c.k_tick() == k)
                 .map(|c| (c.arm_secs as i64).rem_euclid(99_999))
                 .collect();
-            if v.is_empty() { continue; }
+            if v.is_empty() {
+                continue;
+            }
             v.sort_unstable();
-            println!("  K={}: sub-tick remainder at the arm  min={} max={} n={}",
-                     k, v[0], v[v.len()-1], v.len());
+            println!(
+                "  K={}: sub-tick remainder at the arm  min={} max={} n={}",
+                k,
+                v[0],
+                v[v.len() - 1],
+                v.len()
+            );
         }
         println!("  (if the two K groups' fraction ranges do not overlap, the gate is");
         println!("   an exact function of the accumulator at the arm)");
     }
 
-    println!("
--- QPC from the reset frame to the gate frame (10MHz) --");
+    println!(
+        "
+-- QPC from the reset frame to the gate frame (10MHz) --"
+    );
     let mut span: Vec<i64> = cycles
         .iter()
         .map(|c| c.gate_qpc as i64 - c.reset_qpc as i64)
@@ -419,29 +454,47 @@ fn analyse(cycles: &[Cycle]) -> bool {
     } else {
         let lo = span[0];
         let hi = span[span.len() - 1];
-        println!("  min={} max={} spread={} ({:.3} ticks)", lo, hi, hi - lo,
-                 (hi - lo) as f64 / 99_999.0);
-        println!("  median={} ({:.4} seconds)", span[span.len()/2],
-                 span[span.len()/2] as f64 / 10_000_000.0);
+        println!(
+            "  min={} max={} spread={} ({:.3} ticks)",
+            lo,
+            hi,
+            hi - lo,
+            (hi - lo) as f64 / 99_999.0
+        );
+        println!(
+            "  median={} ({:.4} seconds)",
+            span[span.len() / 2],
+            span[span.len() / 2] as f64 / 10_000_000.0
+        );
         // Grouped by the countdown length it produced: if the QPC span is what
         // decides, the two groups must separate cleanly.
         for k in [300i64, 301] {
-            let mut v: Vec<i64> = cycles.iter()
+            let mut v: Vec<i64> = cycles
+                .iter()
                 .filter(|c| c.k_tick() == k)
                 .map(|c| (c.arm_qpc as i64 - c.reset_qpc as i64).rem_euclid(99_999))
                 .collect();
-            if v.is_empty() { continue; }
+            if v.is_empty() {
+                continue;
+            }
             v.sort_unstable();
-            println!("  K={}: sub-tick phase of (arm-reset) min={} max={} n={}",
-                     k, v[0], v[v.len()-1], v.len());
+            println!(
+                "  K={}: sub-tick phase of (arm-reset) min={} max={} n={}",
+                k,
+                v[0],
+                v[v.len() - 1],
+                v.len()
+            );
         }
     }
 
     // Does the sub-tick phase at the RESET decide 310 vs 311? The gate is at a
     // fixed real time, so the tick it lands on is decided by where the tick
     // accumulator's fraction sat when the countdown began.
-    println!("
--- sub-tick phase at the reset, grouped by the countdown length --");
+    println!(
+        "
+-- sub-tick phase at the reset, grouped by the countdown length --"
+    );
     {
         let tick = 99_999.007f64;
         let mut any = false;
@@ -461,7 +514,10 @@ fn analyse(cycles: &[Cycle]) -> bool {
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());
             println!(
                 "  K_reset={:>4}: phase min={:.4} max={:.4} n={}",
-                k, v[0], v[v.len() - 1], v.len()
+                k,
+                v[0],
+                v[v.len() - 1],
+                v.len()
             );
         }
         if !any {
@@ -493,15 +549,21 @@ fn analyse(cycles: &[Cycle]) -> bool {
     println!("\n=== VERDICT ===");
     println!(
         "  tick model : worst |error| {}, exact on {}/{}",
-        worst_tick, exact_tick, cycles.len()
+        worst_tick,
+        exact_tick,
+        cycles.len()
     );
     println!(
         "  clock model: worst |error| {}, exact on {}/{}",
-        worst_clk, exact_clk, cycles.len()
+        worst_clk,
+        exact_clk,
+        cycles.len()
     );
     println!(
         "  reset model: worst |error| {}, exact on {}/{}",
-        worst_reset, exact_reset, cycles.len()
+        worst_reset,
+        exact_reset,
+        cycles.len()
     );
     if worst_reset == 0 && stale == 0 {
         println!("\n  The LEVEL RESET predicts first_moving EXACTLY, and it is already");
@@ -510,7 +572,10 @@ fn analyse(cycles: &[Cycle]) -> bool {
         return true;
     }
     if worst_reset == 0 {
-        println!("\n  The level reset predicts first_moving exactly, but on {} cycles it", stale);
+        println!(
+            "\n  The level reset predicts first_moving exactly, but on {} cycles it",
+            stale
+        );
         println!("  was not yet final at the arm — so the arm has to wait for it.");
         return false;
     }
@@ -521,7 +586,10 @@ fn analyse(cycles: &[Cycle]) -> bool {
     } else {
         println!("\n  Neither model is exact yet.");
         if kc.first() == kc.last() {
-            println!("  But the countdown IS a fixed {} game-centiseconds — the residual is", kc_med);
+            println!(
+                "  But the countdown IS a fixed {} game-centiseconds — the residual is",
+                kc_med
+            );
             println!("  in converting that to a replay index, i.e. the clock-vs-tick drift above.");
         } else {
             println!("  The countdown is not even a fixed number of the game's own units,");

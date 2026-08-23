@@ -68,9 +68,7 @@ fn restart(client: &mut tas_shared::TasSharedMemoryClient) -> bool {
 
 /// Send ARM_CONTINUE and time how long the catch-up takes to reach
 /// VERIFY_FRAMES. Returns (wall_secs, end_coord) or None if it never got there.
-fn time_to_splice(
-    client: &mut tas_shared::TasSharedMemoryClient,
-) -> Option<(f64, [f32; 3])> {
+fn time_to_splice(client: &mut tas_shared::TasSharedMemoryClient) -> Option<(f64, [f32; 3])> {
     // A previous splice leaves playback_pos at the splice frame; clear it so the
     // poll loop doesn't read a stale "already there" value and return 0s.
     client.state_mut().playback_pos = 0;
@@ -153,18 +151,38 @@ fn measure_speed(
         client.state_mut().playback_speed = speed;
         match time_to_splice(client) {
             Some((w, end)) => {
-                println!("    trial {}: {:.3}s  end=({:.3},{:.3},{:.3})", t + 1, w, end[0], end[1], end[2]);
+                println!(
+                    "    trial {}: {:.3}s  end=({:.3},{:.3},{:.3})",
+                    t + 1,
+                    w,
+                    end[0],
+                    end[1],
+                    end[2]
+                );
                 samples.push(w);
                 end_coord = Some(end);
             }
-            None => println!("    trial {}: did not reach splice frame {}", t + 1, VERIFY_FRAMES),
+            None => println!(
+                "    trial {}: did not reach splice frame {}",
+                t + 1,
+                VERIFY_FRAMES
+            ),
         }
         harness::stop(client);
         thread::sleep(Duration::from_millis(200));
     }
     let median_secs = median(&mut samples);
-    println!("    median = {:.3}s  ({} samples)", median_secs, samples.len());
-    SpeedTiming { speed, median_secs, samples: samples.len(), end_coord }
+    println!(
+        "    median = {:.3}s  ({} samples)",
+        median_secs,
+        samples.len()
+    );
+    SpeedTiming {
+        speed,
+        median_secs,
+        samples: samples.len(),
+        end_coord,
+    }
 }
 
 fn locate_recording() -> Option<PathBuf> {
@@ -181,7 +199,10 @@ fn locate_recording() -> Option<PathBuf> {
 }
 
 pub fn run() -> bool {
-    println!("=== CATCH-UP SPEED test (median T_{:.0}x / T_{:.0}x to splice frame {}) ===", SLOW_SPEED, FAST_SPEED, VERIFY_FRAMES);
+    println!(
+        "=== CATCH-UP SPEED test (median T_{:.0}x / T_{:.0}x to splice frame {}) ===",
+        SLOW_SPEED, FAST_SPEED, VERIFY_FRAMES
+    );
 
     let path = match locate_recording() {
         Some(p) => p,
@@ -212,8 +233,14 @@ pub fn run() -> bool {
     client.state_mut().playback_speed = 1.0;
 
     println!("\n=== CATCH-UP SPEED SUMMARY ===");
-    println!("  T_{:.0}x = {:.3}s ({} samples)", slow.speed, slow.median_secs, slow.samples);
-    println!("  T_{:.0}x = {:.3}s ({} samples)", fast.speed, fast.median_secs, fast.samples);
+    println!(
+        "  T_{:.0}x = {:.3}s ({} samples)",
+        slow.speed, slow.median_secs, slow.samples
+    );
+    println!(
+        "  T_{:.0}x = {:.3}s ({} samples)",
+        fast.speed, fast.median_secs, fast.samples
+    );
 
     // Cross-speed sim-invariance: the splice should land at the SAME physical
     // point regardless of speed (speed must change only how fast we get there,
@@ -236,10 +263,16 @@ pub fn run() -> bool {
     }
 
     let ratio = slow.median_secs / fast.median_secs;
-    println!("  effective catch-up = {:.2}× faster than 1× (floor {:.1}×)", ratio, CATCHUP_MIN_RATIO);
+    println!(
+        "  effective catch-up = {:.2}× faster than 1× (floor {:.1}×)",
+        ratio, CATCHUP_MIN_RATIO
+    );
 
     if ratio >= CATCHUP_MIN_RATIO {
-        println!("*** CATCH-UP SPEED OK: 64× catch-up is {:.1}× faster than 1× (>= {:.1}×). ***", ratio, CATCHUP_MIN_RATIO);
+        println!(
+            "*** CATCH-UP SPEED OK: 64× catch-up is {:.1}× faster than 1× (>= {:.1}×). ***",
+            ratio, CATCHUP_MIN_RATIO
+        );
         true
     } else {
         println!(

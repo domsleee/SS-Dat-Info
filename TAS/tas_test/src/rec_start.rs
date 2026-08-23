@@ -215,7 +215,10 @@ pub fn check_file(path: &str) -> bool {
         }
     };
     let count = loaded.count as usize;
-    let a = analyze_start(&loaded.rec_coords[..count.min(loaded.rec_coords.len())], count);
+    let a = analyze_start(
+        &loaded.rec_coords[..count.min(loaded.rec_coords.len())],
+        count,
+    );
     print_analysis(path, &a);
     verdict(&a)
 }

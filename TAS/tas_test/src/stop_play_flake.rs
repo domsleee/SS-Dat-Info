@@ -113,9 +113,13 @@ fn restart_play_match_reference(
 
         let state = client.state();
         let mut diverge: Option<usize> = None;
-        for j in 0..RETRY_VERIFY_FRAMES as usize {
+        for (j, r) in reference
+            .iter()
+            .copied()
+            .enumerate()
+            .take(RETRY_VERIFY_FRAMES as usize)
+        {
             let p = state.play_coords[j];
-            let r = reference[j];
             if p[0].to_bits() != r[0].to_bits()
                 || p[1].to_bits() != r[1].to_bits()
                 || p[2].to_bits() != r[2].to_bits()
@@ -150,11 +154,7 @@ fn restart_play_match_reference(
 
 /// Wait until playback_pos reaches `target` or the timeout elapses.
 /// Returns the actual playback_pos seen.
-fn wait_for_pos(
-    client: &tas_shared::TasSharedMemoryClient,
-    target: u32,
-    timeout: Duration,
-) -> u32 {
+fn wait_for_pos(client: &tas_shared::TasSharedMemoryClient, target: u32, timeout: Duration) -> u32 {
     let start = Instant::now();
     loop {
         let pos = client.playback_pos_volatile();
@@ -271,12 +271,8 @@ pub fn run() -> bool {
         // sometimes lands in a different bucket and diverges; the test's
         // purpose is to verify STOP doesn't introduce flakiness ON TOP of
         // that, so we re-roll F5 until we get the reference bucket.
-        let second_ok = restart_play_match_reference(
-            &mut client,
-            &reference,
-            &rec,
-            REF_MATCH_RETRIES,
-        );
+        let second_ok =
+            restart_play_match_reference(&mut client, &reference, &rec, REF_MATCH_RETRIES);
         if !second_ok {
             println!("  Second playback: reference match failed after retries");
             results.push(CycleResult {
@@ -300,9 +296,13 @@ pub fn run() -> bool {
         let mut max_dx = 0.0f64;
         let mut max_dz = 0.0f64;
         let mut first_div: Option<usize> = None;
-        for j in 0..VERIFY_FRAMES as usize {
+        for (j, r) in reference
+            .iter()
+            .copied()
+            .enumerate()
+            .take(VERIFY_FRAMES as usize)
+        {
             let p = state.play_coords[j];
-            let r = reference[j];
             let dx = (p[0] as f64 - r[0] as f64).abs();
             let dz = (p[2] as f64 - r[2] as f64).abs();
             if dx > max_dx {
@@ -345,9 +345,7 @@ pub fn run() -> bool {
 
     // ---- Summary ----
     println!("\n=== STOP+PLAY FLAKE SUMMARY ===");
-    println!(
-        "Comparing each iteration's SECOND playback to the reference (single PLAY, no stop)."
-    );
+    println!("Comparing each iteration's SECOND playback to the reference (single PLAY, no stop).");
     println!(
         "Pass requires bit-identical match across the first {} frames.",
         VERIFY_FRAMES

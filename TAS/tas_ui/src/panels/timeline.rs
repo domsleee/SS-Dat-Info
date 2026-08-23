@@ -246,8 +246,10 @@ pub fn show(
     let right_padding = 20.0;
     let width = (avail.x.min(900.0) - right_padding - left_margin).max(120.0);
 
-    let (response, painter) =
-        ui.allocate_painter(egui::vec2(width, total_height), egui::Sense::click_and_drag());
+    let (response, painter) = ui.allocate_painter(
+        egui::vec2(width, total_height),
+        egui::Sense::click_and_drag(),
+    );
     let rect = response.rect;
     painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(30, 30, 40));
 
@@ -376,8 +378,10 @@ pub fn show(
 
             let id = ui.id().with(("blk", ev.bit, i));
             let hw = 4.0_f32.min(block.width() / 3.0);
-            let lh = egui::Rect::from_min_max(block.min, egui::pos2(block.left() + hw, block.bottom()));
-            let rh = egui::Rect::from_min_max(egui::pos2(block.right() - hw, block.top()), block.max);
+            let lh =
+                egui::Rect::from_min_max(block.min, egui::pos2(block.left() + hw, block.bottom()));
+            let rh =
+                egui::Rect::from_min_max(egui::pos2(block.right() - hw, block.top()), block.max);
             let body = egui::Rect::from_min_max(
                 egui::pos2(block.left() + hw, block.top()),
                 egui::pos2(block.right() - hw, block.bottom()),
@@ -396,13 +400,25 @@ pub fn show(
                 edit.selected = Some(ev);
             }
             if lr.drag_started() {
-                edit.drag = Some(BlockDrag { idx: i, mode: DragMode::Start, orig: ev });
+                edit.drag = Some(BlockDrag {
+                    idx: i,
+                    mode: DragMode::Start,
+                    orig: ev,
+                });
                 edit.selected = Some(ev);
             } else if rr.drag_started() {
-                edit.drag = Some(BlockDrag { idx: i, mode: DragMode::End, orig: ev });
+                edit.drag = Some(BlockDrag {
+                    idx: i,
+                    mode: DragMode::End,
+                    orig: ev,
+                });
                 edit.selected = Some(ev);
             } else if br.drag_started() {
-                edit.drag = Some(BlockDrag { idx: i, mode: DragMode::Move, orig: ev });
+                edit.drag = Some(BlockDrag {
+                    idx: i,
+                    mode: DragMode::Move,
+                    orig: ev,
+                });
                 edit.selected = Some(ev);
             }
 
@@ -414,7 +430,8 @@ pub fn show(
                         let mut e = edit.work[i];
                         match drag.mode {
                             DragMode::Start => {
-                                let ns = (e.start as i64 + dt).clamp(0, e.end as i64 - MIN_LEN as i64);
+                                let ns =
+                                    (e.start as i64 + dt).clamp(0, e.end as i64 - MIN_LEN as i64);
                                 e.start = ns as u32;
                             }
                             DragMode::End => {
@@ -460,7 +477,15 @@ pub fn show(
                 egui::pos2(bar_left, y + 1.0),
                 egui::vec2(bar_width, row_height - 2.0),
             );
-            paint_runs(&painter, &state.input_log, bit, color, lane, view.start, view.end);
+            paint_runs(
+                &painter,
+                &state.input_log,
+                bit,
+                color,
+                lane,
+                view.start,
+                view.end,
+            );
         }
     }
 
@@ -568,12 +593,23 @@ fn edit_controls(
     let mut changed = false;
     let mut delete = false;
     ui.horizontal(|ui| {
-        ui.colored_label(ROW_COLORS[row].1, format!("{} · press {}", ROW_LABELS[row], ROW_ACTIONS[row]));
+        ui.colored_label(
+            ROW_COLORS[row].1,
+            format!("{} · press {}", ROW_LABELS[row], ROW_ACTIONS[row]),
+        );
         ui.label("Start");
-        changed |= ui.add(egui::DragValue::new(&mut ev.start).speed(1.0)).changed();
+        changed |= ui
+            .add(egui::DragValue::new(&mut ev.start).speed(1.0))
+            .changed();
         ui.label("End");
-        changed |= ui.add(egui::DragValue::new(&mut ev.end).speed(1.0)).changed();
-        ui.weak(format!("({:.2}s – {:.2}s)", ev.start as f32 / 100.0, ev.end as f32 / 100.0));
+        changed |= ui
+            .add(egui::DragValue::new(&mut ev.end).speed(1.0))
+            .changed();
+        ui.weak(format!(
+            "({:.2}s – {:.2}s)",
+            ev.start as f32 / 100.0,
+            ev.end as f32 / 100.0
+        ));
         if ui.button("Delete").clicked() {
             delete = true;
         }
@@ -830,38 +866,65 @@ mod tests {
 
     #[test]
     fn view_clamp_enforces_min_window() {
-        let mut v = TimelineView { start: 100, end: 110 };
+        let mut v = TimelineView {
+            start: 100,
+            end: 110,
+        };
         v.clamp(1000);
         assert!(v.span() >= MIN_WINDOW);
     }
 
     #[test]
     fn view_zoom_at_keeps_cursor_and_clamps() {
-        let mut v = TimelineView { start: 0, end: 1000 };
+        let mut v = TimelineView {
+            start: 0,
+            end: 1000,
+        };
         v.zoom_at(500.0, 0.5, 1000);
         assert!(v.span() < 1000);
         assert!(v.start < 500 && v.end > 500);
         v.zoom_at(500.0, 100.0, 1000);
-        assert_eq!(v, TimelineView { start: 0, end: 1000 });
+        assert_eq!(
+            v,
+            TimelineView {
+                start: 0,
+                end: 1000
+            }
+        );
     }
 
     #[test]
     fn view_zoom_center_shrinks_and_grows() {
-        let mut v = TimelineView { start: 100, end: 1100 };
+        let mut v = TimelineView {
+            start: 100,
+            end: 1100,
+        };
         v.zoom_center(0.8);
         assert!(v.span() < 1000);
-        let mut v2 = TimelineView { start: 100, end: 1100 };
+        let mut v2 = TimelineView {
+            start: 100,
+            end: 1100,
+        };
         v2.zoom_center(1.25);
         assert!(v2.span() > 1000);
     }
 
     #[test]
     fn view_pan_preserves_span_and_clamps() {
-        let mut v = TimelineView { start: 100, end: 200 };
+        let mut v = TimelineView {
+            start: 100,
+            end: 200,
+        };
         v.pan(-1000, 1000);
         assert_eq!(v, TimelineView { start: 0, end: 100 });
         v.pan(100000, 1000);
-        assert_eq!(v, TimelineView { start: 900, end: 1000 });
+        assert_eq!(
+            v,
+            TimelineView {
+                start: 900,
+                end: 1000
+            }
+        );
     }
 
     #[test]
@@ -870,7 +933,10 @@ mod tests {
         state.mode = TasMode::Rec as u32;
         state.recorded_count = 42;
         state.playback_pos = 0;
-        assert_eq!(active_timeline_tick(&state), Some((41, ActiveTickMode::Rec)));
+        assert_eq!(
+            active_timeline_tick(&state),
+            Some((41, ActiveTickMode::Rec))
+        );
     }
 
     #[test]
@@ -879,7 +945,10 @@ mod tests {
         state.mode = TasMode::Play as u32;
         state.recorded_count = 100;
         state.playback_pos = 37;
-        assert_eq!(active_timeline_tick(&state), Some((37, ActiveTickMode::Play)));
+        assert_eq!(
+            active_timeline_tick(&state),
+            Some((37, ActiveTickMode::Play))
+        );
     }
 
     #[test]

@@ -478,6 +478,94 @@ pub fn wait_playback(client: &TasSharedMemoryClient, expected: u32) -> bool {
     }
 }
 
+/// Restart and arm the product PLAY path with input indexed relative to the
+/// recording's gate. Returns `(recorded_gate, live_gate)` once the live gate has
+/// been observed and the gate-relative trajectory watcher accepts the attempt.
+pub fn restart_play_aligned_inprocess(client: &mut TasSharedMemoryClient) -> Option<(u32, u32)> {
+    use tas_shared::transport::{Arm, ArmConfig, StepOutcome, TransportController};
+
+    let rec_gate = {
+        let s = client.state();
+        tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count)?
+    };
+    let catchup_speed = client.state().playback_speed.max(1.0);
+    let mut controller = TransportController::new(ArmConfig {
+        arm: Arm::Play,
+        catchup_speed,
+        continue_from_frame: 0,
+        gate_align_rec: rec_gate,
+        target: None,
+        max_retries: tas_shared::cont::START_MATCH_MAX_RETRIES,
+        resume_speed: 0.0,
+        predict_bucket: false,
+    });
+
+    stop_competing_tas_ui_writer();
+    dismiss_save_dialog();
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let retries_used = loop {
+        if Instant::now() > deadline {
+            eprintln!(
+                "  ERROR: aligned PLAY timed out in {}",
+                controller.phase_name()
+            );
+            stop(client);
+            return None;
+        }
+        match controller.step(client) {
+            StepOutcome::InProgress => thread::sleep(Duration::from_millis(5)),
+            StepOutcome::Wait { ms } => thread::sleep(Duration::from_millis(ms)),
+            StepOutcome::Done { retries_used, .. } => {
+                break retries_used;
+            }
+            StepOutcome::Reroll {
+                attempt,
+                suggested_delay_ms,
+                observed,
+                ..
+            } => {
+                let mismatch = observed
+                    .map(|frame| frame.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                println!(
+                    "  Aligned PLAY watcher rejected attempt {}/{} (first mismatch at gate+{})",
+                    attempt,
+                    tas_shared::cont::START_MATCH_MAX_RETRIES,
+                    mismatch
+                );
+                thread::sleep(Duration::from_millis(suggested_delay_ms));
+            }
+            StepOutcome::Aborted { reason } => {
+                eprintln!("  ERROR: aligned PLAY aborted: {}", reason);
+                stop(client);
+                return None;
+            }
+        }
+    };
+
+    let gate_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let gate = client.state().gate_index;
+        if gate != 0 {
+            println!(
+                "  Aligned PLAY watcher accepted after {} retr{}: recording gate {}, live gate {} (offset {:+})",
+                retries_used,
+                if retries_used == 1 { "y" } else { "ies" },
+                rec_gate,
+                gate,
+                gate as i64 - rec_gate as i64
+            );
+            return Some((rec_gate, gate));
+        }
+        if client.mode_volatile() != TasMode::Play as u32 || Instant::now() > gate_deadline {
+            eprintln!("  ERROR: aligned PLAY never observed a live gate");
+            stop(client);
+            return None;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Path to the `revive-supreme.nu` script used by [`ensure_game_running`].
 /// Override with the `REVIVE_SUPREME_SCRIPT` env var.
 fn revive_script_path() -> String {
@@ -552,10 +640,7 @@ fn inject_dll(label: &str, dll_path: &str) -> bool {
     println!("Injecting {}...", label);
     println!("  DLL: {}", dll_path);
 
-    match Command::new(&injector)
-        .arg(dll_path)
-        .status()
-    {
+    match Command::new(&injector).arg(dll_path).status() {
         Ok(s) if s.success() => {
             println!("  {} injected", label);
             true
@@ -636,8 +721,8 @@ const LEVEL_SCAN_TIMEOUT_SECS: u64 = 12;
 /// `TAS_TEST_LEVEL` overrides the expected code (e.g. `AM`); `TAS_TEST_LEVEL=any`
 /// disables the check for deliberate off-track work.
 pub fn verify_expected_level(client: &TasSharedMemoryClient) {
-    let expected = std::env::var("TAS_TEST_LEVEL")
-        .unwrap_or_else(|_| DEFAULT_EXPECTED_LEVEL.to_string());
+    let expected =
+        std::env::var("TAS_TEST_LEVEL").unwrap_or_else(|_| DEFAULT_EXPECTED_LEVEL.to_string());
     if expected.eq_ignore_ascii_case("any") {
         println!("  Track check: SKIPPED (TAS_TEST_LEVEL=any)");
         return;
@@ -953,10 +1038,7 @@ where
         for i in 1..frames_available as usize {
             let p = s.play_coords[i];
             let r = s.rec_coords[i];
-            if (p[0] - r[0]).abs() > eps
-                || (p[1] - r[1]).abs() > eps
-                || (p[2] - r[2]).abs() > eps
-            {
+            if (p[0] - r[0]).abs() > eps || (p[1] - r[1]).abs() > eps || (p[2] - r[2]).abs() > eps {
                 traj_ok = false;
                 diverge_frame = i as u32;
                 diverge_dx = (p[0] as f64 - r[0] as f64).abs();
@@ -1155,7 +1237,10 @@ pub fn restart_continue_and_splice_inprocess_loop(
 /// and test whether that post-settle render gap is what tanks real-world
 /// first-try vs the harness. Default 0 = off (no-op).
 fn cont_yield_render_frame() {
-    let base: u64 = match std::env::var("CONT_YIELD_MS").ok().and_then(|s| s.parse().ok()) {
+    let base: u64 = match std::env::var("CONT_YIELD_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         Some(n) if n > 0 => n,
         _ => return,
     };
@@ -1186,7 +1271,11 @@ pub fn restart_continue_and_splice_inprocess(
 ) -> Option<u32> {
     use tas_shared::transport::{Arm, ArmConfig, BucketTarget, StepOutcome, TransportController};
 
-    let expected_start_bits = [target[0].to_bits(), target[1].to_bits(), target[2].to_bits()];
+    let expected_start_bits = [
+        target[0].to_bits(),
+        target[1].to_bits(),
+        target[2].to_bits(),
+    ];
     let expected_first_moving = {
         let s = client.state();
         tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count)
@@ -1206,6 +1295,7 @@ pub fn restart_continue_and_splice_inprocess(
         arm: Arm::Continue,
         catchup_speed,
         continue_from_frame: splice_frame,
+        gate_align_rec: 0,
         target: Some(BucketTarget {
             expected_start_bits,
             expected_first_moving,
@@ -1362,23 +1452,29 @@ where
     // Expected bucket signature from the loaded recording (shared-memory
     // rec_coords), computed once. Same inputs tas_ui's set_continue_start_guard
     // captures: the recording's start bits + first-moving frame.
-    let expected_start_bits = [target[0].to_bits(), target[1].to_bits(), target[2].to_bits()];
+    let expected_start_bits = [
+        target[0].to_bits(),
+        target[1].to_bits(),
+        target[2].to_bits(),
+    ];
     let expected_first_moving = {
         let s = client.state();
         tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count)
     };
     match expected_first_moving {
-        Some(fm) => println!("  CONT bucket criteria (tas_ui): spawn match + first-moving frame {}", fm),
-        None => println!("  CONT bucket criteria (tas_ui): recording never moves — spawn match only"),
+        Some(fm) => println!(
+            "  CONT bucket criteria (tas_ui): spawn match + first-moving frame {}",
+            fm
+        ),
+        None => {
+            println!("  CONT bucket criteria (tas_ui): recording never moves — spawn match only")
+        }
     }
 
     for attempt in 0..=max_retries {
         stop_competing_tas_ui_writer();
         if attempt > 0 {
-            println!(
-                "  Retry {}/{}: CONT bucket reroll",
-                attempt, max_retries
-            );
+            println!("  Retry {}/{}: CONT bucket reroll", attempt, max_retries);
         }
         if !restart_fn(client) {
             eprintln!("  ERROR: Game not alive after restart");
@@ -1411,12 +1507,20 @@ where
         // before it can mutate the recording, and the reroll is fast — same as
         // tas_ui's poll_continue_start_guard. Drift over the accepted bucket is
         // checked by the caller, so the test measures the drift the USER sees.
-        let verdict = poll_cont_verdict(client, expected_start_bits, expected_first_moving, splice_frame);
+        let verdict = poll_cont_verdict(
+            client,
+            expected_start_bits,
+            expected_first_moving,
+            splice_frame,
+        );
         use tas_shared::cont::BucketVerdict;
         match verdict {
             BucketVerdict::Match | BucketVerdict::NoSignal => {
                 if attempt > 0 {
-                    println!("  CONT bucket accepted (tas_ui criteria) on attempt {}", attempt + 1);
+                    println!(
+                        "  CONT bucket accepted (tas_ui criteria) on attempt {}",
+                        attempt + 1
+                    );
                 }
                 println!("  CONT bucket accepted, waiting for splice...");
                 if wait_continue_splice(client, splice_frame) {
@@ -1520,6 +1624,26 @@ fn poll_cont_verdict(
 /// `fallback_ms` is the sleep duration if the Pico port cannot be opened
 /// (allows the test to wait for the equivalent recording duration).
 pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep], fallback_ms: Option<u64>) {
+    drive_pico_steps_inner(steps, fallback_ms, None);
+}
+
+/// Drive a pattern while periodically refreshing a held non-zero mask. This is
+/// for long intentional holds; the Pico firmware releases keys after 500ms
+/// without traffic. Existing regression patterns retain their measured
+/// watchdog-release behavior through [`drive_pico_steps`].
+pub fn drive_pico_steps_keepalive(
+    steps: &[crate::patterns::PatternStep],
+    fallback_ms: Option<u64>,
+    keepalive_ms: u64,
+) {
+    drive_pico_steps_inner(steps, fallback_ms, Some(keepalive_ms.max(1)));
+}
+
+fn drive_pico_steps_inner(
+    steps: &[crate::patterns::PatternStep],
+    fallback_ms: Option<u64>,
+    keepalive_ms: Option<u64>,
+) {
     let port_name = pico_port();
     // PicoKeys, not a bare File: this loop holds movement keys down for the whole
     // pattern — seconds at a time — which makes it by far the most exposed place
@@ -1570,6 +1694,7 @@ pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep], fallback_ms: Opt
     let ms_per_tick = 10u64;
     let start = Instant::now();
     let mut prev_mask = 0xFFu8;
+    let mut last_send: Option<Instant> = None;
     let mut current_step = 0usize;
 
     for tick in 0..total {
@@ -1582,10 +1707,15 @@ pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep], fallback_ms: Opt
             0
         };
 
-        if mask != prev_mask {
+        let keepalive_due = mask != 0
+            && keepalive_ms.is_some_and(|ms| {
+                last_send.is_some_and(|sent| sent.elapsed() >= Duration::from_millis(ms))
+            });
+        if mask != prev_mask || keepalive_due {
             let send_byte = if mask == 0 { 0xFF } else { mask };
             port.send(send_byte);
             prev_mask = mask;
+            last_send = Some(Instant::now());
         }
 
         let target = Duration::from_millis((tick as u64 + 1) * ms_per_tick);

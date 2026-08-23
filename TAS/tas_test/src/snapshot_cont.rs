@@ -89,7 +89,6 @@ fn check_drift(client: &tas_shared::TasSharedMemoryClient) -> f64 {
     d.max_axis()
 }
 
-
 fn restore(client: &mut tas_shared::TasSharedMemoryClient) -> (u32, u32) {
     client.send_command(TasCommand::Restore);
     thread::sleep(Duration::from_millis(150));
@@ -108,7 +107,9 @@ pub fn run() -> bool {
     // 1. Load the recording.
     let path = "TAS/recordings/FE-10065.tasrec";
     let candidates = [
-        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("../../..").join(path))),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("../../..").join(path))),
         Some(std::path::PathBuf::from(path)),
         Some(std::path::PathBuf::from("recordings/FE-10065.tasrec")),
     ];
@@ -149,7 +150,9 @@ pub fn run() -> bool {
         {
             let t0 = Instant::now();
             while client.state().command != TasCommand::Idle as u32 {
-                if t0.elapsed() > Duration::from_millis(500) { break; }
+                if t0.elapsed() > Duration::from_millis(500) {
+                    break;
+                }
                 thread::sleep(Duration::from_millis(2));
             }
         }
@@ -164,7 +167,10 @@ pub fn run() -> bool {
         let snap_us = client.state().snapshot_flags;
         harness::stop(&mut client);
         if snap_bytes == 0 {
-            eprintln!("  WARN: F5 #{}: spawn snapshot didn't fire (0 bytes)", attempt);
+            eprintln!(
+                "  WARN: F5 #{}: spawn snapshot didn't fire (0 bytes)",
+                attempt
+            );
             continue;
         }
         println!(
@@ -173,7 +179,11 @@ pub fn run() -> bool {
             snap_bytes as f64 / 1_048_576.0,
             snap_us as f64 / 1000.0,
             drift,
-            if drift < MATCH_EPS { "<- MATCH, snapshot established" } else { "(wrong bucket, reroll)" }
+            if drift < MATCH_EPS {
+                "<- MATCH, snapshot established"
+            } else {
+                "(wrong bucket, reroll)"
+            }
         );
         if drift < MATCH_EPS {
             established = true;
@@ -181,12 +191,18 @@ pub fn run() -> bool {
         }
     }
     if !established {
-        println!("\n*** FAILED: couldn't establish a matching spawn snapshot in {} F5 tries ***", ESTABLISH_MAX_F5);
+        println!(
+            "\n*** FAILED: couldn't establish a matching spawn snapshot in {} F5 tries ***",
+            ESTABLISH_MAX_F5
+        );
         return false;
     }
 
     // 3. VALIDATE: lottery-free restores.
-    println!("\n--- VALIDATE ({} lottery-free CONTs via RESTORE, no F5) ---", VALIDATE_ITERS);
+    println!(
+        "\n--- VALIDATE ({} lottery-free CONTs via RESTORE, no F5) ---",
+        VALIDATE_ITERS
+    );
     let mut clean = 0u32;
     // `None` until an iteration actually completes a replay and measures drift.
     // Tracked as an Option so a run where EVERY iteration stalled reports "n/a"
@@ -214,22 +230,33 @@ pub fn run() -> bool {
         harness::stop(&mut client);
         worst_drift = Some(worst_drift.map_or(drift, |w: f64| w.max(drift)));
         let ok = drift < MATCH_EPS;
-        if ok { clean += 1; }
+        if ok {
+            clean += 1;
+        }
         println!(
             "  #{}: restore {:.0}ms, replay drift = {:.6} {}",
-            i, rest_us as f64 / 1000.0, drift, if ok { "OK (no reroll)" } else { "DRIFT!" }
+            i,
+            rest_us as f64 / 1000.0,
+            drift,
+            if ok { "OK (no reroll)" } else { "DRIFT!" }
         );
     }
 
     println!("\n=== SUMMARY ===");
-    println!("  Established spawn snapshot after {} F5 attempt(s) (one-time lottery).", establish_f5);
+    println!(
+        "  Established spawn snapshot after {} F5 attempt(s) (one-time lottery).",
+        establish_f5
+    );
     let worst_str = match worst_drift {
         Some(w) => format!("{:.6}", w),
         None => "n/a (no iteration produced a measurement)".to_string(),
     };
     println!(
         "  Then {}/{} lottery-free restores clean, worst drift {}, mean restore {:.0}ms.",
-        clean, VALIDATE_ITERS, worst_str, restore_ms_sum / VALIDATE_ITERS as f64
+        clean,
+        VALIDATE_ITERS,
+        worst_str,
+        restore_ms_sum / VALIDATE_ITERS as f64
     );
     if stalled > 0 || restore_failed > 0 {
         println!(
@@ -242,7 +269,10 @@ pub fn run() -> bool {
     if ok {
         println!("\n*** SNAPSHOT CONT PASSED: {}/{} replays bit-exact with ZERO rerolls (F5 lottery eliminated) ***", clean, VALIDATE_ITERS);
     } else {
-        println!("\n*** SNAPSHOT CONT FAILED: {}/{} clean ***", clean, VALIDATE_ITERS);
+        println!(
+            "\n*** SNAPSHOT CONT FAILED: {}/{} clean ***",
+            clean, VALIDATE_ITERS
+        );
     }
     ok
 }

@@ -86,7 +86,10 @@ pub fn watch(secs: Option<u64>) -> bool {
     };
     let state = client.state();
 
-    println!("\n=== level-seq watch: {:?} — change the level now ===", observe);
+    println!(
+        "\n=== level-seq watch: {:?} — change the level now ===",
+        observe
+    );
     println!("  t(ms)  seq  state");
 
     let start = Instant::now();
@@ -95,7 +98,9 @@ pub fn watch(secs: Option<u64>) -> bool {
     while start.elapsed() < observe {
         let ctx = tas_shared::level_context(state);
         if last.as_ref() != Some(&ctx) {
-            let seq = state.level_ctx_seq.load(std::sync::atomic::Ordering::Acquire);
+            let seq = state
+                .level_ctx_seq
+                .load(std::sync::atomic::Ordering::Acquire);
             match &ctx {
                 Some((id, path)) => println!(
                     "  {:>6}  {:>3}  RESOLVED id={:#x} {:?}",
@@ -129,7 +134,9 @@ pub fn run(secs: Option<u64>) -> bool {
     println!("\n=== level-seq: is the seqlock actually engaged? ===");
 
     // --- 1. The writer has run at least once. ---
-    let seq0 = state.level_ctx_seq.load(std::sync::atomic::Ordering::Acquire);
+    let seq0 = state
+        .level_ctx_seq
+        .load(std::sync::atomic::Ordering::Acquire);
     println!("  level_ctx_seq at connect: {}", seq0);
     if seq0 == 0 {
         eprintln!(
@@ -165,7 +172,9 @@ pub fn run(secs: Option<u64>) -> bool {
     let start = Instant::now();
     while start.elapsed() < observe {
         samples += 1;
-        let seq = state.level_ctx_seq.load(std::sync::atomic::Ordering::Acquire);
+        let seq = state
+            .level_ctx_seq
+            .load(std::sync::atomic::Ordering::Acquire);
         if seq & 1 != 0 {
             odd_samples += 1;
         }

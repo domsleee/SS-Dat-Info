@@ -111,7 +111,10 @@ pub fn run() -> bool {
     // Without this the test cannot tell "the pause left the game running fast"
     // from "the game was running at this rate the whole time" — and those want
     // completely different fixes.
-    println!("\n--- Phase 0: {}s baseline BEFORE pausing ---", BASELINE_SECS);
+    println!(
+        "\n--- Phase 0: {}s baseline BEFORE pausing ---",
+        BASELINE_SECS
+    );
     let base_start = sample(&client);
     thread::sleep(Duration::from_secs(BASELINE_SECS));
     let base_end = sample(&client);
@@ -122,7 +125,11 @@ pub fn run() -> bool {
         "  baseline: {} ticks/s, {} fps ({:.2} ticks per frame)",
         base_tps,
         base_frames / BASELINE_SECS as u32,
-        if base_frames > 0 { base_ticks as f64 / base_frames as f64 } else { 0.0 }
+        if base_frames > 0 {
+            base_ticks as f64 / base_frames as f64
+        } else {
+            0.0
+        }
     );
 
     // ---- Phase 1: Pause ----
@@ -190,8 +197,12 @@ pub fn run() -> bool {
         if second == 1 {
             first_second_ticks = dt;
         }
-        if dt > max_second_ticks { max_second_ticks = dt; }
-        if dt < min_second_ticks { min_second_ticks = dt; }
+        if dt > max_second_ticks {
+            max_second_ticks = dt;
+        }
+        if dt < min_second_ticks {
+            min_second_ticks = dt;
+        }
         println!(
             "  t={:>2}s  ticks={} (+{})   frames={} (+{})",
             second,

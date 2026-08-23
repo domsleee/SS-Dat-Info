@@ -43,13 +43,12 @@
 //! 1. "The spawn state is bucket-quantized" (f5_probe's standing suspicion).
 //!    NO. Across 24 restarts spanning 3 buckets (fm = 261 x3, 262 x9, 263 x12):
 //!
-//!      spawn position   1 distinct value  <- bit-identical every single time
-//!      velocity         1 distinct value
-//!      speed            1 distinct value
-//!      race_time_cs     1 distinct value
-//!      rotation matrix  4 distinct values <- but UNSOUND: one rotation key
-//!                                            spans several buckets, so it
-//!                                            would accept wrong ones
+//!    spawn position   1 distinct value  <- bit-identical every single time
+//!    velocity         1 distinct value
+//!    speed            1 distinct value
+//!    race_time_cs     1 distinct value
+//!    rotation matrix  4 distinct values <- UNSOUND: one key spans several
+//!    buckets, so it would accept wrong ones
 //!
 //!    The spawn state is not merely a weak predictor, it is CONSTANT. There is
 //!    nothing to read.
@@ -65,9 +64,9 @@
 //!    after send_command. THE WINDOW CAME BACK 0 TICKS on all 20 samples, i.e.
 //!    no measurement uncertainty at all. And the model still failed:
 //!
-//!      arm_phase=36 -> fm 263 (x11), and also 261, and also 262
-//!      arm_phase=37 -> fm 261, 262 AND 263
-//!      fm+arm_phase = 297, 298, 299, 300   (not constant)
+//!    arm_phase=36 -> fm 263 (x11), and also 261, and also 262
+//!    arm_phase=37 -> fm 261, 262 AND 263
+//!    fm+arm_phase = 297, 298, 299, 300   (not constant)
 //!
 //!    Same arm phase, different bucket, with the phase measured exactly. The
 //!    arm phase is strongly CORRELATED with the bucket but does not determine
@@ -398,7 +397,10 @@ fn analyze(samples: &[Sample]) -> bool {
     for c in &candidates {
         let mut by_key: BTreeMap<String, Vec<u32>> = BTreeMap::new();
         for s in &usable {
-            by_key.entry((c.key)(s)).or_default().push(s.first_moving.unwrap());
+            by_key
+                .entry((c.key)(s))
+                .or_default()
+                .push(s.first_moving.unwrap());
         }
         let distinct_keys = by_key.len();
 

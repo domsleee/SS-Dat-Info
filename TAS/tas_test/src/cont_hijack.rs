@@ -11,7 +11,6 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-
 use crate::{harness, replay};
 
 const SPLICE_AT: u32 = 2000; // a frame well within the recording, ahead of the playhead
@@ -73,7 +72,11 @@ pub fn run() -> bool {
             break;
         }
         if client.state().mode != MODE_PLAY || t0.elapsed() > Duration::from_secs(10) {
-            eprintln!("  ERROR: replay didn't start (pos={}, mode={})", pos, client.state().mode);
+            eprintln!(
+                "  ERROR: replay didn't start (pos={}, mode={})",
+                pos,
+                client.state().mode
+            );
             harness::stop(&mut client);
             return false;
         }
@@ -120,7 +123,9 @@ pub fn run() -> bool {
 
     println!();
     if hijacked {
-        println!("*** BUG #2 FAILED: plain PLAY was hijacked into REC by a stray splice marker ***");
+        println!(
+            "*** BUG #2 FAILED: plain PLAY was hijacked into REC by a stray splice marker ***"
+        );
         false
     } else if crossed {
         println!(

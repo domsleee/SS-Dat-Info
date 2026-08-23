@@ -1025,10 +1025,7 @@ pub mod level {
     /// the file itself says which track it can be replayed on. `None` when the
     /// name carries no recognised code.
     pub fn code_from_recording_name(path: &str) -> Option<&'static str> {
-        let stem = path
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(path);
+        let stem = path.rsplit(['/', '\\']).next().unwrap_or(path);
         let head = stem.split(['-', '_', '.']).next().unwrap_or("");
         CODES.iter().find(|c| c.eq_ignore_ascii_case(head)).copied()
     }
@@ -1160,7 +1157,10 @@ mod level_tests {
     #[test]
     fn recording_name_declares_its_track() {
         assert_eq!(code_from_recording_name("FE-tremendous.tasrec"), Some("FE"));
-        assert_eq!(code_from_recording_name("TAS/recordings/FE-10065.tasrec"), Some("FE"));
+        assert_eq!(
+            code_from_recording_name("TAS/recordings/FE-10065.tasrec"),
+            Some("FE")
+        );
         assert_eq!(code_from_recording_name(r"C:\x\VH_run.tasrec"), Some("VH"));
         assert_eq!(code_from_recording_name("scratch.tasrec"), None);
     }
@@ -1206,8 +1206,7 @@ pub mod cont {
             return None;
         }
         let start = rec_coords[0];
-        for j in 1..n {
-            let c = rec_coords[j];
+        for (j, c) in rec_coords.iter().copied().enumerate().take(n).skip(1) {
             if c[0].to_bits() != start[0].to_bits()
                 || c[1].to_bits() != start[1].to_bits()
                 || c[2].to_bits() != start[2].to_bits()
@@ -1492,7 +1491,14 @@ pub mod cont {
 
             // Departure frames either side of the recording's, plus the exact
             // match, plus a replay that never leaves the spawn at all.
-            for depart in [Some(FM - 8), Some(FM - 1), Some(FM), Some(FM + 1), Some(FM + 30), None] {
+            for depart in [
+                Some(FM - 8),
+                Some(FM - 1),
+                Some(FM),
+                Some(FM + 1),
+                Some(FM + 30),
+                None,
+            ] {
                 let mut play = vec![[1.0f32, 2.0, 3.0]; 400];
                 if let Some(d) = depart {
                     for (k, item) in play.iter_mut().enumerate().take(400).skip(d) {
@@ -1500,7 +1506,13 @@ pub mod cont {
                     }
                 }
                 let early = judge_cont_bucket(
-                    &play, &rec, 400, (FM + 1) as u32, start, Some(FM as u32), 400,
+                    &play,
+                    &rec,
+                    400,
+                    (FM + 1) as u32,
+                    start,
+                    Some(FM as u32),
+                    400,
                 );
                 let late = judge_cont_bucket(
                     &play,
@@ -1558,7 +1570,9 @@ pub mod cont {
             wrong[248] = [1.0, 2.0, 3.5];
             assert_eq!(
                 judge_cont_bucket(&wrong, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250), 320),
-                BucketVerdict::WrongBucket { observed: Some(248) }
+                BucketVerdict::WrongBucket {
+                    observed: Some(248)
+                }
             );
             // THE KEY CASE: same first-moving frame (250) as rec, but the
             // trajectory diverges later (260). The old frame-only fingerprint
@@ -1568,7 +1582,9 @@ pub mod cont {
             near[260] = [9.0, 9.0, 9.0];
             assert_eq!(
                 judge_cont_bucket(&near, &rec, 400, 320, bits(1.0, 2.0, 3.0), Some(250), 320),
-                BucketVerdict::WrongBucket { observed: Some(260) }
+                BucketVerdict::WrongBucket {
+                    observed: Some(260)
+                }
             );
         }
 
@@ -1582,17 +1598,25 @@ pub mod cont {
             // CONT success). Only a catastrophic off-trajectory impostor (0.5+)
             // is rejected.
             let mut rec = vec![[100.0_f32, 200.0, 300.0]; 400];
-            for f in 250..400 {
-                rec[f] = [100.0 + (f as f32) * 0.5, 200.0, 300.0];
+            for (f, coord) in rec.iter_mut().enumerate().take(400).skip(250) {
+                *coord = [100.0 + (f as f32) * 0.5, 200.0, 300.0];
             }
             // Working bucket: same first-moving frame, tiny noise everywhere.
             let mut noisy = rec.clone();
-            for f in 250..400 {
-                noisy[f][0] += 0.00006;
-                noisy[f][2] -= 0.00004;
+            for coord in noisy.iter_mut().take(400).skip(250) {
+                coord[0] += 0.00006;
+                coord[2] -= 0.00004;
             }
             assert_eq!(
-                judge_cont_bucket(&noisy, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250), 320),
+                judge_cont_bucket(
+                    &noisy,
+                    &rec,
+                    400,
+                    320,
+                    bits(100.0, 200.0, 300.0),
+                    Some(250),
+                    320
+                ),
                 BucketVerdict::Match
             );
             // Working bucket with a settle blip (0.4 transient) — still accepted;
@@ -1600,7 +1624,15 @@ pub mod cont {
             let mut blip = rec.clone();
             blip[252][0] += 0.4;
             assert_eq!(
-                judge_cont_bucket(&blip, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250), 320),
+                judge_cont_bucket(
+                    &blip,
+                    &rec,
+                    400,
+                    320,
+                    bits(100.0, 200.0, 300.0),
+                    Some(250),
+                    320
+                ),
                 BucketVerdict::Match
             );
             // Catastrophic impostor: same first-moving frame but veers off the
@@ -1608,16 +1640,36 @@ pub mod cont {
             let mut wrong = rec.clone();
             wrong[252][0] += 0.7;
             assert_eq!(
-                judge_cont_bucket(&wrong, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250), 320),
-                BucketVerdict::WrongBucket { observed: Some(252) }
+                judge_cont_bucket(
+                    &wrong,
+                    &rec,
+                    400,
+                    320,
+                    bits(100.0, 200.0, 300.0),
+                    Some(250),
+                    320
+                ),
+                BucketVerdict::WrongBucket {
+                    observed: Some(252)
+                }
             );
             // Wrong fingerprint: departs spawn a frame early — rejected with the
             // replay's first-moving frame reported.
             let mut early = rec.clone();
             early[249] = [100.5, 200.0, 300.0];
             assert_eq!(
-                judge_cont_bucket(&early, &rec, 400, 320, bits(100.0, 200.0, 300.0), Some(250), 320),
-                BucketVerdict::WrongBucket { observed: Some(249) }
+                judge_cont_bucket(
+                    &early,
+                    &rec,
+                    400,
+                    320,
+                    bits(100.0, 200.0, 300.0),
+                    Some(250),
+                    320
+                ),
+                BucketVerdict::WrongBucket {
+                    observed: Some(249)
+                }
             );
         }
 
@@ -1631,33 +1683,59 @@ pub mod cont {
             let fm = 250usize;
             let splice = 1200u32; // deep splice, like a real run
             let mut rec = vec![[100.0_f32, 200.0, 300.0]; 1400];
-            for f in fm..1400 {
-                rec[f] = [100.0, 200.0, 300.0 + (f as f32) * 0.5]; // rides +Z
+            for (f, coord) in rec.iter_mut().enumerate().take(1400).skip(fm) {
+                *coord = [100.0, 200.0, 300.0 + (f as f32) * 0.5]; // rides +Z
             }
             // Replay: identical through the settle, then diverges hard at
             // tick 750 (= fm+500, far past the old fm+64=314 window).
             let mut play = rec.clone();
-            for f in (fm + 500)..1400 {
-                play[f][0] += 8.0; // 8-unit lateral veer — a real wrong bucket
+            for coord in play.iter_mut().take(1400).skip(fm + 500) {
+                coord[0] += 8.0; // 8-unit lateral veer — a real wrong bucket
             }
 
             // Old behaviour accepted Match at fm+64. The fix keeps validating:
             // at pos 320 (just past the settle) it's clean SO FAR but not yet
             // validated to the target → KeepWaiting, NOT a premature Match.
             assert_eq!(
-                judge_cont_bucket(&play, &rec, 1400, 320, bits(100.0, 200.0, 300.0), Some(250), splice),
+                judge_cont_bucket(
+                    &play,
+                    &rec,
+                    1400,
+                    320,
+                    bits(100.0, 200.0, 300.0),
+                    Some(250),
+                    splice
+                ),
                 BucketVerdict::KeepWaiting,
                 "must not Match at the old settle window — keep validating"
             );
             // Once playback reaches the divergence (tick 750), reroll.
             assert_eq!(
-                judge_cont_bucket(&play, &rec, 1400, 800, bits(100.0, 200.0, 300.0), Some(250), splice),
-                BucketVerdict::WrongBucket { observed: Some(750) },
+                judge_cont_bucket(
+                    &play,
+                    &rec,
+                    1400,
+                    800,
+                    bits(100.0, 200.0, 300.0),
+                    Some(250),
+                    splice
+                ),
+                BucketVerdict::WrongBucket {
+                    observed: Some(750)
+                },
                 "late divergence must reroll, not splice onto a wrong trajectory"
             );
             // A clean bucket validated through the splice target → Match.
             assert_eq!(
-                judge_cont_bucket(&rec, &rec, 1400, splice, bits(100.0, 200.0, 300.0), Some(250), splice),
+                judge_cont_bucket(
+                    &rec,
+                    &rec,
+                    1400,
+                    splice,
+                    bits(100.0, 200.0, 300.0),
+                    Some(250),
+                    splice
+                ),
                 BucketVerdict::Match,
                 "a clean bucket confirms Match through the splice target"
             );
@@ -1745,9 +1823,13 @@ pub mod transport {
         pub catchup_speed: f32,
         /// Splice frame for CONT (0 for REC/PLAY).
         pub continue_from_frame: u32,
-        /// Bucket fingerprint to match; `Some` only for CONT.
+        /// Recording gate used to index PLAY input relative to the live gate.
+        /// Zero disables alignment (required for REC and arm-relative CONT).
+        pub gate_align_rec: u32,
+        /// Arm-relative bucket fingerprint to match; `Some` for CONT and legacy
+        /// judged PLAY. Gate-aligned PLAY uses `gate_align_rec` instead.
         pub target: Option<BucketTarget>,
-        /// Max F5 rerolls to land the recording's bucket (CONT only).
+        /// Max restart retries for a bucket or aligned-trajectory mismatch.
         pub max_retries: u32,
         /// Speed to hand back to once the replay reaches the first moving
         /// frame - 0 disables the handover and the whole cycle stays at
@@ -1798,7 +1880,11 @@ pub mod transport {
         /// fingerprint (the replay must reproduce this, not just its first-move).
         fn rec_coords(&self) -> &[[f32; 3]];
         fn recorded_count(&self) -> u32;
+        /// First live replay frame where the boarder left spawn. Zero until the
+        /// gate has been observed for the current arm.
+        fn gate_index(&self) -> u32;
         fn set_continue_from_frame(&mut self, frame: u32);
+        fn set_gate_align_rec(&mut self, frame: u32);
         fn set_playback_speed(&mut self, speed: f32);
         /// Ask the DLL to drop the playback speed to `speed` at replay
         /// position `pos`, atomically on that tick. `pos == 0` clears any
@@ -1890,7 +1976,7 @@ pub mod transport {
         /// restart_state==2 seen; honouring a fixed ARM_SETTLE_MS wait before the
         /// Arm command so the arm phase (→ observed first-moving) is consistent.
         ArmSettle,
-        /// CONT only: replaying — judge the F5 bucket each step.
+        /// Replaying: judge either the CONT bucket or aligned PLAY trajectory.
         JudgeBucket,
         Done,
         Aborted,
@@ -1906,8 +1992,9 @@ pub mod transport {
         Wait { ms: u64 },
         /// A reroll was scheduled. Caller should wait `suggested_delay_ms`
         /// (harness: sleep; egui: it already slept) before the next `step()`.
-        /// `observed`/`expected` are the rejected bucket's first-moving frame and
-        /// the recording's target (diagnostic — shows HOW it mismatched).
+        /// For bucket judgment, `observed`/`expected` are first-moving frames.
+        /// For aligned PLAY, `observed` is the first gate-relative mismatch and
+        /// `expected` is `None`.
         Reroll {
             attempt: u32,
             suggested_delay_ms: u64,
@@ -1929,7 +2016,7 @@ pub mod transport {
     /// the right bucket?".
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum CompletedVia {
-        /// The bucket fingerprint positively matched the recording. Trustworthy.
+        /// The bucket fingerprint or aligned trajectory positively matched.
         BucketMatched,
         /// Accepted with no movement signal to judge against — the resumed state
         /// could be from a near-miss bucket. Prime suspect for a "wrong" resume.
@@ -1949,6 +2036,68 @@ pub mod transport {
             return None;
         }
         Some(a.wrapping_sub(r) as i64)
+    }
+
+    /// Judge the first gate-relative window of an aligned PLAY.
+    ///
+    /// CONT deliberately allows sub-tick trajectory skew after matching its
+    /// bucket because it only needs a safe state to splice from. Aligned PLAY
+    /// has a stronger contract: cave2 is feeding the same recorded input from
+    /// the same semantic gate, so the resulting coordinates must be bit-exact.
+    /// A differing hidden spawn state shows up immediately in this window and
+    /// must be rerolled rather than allowed to become the watched run.
+    pub fn judge_gate_aligned_play(
+        play_coords: &[[f32; 3]],
+        rec_coords: &[[f32; 3]],
+        recorded_count: u32,
+        playback_pos: u32,
+        live_gate: u32,
+        rec_gate: u32,
+        capture_ok: bool,
+    ) -> BucketVerdict {
+        if !capture_ok {
+            return BucketVerdict::WrongStart;
+        }
+        if live_gate == 0 || playback_pos <= live_gate {
+            return BucketVerdict::KeepWaiting;
+        }
+
+        let rec_end = (recorded_count as usize).min(rec_coords.len());
+        let rec_gate = rec_gate as usize;
+        let live_gate = live_gate as usize;
+        if rec_gate >= rec_end || live_gate >= play_coords.len() {
+            return BucketVerdict::NoSignal;
+        }
+
+        let depth = (rec_end - rec_gate).min(super::cont::BUCKET_MATCH_WINDOW as usize);
+        if depth == 0 {
+            return BucketVerdict::NoSignal;
+        }
+        let available = (playback_pos as usize)
+            .saturating_sub(live_gate)
+            .min(play_coords.len().saturating_sub(live_gate))
+            .min(depth);
+
+        for k in 0..available {
+            let p = play_coords[live_gate + k];
+            let r = rec_coords[rec_gate + k];
+            if !p.iter().all(|v| v.is_finite())
+                || !r.iter().all(|v| v.is_finite())
+                || p[0].to_bits() != r[0].to_bits()
+                || p[1].to_bits() != r[1].to_bits()
+                || p[2].to_bits() != r[2].to_bits()
+            {
+                return BucketVerdict::WrongBucket {
+                    observed: Some(k as u32),
+                };
+            }
+        }
+
+        if available == depth {
+            BucketVerdict::Match
+        } else {
+            BucketVerdict::KeepWaiting
+        }
     }
 
     /// Drives one restart→arm(→judge→reroll) cycle to a terminal outcome.
@@ -2099,6 +2248,10 @@ pub mod transport {
                 Phase::Start => {
                     port.set_playback_speed(self.cfg.catchup_speed);
                     port.set_continue_from_frame(self.cfg.continue_from_frame);
+                    // STOP also clears this in the DLL. Clear it here as part of
+                    // the controller contract so even a delayed STOP cannot let
+                    // the previous PLAY's alignment leak into another arm.
+                    port.set_gate_align_rec(0);
                     // Clear any handover left over from a previous cycle before
                     // the replay position resets, so it cannot fire against the
                     // wrong replay.
@@ -2109,9 +2262,7 @@ pub mod transport {
                     // wall-clock phase → consistent (good) F5 bucket.
                     port.send_command(TasCommand::Stop);
                     self.phase = Phase::StopSettle;
-                    StepOutcome::Wait {
-                        ms: STOP_SETTLE_MS,
-                    }
+                    StepOutcome::Wait { ms: STOP_SETTLE_MS }
                 }
                 Phase::StopSettle => {
                     // The settle wait elapsed (caller honoured the Wait), so cave2
@@ -2128,8 +2279,13 @@ pub mod transport {
                         // phase (→ observed first-moving) matches the recording.
                         // Sweep the settle across rerolls so any recording aligns.
                         self.phase = Phase::ArmSettle;
-                        let expected_fm =
-                            self.cfg.target.and_then(|t| t.expected_first_moving);
+                        let expected_fm = self
+                            .cfg
+                            .target
+                            .and_then(|t| t.expected_first_moving)
+                            .or_else(|| {
+                                (self.cfg.gate_align_rec > 0).then_some(self.cfg.gate_align_rec)
+                            });
                         StepOutcome::Wait {
                             ms: arm_settle_ms(self.retries_used(), expected_fm),
                         }
@@ -2140,6 +2296,7 @@ pub mod transport {
                 Phase::ArmSettle => {
                     // cave2 reads these at ARM time — re-assert post-restart.
                     port.set_continue_from_frame(self.cfg.continue_from_frame);
+                    port.set_gate_align_rec(self.cfg.gate_align_rec);
                     port.set_playback_speed(self.cfg.catchup_speed);
                     // Stage the speed handover BEFORE arming: the arm resets the
                     // replay position to 0, and cave2 only tests the handover
@@ -2172,12 +2329,10 @@ pub mod transport {
                     // previous one's no matter how the polling lands.
                     self.arm_generation_at_arm = port.arm_generation();
                     port.send_command(self.cfg.arm.command());
-                    // Judge the F5 bucket whenever a fingerprint was given — CONT
-                    // always has one; PLAY can too, so a replay rerolls until it
-                    // lands the recording's bucket (zero drift), exactly like the
-                    // harness's restart_play_and_match. REC has no target (it's a
-                    // fresh recording) → done.
-                    if self.cfg.target.is_some() {
+                    // CONT judges its bucket fingerprint. Gate-aligned PLAY still
+                    // has to watch the resulting trajectory: the gate fixes input
+                    // indexing, but it does not fully identify hidden spawn state.
+                    if self.cfg.target.is_some() || self.cfg.gate_align_rec > 0 {
                         self.phase = Phase::JudgeBucket;
                         StepOutcome::InProgress
                     } else {
@@ -2195,7 +2350,8 @@ pub mod transport {
                         return StepOutcome::InProgress;
                     }
                     let mode = port.mode();
-                    if mode == rec {
+                    let aligned_play = self.cfg.arm == Arm::Play && self.cfg.gate_align_rec > 0;
+                    if mode == rec && !aligned_play {
                         // Splice already fired (PLAY→REC) — bucket accepted.
                         return self.finish(CompletedVia::Unjudged);
                     }
@@ -2206,6 +2362,52 @@ pub mod transport {
                     // a recording shorter than first_moving + BUCKET_MATCH_WINDOW
                     // can never be ruled on and used to spin the cycle forever.
                     let replay_ended = mode != play;
+                    if aligned_play {
+                        let pos = port.playback_pos();
+                        if pos == 0 && replay_ended {
+                            self.phase = Phase::Aborted;
+                            return StepOutcome::Aborted {
+                                reason: "the DLL refused aligned PLAY (nothing replayed)"
+                                    .to_string(),
+                            };
+                        }
+                        let verdict = judge_gate_aligned_play(
+                            port.play_coords(),
+                            port.rec_coords(),
+                            port.recorded_count(),
+                            pos,
+                            port.gate_index(),
+                            self.cfg.gate_align_rec,
+                            port.capture_ok(),
+                        );
+                        return match verdict {
+                            BucketVerdict::KeepWaiting if replay_ended => self.reroll(
+                                port,
+                                "aligned replay ended before its watcher completed".to_string(),
+                                None,
+                            ),
+                            BucketVerdict::KeepWaiting => StepOutcome::InProgress,
+                            BucketVerdict::Match => self.finish(CompletedVia::BucketMatched),
+                            BucketVerdict::WrongBucket { observed } => self.reroll(
+                                port,
+                                format!(
+                                    "aligned trajectory mismatch at gate-relative frame {:?}",
+                                    observed
+                                ),
+                                observed,
+                            ),
+                            BucketVerdict::WrongStart => self.reroll(
+                                port,
+                                "aligned trajectory capture was incomplete".to_string(),
+                                None,
+                            ),
+                            BucketVerdict::NoSignal => self.reroll(
+                                port,
+                                "recording has no gate-relative trajectory to watch".to_string(),
+                                None,
+                            ),
+                        };
+                    }
                     // THE PREDICTIVE REJECT. first_moving is decided by the arm
                     // offset, not by anything that happens during the replay, so
                     // once K is known this attempt's bucket is already determined
@@ -2246,8 +2448,7 @@ pub mod transport {
                             if let Some(off) = arm_offset(port) {
                                 let predicted = k - off;
                                 if (predicted - expected as i64).abs() > COUNTDOWN_K_JITTER {
-                                    if self.blind_predictive_rejects
-                                        >= MAX_BLIND_PREDICTIVE_REJECTS
+                                    if self.blind_predictive_rejects >= MAX_BLIND_PREDICTIVE_REJECTS
                                     {
                                         // Nothing has replayed in a while, so
                                         // nothing has confirmed this K. Distrust
@@ -2283,8 +2484,7 @@ pub mod transport {
                             // asserted with no splice ever coming to undo it.
                             self.phase = Phase::Aborted;
                             return StepOutcome::Aborted {
-                                reason: "the DLL refused the arm (nothing replayed)"
-                                    .to_string(),
+                                reason: "the DLL refused the arm (nothing replayed)".to_string(),
                             };
                         }
                         return StepOutcome::InProgress;
@@ -2303,9 +2503,10 @@ pub mod transport {
                     // failed: the caller advances the index regardless, so the
                     // prefix has a stale hole that reads as early movement.
                     if port.capture_ok() {
-                        if let (Some(o), Some(off)) =
-                            (detect_first_moving(port.play_coords(), pos), arm_offset(port))
-                        {
+                        if let (Some(o), Some(off)) = (
+                            detect_first_moving(port.play_coords(), pos),
+                            arm_offset(port),
+                        ) {
                             self.learned_countdown_k = Some(o as i64 + off);
                             self.blind_predictive_rejects = 0;
                         }
@@ -2375,7 +2576,7 @@ pub mod transport {
                     completed_via: self.completed_via,
                 },
                 Phase::Aborted => StepOutcome::Aborted {
-                    reason: "CONT aborted".to_string(),
+                    reason: "transport cycle aborted".to_string(),
                 },
             }
         }
@@ -2413,6 +2614,7 @@ pub mod transport {
             self.retries_remaining -= 1;
             let attempt = self.cfg.max_retries - self.retries_remaining;
             port.set_continue_from_frame(self.cfg.continue_from_frame);
+            port.set_gate_align_rec(0);
             port.set_playback_speed(self.cfg.catchup_speed);
             port.send_command(TasCommand::Stop);
             self.phase = Phase::StopSettle;
@@ -2439,7 +2641,9 @@ pub mod transport {
             play_coords: Vec<[f32; 3]>,
             rec_coords: Vec<[f32; 3]>,
             recorded_count: u32,
+            gate_index: u32,
             continue_from_frame: u32,
+            gate_align_rec: u32,
             playback_speed: f32,
             speed_handoff_pos: u32,
             speed_after_handoff: f32,
@@ -2484,8 +2688,14 @@ pub mod transport {
             fn recorded_count(&self) -> u32 {
                 self.recorded_count
             }
+            fn gate_index(&self) -> u32 {
+                self.gate_index
+            }
             fn set_continue_from_frame(&mut self, frame: u32) {
                 self.continue_from_frame = frame;
+            }
+            fn set_gate_align_rec(&mut self, frame: u32) {
+                self.gate_align_rec = frame;
             }
             fn set_playback_speed(&mut self, speed: f32) {
                 self.playback_speed = speed;
@@ -2515,8 +2725,7 @@ pub mod transport {
             /// Stand in for cave2: when the replay reaches the staged handover
             /// position, drop the speed on that tick and clear the request.
             fn dll_tick(&mut self) {
-                if self.speed_handoff_pos != 0 && self.playback_pos >= self.speed_handoff_pos
-                {
+                if self.speed_handoff_pos != 0 && self.playback_pos >= self.speed_handoff_pos {
                     if self.speed_after_handoff > 0.0 {
                         self.playback_speed = self.speed_after_handoff;
                     }
@@ -2534,6 +2743,7 @@ pub mod transport {
                 // judge match_through). The deep validate-through-splice path
                 // is covered directly by judge_rejects_late_divergence_*.
                 continue_from_frame: if arm == Arm::Continue { 320 } else { 0 },
+                gate_align_rec: 0,
                 target,
                 max_retries,
                 resume_speed: 0.0,
@@ -2543,6 +2753,54 @@ pub mod transport {
 
         fn bits(x: f32, y: f32, z: f32) -> [u32; 3] {
             [x.to_bits(), y.to_bits(), z.to_bits()]
+        }
+
+        fn aligned_trajectory(
+            rec_gate: usize,
+            live_gate: usize,
+            depth: usize,
+        ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+            let len = (rec_gate.max(live_gate) + depth + 16).max(400);
+            let mut rec = vec![[0.0; 3]; len];
+            let mut play = vec![[0.0; 3]; len];
+            for k in 0..depth {
+                let point = [k as f32 + 1.25, k as f32 * 0.5 + 2.0, -(k as f32)];
+                rec[rec_gate + k] = point;
+                play[live_gate + k] = point;
+            }
+            (play, rec)
+        }
+
+        #[test]
+        fn aligned_play_judge_matches_a_shifted_gate_relative_trajectory() {
+            let (play, rec) = aligned_trajectory(299, 297, 64);
+            assert_eq!(
+                judge_gate_aligned_play(&play, &rec, 400, 361, 297, 299, true),
+                BucketVerdict::Match
+            );
+        }
+
+        #[test]
+        fn aligned_play_judge_rejects_a_one_bit_hidden_state_difference() {
+            let (mut play, rec) = aligned_trajectory(299, 297, 64);
+            play[297][0] = f32::from_bits(play[297][0].to_bits() + 1);
+            assert_eq!(
+                judge_gate_aligned_play(&play, &rec, 400, 298, 297, 299, true),
+                BucketVerdict::WrongBucket { observed: Some(0) }
+            );
+        }
+
+        #[test]
+        fn aligned_play_judge_waits_for_the_full_window_and_capture() {
+            let (play, rec) = aligned_trajectory(299, 297, 64);
+            assert_eq!(
+                judge_gate_aligned_play(&play, &rec, 400, 360, 297, 299, true),
+                BucketVerdict::KeepWaiting
+            );
+            assert_eq!(
+                judge_gate_aligned_play(&play, &rec, 400, 361, 297, 299, false),
+                BucketVerdict::WrongStart
+            );
         }
 
         #[test]
@@ -2581,32 +2839,131 @@ pub mod transport {
         }
 
         #[test]
-        fn play_from_off_still_stops_first() {
+        fn aligned_play_stages_gate_only_after_restart() {
+            let (play_coords, rec_coords) = aligned_trajectory(299, 297, 64);
             let mut p = FakePort {
                 mode: TasMode::Off as u32,
+                gate_align_rec: 777,
+                gate_index: 297,
+                playback_pos: 361,
+                play_coords,
+                rec_coords,
+                recorded_count: 400,
+                capture_ok_flag: true,
                 ..Default::default()
             };
-            let mut c = TransportController::new(cfg(Arm::Play, None, 0));
+            let mut config = cfg(Arm::Play, None, 1);
+            config.gate_align_rec = 299;
+            let mut c = TransportController::new(config);
             // Even from OFF, always Stop + settle (matches the legacy loop, which
             // is what lands hard buckets reliably).
             assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: STOP_SETTLE_MS });
             assert_eq!(p.commands, vec![TasCommand::Stop]);
+            assert_eq!(
+                p.gate_align_rec, 0,
+                "stale alignment must clear before STOP"
+            );
             assert_eq!(c.step(&mut p), StepOutcome::InProgress); // Restart
             assert_eq!(p.commands, vec![TasCommand::Stop, TasCommand::Restart]);
             p.restart_state = 2;
-            assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: ARM_SETTLE_MS });
             assert_eq!(
                 c.step(&mut p),
-                StepOutcome::Done {
-                    retries_used: 0,
-                    completed_via: CompletedVia::Unjudged
+                StepOutcome::Wait {
+                    ms: arm_settle_ms(0, Some(299))
                 }
             );
+            assert_eq!(
+                p.gate_align_rec, 0,
+                "restart must happen with alignment clear"
+            );
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress);
             assert_eq!(
                 p.commands,
                 vec![TasCommand::Stop, TasCommand::Restart, TasCommand::ArmPlay]
             );
             assert_eq!(p.continue_from_frame, 0);
+            assert_eq!(p.gate_align_rec, 299, "alignment must be armed with PLAY");
+            p.mode = TasMode::Play as u32;
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 0,
+                    completed_via: CompletedVia::BucketMatched
+                }
+            );
+        }
+
+        #[test]
+        fn aligned_play_rerolls_hidden_state_mismatch_then_accepts_exact_retry() {
+            let (mut play_coords, rec_coords) = aligned_trajectory(299, 297, 64);
+            play_coords[297][1] = f32::from_bits(play_coords[297][1].to_bits() + 1);
+            let mut p = FakePort {
+                gate_index: 297,
+                playback_pos: 298,
+                play_coords,
+                rec_coords,
+                recorded_count: 400,
+                capture_ok_flag: true,
+                ..Default::default()
+            };
+            let mut config = cfg(Arm::Play, None, 1);
+            config.gate_align_rec = 299;
+            let mut c = TransportController::new(config);
+            drive_to_judge(&mut c, &mut p);
+
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Reroll {
+                    attempt: 1,
+                    suggested_delay_ms: STOP_SETTLE_MS,
+                    observed: Some(0),
+                    expected: None,
+                }
+            );
+            assert_eq!(p.gate_align_rec, 0, "reroll STOP must clear alignment");
+
+            drive_reroll_to_judge(&mut c, &mut p);
+            let (play_coords, rec_coords) = aligned_trajectory(299, 300, 64);
+            p.gate_index = 300;
+            p.playback_pos = 364;
+            p.play_coords = play_coords;
+            p.rec_coords = rec_coords;
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 1,
+                    completed_via: CompletedVia::BucketMatched
+                }
+            );
+        }
+
+        #[test]
+        fn aligned_play_rerolls_if_replay_ends_before_watcher_completes() {
+            let (play_coords, rec_coords) = aligned_trajectory(299, 297, 64);
+            let mut p = FakePort {
+                gate_index: 297,
+                playback_pos: 360,
+                play_coords,
+                rec_coords,
+                recorded_count: 400,
+                capture_ok_flag: true,
+                ..Default::default()
+            };
+            let mut config = cfg(Arm::Play, None, 1);
+            config.gate_align_rec = 299;
+            let mut c = TransportController::new(config);
+            drive_to_judge(&mut c, &mut p);
+            p.mode = TasMode::Off as u32;
+
+            assert!(matches!(
+                c.step(&mut p),
+                StepOutcome::Reroll {
+                    attempt: 1,
+                    observed: None,
+                    expected: None,
+                    ..
+                }
+            ));
         }
 
         /// Drive the controller through restart until it's armed CONT and in the
@@ -2620,8 +2977,8 @@ pub mod transport {
             p.restart_state = 2;
             c.step(p); // RestartWaitDone -> ArmSettle (Wait)
             c.step(p); // ArmSettle -> arm command, phase -> JudgeBucket
-            // Assert against the configured arm, not a hardcoded ArmContinue:
-            // PLAY is judged too when it is given a target.
+                       // Assert against the configured arm, not a hardcoded ArmContinue:
+                       // PLAY is judged too when it is given a target.
             assert_eq!(p.commands.last(), Some(&c.cfg.arm.command()));
             // game enters PLAY for the replay
             p.mode = TasMode::Play as u32;
@@ -2661,7 +3018,10 @@ pub mod transport {
             p.recorded_count = 400;
             drive_to_judge(&mut c, &mut p);
 
-            assert_eq!(p.speed_handoff_pos, 251, "handover staged at first_moving + 1");
+            assert_eq!(
+                p.speed_handoff_pos, 251,
+                "handover staged at first_moving + 1"
+            );
             assert_eq!(p.speed_after_handoff, 1.0);
             assert_eq!(p.playback_speed, 64.0);
 
@@ -2718,8 +3078,10 @@ pub mod transport {
             assert!(TransportController::new(a).owns_playback_speed());
 
             // CONT hands over at its splice instead, and REC never replays.
-            assert!(!TransportController::new(cfg(Arm::Continue, Some(target), 30))
-                .owns_playback_speed());
+            assert!(
+                !TransportController::new(cfg(Arm::Continue, Some(target), 30))
+                    .owns_playback_speed()
+            );
             assert!(!TransportController::new(cfg(Arm::Rec, None, 0)).owns_playback_speed());
         }
 
@@ -2763,8 +3125,14 @@ pub mod transport {
                 fn recorded_count(&self) -> u32 {
                     self.inner.recorded_count()
                 }
+                fn gate_index(&self) -> u32 {
+                    self.inner.gate_index()
+                }
                 fn set_continue_from_frame(&mut self, frame: u32) {
                     self.inner.set_continue_from_frame(frame)
+                }
+                fn set_gate_align_rec(&mut self, frame: u32) {
+                    self.inner.set_gate_align_rec(frame)
                 }
                 fn set_playback_speed(&mut self, speed: f32) {
                     if self.armed {
@@ -2892,7 +3260,10 @@ pub mod transport {
             assert_eq!(p.speed_handoff_pos, 0, "fired during the failed attempt");
 
             assert!(matches!(c.step(&mut p), StepOutcome::Reroll { .. }));
-            assert_eq!(p.speed_handoff_pos, 0, "no handover left armed by the reroll");
+            assert_eq!(
+                p.speed_handoff_pos, 0,
+                "no handover left armed by the reroll"
+            );
             assert_eq!(p.speed_after_handoff, 0.0);
             assert_eq!(
                 p.playback_speed, 64.0,
@@ -3604,7 +3975,12 @@ pub mod transport {
         fn jitter_zero_early_then_bounded() {
             // First NATURAL_RESTART_ATTEMPTS use no jitter (natural variance).
             for a in 1..=NATURAL_RESTART_ATTEMPTS {
-                assert_eq!(cont_retry_jitter_ms(a), 0, "attempt {} should not jitter", a);
+                assert_eq!(
+                    cont_retry_jitter_ms(a),
+                    0,
+                    "attempt {} should not jitter",
+                    a
+                );
             }
             // After that, a bounded non-zero escape jitter.
             for a in (NATURAL_RESTART_ATTEMPTS + 1)..=40 {
@@ -3645,8 +4021,14 @@ impl transport::TransportPort for TasSharedMemoryClient {
     fn recorded_count(&self) -> u32 {
         self.state().recorded_count
     }
+    fn gate_index(&self) -> u32 {
+        unsafe { std::ptr::read_volatile(&self.state().gate_index as *const u32) }
+    }
     fn set_continue_from_frame(&mut self, frame: u32) {
         self.state_mut().continue_from_frame = frame;
+    }
+    fn set_gate_align_rec(&mut self, frame: u32) {
+        self.state_mut().gate_align_rec = frame;
     }
     fn set_playback_speed(&mut self, speed: f32) {
         self.state_mut().playback_speed = speed;
@@ -3716,8 +4098,14 @@ impl transport::TransportPort for TasSharedMemoryClient {
     fn recorded_count(&self) -> u32 {
         self.state().recorded_count
     }
+    fn gate_index(&self) -> u32 {
+        self.state().gate_index
+    }
     fn set_continue_from_frame(&mut self, frame: u32) {
         self.state_mut().continue_from_frame = frame;
+    }
+    fn set_gate_align_rec(&mut self, frame: u32) {
+        self.state_mut().gate_align_rec = frame;
     }
     fn set_playback_speed(&mut self, speed: f32) {
         self.state_mut().playback_speed = speed;
@@ -4248,10 +4636,7 @@ mod level_seqlock_tests {
                             std::hint::spin_loop(); // widen the tear window
                         }
                     }
-                    std::ptr::write_volatile(
-                        std::ptr::addr_of_mut!((*s).level_path[src.len()]),
-                        0,
-                    );
+                    std::ptr::write_volatile(std::ptr::addr_of_mut!((*s).level_path[src.len()]), 0);
                     (*s).level_ctx_seq.fetch_add(1, Ordering::AcqRel); // -> even
                 }
                 // Leave a stable window. The real writer publishes on level
@@ -4292,7 +4677,10 @@ mod level_seqlock_tests {
         // must have been seen, which is what proves the reader was actually
         // running concurrently with the writer rather than sampling one quiet
         // value 20,000 times.
-        assert!(clean > 0, "no clean read ever completed — reader is starving");
+        assert!(
+            clean > 0,
+            "no clean read ever completed — reader is starving"
+        );
         assert!(
             saw_a && saw_b,
             "only ever saw one publication (A={} B={}) — the reader never \

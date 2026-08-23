@@ -45,7 +45,10 @@ pub fn run() -> bool {
     let path = match candidates.iter().find(|p| p.exists()) {
         Some(p) => p.to_string_lossy().into_owned(),
         None => {
-            eprintln!("ERROR: couldn't locate {} (tried {:?})", RECORDING_REL, candidates);
+            eprintln!(
+                "ERROR: couldn't locate {} (tried {:?})",
+                RECORDING_REL, candidates
+            );
             return false;
         }
     };

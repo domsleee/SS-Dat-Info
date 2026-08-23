@@ -11,6 +11,11 @@
 
 use std::collections::BTreeMap;
 
+type PositionKey = (u32, u32, u32);
+type PositionVelocityKey = (u32, u32, u32, u32, u32, u32);
+type FullKey = (u32, u32, u32, [u32; 9]);
+type BucketList<'a, K> = Vec<(&'a K, &'a Vec<u32>)>;
+
 use crate::harness;
 
 #[derive(Debug, Clone, Copy)]
@@ -57,11 +62,7 @@ pub fn run(iterations: u32) {
 }
 
 fn pos_key(s: &Sample) -> (u32, u32, u32) {
-    (
-        s.pos[0].to_bits(),
-        s.pos[1].to_bits(),
-        s.pos[2].to_bits(),
-    )
+    (s.pos[0].to_bits(), s.pos[1].to_bits(), s.pos[2].to_bits())
 }
 
 fn full_key(s: &Sample) -> (u32, u32, u32, [u32; 9]) {
@@ -69,7 +70,12 @@ fn full_key(s: &Sample) -> (u32, u32, u32, [u32; 9]) {
     for (i, v) in s.rot.iter().enumerate() {
         rot_bits[i] = v.to_bits();
     }
-    (s.pos[0].to_bits(), s.pos[1].to_bits(), s.pos[2].to_bits(), rot_bits)
+    (
+        s.pos[0].to_bits(),
+        s.pos[1].to_bits(),
+        s.pos[2].to_bits(),
+        rot_bits,
+    )
 }
 
 fn pos_vel_key(s: &Sample) -> (u32, u32, u32, u32, u32, u32) {
@@ -88,27 +94,33 @@ fn summarize(samples: &[Sample]) {
     println!("Total cycles: {}", samples.len());
 
     // Position-only buckets (what restart_play_and_match matches against).
-    let mut pos_buckets: BTreeMap<(u32, u32, u32), Vec<u32>> = BTreeMap::new();
+    let mut pos_buckets: BTreeMap<PositionKey, Vec<u32>> = BTreeMap::new();
     for s in samples {
         pos_buckets.entry(pos_key(s)).or_default().push(s.cycle);
     }
 
     // Combined position+rotation buckets (what would actually need to match
     // for the post-arm trajectory to be deterministic).
-    let mut full_buckets: BTreeMap<(u32, u32, u32, [u32; 9]), Vec<u32>> = BTreeMap::new();
+    let mut full_buckets: BTreeMap<FullKey, Vec<u32>> = BTreeMap::new();
     for s in samples {
         full_buckets.entry(full_key(s)).or_default().push(s.cycle);
     }
 
     // Combined position+velocity buckets (the cont-reliability hypothesis).
-    let mut pos_vel_buckets: BTreeMap<(u32, u32, u32, u32, u32, u32), Vec<u32>> = BTreeMap::new();
+    let mut pos_vel_buckets: BTreeMap<PositionVelocityKey, Vec<u32>> = BTreeMap::new();
     for s in samples {
-        pos_vel_buckets.entry(pos_vel_key(s)).or_default().push(s.cycle);
+        pos_vel_buckets
+            .entry(pos_vel_key(s))
+            .or_default()
+            .push(s.cycle);
     }
 
     println!("Distinct position-only buckets:    {}", pos_buckets.len());
     println!("Distinct (pos+rotation) buckets:   {}", full_buckets.len());
-    println!("Distinct (pos+velocity) buckets:   {}", pos_vel_buckets.len());
+    println!(
+        "Distinct (pos+velocity) buckets:   {}",
+        pos_vel_buckets.len()
+    );
 
     if full_buckets.len() > pos_buckets.len() {
         println!(
@@ -123,8 +135,8 @@ fn summarize(samples: &[Sample]) {
         );
     }
 
-    let mut pos_list: Vec<(&(u32, u32, u32), &Vec<u32>)> = pos_buckets.iter().collect();
-    pos_list.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    let mut pos_list: BucketList<'_, PositionKey> = pos_buckets.iter().collect();
+    pos_list.sort_by_key(|entry| std::cmp::Reverse(entry.1.len()));
 
     println!("\n--- Position buckets ---");
     for (i, (key, cycles)) in pos_list.iter().enumerate() {
@@ -159,22 +171,16 @@ fn summarize(samples: &[Sample]) {
 
     // Hit probability summary: assume the "right" combined bucket is the most
     // common one (most likely matches the recording's true state).
-    let mut full_list: Vec<(&(u32, u32, u32, [u32; 9]), &Vec<u32>)> =
-        full_buckets.iter().collect();
-    full_list.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    let mut full_list: BucketList<'_, FullKey> = full_buckets.iter().collect();
+    full_list.sort_by_key(|entry| std::cmp::Reverse(entry.1.len()));
 
     if let Some((_, top)) = full_list.first() {
         let p = top.len() as f64 / samples.len() as f64;
         let p_fail_60 = (1.0 - p).powi(60);
-        println!(
-            "\nIf you target the most-common (pos+rotation) bucket:"
-        );
+        println!("\nIf you target the most-common (pos+rotation) bucket:");
         println!("  Hit probability per attempt: {:.3}", p);
         println!("  Expected attempts to first hit: {:.2}", 1.0 / p);
-        println!(
-            "  Probability of needing >60 attempts: {:.6}",
-            p_fail_60
-        );
+        println!("  Probability of needing >60 attempts: {:.6}", p_fail_60);
     }
 
     // Position spread.

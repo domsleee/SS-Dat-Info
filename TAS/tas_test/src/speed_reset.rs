@@ -20,8 +20,8 @@
 
 use crate::harness;
 use std::thread;
-use tas_shared::TasMode;
 use std::time::{Duration, Instant};
+use tas_shared::TasMode;
 
 /// Duration for each tick rate measurement (seconds).
 const MEASURE_SECS: u64 = 2;

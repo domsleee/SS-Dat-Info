@@ -57,8 +57,13 @@ unsafe extern "system" {
     fn Module32Next(snap: Handle, me: *mut ModuleEntry32) -> i32;
     fn CloseHandle(h: Handle) -> i32;
     fn OpenProcess(access: Dword, inherit: i32, pid: Dword) -> Handle;
-    fn ReadProcessMemory(h: Handle, addr: usize, buf: *mut u8, size: usize, read: *mut usize)
-        -> i32;
+    fn ReadProcessMemory(
+        h: Handle,
+        addr: usize,
+        buf: *mut u8,
+        size: usize,
+        read: *mut usize,
+    ) -> i32;
 }
 
 const TH32CS_SNAPMODULE: Dword = 0x08;
@@ -194,12 +199,8 @@ struct MemoryBasicInformation {
 }
 
 extern "system" {
-    fn VirtualQueryEx(
-        h: usize,
-        addr: usize,
-        buf: *mut MemoryBasicInformation,
-        len: usize,
-    ) -> usize;
+    fn VirtualQueryEx(h: usize, addr: usize, buf: *mut MemoryBasicInformation, len: usize)
+        -> usize;
 }
 
 /// Snapshot every committed, readable, WRITABLE, non-image region — i.e. the
@@ -214,7 +215,12 @@ pub fn capture_heap(pid: Dword) -> Vec<RegionSnap> {
     const PAGE_GUARD: Dword = 0x100;
     const PAGE_NOACCESS: Dword = 0x01;
     // readable AND writable protections
-    const WRITABLE: &[Dword] = &[0x04 /*RW*/, 0x08 /*WC*/, 0x40 /*ERW*/, 0x80 /*ERWC*/];
+    const WRITABLE: &[Dword] = &[
+        0x04, /*RW*/
+        0x08, /*WC*/
+        0x40, /*ERW*/
+        0x80, /*ERWC*/
+    ];
     // Skip absurdly large regions: a multi-hundred-MB mapping is not game state
     // and would dominate both the read time and the diff.
     const MAX_REGION: usize = 64 * 1024 * 1024;
@@ -254,7 +260,13 @@ pub fn capture_heap(pid: Dword) -> Vec<RegionSnap> {
             let mut buf = vec![0u8; mbi.region_size];
             let mut read = 0usize;
             let ok = unsafe {
-                ReadProcessMemory(h, mbi.base_address, buf.as_mut_ptr(), mbi.region_size, &mut read)
+                ReadProcessMemory(
+                    h,
+                    mbi.base_address,
+                    buf.as_mut_ptr(),
+                    mbi.region_size,
+                    &mut read,
+                )
             };
             if ok != 0 && read >= 4 {
                 buf.truncate(read);
@@ -268,7 +280,11 @@ pub fn capture_heap(pid: Dword) -> Vec<RegionSnap> {
         addr = next;
     }
     unsafe { CloseHandle(h) };
-    println!("    heap: {} regions, {:.1} MB", out.len(), total as f64 / 1e6);
+    println!(
+        "    heap: {} regions, {:.1} MB",
+        out.len(),
+        total as f64 / 1e6
+    );
     out
 }
 
@@ -413,18 +429,20 @@ pub fn run(sub: &str) -> bool {
                 if ok == 0 || got == 0 {
                     continue;
                 }
-                println!("  scanning {} ({} bytes) for pointers to a level path", m.name, got);
+                println!(
+                    "  scanning {} ({} bytes) for pointers to a level path",
+                    m.name, got
+                );
                 let mut i = 0usize;
                 while i + 4 <= got {
-                    let p = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]])
-                        as usize;
+                    let p =
+                        u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
                     // Plausible user-space address only.
-                    if p >= 0x10000 && p < 0x7fff_0000 {
+                    if (0x10000..0x7fff_0000).contains(&p) {
                         let mut s = [0u8; 160];
                         let mut rd = 0usize;
-                        let ok2 = unsafe {
-                            ReadProcessMemory(h, p, s.as_mut_ptr(), s.len(), &mut rd)
-                        };
+                        let ok2 =
+                            unsafe { ReadProcessMemory(h, p, s.as_mut_ptr(), s.len(), &mut rd) };
                         if ok2 != 0 && rd > 8 {
                             let end = s.iter().position(|&c| c == 0).unwrap_or(rd);
                             if end > 8 {
@@ -462,13 +480,14 @@ pub fn run(sub: &str) -> bool {
             let now = capture_opt(pid, false);
             let mut rows: Vec<(String, usize, u32)> = prev
                 .keys()
-                .filter_map(|(m, off)| {
-                    now.get(&(m.clone(), *off)).map(|v| (m.clone(), *off, *v))
-                })
+                .filter_map(|(m, off)| now.get(&(m.clone(), *off)).map(|v| (m.clone(), *off, *v)))
                 .collect();
             rows.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
-            println!("
-{} candidates, current values:", rows.len());
+            println!(
+                "
+{} candidates, current values:",
+                rows.len()
+            );
             for (m, off, v) in &rows {
                 println!("  {}+{:#x}	{}", m, off, v);
             }

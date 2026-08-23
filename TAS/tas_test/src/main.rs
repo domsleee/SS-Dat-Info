@@ -13,54 +13,54 @@
 //!   cont-reliability — CONT splice reliability test at long frame offsets
 
 mod acceptance;
+mod arm_precision;
 mod benchmark;
+mod bucket_predict;
+mod bucket_scan;
 mod cache;
+mod catchup_speed;
 mod certificate;
+mod cont_hijack;
 mod cont_reliability;
+mod cont_restart_race;
 mod cont_splice_frame;
 mod cont_stress;
-mod cont_restart_race;
+mod countdown_probe;
 mod drift;
 mod drift_speed;
-mod bucket_predict;
-mod arm_precision;
-mod restart_precision;
-mod bucket_scan;
-mod countdown_probe;
+mod escape_speedup;
 mod f5_probe;
+mod fe10065_cont;
+mod fe_cont_reliability;
+mod fe_cont_stress;
+mod gate_align;
+mod gate_predict;
+mod gate_trace;
 mod gates;
 mod harness;
 mod level_hunt;
 mod level_seq;
-mod video_rate;
 mod patterns;
-mod catchup_speed;
-mod escape_speedup;
-mod fe_cont_reliability;
-mod fe10065_cont;
-mod fe_cont_stress;
 mod pause_resume;
-mod gate_predict;
-mod gate_align;
-mod gate_trace;
 mod play_judge;
-mod reroll_cost;
 mod play_pace;
+mod rec_repro;
 mod rec_start;
 mod refresh_recording;
 mod regression;
 mod reliability;
 mod replay;
+mod reroll_cost;
+mod restart_precision;
 mod restart_probe;
-mod snapshot_probe;
-mod snapshot_cont;
-mod cont_hijack;
 mod save_reload;
-mod rec_repro;
-mod steer_impact;
-mod stop_play_flake;
+mod snapshot_cont;
+mod snapshot_probe;
 mod speed;
 mod speed_reset;
+mod steer_impact;
+mod stop_play_flake;
+mod video_rate;
 
 use std::path::PathBuf;
 
@@ -85,17 +85,24 @@ fn main() {
         "acceptance" => {
             let out = output_dir();
             let cert_path = out.join("acceptance_certificate.json");
-            const ITERATIONS: u32 = 5;
+            let iterations = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(5u32);
+            if iterations == 0 {
+                eprintln!("acceptance iteration count must be at least 1");
+                std::process::exit(2);
+            }
             let mut last_result = None;
             let mut passed = 0u32;
-            for i in 1..=ITERATIONS {
-                println!("\n========== Acceptance run {}/{} ==========", i, ITERATIONS);
+            for i in 1..=iterations {
+                println!(
+                    "\n========== Acceptance run {}/{} ==========",
+                    i, iterations
+                );
                 let result = acceptance::run();
                 if result.all_pass() {
                     passed += 1;
-                    println!("Acceptance run {}/{} PASSED", i, ITERATIONS);
+                    println!("Acceptance run {}/{} PASSED", i, iterations);
                 } else {
-                    println!("Acceptance run {}/{} FAILED — aborting", i, ITERATIONS);
+                    println!("Acceptance run {}/{} FAILED — aborting", i, iterations);
                     last_result = Some(result);
                     break;
                 }
@@ -106,9 +113,9 @@ fn main() {
             }
             println!(
                 "\n=== Acceptance: {}/{} runs passed ===",
-                passed, ITERATIONS
+                passed, iterations
             );
-            std::process::exit(if passed == ITERATIONS { 0 } else { 1 });
+            std::process::exit(if passed == iterations { 0 } else { 1 });
         }
         "speed" => {
             let result = speed::run();
@@ -194,7 +201,7 @@ fn main() {
             let ok = escape_speedup::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
-"cont-restart-race" => {
+        "cont-restart-race" => {
             // Verifies the cave2 contract that tas_ui's Stop→Restart
             // serialisation depends on: confirms (1) sending Stop + Restart
             // back-to-back loses the Stop, so cave2 still sees REC/PLAY
@@ -251,9 +258,7 @@ fn main() {
             let mut iterations = 50u32;
             let mut i = 2;
             while i < args.len() {
-                if (args[i] == "--iterations" || args[i] == "-n")
-                    && i + 1 < args.len()
-                {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
                     iterations = args[i + 1].parse().unwrap_or(50);
                     i += 2;
                 } else {
@@ -587,7 +592,11 @@ fn main() {
                     i += 1;
                 }
             }
-            std::process::exit(if video_rate::run_with_cap(secs, cap, region) { 0 } else { 1 });
+            std::process::exit(if video_rate::run_with_cap(secs, cap, region) {
+                0
+            } else {
+                1
+            });
         }
         "level-seq" => {
             // Wiring test for the level-context seqlock: proves the DLL actually
@@ -694,7 +703,9 @@ fn main() {
                         .and_then(|p| p.parent().map(PathBuf::from))
                         .unwrap_or_else(|| PathBuf::from("."));
                     let candidates = [
-                        exe_dir.join("../../..").join("TAS/recordings/FE-tremendous.tasrec"),
+                        exe_dir
+                            .join("../../..")
+                            .join("TAS/recordings/FE-tremendous.tasrec"),
                         PathBuf::from("TAS/recordings/FE-tremendous.tasrec"),
                         PathBuf::from("recordings/FE-tremendous.tasrec"),
                     ];
@@ -736,7 +747,10 @@ fn main() {
                         i += 2;
                     }
                     "--restart" => {
-                        restart = args.get(i + 1).cloned().unwrap_or_else(|| "inprocess".into());
+                        restart = args
+                            .get(i + 1)
+                            .cloned()
+                            .unwrap_or_else(|| "inprocess".into());
                         i += 2;
                     }
                     "--splice" => {
@@ -1085,8 +1099,7 @@ fn run_smoke_test() {
     // failure `complete_ok` is there to catch.
     // "Moved" means moved on ANY axis. Gating on Z alone would call a run that
     // travelled purely in X/Y motionless.
-    let (rec_dx, rec_dy, rec_dz) =
-        drift::compute_movement(&state.rec_coords, rec_count as usize);
+    let (rec_dx, rec_dy, rec_dz) = drift::compute_movement(&state.rec_coords, rec_count as usize);
     let (play_dx, play_dy, play_dz) =
         drift::compute_movement(&state.play_coords, rec_count.min(played) as usize);
     let rec_travel = rec_dx.max(rec_dy).max(rec_dz);

@@ -765,8 +765,7 @@ fn write_manifest_atomic(dir: &Path, manifest: &Manifest) -> Result<(), String> 
     let json = serde_json::to_vec_pretty(manifest)
         .map_err(|e| format!("failed to serialize manifest: {}", e))?;
     let tmp = dir.join("manifest.json.tmp");
-    std::fs::write(&tmp, &json)
-        .map_err(|e| format!("failed to write manifest tmp: {}", e))?;
+    std::fs::write(&tmp, &json).map_err(|e| format!("failed to write manifest tmp: {}", e))?;
     // std::fs::rename atomically replaces the destination (MoveFileExW with
     // MOVEFILE_REPLACE_EXISTING on Windows): old-or-new, never missing.
     std::fs::rename(&tmp, dir.join("manifest.json")).map_err(|e| {
@@ -826,7 +825,12 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("ssb_hist_v2_{}_{}_{}", tag, std::process::id(), nonce))
+        std::env::temp_dir().join(format!(
+            "ssb_hist_v2_{}_{}_{}",
+            tag,
+            std::process::id(),
+            nonce
+        ))
     }
 
     fn snap(count: u32, fill: u8) -> PersistedSnapshot {
@@ -878,7 +882,11 @@ mod tests {
             assert_eq!(got.name, want.name);
             assert_eq!(got.pinned, want.pinned);
             assert_eq!(got.kind, want.kind);
-            assert_eq!(got.snapshot, want.snapshot, "snapshot for {}", want.entry_id);
+            assert_eq!(
+                got.snapshot, want.snapshot,
+                "snapshot for {}",
+                want.entry_id
+            );
             assert!(got.available);
         }
         assert_eq!(res.current_entry_id, cursor);
@@ -897,7 +905,11 @@ mod tests {
     fn roundtrip_entries_and_marker() {
         let dir = tmp_dir("rt");
         let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
-        let entries = vec![entry(1, "A", false, 3), entry(2, "B", true, 5), marker(3, "saved")];
+        let entries = vec![
+            entry(1, "A", false, 3),
+            entry(2, "B", true, 5),
+            marker(3, "saved"),
+        ];
         store.persist(&entries, Some(2), 4).unwrap();
         assert_loads_as(&dir, &entries, Some(2));
         let _ = std::fs::remove_dir_all(&dir);
@@ -924,7 +936,13 @@ mod tests {
         let entries = vec![entry(1, "A", false, 3)];
         store.persist(&entries, Some(1), 2).unwrap();
         let o = store.persist(&entries, Some(1), 2).unwrap();
-        assert_eq!(o, PersistOutcome { blobs_written: 0, blobs_deleted: 0 });
+        assert_eq!(
+            o,
+            PersistOutcome {
+                blobs_written: 0,
+                blobs_deleted: 0
+            }
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -957,7 +975,11 @@ mod tests {
         let dir = tmp_dir("missing");
         let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
         store
-            .persist(&[entry(1, "A", false, 3), entry(2, "B", false, 3)], Some(2), 3)
+            .persist(
+                &[entry(1, "A", false, 3), entry(2, "B", false, 3)],
+                Some(2),
+                3,
+            )
             .unwrap();
         // Yank a blob from under the store.
         std::fs::remove_file(blob_path(&dir, 1)).unwrap();
@@ -973,11 +995,16 @@ mod tests {
     fn corrupt_blob_quarantined() {
         let dir = tmp_dir("corrupt");
         let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
-        store.persist(&[entry(1, "A", false, 3)], Some(1), 2).unwrap();
+        store
+            .persist(&[entry(1, "A", false, 3)], Some(1), 2)
+            .unwrap();
         std::fs::write(blob_path(&dir, 1), b"garbage").unwrap();
         let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
         assert!(!res.entries[0].available);
-        assert!(dir.join("1.tasrec.corrupt").exists(), "corrupt blob quarantined");
+        assert!(
+            dir.join("1.tasrec.corrupt").exists(),
+            "corrupt blob quarantined"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -985,7 +1012,9 @@ mod tests {
     fn gc_orphan_blob_on_open() {
         let dir = tmp_dir("gc");
         let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
-        store.persist(&[entry(1, "A", false, 3)], Some(1), 2).unwrap();
+        store
+            .persist(&[entry(1, "A", false, 3)], Some(1), 2)
+            .unwrap();
         // Stray blob not referenced by the manifest.
         std::fs::write(blob_path(&dir, 99), b"orphan").unwrap();
         let (_s, _res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
@@ -998,9 +1027,14 @@ mod tests {
         let dir = tmp_dir("nextid");
         let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
         // next_entry_id stored as 100 even though max id is 2.
-        store.persist(&[entry(2, "A", false, 3)], Some(2), 100).unwrap();
+        store
+            .persist(&[entry(2, "A", false, 3)], Some(2), 100)
+            .unwrap();
         let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
-        assert_eq!(res.next_entry_id, 100, "authoritative stored next_entry_id wins");
+        assert_eq!(
+            res.next_entry_id, 100,
+            "authoritative stored next_entry_id wins"
+        );
         // A stray higher-id blob must also bump next_entry_id past it.
         std::fs::write(blob_path(&dir, 250), b"x").unwrap();
         let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
@@ -1117,9 +1151,17 @@ mod tests {
 
         for _ in 0..200 {
             let n = 3 + rng.below(6);
-            let ids: Vec<u64> = (0..n).map(|_| { let id = next_id; next_id += 1; id }).collect();
-            let model: Vec<StoredEntry> =
-                ids.iter().map(|&id| entry(id, &format!("e{}", id), false, 2)).collect();
+            let ids: Vec<u64> = (0..n)
+                .map(|_| {
+                    let id = next_id;
+                    next_id += 1;
+                    id
+                })
+                .collect();
+            let model: Vec<StoredEntry> = ids
+                .iter()
+                .map(|&id| entry(id, &format!("e{}", id), false, 2))
+                .collect();
             store.persist(&model, Some(ids[0]), next_id).unwrap();
 
             // Inject a fault.
@@ -1197,7 +1239,11 @@ mod tests {
         let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
         store
             .persist(
-                &[entry(1, "A", false, 3), entry(2, "B", false, 3), entry(3, "C", false, 3)],
+                &[
+                    entry(1, "A", false, 3),
+                    entry(2, "B", false, 3),
+                    entry(3, "C", false, 3),
+                ],
                 Some(2),
                 4,
             )
@@ -1214,7 +1260,11 @@ mod tests {
         let dir = tmp_dir("corruptman");
         let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
         store
-            .persist(&[entry(1, "A", false, 3), entry(2, "B", false, 3)], Some(2), 3)
+            .persist(
+                &[entry(1, "A", false, 3), entry(2, "B", false, 3)],
+                Some(2),
+                3,
+            )
             .unwrap();
         // Corrupt the manifest — must NOT trigger GC of the blobs.
         std::fs::write(dir.join("manifest.json"), b"{ not valid json").unwrap();
@@ -1231,7 +1281,11 @@ mod tests {
         let dir = tmp_dir("undemote");
         let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
         store
-            .persist(&[entry(1, "A", false, 3), entry(2, "B", false, 3)], Some(2), 3)
+            .persist(
+                &[entry(1, "A", false, 3), entry(2, "B", false, 3)],
+                Some(2),
+                3,
+            )
             .unwrap();
         std::fs::remove_file(blob_path(&dir, 1)).unwrap(); // blob 1 disappears
 
@@ -1361,7 +1415,11 @@ mod tests {
         };
         let o = store.persist(&[stored], Some(1), 2).unwrap();
         assert_eq!(o.blobs_written, 0, "legacy blob reused, not rewritten");
-        assert_eq!(std::fs::read(blob_path(&dir, 1)).unwrap(), before, "blob bytes unchanged");
+        assert_eq!(
+            std::fs::read(blob_path(&dir, 1)).unwrap(),
+            before,
+            "blob bytes unchanged"
+        );
 
         // And it still loads after the manifest was rewritten (format preserved).
         let (_s, res2) = HistoryStoreV2::open_in(dir.clone()).unwrap();
@@ -1376,14 +1434,19 @@ mod tests {
     fn blob_size_mismatch_rejected_without_reading() {
         let dir = tmp_dir("sizemismatch");
         let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
-        store.persist(&[entry(1, "A", false, 4)], Some(1), 2).unwrap();
+        store
+            .persist(&[entry(1, "A", false, 4)], Some(1), 2)
+            .unwrap();
         // Grow the blob so its length no longer matches the manifest `size`.
         let mut bytes = std::fs::read(blob_path(&dir, 1)).unwrap();
         bytes.extend_from_slice(&[0u8; 32]);
         std::fs::write(blob_path(&dir, 1), &bytes).unwrap();
 
         let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
-        assert!(!res.entries[0].available, "size-mismatched blob is unavailable");
+        assert!(
+            !res.entries[0].available,
+            "size-mismatched blob is unavailable"
+        );
         assert!(dir.join("1.tasrec.corrupt").exists(), "quarantined");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1421,7 +1484,10 @@ mod tests {
         write_manifest_with_blob(&dir, 1, &bytes, BLOB_FORMAT_BINCODE_V1, None);
 
         let (mut store, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
-        assert!(!res.entries[0].available, "invalid snapshot rejected, not loaded");
+        assert!(
+            !res.entries[0].available,
+            "invalid snapshot rejected, not loaded"
+        );
 
         // Bridge re-persists it with snapshot None (it couldn't build one): the
         // entry must stay a missing-blob Snapshot, NOT become an available marker.
@@ -1445,7 +1511,7 @@ mod tests {
         let dir = tmp_dir("rawfmt");
         let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
         let e = entry(1, "A", false, 5);
-        store.persist(&[e.clone()], Some(1), 2).unwrap();
+        store.persist(std::slice::from_ref(&e), Some(1), 2).unwrap();
         // Raw layout length is exactly 4 + count*(1 + 12).
         let len = std::fs::metadata(blob_path(&dir, 1)).unwrap().len();
         assert_eq!(len, (4 + 5 * BLOB_BYTES_PER_TICK) as u64);

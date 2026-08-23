@@ -20,45 +20,6 @@ pub struct Settings {
     /// entries and the current entry are always kept. Default preserves the old
     /// 500-entry depth so existing histories migrate without trimming.
     pub history_cap: usize,
-
-    /// Reroll the F5 restart on PLAY until it lands the recording's spawn
-    /// bucket, the way CONT already does.
-    ///
-    /// OFF, a PLAY starts on whatever bucket the restart happened to land, and a
-    /// near-miss diverges from the recording as soon as the boarder moves
-    /// (~tick 299) — the replay silently stops being the run you recorded.
-    ///
-    /// ON used to cost real time: the judge cannot rule until the replay has
-    /// passed the recording's first moving frame, which at 1x is ~3s of a
-    /// stationary boarder on the attempt that succeeds AND on every reroll.
-    /// `play_judge_speed` removed most of that by replaying the countdown fast
-    /// and handing back the moment the boarder moves - measured on FE-10065,
-    /// 3161 ms to first movement at 1x against 331 ms at 64x, with the replay
-    /// bit-identical either way. The switch stays because the judge speed can
-    /// be set to 1x, and because a user may simply not want rerolls.
-    pub play_bucket_match: bool,
-
-    /// Speed to replay the pre-movement countdown at while a bucket-matched
-    /// PLAY is being judged. 1.0 disables the catch-up and plays it at normal
-    /// speed.
-    ///
-    /// The judge cannot rule on the bucket until the replay has passed the
-    /// recording's first moving frame, and for a real recording that is ~2.6s
-    /// of watching a boarder stand still through the countdown - paid on the
-    /// attempt that succeeds AND on every reroll. Nothing in that stretch is
-    /// worth watching, so it is replayed fast; the DLL hands the speed back at
-    /// the exact tick the boarder starts moving.
-    #[serde(default = "default_play_judge_speed")]
-    pub play_judge_speed: f32,
-}
-
-/// Default judge-time catch-up speed for a bucket-matched PLAY.
-///
-/// 64x, matching the CONT catch-up multiplier's usual setting. Higher is
-/// possible - CONT judges at 256x - but the countdown is only ~2.6s, so
-/// past ~64x the restart dominates and there is nothing left to win.
-fn default_play_judge_speed() -> f32 {
-    64.0
 }
 
 impl Default for Settings {
@@ -85,11 +46,6 @@ impl Default for Settings {
             // runs only ~20 ticks/frame.)
             cont_catchup_speed: 256.0,
             history_cap: 500,
-            // Default ON: a replay that quietly diverges from the recording is
-            // worse than a replay that takes longer to start, and until now PLAY
-            // had no way to tell you it had landed the wrong bucket.
-            play_bucket_match: true,
-            play_judge_speed: default_play_judge_speed(),
         }
     }
 }
@@ -138,12 +94,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn old_settings_file_without_play_bucket_match_defaults_on() {
-        // A settings file written before play_bucket_match existed must still
-        // load, with the new key defaulting on. Without #[serde(default)] on the
-        // struct this deserialize fails, load() falls back to Default, and every
-        // other setting the user had chosen is silently reset — which is a much
-        // louder bug than the one this field was added for.
+    fn old_play_bucket_settings_are_ignored_without_resetting_other_values() {
         let old = r#"{
             "show_pico_panel": true,
             "show_debug_drift": false,
@@ -153,31 +104,14 @@ mod tests {
             "show_trajectory": false,
             "playback_speed": 1.0,
             "cont_catchup_speed": 128.0,
-            "history_cap": 250
+            "history_cap": 250,
+            "play_bucket_match": false,
+            "play_judge_speed": 32.0
         }"#;
         let s: Settings = serde_json::from_str(old).expect("old file must still parse");
-        assert!(s.play_bucket_match, "new field defaults on");
-        // The struct-level #[serde(default)] would give this f32 0.0, which
-        // reads as "no catch-up" and silently returns every old settings file
-        // to the slow judge. The per-field default is what stops that.
-        assert_eq!(
-            s.play_judge_speed,
-            default_play_judge_speed(),
-            "a missing judge speed must default to the catch-up, not 0"
-        );
-        // and the user's existing choices survive
         assert!(s.show_pico_panel);
         assert!(s.show_log);
         assert_eq!(s.history_cap, 250);
         assert_eq!(s.cont_catchup_speed, 128.0);
-    }
-
-    #[test]
-    fn play_bucket_match_round_trips() {
-        let mut s = Settings::default();
-        s.play_bucket_match = false;
-        let json = serde_json::to_string(&s).unwrap();
-        let back: Settings = serde_json::from_str(&json).unwrap();
-        assert!(!back.play_bucket_match);
     }
 }

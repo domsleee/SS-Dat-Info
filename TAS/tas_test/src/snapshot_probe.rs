@@ -80,11 +80,17 @@ pub fn run() -> bool {
         waited += 10;
         let p = read_pos(&client);
         if dist(p, spawn) > 0.5 {
-            println!("  boarder moving after ~{} frames (pos z={:.3})", waited, p[2]);
+            println!(
+                "  boarder moving after ~{} frames (pos z={:.3})",
+                waited, p[2]
+            );
             break;
         }
         if waited > 800 {
-            println!("  WARN: boarder still near spawn after {} frames; testing anyway", waited);
+            println!(
+                "  WARN: boarder still near spawn after {} frames; testing anyway",
+                waited
+            );
             break;
         }
     }
@@ -159,8 +165,18 @@ pub fn run() -> bool {
         rest_bytes,
         rest_us,
         rest_us as f64 / 1000.0,
-        if revert_match == 0xFF { 0 } else { revert_match },
-        if revert_match == 3 { "(BIT-EXACT rewind!)" } else if revert_match == 0xFF { "(no player ptr)" } else { "(partial)" }
+        if revert_match == 0xFF {
+            0
+        } else {
+            revert_match
+        },
+        if revert_match == 3 {
+            "(BIT-EXACT rewind!)"
+        } else if revert_match == 0xFF {
+            "(no player ptr)"
+        } else {
+            "(partial)"
+        }
     );
 
     // 5. Did the restore rewind the sim? Gold standard = the DLL frame-exact

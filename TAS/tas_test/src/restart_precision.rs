@@ -23,6 +23,7 @@
 //! Runs both ways in one session so the comparison is like-for-like:
 //!   * UNCONTROLLED: send the restart whenever, as the harness does today.
 //!   * EDGE-ALIGNED: spin until the tick counter changes, then send immediately.
+//!
 //! Everything downstream (arm at +40 measured ticks) is identical, so any
 //! difference in the fm spread is attributable to the restart timing alone.
 
@@ -152,8 +153,18 @@ pub fn run(iterations: u32) -> bool {
     let bu = hu.values().cloned().max().unwrap_or(0) as f64 / uncontrolled.len() as f64;
     let ba = ha.values().cloned().max().unwrap_or(0) as f64 / aligned.len() as f64;
 
-    println!("  uncontrolled : {:?}  ({} values, {:.0}% on the mode)", hu, hu.len(), bu * 100.0);
-    println!("  edge-aligned : {:?}  ({} values, {:.0}% on the mode)", ha, ha.len(), ba * 100.0);
+    println!(
+        "  uncontrolled : {:?}  ({} values, {:.0}% on the mode)",
+        hu,
+        hu.len(),
+        bu * 100.0
+    );
+    println!(
+        "  edge-aligned : {:?}  ({} values, {:.0}% on the mode)",
+        ha,
+        ha.len(),
+        ba * 100.0
+    );
 
     println!();
     if ha.len() == 1 && hu.len() > 1 {
@@ -162,7 +173,11 @@ pub fn run(iterations: u32) -> bool {
         println!("  sub-frame offset. Send CMD_RESTART on a tick edge and the bucket stops");
         println!("  being a lottery at all — no judge needed, fast or slow.");
     } else if ba > bu + 0.15 {
-        println!("  IMPROVED but not deterministic: the mode went from {:.0}% to {:.0}%.", bu * 100.0, ba * 100.0);
+        println!(
+            "  IMPROVED but not deterministic: the mode went from {:.0}% to {:.0}%.",
+            bu * 100.0,
+            ba * 100.0
+        );
         println!("  Restart timing is part of the residual but not all of it.");
     } else {
         println!("  NO EFFECT. Pinning the restart to a tick edge does not change the");

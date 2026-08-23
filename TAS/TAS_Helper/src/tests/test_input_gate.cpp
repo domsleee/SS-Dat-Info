@@ -11,6 +11,7 @@
 // policy (which required !game_paused for every block) and passes on the fix.
 
 #include "../input_gate.hpp"
+#include "../gate_alignment.hpp"
 #include <cstdio>
 
 static int g_failures = 0;
@@ -67,6 +68,22 @@ int main() {
           "off_idle_passes");
     check(ShouldBlockRealInput(G{OFF, false, false, true, false}) == false,
           "off_paused_passes");
+
+    // --- Gate-relative replay source mapping --------------------------------
+    check(GateAlignedInputSource(5, 0, 299, 500) == 5,
+          "alignment_preserves_early_input_timing");
+    check(GateAlignedInputSource(234, 0, 299, 500) == 234,
+          "alignment_preserves_input_before_safety_window");
+    check(GateAlignedInputSource(235, 0, 299, 500) == 299,
+          "alignment_holds_gate_mask_in_safety_window");
+    check(GateAlignedInputSource(297, 297, 299, 500) == 299,
+          "alignment_maps_early_live_gate_to_recorded_gate");
+    check(GateAlignedInputSource(302, 301, 299, 500) == 300,
+          "alignment_maps_positive_gate_offset");
+    check(GateAlignedInputSource(502, 301, 299, 500) == GATE_ALIGN_INVALID_SOURCE,
+          "alignment_rejects_source_after_recording");
+    check(GateAlignedInputSource(0, 0, 40, 500) == 40,
+          "short_countdown_holds_gate_mask_from_arm");
 
     if (g_failures == 0) {
         std::printf("ALL PASS\n");

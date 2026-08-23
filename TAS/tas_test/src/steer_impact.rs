@@ -55,7 +55,7 @@ const TURN_MIN: f64 = 6.0;
 const CONTRAST_MIN: f64 = 5.0;
 /// A Time.hi the game's clock can't be at (live values are small — machine
 /// uptime in coarse units; 0xBADBAD is centuries away) — guaranteed "wrong".
-const BOGUS_ARG4: u32 = 0x00BAD_BAD;
+const BOGUS_ARG4: u32 = 0x00BA_DBAD;
 
 /// Replay a hard RIGHT once with the given arg4 override and return the lateral
 /// (X) swing over the steered span plus the DLL-reported `arg4_source` for the
@@ -98,12 +98,18 @@ fn replay_turn_swing(
 
     let end = end.min(coords.len());
     if end <= STEER_START + 50 {
-        eprintln!("  (replay covered too few steered frames: {})", end.saturating_sub(STEER_START));
+        eprintln!(
+            "  (replay covered too few steered frames: {})",
+            end.saturating_sub(STEER_START)
+        );
         return None;
     }
     let xs = &coords[STEER_START..end];
     let xmin = xs.iter().map(|c| c[0] as f64).fold(f64::INFINITY, f64::min);
-    let xmax = xs.iter().map(|c| c[0] as f64).fold(f64::NEG_INFINITY, f64::max);
+    let xmax = xs
+        .iter()
+        .map(|c| c[0] as f64)
+        .fold(f64::NEG_INFINITY, f64::max);
     Some((xmax - xmin, arg4_source))
 }
 
@@ -116,7 +122,10 @@ pub fn run() -> bool {
     let mut client = harness::ensure_game_running();
 
     // Phase A: a deliberately-wrong Time.hi — injection must be discarded.
-    println!("  Phase A: forced WRONG arg4 (0x{:06X}) — expect NO turn ...", BOGUS_ARG4);
+    println!(
+        "  Phase A: forced WRONG arg4 (0x{:06X}) — expect NO turn ...",
+        BOGUS_ARG4
+    );
     let Some((wrong_swing, _)) = replay_turn_swing(&mut client, BOGUS_ARG4) else {
         println!("*** STEER-IMPACT INCONCLUSIVE (phase A did not produce a usable replay) ***");
         return false;
