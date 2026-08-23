@@ -990,7 +990,40 @@ static void __declspec(noinline) Cave2_Logic() {
             return;
         }
 
-        uint8_t mask = s->input_log[pos];
+        // Gate-relative input alignment.
+        //
+        // Normally the replay applies input_log[pos] — indexed from the ARM. If
+        // this replay's countdown ends on a different index than the
+        // recording's did, every input then lands at the wrong offset relative
+        // to the race start, and that is the ENTIRE reason a replay has to
+        // reroll until it matches the recording's first-moving frame.
+        //
+        // With gate_align_rec set, indexing is relative to the gate instead, so
+        // a countdown one tick longer or shorter simply shifts where the
+        // recording is read from and the run is unchanged.
+        //
+        // Before the gate, HOLD the input the recording had at its own gate.
+        //
+        // Injecting nothing there instead costs one cycle of input and shows up
+        // as a constant 0.389 drift: gate_index is stamped at the END of the
+        // cycle whose position first differs, so on that cycle the mask is
+        // still chosen without it, and input_log[rec_gate] is never applied at
+        // all. Holding it through the countdown fixes that exactly — the
+        // boarder cannot move before the gate, so the value is inert until the
+        // moment it becomes the correct one.
+        uint32_t src = pos;
+        if (s->gate_align_rec > 0) {
+            if (s->gate_index == 0) {
+                src = s->gate_align_rec;
+            } else {
+                int64_t off = (int64_t)pos - (int64_t)s->gate_index;
+                int64_t si = (int64_t)s->gate_align_rec + off;
+                src = (si < 0 || si >= (int64_t)s->recorded_count)
+                          ? 0xFFFFFFFFu
+                          : (uint32_t)si;
+            }
+        }
+        uint8_t mask = (src == 0xFFFFFFFFu) ? (uint8_t)0 : s->input_log[src];
 
         uint32_t buffer = GetDIBuffer(kbobj);
         WriteDIBuffer(buffer, mask);

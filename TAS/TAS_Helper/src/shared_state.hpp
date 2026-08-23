@@ -8,7 +8,7 @@
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
 constexpr size_t TRACE_FRAMES = 384;
 
-constexpr uint32_t TAS_SHARED_VERSION = 36; // +cave2 cycle ordinals
+constexpr uint32_t TAS_SHARED_VERSION = 37; // +gate_align_rec
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -408,6 +408,10 @@ struct TasSharedState {
     // cave2 CYCLE ordinals at press / arm / gate. tick_count is batched by
     // cave5 (esi added before the cycles run), so it cannot tell cycles apart
     // inside a batch — and first_moving counts cycles. See the Rust doc.
+    // The RECORDING's first-moving index; non-zero enables gate-relative input
+    // alignment for PLAY. Makes the gate index irrelevant rather than predicted.
+    // See the Rust doc.
+    volatile uint32_t gate_align_rec;
     volatile uint32_t press_seq;
     volatile uint32_t arm_seq;
     volatile uint32_t gate_seq;
@@ -447,7 +451,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1658352,
+static_assert(sizeof(TasSharedState) == 1658360,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 

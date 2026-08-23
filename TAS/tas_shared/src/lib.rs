@@ -7,7 +7,7 @@ use std::sync::atomic::compiler_fence;
 /// covers it end to end with room for the settle either side.
 pub const TRACE_FRAMES: usize = 384;
 
-pub const TAS_SHARED_VERSION: u32 = 36; // +cave2 cycle ordinals (tick_count batches; first_moving counts cycles)
+pub const TAS_SHARED_VERSION: u32 = 37; // +gate_align_rec (align replay input to the gate, not the arm)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -535,6 +535,23 @@ pub struct TasSharedState {
     /// while the prediction was computed in batched ticks, and the 310/311
     /// split may be nothing but that aliasing. frame_count already advances
     /// exactly once per cave2 call, which is the right unit.
+    /// The RECORDING's first-moving index. Non-zero turns on gate-relative
+    /// input alignment for PLAY; 0 leaves playback indexed from the arm.
+    ///
+    /// The gate index only ever mattered because a replay applies recorded
+    /// inputs BY INDEX, so a countdown that ends on a different index lands the
+    /// whole input stream at the wrong offset against the race start. Aligning
+    /// to the replay's OWN gate makes the index irrelevant instead of
+    /// predicted:
+    ///
+    /// ```text
+    /// recorded_index = playback_index - play_gate + rec_gate
+    /// ```
+    ///
+    /// which matters because the gate is NOT exactly predictable: the deciding
+    /// event is tick batching during the restart, which is over before the arm
+    /// and leaves nothing in the state to read.
+    pub gate_align_rec: u32,
     pub press_seq: u32,
     pub arm_seq: u32,
     pub gate_seq: u32,
@@ -3764,7 +3781,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_658_352);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_658_360);
     }
 
     #[test]
