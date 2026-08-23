@@ -421,6 +421,16 @@ static volatile uint32_t g_cave2_handoffArmed = 0;
 // invalidates a replay - stop, refusal, restart, playback completion, the
 // level-swap auto-stop. A marker that outlives its replay would fire against
 // whatever runs next, at a position that means nothing there.
+// Drop any gate-relative input alignment. Called from every path that is not
+// an aligned PLAY: the field is persistent shared memory, and a value left
+// behind by an earlier replay would silently re-index a later one. CONT is the
+// dangerous case — it runs the same PLAY handler for its prefix but splices at
+// an ARM-relative continue_from_frame, so an inherited alignment would shift
+// the input stream while leaving the splice point where it was.
+static inline void ClearGateAlign(TasSharedState* s) {
+    s->gate_align_rec = 0;
+}
+
 static inline void ClearSpeedHandoff(TasSharedState* s) {
     s->speed_handoff_pos = 0;
     g_cave2_handoffArmed = 0;
@@ -492,8 +502,10 @@ static void ProcessCommand(TasSharedState* s) {
             s->mode = MODE_REC;
             g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
             g_cave2_contArmed = 0;
-            // REC never hands over a speed; make sure it cannot inherit one.
+            // REC never hands over a speed, and never replays; make sure it
+            // cannot inherit either.
             ClearSpeedHandoff(s);
+            ClearGateAlign(s);
             g_diagInjectLogged = 0;
             g_cave2_pendingLog = 1;
             LogRootDiag(s, "arm-rec");
@@ -583,8 +595,11 @@ static void ProcessCommand(TasSharedState* s) {
             g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
             g_cave2_contArmed = 1;  // the ONLY place the splice gate opens
             // CONT hands over at its splice (cont_resume_speed), never
-            // mid-replay. Refuse any marker it might have inherited.
+            // mid-replay. Refuse any marker it might have inherited — and
+            // refuse gate alignment outright: CONT's splice is ARM-relative, so
+            // shifting its input stream would splice at the wrong place.
             ClearSpeedHandoff(s);
+            ClearGateAlign(s);
             g_cave2_pendingLog = 5;
             break;
 
@@ -606,6 +621,7 @@ static void ProcessCommand(TasSharedState* s) {
             // its own handover immediately before the arm command, so clearing
             // here cannot break a legitimate cycle.
             ClearSpeedHandoff(s);
+            ClearGateAlign(s);
             memcpy((void*)&s->speed_after_handoff, &ZERO_BITS, 4);
             g_cave2_pendingLog = 3;
             break;
@@ -980,7 +996,20 @@ static void __declspec(noinline) Cave2_Logic() {
             g_snapAtSpawn = false;
         }
 
-        if (pos >= s->recorded_count) {
+        // The endpoint has to move with the input.
+        //
+        // Alignment made the SOURCE index gate-relative but left this test
+        // arm-relative, so a replay whose gate landed 4 ticks early stopped 4
+        // gate-relative ticks short: its last four source indices ran past
+        // recorded_count and injected nothing, and the run ended before the
+        // recording did. Invisible to a fixed-window comparison, and exactly
+        // the sort of thing that changes a finish.
+        uint32_t play_end = s->recorded_count;
+        if (s->gate_align_rec > 0 && s->gate_index > 0
+                && s->recorded_count > s->gate_align_rec) {
+            play_end = s->gate_index + (s->recorded_count - s->gate_align_rec);
+        }
+        if (pos >= play_end) {
             s->mode = MODE_OFF;
             ReleaseTasInput(s, addr);  // replay done — un-stick its held keys
             g_cave2_contArmed = 0;  // hygiene — an armed CONT always splices before here
