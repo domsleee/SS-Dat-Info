@@ -265,7 +265,8 @@ fn main() {
         }
         "gate-align" => {
             let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(8u32);
-            std::process::exit(if gate_align::run(n) { 0 } else { 1 });
+            let rec = args.get(3).map(|s| s.as_str());
+            std::process::exit(if gate_align::run(n, rec) { 0 } else { 1 });
         }
         "gate-trace" => {
             let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(6u32);
