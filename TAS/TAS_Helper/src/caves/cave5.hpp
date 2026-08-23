@@ -400,6 +400,22 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         if (ctx.esp) {
             sp->clock_delta_lo = *(volatile uint32_t*)(uintptr_t)(ctx.esp + 0x40);
             sp->clock_delta_hi = *(volatile uint32_t*)(uintptr_t)(ctx.esp + 0x44);
+
+            // Accumulate it. The delta alone says nothing — it is ~0.01 every
+            // frame, which is why differencing two of them measured exactly
+            // zero. The SUM since the reset is the quantity the game compares
+            // against 3 seconds, and its fractional part is the sub-tick phase
+            // that decides whether the gate lands on tick 300 or 301.
+            //
+            // INTEGER, not float. The calibration says ~99,999 units per 10ms
+            // tick at 10MHz, so this is a 64-bit QPC delta. Reading those bytes
+            // as a double gives a denormal around 5e-319, which sums to nothing
+            // — which is exactly what the first attempt measured.
+            uint64_t delta = 0, accum = 0;
+            memcpy(&delta, (const void*)&sp->clock_delta_lo, 8);
+            memcpy(&accum, (const void*)&sp->secs_since_reset_lo, 8);
+            accum += delta;
+            memcpy((void*)&sp->secs_since_reset_lo, &accum, 8);
         }
     }
 

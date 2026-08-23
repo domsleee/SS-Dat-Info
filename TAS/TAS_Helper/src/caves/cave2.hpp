@@ -7,6 +7,7 @@
 #include "../game_addresses.hpp"
 #include "../external/safetyhook.hpp"
 #include "snapshot.hpp"
+#include "race_timer.hpp"   // racetimer::ReadClk() — the GAME's own clock
 
 // Cave 2: Supreme::Cycle hook (SG+0x13FE40)
 // Main REC/PLAY engine. Fires every render frame during gameplay.
@@ -251,7 +252,14 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
 // Uses integer-width memcpy to avoid corrupting x87 FPU state.
 // Drift computation is deferred to Rust test harness post-playback.
 static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
-    if (!s->player_ptr) return;
+    // A capture that writes nothing still lets the caller advance the index,
+    // leaving a STALE coordinate inside the current prefix. Anything scanning
+    // that prefix for first movement can read the hole as movement, so the
+    // failure has to be visible rather than silent.
+    if (!s->player_ptr) {
+        s->capture_ok = 0;
+        return;
+    }
 
     uint32_t raw[3];
     uint32_t rot_raw[9];
@@ -269,6 +277,7 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
             got_rot = true;
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
+        s->capture_ok = 0;
         return;
     }
 
@@ -297,12 +306,21 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
         // the coordinate array afterwards because the TICK it happened on is
         // what the prediction model needs, and that is only available now.
         // Integer compare on the raw bits - no float ops inside the hook.
-        if (s->gate_tick == 0 && index > 0) {
+        // capture_ok also means frame 0 of THIS session was really written;
+        // without it the comparison below is against the previous session's
+        // frame 0 and can stamp a gate that never happened.
+        if (s->capture_ok && s->gate_tick == 0 && index > 0) {
             const uint32_t* z = isRec ? (const uint32_t*)&s->rec_coords[0][0]
                                       : (const uint32_t*)&s->play_coords[0][0];
             if (raw[0] != z[0] || raw[1] != z[1] || raw[2] != z[2]) {
                 s->gate_tick = s->tick_count;
                 s->gate_index = index;
+                s->gate_clk = racetimer::ReadClk();
+                s->gate_reset_tick = s->reset_tick;
+                s->gate_qpc_lo = s->clock_delta_lo;
+                s->gate_qpc_hi = s->clock_delta_hi;
+                s->gate_secs_lo = s->secs_since_reset_lo;
+                s->gate_secs_hi = s->secs_since_reset_hi;
             }
         }
     }
@@ -310,6 +328,7 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
 
 // In-process F5 restart constants
 static constexpr uint32_t RESTART_F5_HOLD_FRAMES = 10;  // Hold F5 for 10 frames
+
 
 // Helper: press or release F5 in the DI buffer + notify BB3B10
 static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, bool pressed) {
@@ -663,9 +682,24 @@ static void ProcessCommand(TasSharedState* s) {
         // deferral path above returns early while it is still waiting, so
         // reaching here always means the command was really consumed, now.
         s->arm_consumed_tick = s->tick_count;
-        // Fresh session: the gate has not fired yet.
+        // Latch the restart this arm belongs to, so a later CMD_RESTART from
+        // anywhere cannot repair the pair into a different attempt's.
+        s->arm_restart_tick = s->restart_done_tick;
+        s->arm_clk = racetimer::ReadClk();
+        s->arm_reset_tick = s->reset_tick;
+        s->arm_qpc_lo = s->clock_delta_lo;
+        s->arm_qpc_hi = s->clock_delta_hi;
+        s->arm_secs_lo = s->secs_since_reset_lo;
+        s->arm_secs_hi = s->secs_since_reset_hi;
+        // Integer copies of the live position — no float ops, and the raw bits
+        // are what a settle-frame comparison wants anyway.
+        memcpy((void*)&s->arm_pos_x, (const void*)&s->player_x, 4);
+        memcpy((void*)&s->arm_pos_y, (const void*)&s->player_y, 4);
+        memcpy((void*)&s->arm_pos_z, (const void*)&s->player_z, 4);
+        // Fresh session: the gate has not fired yet, and no capture has failed.
         s->gate_tick = 0;
         s->gate_index = 0;
+        s->capture_ok = 1;
     }
     if (cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE) {
         s->arm_generation++;
@@ -740,6 +774,43 @@ static void __declspec(noinline) Cave2_Logic() {
             s->prev_player_y = s->player_y;
             s->prev_player_z = s->player_z;
 
+            // Level-reset detector: the most recent tick on which the position
+            // changed AT ALL.
+            //
+            // No distance threshold, because none is needed and the obvious one
+            // is wrong. A first attempt looked for a big teleport back to spawn,
+            // which never fired in a countdown-only cycle — the boarder had never
+            // left the spawn area, so the "teleport" was a fraction of a unit.
+            //
+            // The real signal is much simpler: during the countdown the boarder
+            // is BIT-IDENTICALLY still (measured: the position captured at the
+            // arm is the same 36/36 across every arm offset). So the last frame
+            // the position moved, read any time during the countdown, IS the
+            // frame the level reset. Raw-bit compare, no float ops.
+            // ...and only while OFF. The gate is a position change too, so a
+            // detector that watches every mode re-stamps itself at the very
+            // moment it is meant to be measuring the distance to — which is
+            // exactly what made every QPC reading come out as zero. The reset
+            // happens in OFF; the gate happens in REC/PLAY.
+            if (s->mode == MODE_OFF) {
+                uint32_t nb[3], ob[3];
+                memcpy(&nb[0], &new_x, 4);
+                memcpy(&nb[1], &new_y, 4);
+                memcpy(&nb[2], &new_z, 4);
+                memcpy(&ob[0], (const void*)&s->player_x, 4);
+                memcpy(&ob[1], (const void*)&s->player_y, 4);
+                memcpy(&ob[2], (const void*)&s->player_z, 4);
+                if (nb[0] != ob[0] || nb[1] != ob[1] || nb[2] != ob[2]) {
+                    s->reset_tick = s->tick_count;
+                    // cave5 published this frame's engine clock already.
+                    s->reset_qpc_lo = s->clock_delta_lo;
+                    s->reset_qpc_hi = s->clock_delta_hi;
+                    // Restart the seconds accumulator from the reset frame.
+                    s->secs_since_reset_lo = 0;
+                    s->secs_since_reset_hi = 0;
+                }
+            }
+
             // Update current position
             s->player_x = new_x;
             s->player_y = new_y;
@@ -773,6 +844,7 @@ static void __declspec(noinline) Cave2_Logic() {
                 // Release F5 after holding long enough
                 InjectF5(s, addr, kbobj, false);
                 s->restart_done_tick = s->tick_count;
+                s->restart_clk = racetimer::ReadClk();
                 s->restart_state = 2;  // Done
                 LogRootDiag(s, "f5-released");
                 g_cave2_pendingLog = 8;
