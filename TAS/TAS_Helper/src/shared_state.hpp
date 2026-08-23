@@ -8,7 +8,10 @@
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
 constexpr size_t TRACE_FRAMES = 384;
 
-constexpr uint32_t TAS_SHARED_VERSION = 37; // +gate_align_rec
+constexpr size_t OBJSNAP_PLAYER_DWORDS = 128;
+constexpr size_t OBJSNAP_PHYSICS_DWORDS = 512;
+
+constexpr uint32_t TAS_SHARED_VERSION = 38; // +object snapshots
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -443,6 +446,15 @@ struct TasSharedState {
     volatile uint32_t arm_consumed_tick;
     volatile uint32_t clock_delta_lo;
     volatile uint32_t clock_delta_hi;
+    // Raw dwords of the player object and its physics sub-object at the ARM
+    // and at the GATE — the hunt for the hidden spawn state that makes the
+    // first moving coordinate differ with the gate index matched. See Rust.
+    volatile uint32_t objsnap_arm_player[OBJSNAP_PLAYER_DWORDS];
+    volatile uint32_t objsnap_arm_physics[OBJSNAP_PHYSICS_DWORDS];
+    volatile uint32_t objsnap_gate_player[OBJSNAP_PLAYER_DWORDS];
+    volatile uint32_t objsnap_gate_physics[OBJSNAP_PHYSICS_DWORDS];
+    volatile uint32_t objsnap_player_ok;
+    volatile uint32_t objsnap_physics_ok;
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -451,7 +463,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1658360,
+static_assert(sizeof(TasSharedState) == 1663488,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 

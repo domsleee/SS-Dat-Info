@@ -7,7 +7,13 @@ use std::sync::atomic::compiler_fence;
 /// covers it end to end with room for the settle either side.
 pub const TRACE_FRAMES: usize = 384;
 
-pub const TAS_SHARED_VERSION: u32 = 37; // +gate_align_rec (align replay input to the gate, not the arm)
+/// Player object dwords captured for the hidden-state hunt (0x200 bytes).
+pub const OBJSNAP_PLAYER_DWORDS: usize = 128;
+/// Physics sub-object dwords captured (0x800 bytes; the rotation matrix sits
+/// at 0x1B4 so the object is at least 0x1D8, and this leaves headroom).
+pub const OBJSNAP_PHYSICS_DWORDS: usize = 512;
+
+pub const TAS_SHARED_VERSION: u32 = 38; // +object snapshots at arm and gate (the hidden-state hunt)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -592,6 +598,29 @@ pub struct TasSharedState {
     pub arm_consumed_tick: u32,
     pub clock_delta_lo: u32,
     pub clock_delta_hi: u32,
+    /// Raw dwords of the player object and its physics sub-object, captured
+    /// at the ARM and again at the GATE.
+    ///
+    /// The hunt for the second hidden spawn state. A control run settled that
+    /// the gate index is not the whole bucket: an aligned replay diverged at
+    /// the FIRST MOVING COORDINATE with its gate index matched, while the
+    /// legacy path replayed the same recording bit-exact. Position is
+    /// identical at the arm across restarts (measured 36/36), so whatever
+    /// differs is in the physics state position does not show — rotation,
+    /// velocity, contact, animation. Earlier work noted "rotation varies" and
+    /// dismissed it as unsound; this captures everything and lets the
+    /// trajectory outcome do the partitioning.
+    ///
+    /// Two capture points because they answer different questions: a
+    /// difference visible at the ARM can be rejected before a single tick
+    /// replays; one visible only at the GATE still names the field.
+    pub objsnap_arm_player: [u32; OBJSNAP_PLAYER_DWORDS],
+    pub objsnap_arm_physics: [u32; OBJSNAP_PHYSICS_DWORDS],
+    pub objsnap_gate_player: [u32; OBJSNAP_PLAYER_DWORDS],
+    pub objsnap_gate_physics: [u32; OBJSNAP_PHYSICS_DWORDS],
+    /// Dwords of each object that were actually readable (SEH-guarded).
+    pub objsnap_player_ok: u32,
+    pub objsnap_physics_ok: u32,
 }
 
 /// How many times to retry a torn level-context read before giving up.
@@ -4169,7 +4198,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_658_360);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_488);
     }
 
     #[test]
