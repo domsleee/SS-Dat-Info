@@ -1291,20 +1291,31 @@ pub fn restart_continue_and_splice_inprocess(
     }
 
     let catchup_speed = client.state().playback_speed;
+    // Gate-aligned CONT by default: the prefix input is indexed from the
+    // observed gate and the splice fires at the aligned position, so the
+    // countdown landing on a different tick no longer forces a reroll — the
+    // same win PLAY got. CONT_NO_ALIGN=1 falls back to the old bucket match
+    // (splice arm-relative, reroll until the fingerprint matches) for A/B.
+    let no_align = std::env::var("CONT_NO_ALIGN").is_ok();
+    let gate_align_rec = if no_align { 0 } else { expected_first_moving.unwrap_or(0) };
     let cfg = ArmConfig {
         arm: Arm::Continue,
         catchup_speed,
         continue_from_frame: splice_frame,
-        gate_align_rec: 0,
-        target: Some(BucketTarget {
-            expected_start_bits,
-            expected_first_moving,
-        }),
+        gate_align_rec,
+        target: if gate_align_rec > 0 {
+            None
+        } else {
+            Some(BucketTarget {
+                expected_start_bits,
+                expected_first_moving,
+            })
+        },
         max_retries,
         // CONT hands the speed back at the splice (cont_resume_speed), not
         // mid-replay, so it stages no handover here.
         resume_speed: 0.0,
-        predict_bucket: true,
+        predict_bucket: gate_align_rec == 0,
     };
     let mut controller = TransportController::new(cfg);
 

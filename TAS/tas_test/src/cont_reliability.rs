@@ -740,9 +740,33 @@ pub fn run(
                 replay_start_fc = state.cont_replay_start_fc;
                 splice_fc = state.cont_splice_fc;
                 playback_pos_at_splice = state.playback_pos;
-                replay_coverage_ok = playback_pos_at_splice >= splice_frame;
+                // Gate-aligned CONT shifts the live play index relative to the
+                // recording, so coverage and drift are gate-relative. Unaligned
+                // CONT has gate_align_rec == 0 and this reduces to the old
+                // raw-index comparison exactly.
+                let aligned = state.gate_align_rec > 0 && state.gate_index > 0;
+                let (rec_gate, play_gate) = if aligned {
+                    (state.gate_align_rec, state.gate_index)
+                } else {
+                    (0, 0)
+                };
+                // Play index the splice fired at, in gate-relative terms.
+                let aligned_splice = if aligned {
+                    play_gate + (splice_frame - rec_gate)
+                } else {
+                    splice_frame
+                };
+                replay_coverage_ok = playback_pos_at_splice >= aligned_splice;
+                // Gate-relative prefix length: ticks of trajectory past the gate
+                // that both sides share.
+                let rel_count = (splice_frame.saturating_sub(rec_gate))
+                    .min(playback_pos_at_splice.saturating_sub(play_gate));
                 let assessed_prefix = splice_frame.min(playback_pos_at_splice);
-                let d = drift::compute_drift(state, assessed_prefix);
+                let d = if aligned {
+                    drift::compute_drift_gate_relative(state, rec_gate, play_gate, rel_count)
+                } else {
+                    drift::compute_drift(state, assessed_prefix)
+                };
                 max_drift_x = d.max_drift_x;
                 max_drift_y = d.max_drift_y;
                 max_drift_z = d.max_drift_z;

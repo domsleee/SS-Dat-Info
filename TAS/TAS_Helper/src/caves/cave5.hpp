@@ -2,6 +2,7 @@
 #include "../stdafx.h"
 #include "../log.hpp"
 #include "../shared_state.hpp"
+#include "../gate_alignment.hpp"
 #include "../game_addresses.hpp"
 #include "../external/safetyhook.hpp"
 
@@ -248,10 +249,14 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // LAST tick of the batch — no leftover catch-up ticks spill into the
         // resumed REC (that splice-frame remainder was most of the overshoot).
         // Free: the batch was already ≤ cap; only the final replay frame shortens.
-        if (s->continue_from_frame > 0 && s->mode == MODE_PLAY
-            && s->playback_pos < s->continue_from_frame) {
-            int32_t remaining = (int32_t)(s->continue_from_frame - s->playback_pos);
-            if (realTick > remaining) realTick = remaining;
+        {
+            uint32_t aligned_splice = GateAlignedSplicePos(
+                s->continue_from_frame, s->gate_index, s->gate_align_rec);
+            if (s->continue_from_frame > 0 && s->mode == MODE_PLAY
+                && s->playback_pos < aligned_splice) {
+                int32_t remaining = (int32_t)(aligned_splice - s->playback_pos);
+                if (realTick > remaining) realTick = remaining;
+            }
         }
 
         // Same treatment for a PLAY speed handover: land the batch exactly ON the

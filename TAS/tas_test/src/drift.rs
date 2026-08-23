@@ -130,6 +130,26 @@ pub fn compute_drift(state: &TasSharedState, count: u32) -> DriftResult {
 }
 
 /// Compute drift between rec_coords and play_coords over the window `[start, count)`.
+/// Gate-relative drift: rec_coords from rec_gate, play_coords from play_gate,
+/// for `count` samples. When the two gates differ (the countdown landed on a
+/// different tick), raw-index drift is meaningless but this is exactly zero on
+/// a correct aligned replay.
+pub fn compute_drift_gate_relative(
+    state: &TasSharedState,
+    rec_gate: u32,
+    play_gate: u32,
+    count: u32,
+) -> DriftResult {
+    compute_drift_between(
+        &state.rec_coords,
+        &state.play_coords,
+        rec_gate as usize,
+        play_gate as usize,
+        count as usize,
+        false,
+    )
+}
+
 pub fn compute_drift_window(state: &TasSharedState, start: u32, count: u32) -> DriftResult {
     let end = count as usize;
     let start = (start as usize).min(end);
