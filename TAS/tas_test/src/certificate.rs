@@ -55,6 +55,7 @@ struct RegressionCase<'a> {
 struct AcceptanceCertificate {
     r#type: &'static str,
     timestamp: String,
+    baseline_neutral: bool,
     steering: String,
     replay_steered: String,
     zero_drift: String,
@@ -64,15 +65,13 @@ struct AcceptanceCertificate {
     max_drift_z: f64,
     max_base_vs_rec_x: f64,
     max_play_vs_base_x: f64,
+    rec_gate: u32,
+    play_gate: u32,
     verdict: &'static str,
 }
 
 /// Certificate for a regression suite run.
-pub fn write_regression_certificate(
-    results: &[CaseResult],
-    csv_path: &Path,
-    cert_path: &Path,
-) {
+pub fn write_regression_certificate(results: &[CaseResult], csv_path: &Path, cert_path: &Path) {
     let total = results.len();
     let passed = results.iter().filter(|r| r.all_gates_pass).count();
     let max_raw_drift_x: f64 = results.iter().map(|r| r.replay_drift_x).fold(0.0, f64::max);
@@ -141,6 +140,7 @@ pub fn write_acceptance_certificate(result: &AcceptanceResult, cert_path: &Path)
     let cert = AcceptanceCertificate {
         r#type: "acceptance",
         timestamp: format_timestamp(),
+        baseline_neutral: result.baseline_neutral,
         steering: result.steering.to_string(),
         replay_steered: result.replay_steered.to_string(),
         zero_drift: result.zero_drift.to_string(),
@@ -150,6 +150,8 @@ pub fn write_acceptance_certificate(result: &AcceptanceResult, cert_path: &Path)
         max_drift_z: result.max_drift_z,
         max_base_vs_rec_x: result.max_base_vs_rec_x,
         max_play_vs_base_x: result.max_play_vs_base_x,
+        rec_gate: result.rec_gate,
+        play_gate: result.play_gate,
         verdict: if result.all_pass() { "PASS" } else { "FAIL" },
     };
 
@@ -299,6 +301,7 @@ mod tests {
     #[test]
     fn acceptance_certificate_creates_valid_json() {
         let result = AcceptanceResult {
+            baseline_neutral: true,
             steering: crate::acceptance::Verdict::Pass,
             replay_steered: crate::acceptance::Verdict::Pass,
             zero_drift: crate::acceptance::Verdict::Pass,
@@ -310,6 +313,8 @@ mod tests {
             max_play_vs_base_x: 14.2,
             gates_pass: true,
             playback_complete: true,
+            rec_gate: 299,
+            play_gate: 297,
         };
         let cert_path = temp_path("acceptance.json");
 
@@ -318,6 +323,7 @@ mod tests {
         let content = std::fs::read_to_string(&cert_path).expect("read cert");
         let val: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
         assert_eq!(val["type"], "acceptance");
+        assert_eq!(val["baseline_neutral"], true);
         assert_eq!(val["steering"], "PASS");
         assert_eq!(val["replay_steered"], "PASS");
         assert_eq!(val["zero_drift"], "PASS");
@@ -330,6 +336,7 @@ mod tests {
     #[test]
     fn acceptance_certificate_fail_verdict() {
         let result = AcceptanceResult {
+            baseline_neutral: true,
             steering: crate::acceptance::Verdict::Fail,
             replay_steered: crate::acceptance::Verdict::Pass,
             zero_drift: crate::acceptance::Verdict::Pass,
@@ -341,6 +348,8 @@ mod tests {
             max_play_vs_base_x: 0.1,
             gates_pass: false,
             playback_complete: true,
+            rec_gate: 299,
+            play_gate: 300,
         };
         let cert_path = temp_path("acceptance_fail.json");
 

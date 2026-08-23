@@ -60,14 +60,9 @@ fn category_marker(category: &str) -> Option<&'static str> {
 #[allow(dead_code)]
 pub fn parse_level_code(path: &str) -> Option<String> {
     // Split on either separator, drop empties.
-    let segs: Vec<&str> = path
-        .split(['/', '\\'])
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segs: Vec<&str> = path.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
     // Find the "Levels" anchor; area/category/difficulty are the next three.
-    let li = segs
-        .iter()
-        .position(|s| s.eq_ignore_ascii_case("levels"))?;
+    let li = segs.iter().position(|s| s.eq_ignore_ascii_case("levels"))?;
     let area = segs.get(li + 1)?;
     let category = segs.get(li + 2)?;
     let difficulty = segs.get(li + 3)?;
@@ -157,15 +152,30 @@ mod tests {
 
     #[test]
     fn parse_all_areas_and_difficulties() {
-        assert_eq!(parse_level_code("Levels/Alpine/Tracks/Medium/x").as_deref(), Some("AM"));
-        assert_eq!(parse_level_code("Levels/Village/Tracks/Hard/x").as_deref(), Some("VH"));
-        assert_eq!(parse_level_code("Levels/Forest/Tracks/Easy/x").as_deref(), Some("FE"));
+        assert_eq!(
+            parse_level_code("Levels/Alpine/Tracks/Medium/x").as_deref(),
+            Some("AM")
+        );
+        assert_eq!(
+            parse_level_code("Levels/Village/Tracks/Hard/x").as_deref(),
+            Some("VH")
+        );
+        assert_eq!(
+            parse_level_code("Levels/Forest/Tracks/Easy/x").as_deref(),
+            Some("FE")
+        );
     }
 
     #[test]
     fn parse_halfpipe_and_ramp_get_category_marker() {
-        assert_eq!(parse_level_code("Levels/Forest/Halfpipe/Easy/x").as_deref(), Some("FPE"));
-        assert_eq!(parse_level_code("Levels/Alpine/Ramp/Hard/x").as_deref(), Some("ARH"));
+        assert_eq!(
+            parse_level_code("Levels/Forest/Halfpipe/Easy/x").as_deref(),
+            Some("FPE")
+        );
+        assert_eq!(
+            parse_level_code("Levels/Alpine/Ramp/Hard/x").as_deref(),
+            Some("ARH")
+        );
     }
 
     #[test]
@@ -203,7 +213,10 @@ mod tests {
 
     #[test]
     fn default_name_formats_level_and_time() {
-        assert_eq!(default_recording_name(Some("FE"), Some(5876)), "FE-5876.tasrec");
+        assert_eq!(
+            default_recording_name(Some("FE"), Some(5876)),
+            "FE-5876.tasrec"
+        );
     }
 
     /// The whole point of the fallback: you finish a run, the engine throws up

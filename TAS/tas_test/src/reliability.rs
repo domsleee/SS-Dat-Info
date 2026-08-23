@@ -67,7 +67,14 @@ impl ReliabilityReport {
         println!();
         println!(
             "{:>3} {:>6} {:>5} {:>12} {:>12} {:>12} {:>6} {:>6} {:>5}",
-            "#", "ticks", "trans", "max_drift_x", "max_drift_y", "max_drift_z", "pos", "play",
+            "#",
+            "ticks",
+            "trans",
+            "max_drift_x",
+            "max_drift_y",
+            "max_drift_z",
+            "pos",
+            "play",
             "gates"
         );
         println!("{}", "-".repeat(86));

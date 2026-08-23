@@ -162,7 +162,13 @@ impl ContReliabilityReport {
             let rerolls_list: Vec<String> = self
                 .results
                 .iter()
-                .map(|r| if r.spliced { r.rerolls.to_string() } else { "x".into() })
+                .map(|r| {
+                    if r.spliced {
+                        r.rerolls.to_string()
+                    } else {
+                        "x".into()
+                    }
+                })
                 .collect();
             println!();
             println!(
@@ -249,7 +255,12 @@ impl ContReliabilityReport {
 
         // Time to resume (restart→splice wall-clock) — the wait after pressing
         // CONT. min is the clean no-reroll catch-up; max includes reroll cycles.
-        let resume_times: Vec<f64> = self.results.iter().filter(|r| r.spliced).map(|r| r.resume_ms).collect();
+        let resume_times: Vec<f64> = self
+            .results
+            .iter()
+            .filter(|r| r.spliced)
+            .map(|r| r.resume_ms)
+            .collect();
         if !resume_times.is_empty() {
             let rmin = resume_times.iter().cloned().fold(f64::INFINITY, f64::min);
             let rmax = resume_times.iter().cloned().fold(0.0_f64, f64::max);
@@ -672,17 +683,27 @@ pub fn run(
                 let st = client.state();
                 let ticks = st.perf_cave2.calls;
                 let render_frames = st.perf_cave5.calls;
-                let cave2_cyc = if st.perf_cave2.calls > 0 {
-                    st.perf_cave2.cycles_total / st.perf_cave2.calls
-                } else { 0 };
-                let cave5_cyc = if st.perf_cave5.calls > 0 {
-                    st.perf_cave5.cycles_total / st.perf_cave5.calls
-                } else { 0 };
+                let cave2_cyc = st
+                    .perf_cave2
+                    .cycles_total
+                    .checked_div(st.perf_cave2.calls)
+                    .unwrap_or(0);
+                let cave5_cyc = st
+                    .perf_cave5
+                    .cycles_total
+                    .checked_div(st.perf_cave5.calls)
+                    .unwrap_or(0);
                 let secs = resume_ms / 1000.0;
-                let render_fps = if secs > 0.0 { render_frames as f64 / secs } else { 0.0 };
+                let render_fps = if secs > 0.0 {
+                    render_frames as f64 / secs
+                } else {
+                    0.0
+                };
                 let ticks_per_frame = if render_frames > 0 {
                     ticks as f64 / render_frames as f64
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
                 println!(
                     "  PERF: ticks(cave2)={} render_frames(cave5)={} | ticks/frame={:.1} (cap={}) | render_fps={:.0} | hook_cyc cave2={} cave5={}",
                     ticks, render_frames, ticks_per_frame, 64, render_fps, cave2_cyc, cave5_cyc

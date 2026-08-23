@@ -28,7 +28,6 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-
 use crate::harness;
 
 const GATE_TIMEOUT_SECS: u64 = 20;
@@ -161,7 +160,13 @@ fn analyse(runs: &[Run]) -> bool {
             match (last_zero, gi) {
                 (Some(z), Some(g)) if g > z => {
                     let d = g as i64 - z as i64;
-                    println!("  run {:>2}: teardownF={} gateF={} cycles={}", i + 1, z, g, d);
+                    println!(
+                        "  run {:>2}: teardownF={} gateF={} cycles={}",
+                        i + 1,
+                        z,
+                        g,
+                        d
+                    );
                     ds.push(d);
                 }
                 (None, _) => println!("  run {:>2}: no teardown frame seen", i + 1),
@@ -171,21 +176,41 @@ fn analyse(runs: &[Run]) -> bool {
         ds.sort_unstable();
         let n = ds.len();
         ds.dedup();
-        println!("  distinct cycles from teardown to gate: {:?} (over {} runs)", ds, n);
+        println!(
+            "  distinct cycles from teardown to gate: {:?} (over {} runs)",
+            ds, n
+        );
         if ds.len() == 1 && n > 1 {
             println!("  *** CONSTANT: the teardown frame predicts the gate exactly ***");
         }
     }
 
     println!("-- countdown measured in cave2 CYCLES --");
-    let mut kp: Vec<i64> = runs.iter().map(|r| r.gate_seq as i64 - r.press_seq as i64).collect();
-    let mut ka: Vec<i64> = runs.iter().map(|r| r.gate_seq as i64 - r.arm_seq as i64).collect();
-    let mismatch = runs.iter().filter(|r| (r.gate_seq as i64 - r.arm_seq as i64) != r.first_moving as i64).count();
-    kp.sort_unstable(); ka.sort_unstable();
+    let mut kp: Vec<i64> = runs
+        .iter()
+        .map(|r| r.gate_seq as i64 - r.press_seq as i64)
+        .collect();
+    let mut ka: Vec<i64> = runs
+        .iter()
+        .map(|r| r.gate_seq as i64 - r.arm_seq as i64)
+        .collect();
+    let mismatch = runs
+        .iter()
+        .filter(|r| (r.gate_seq as i64 - r.arm_seq as i64) != r.first_moving as i64)
+        .count();
+    kp.sort_unstable();
+    ka.sort_unstable();
     println!("  gate_seq - press_seq : {:?}", kp);
     println!("  gate_seq - arm_seq   : {:?}", ka);
-    println!("  first_moving         : {:?}", runs.iter().map(|r| r.first_moving).collect::<Vec<_>>());
-    println!("  (gate_seq-arm_seq) != first_moving on {}/{}", mismatch, runs.len());
+    println!(
+        "  first_moving         : {:?}",
+        runs.iter().map(|r| r.first_moving).collect::<Vec<_>>()
+    );
+    println!(
+        "  (gate_seq-arm_seq) != first_moving on {}/{}",
+        mismatch,
+        runs.len()
+    );
     kp.dedup();
     if kp.len() == 1 {
         println!("  *** CONSTANT in cycles: the 310/311 split was tick_count aliasing ***");
@@ -235,7 +260,16 @@ fn analyse(runs: &[Run]) -> bool {
         let dt = r.gate as i64 - rt as i64;
         println!(
             "  {:>3} {:>2}x | {:>6} {:>6} {:>4}of{:<3} | {:>5} {:>6} | {:>7} {:>6}",
-            i + 1, r.speed, ri, rt, ri - first_of_tick + 1, ndup, gi, r.gate, df, dt
+            i + 1,
+            r.speed,
+            ri,
+            rt,
+            ri - first_of_tick + 1,
+            ndup,
+            gi,
+            r.gate,
+            df,
+            dt
         );
         by_dframes.push(df);
         by_dticks.push(dt);
@@ -263,7 +297,11 @@ fn analyse(runs: &[Run]) -> bool {
                 let d = r.gate as i64 - r.frames[n].tick as i64;
                 println!(
                     "  {:>3} | {:>11} {:>11} | {:>5} | {}",
-                    i + 1, n, r.frames[n].tick, r.gate, d
+                    i + 1,
+                    n,
+                    r.frames[n].tick,
+                    r.gate,
+                    d
                 );
                 by_phys.push(d);
             }

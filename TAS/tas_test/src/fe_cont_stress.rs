@@ -86,9 +86,7 @@ fn wait_restart_complete(client: &mut tas_shared::TasSharedMemoryClient) -> bool
 
 /// Returns (success, wall_clock_seconds from ARM_CONTINUE send to reaching
 /// VERIFY_FRAMES).
-fn arm_continue_and_wait_for_verify(
-    client: &mut tas_shared::TasSharedMemoryClient,
-) -> (bool, f64) {
+fn arm_continue_and_wait_for_verify(client: &mut tas_shared::TasSharedMemoryClient) -> (bool, f64) {
     // Reset playback_pos before ArmContinue — a previous splice leaves
     // playback_pos at 2200 (the splice frame), and if the polling loop
     // reads that stale value it spuriously sees "verify frame already
@@ -155,11 +153,18 @@ fn first_moving_frame(coords: &[[f32; 3]]) -> Option<usize> {
     None
 }
 
-fn matches_reference(client: &tas_shared::TasSharedMemoryClient, reference: &[[f32; 3]]) -> Option<usize> {
+fn matches_reference(
+    client: &tas_shared::TasSharedMemoryClient,
+    reference: &[[f32; 3]],
+) -> Option<usize> {
     let state = client.state();
-    for j in 0..VERIFY_FRAMES as usize {
+    for (j, r) in reference
+        .iter()
+        .copied()
+        .enumerate()
+        .take(VERIFY_FRAMES as usize)
+    {
         let p = state.play_coords[j];
-        let r = reference[j];
         if p[0].to_bits() != r[0].to_bits()
             || p[1].to_bits() != r[1].to_bits()
             || p[2].to_bits() != r[2].to_bits()
@@ -187,16 +192,37 @@ fn run_one_speed(
     replay::write_to_shared(client, rec);
     if !wait_restart_complete(client) {
         println!("  Reference restart timed out");
-        return SpeedResult { speed, reference_ok: false, one_shot_matched: 0, eventual_matched: 0, total_rerolls: 0, iterations: DEFAULT_ITERATIONS_PER_SPEED, ref_wall_secs: 0.0, expected_first_moving: None };
+        return SpeedResult {
+            speed,
+            reference_ok: false,
+            one_shot_matched: 0,
+            eventual_matched: 0,
+            total_rerolls: 0,
+            iterations: DEFAULT_ITERATIONS_PER_SPEED,
+            ref_wall_secs: 0.0,
+            expected_first_moving: None,
+        };
     }
     // CMD_RESTART zeros continue_from_frame; re-write so ARM_CONTINUE's
     // validity check sees the right value.
     client.state_mut().continue_from_frame = SPLICE_FRAME;
     let (verify_ok, ref_wall) = arm_continue_and_wait_for_verify(client);
     if !verify_ok {
-        println!("  Reference ARM_CONTINUE didn't reach frame {}", VERIFY_FRAMES);
+        println!(
+            "  Reference ARM_CONTINUE didn't reach frame {}",
+            VERIFY_FRAMES
+        );
         harness::stop(client);
-        return SpeedResult { speed, reference_ok: false, one_shot_matched: 0, eventual_matched: 0, total_rerolls: 0, iterations: DEFAULT_ITERATIONS_PER_SPEED, ref_wall_secs: 0.0, expected_first_moving: None };
+        return SpeedResult {
+            speed,
+            reference_ok: false,
+            one_shot_matched: 0,
+            eventual_matched: 0,
+            total_rerolls: 0,
+            iterations: DEFAULT_ITERATIONS_PER_SPEED,
+            ref_wall_secs: 0.0,
+            expected_first_moving: None,
+        };
     }
     println!(
         "  Reference splice: {:.2}s wall to reach {} frames (speedup vs 1× computed in the summary)",
@@ -205,7 +231,9 @@ fn run_one_speed(
     let reference = capture_play_prefix(client);
     println!(
         "  Reference: start=({:.4}, {:.4}, {:.4})  anchor[{}]=({:.4}, {:.4}, {:.4})",
-        reference[0][0], reference[0][1], reference[0][2],
+        reference[0][0],
+        reference[0][1],
+        reference[0][2],
         VERIFY_FRAMES - 1,
         reference[(VERIFY_FRAMES - 1) as usize][0],
         reference[(VERIFY_FRAMES - 1) as usize][1],
@@ -287,7 +315,9 @@ fn run_one_speed(
                         "  Iter {:>2}: {} end=({:.4},{:.4},{:.4})  attempt={}",
                         i + 1,
                         label,
-                        p[0], p[1], p[2],
+                        p[0],
+                        p[1],
+                        p[2],
                         attempt + 1,
                     );
                     if attempt == 0 {
@@ -422,7 +452,10 @@ pub fn run(speeds: &[f32]) -> bool {
     }
     println!();
     println!("one_shot = matched first try, no reroll (= what user sees pressing cont once)");
-    println!("eventual = matched within {} bucket-detection rerolls (= auto-reroll feature)", MAX_REROLLS);
+    println!(
+        "eventual = matched within {} bucket-detection rerolls (= auto-reroll feature)",
+        MAX_REROLLS
+    );
     println!();
     all_eventual_ok
 }

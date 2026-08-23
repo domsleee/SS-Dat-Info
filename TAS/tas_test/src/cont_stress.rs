@@ -68,7 +68,10 @@ pub fn run(
         None => match locate() {
             Some(p) => p,
             None => {
-                eprintln!("ERROR: couldn't locate {} (pass --file <path>)", RECORDING_REL);
+                eprintln!(
+                    "ERROR: couldn't locate {} (pass --file <path>)",
+                    RECORDING_REL
+                );
                 return false;
             }
         },
@@ -81,7 +84,10 @@ pub fn run(
         }
     };
     if rec.count <= splice_frame {
-        eprintln!("ERROR: recording has {} frames, need > {}", rec.count, splice_frame);
+        eprintln!(
+            "ERROR: recording has {} frames, need > {}",
+            rec.count, splice_frame
+        );
         return false;
     }
     println!("  Recording: {} ({} frames)", path.display(), rec.count);
@@ -198,7 +204,10 @@ pub fn run(
 
     println!("\n=== CONT-STRESS RESULTS ===");
     println!("  reroll counts:  {:?}", reroll_counts);
-    println!("  rerolls:        median={} mean={:.1} max={}", median, mean, max);
+    println!(
+        "  rerolls:        median={} mean={:.1} max={}",
+        median, mean, max
+    );
     println!(
         "  wall-clock (s): {}",
         wall_secs

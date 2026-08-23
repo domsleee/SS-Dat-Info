@@ -3,8 +3,8 @@
 //! A replay normally applies `input_log[playback_pos]` — indexed from the ARM.
 //! If this replay's countdown ends on a different index than the recording's
 //! did, every input lands at the wrong offset against the race start and the
-//! run diverges. That, and only that, is why a judged PLAY rerolls until it
-//! matches the recording's first-moving frame.
+//! run diverges. This tool isolates that indexing problem; it does not assume
+//! the gate index fully describes the game's hidden spawn state.
 //!
 //! Predicting that index exactly turned out to be impossible from arm-time
 //! state: the deciding event is tick batching during the restart, which is over
@@ -19,8 +19,8 @@
 //!     rec_coords[rec_gate + k]  vs  play_coords[play_gate + k]
 //!
 //! If those agree while the raw indices disagree, the countdown's end tick has
-//! stopped mattering — which is a better outcome than predicting it, because
-//! there is then nothing left to get wrong.
+//! stopped mattering for input indexing. Product PLAY still watches the first
+//! gate-relative trajectory window and rerolls a differing hidden spawn state.
 
 use std::path::PathBuf;
 use std::thread;
@@ -32,15 +32,15 @@ use crate::harness;
 use crate::replay;
 
 const RECORDING_REL: &str = "TAS/recordings/FE-10065.tasrec";
-/// Compare the WHOLE overlap past each side's gate, not a window. The first
-/// version compared 1200 of 7162 ticks, which cannot see the failure this
-/// project has a documented history of: a bucket that tracks through the
-/// settle and veers off hundreds of ticks later.
-const COMPARE_TICKS: u32 = 6900;
+/// A post-finish dialog stops Supreme::Cycle while leaving TAS in PLAY. Treat a
+/// stable playback position and stable, readable race clock as a terminal run
+/// instead of burning the full timeout. The matched control establishes how
+/// many meaningful ticks exist before that freeze.
+const FINISH_STALL_SECS: u64 = 3;
 /// Replayed fast. Judging during a catch-up was already measured bit-exact
 /// (drift 0.0000 at 64x on this same recording), so this buys depth without
 /// buying a new variable.
-const COMPARE_SPEED: f32 = 16.0;
+const DEFAULT_COMPARE_SPEED: f32 = 16.0;
 const PLAY_TIMEOUT_SECS: u64 = 180;
 /// Arm delays swept across attempts, in milliseconds. The gate is measured
 /// from the ARM, so delaying the arm moves the gate — which is the only way to
@@ -58,18 +58,33 @@ struct Attempt {
     first_mismatch: Option<u32>,
     /// Ticks the replay was expected to produce past its gate, and did.
     expected: u32,
+    /// The on-screen race time at the end of the replay, in centiseconds.
+    ///
+    /// Position agreeing is not the same as the RUN agreeing. This is the
+    /// number a TAS is actually judged on, it is read from the HUD rather than
+    /// derived, and it would catch a replay that traced the right path while
+    /// the race clock ran differently.
+    race_time_cs: u32,
+    /// True when the HUD clock stayed fixed after playback ended. An unfinished
+    /// recording's clock keeps running, so a later poll is not a run result.
+    race_time_final: bool,
     /// How many ticks were actually compared. A pass on three ticks is not a
     /// pass, so this is reported and asserted rather than assumed.
     compared: u32,
     play_gate: u32,
     rec_gate: u32,
-    /// Max per-axis |play - rec| over COMPARE_TICKS past each side's own gate.
+    /// Max per-axis |play - rec| over the available recording past each gate.
     gate_rel_drift: f32,
     /// The same comparison done the OLD way, index against index.
     index_drift: f32,
 }
 
 pub fn run(iterations: u32, rec: Option<&str>) -> bool {
+    let compare_speed = std::env::var("TAS_GATE_ALIGN_SPEED")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(DEFAULT_COMPARE_SPEED);
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(PathBuf::from))
@@ -85,7 +100,10 @@ pub fn run(iterations: u32, rec: Option<&str>) -> bool {
         return false;
     };
     let path = path.to_string_lossy().into_owned();
-    println!("=== Gate-relative input alignment: {} ===", path);
+    println!(
+        "=== Gate-relative input alignment: {} at {}x ===",
+        path, compare_speed
+    );
 
     let mut client = harness::ensure_game_running();
     harness::stop_competing_tas_ui_writer();
@@ -120,7 +138,10 @@ pub fn run(iterations: u32, rec: Option<&str>) -> bool {
     {
         let s = client.state();
         let gate_mask = s.input_log[rec_gate as usize];
-        let nonzero = s.input_log[..rec_gate as usize].iter().filter(|b| **b != 0).count();
+        let nonzero = s.input_log[..rec_gate as usize]
+            .iter()
+            .filter(|b| **b != 0)
+            .count();
         let differing = s.input_log[..rec_gate as usize]
             .iter()
             .filter(|b| **b != gate_mask)
@@ -138,14 +159,15 @@ pub fn run(iterations: u32, rec: Option<&str>) -> bool {
     harness::focus_game();
 
     let mut attempts = Vec::new();
+    let mut failed_attempts = 0u32;
     for i in 1..=iterations {
         // Alternate alignment, and sweep the arm delay so both arms see the
         // same spread of gates rather than whatever the machine felt like.
         let aligned = i % 2 == 0;
         let delay = ARM_DELAYS_MS[(i as usize / 2) % ARM_DELAYS_MS.len()];
-        if let Some(a) = one_attempt(&mut client, rec_gate, aligned, delay) {
+        if let Some(a) = one_attempt(&mut client, rec_gate, aligned, delay, compare_speed) {
             println!(
-                "  attempt {:>2} {:<9} d{:>2}ms play_gate={} (rec {}, off {:+}) | {}/{} ticks | {} bad from {:?} | gate-rel {:.5} | index {:.5}",
+                "  attempt {:>2} {:<9} d{:>2}ms play_gate={} (rec {}, off {:+}) | {}/{} ticks | {} bad from {:?} | race {} | gate-rel {:.5} | index {:.5}",
                 i,
                 if aligned { "ALIGNED" } else { "baseline" },
                 delay,
@@ -156,16 +178,53 @@ pub fn run(iterations: u32, rec: Option<&str>) -> bool {
                 a.expected,
                 a.bit_mismatches,
                 a.first_mismatch,
+                a.race_time_cs,
                 a.gate_rel_drift,
                 a.index_drift
             );
             attempts.push(a);
         } else {
             println!("  attempt {:>2}: failed", i);
+            failed_attempts += 1;
+        }
+    }
+    // A matched, unaligned baseline is the control. Natural gate jitter can
+    // omit one from a small requested sample, so collect bounded extra controls
+    // rather than turning a sound feature into a coin-flip test result.
+    if !attempts
+        .iter()
+        .any(|a| !a.aligned && a.play_gate == rec_gate)
+    {
+        println!("  no matched baseline yet; collecting up to 12 control attempts");
+        for extra in 0..12u32 {
+            let delay = ARM_DELAYS_MS[extra as usize % ARM_DELAYS_MS.len()];
+            match one_attempt(&mut client, rec_gate, false, delay, compare_speed) {
+                Some(a) => {
+                    println!(
+                        "  control {:>2} d{:>2}ms play_gate={} (off {:+}) | {}/{} ticks | race {}",
+                        extra + 1,
+                        delay,
+                        a.play_gate,
+                        a.play_gate as i64 - rec_gate as i64,
+                        a.compared,
+                        a.expected,
+                        a.race_time_cs
+                    );
+                    let matched = a.play_gate == rec_gate;
+                    attempts.push(a);
+                    if matched {
+                        break;
+                    }
+                }
+                None => {
+                    println!("  control {:>2}: failed", extra + 1);
+                    failed_attempts += 1;
+                }
+            }
         }
     }
     harness::stop(&mut client);
-    report(&attempts, rec_gate)
+    report(&attempts, rec_gate, failed_attempts)
 }
 
 fn one_attempt(
@@ -173,8 +232,9 @@ fn one_attempt(
     rec_gate: u32,
     aligned: bool,
     delay_ms: u64,
+    compare_speed: f32,
 ) -> Option<Attempt> {
-    client.state_mut().playback_speed = COMPARE_SPEED;
+    client.state_mut().playback_speed = compare_speed;
     client.state_mut().gate_index = 0;
     client.state_mut().gate_tick = 0;
 
@@ -184,25 +244,52 @@ fn one_attempt(
     if delay_ms > 0 {
         thread::sleep(Duration::from_millis(delay_ms));
     }
+    // The in-process F5 resets game speed. Reassert after the restart, as the
+    // product transport controller does on every step.
+    client.state_mut().playback_speed = compare_speed;
     // AFTER the restart: the restart sends a STOP, and STOP clears alignment on
     // purpose so a stale value cannot re-index someone else's replay.
     client.state_mut().gate_align_rec = if aligned { rec_gate } else { 0 };
     harness::arm_play(client);
 
-    // Wait until the replay is far enough past its gate to compare.
+    let expected = client.state().recorded_count.saturating_sub(rec_gate);
+    // Wait until the replay reaches its shifted endpoint, ends, or freezes at a
+    // finish dialog with a stable real race time.
     let deadline = Instant::now() + Duration::from_secs(PLAY_TIMEOUT_SECS);
+    let mut last_pos = 0u32;
+    let mut last_progress = Instant::now();
     loop {
+        // Mirror TransportController: F5 and game code may reset this field, so
+        // a catch-up owner reasserts it for the lifetime of the replay.
+        client.state_mut().playback_speed = compare_speed;
         if Instant::now() > deadline {
             eprintln!("    timed out");
             client.send_command(TasCommand::Stop);
             return None;
         }
+        let pos = client.playback_pos_volatile();
+        let mode = client.mode_volatile();
         let s = client.state();
         let g = s.gate_index;
-        if g != 0 && s.playback_pos > g + COMPARE_TICKS {
+        if pos != last_pos {
+            last_pos = pos;
+            last_progress = Instant::now();
+        }
+        if g != 0 && pos >= g.saturating_add(expected) {
             break;
         }
-        if s.mode != TasMode::Play as u32 && s.playback_pos > 0 {
+        if mode != TasMode::Play as u32 && pos > 0 {
+            break;
+        }
+        if g != 0
+            && pos > g
+            && s.race_time_cs != u32::MAX
+            && last_progress.elapsed() >= Duration::from_secs(FINISH_STALL_SECS)
+        {
+            println!(
+                "    terminal finish stall at playback_pos={} race_time_cs={}",
+                pos, s.race_time_cs
+            );
             break;
         }
         thread::sleep(Duration::from_millis(5));
@@ -217,16 +304,19 @@ fn one_attempt(
     // What the aligned replay OWES us: every tick of the recording past its
     // gate. Anything less is a short replay, which is the failure the
     // arm-relative endpoint used to cause and a fixed window cannot see.
-    let expected = (s.recorded_count - rec_gate).min(COMPARE_TICKS);
+    let expected = expected
+        .min(s.rec_coords.len().saturating_sub(rec_gate as usize) as u32)
+        .min(s.play_coords.len().saturating_sub(play_gate as usize) as u32);
     let mut gate_rel = 0f32;
     let mut idx = 0f32;
     let mut compared = 0u32;
     let mut bit_mismatches = 0u32;
     let mut first_mismatch: Option<u32> = None;
-    for k in 0..COMPARE_TICKS {
+    for k in 0..expected {
         let pi = (play_gate + k) as usize;
         let ri = (rec_gate + k) as usize;
-        if pi >= s.play_coords.len() || ri >= s.rec_coords.len() || ri >= s.recorded_count as usize {
+        if pi >= s.play_coords.len() || ri >= s.rec_coords.len() || ri >= s.recorded_count as usize
+        {
             break;
         }
         if (pi as u32) >= s.playback_pos {
@@ -258,8 +348,13 @@ fn one_attempt(
             .max((p[1] - r2[1]).abs())
             .max((p[2] - r2[2]).abs());
     }
+    let race_time_cs = s.race_time_cs;
+    thread::sleep(Duration::from_millis(200));
+    let race_after = unsafe { std::ptr::read_volatile(&client.state().race_time_cs as *const u32) };
     let a = Attempt {
         aligned,
+        race_time_cs,
+        race_time_final: race_time_cs != u32::MAX && race_after == race_time_cs,
         bit_mismatches,
         first_mismatch,
         expected,
@@ -274,11 +369,20 @@ fn one_attempt(
     Some(a)
 }
 
-fn report(attempts: &[Attempt], rec_gate: u32) -> bool {
+fn report(attempts: &[Attempt], rec_gate: u32, failed_attempts: u32) -> bool {
     println!("\n=== RESULT ===");
     let gates: Vec<u32> = attempts.iter().map(|a| a.play_gate).collect();
     let off: Vec<i64> = gates.iter().map(|g| *g as i64 - rec_gate as i64).collect();
-    println!("  play gates seen: {:?} (offsets from the recording: {:?})", gates, off);
+    println!(
+        "  play gates seen: {:?} (offsets from the recording: {:?})",
+        gates, off
+    );
+    if failed_attempts > 0 {
+        println!(
+            "  FAIL: {} attempted run(s) produced no result",
+            failed_attempts
+        );
+    }
 
     for &aligned in &[false, true] {
         let v: Vec<&Attempt> = attempts.iter().filter(|a| a.aligned == aligned).collect();
@@ -307,18 +411,11 @@ fn report(attempts: &[Attempt], rec_gate: u32) -> bool {
         println!("  (Re-run; the gate has to differ for the test to mean anything.)");
         return false;
     }
-    // A pass on a handful of ticks is not a pass, and "fewer than expected" is
-    // itself the short-replay failure — so require the full owed count, not a
-    // floor someone picked.
-    let short = mismatched.iter().filter(|a| a.compared < a.expected).count();
-    if short > 0 {
-        println!(
-            "  FAIL: {} mismatched attempts produced fewer ticks than the recording owes",
-            short
-        );
-    }
     let bits = mismatched.iter().map(|a| a.bit_mismatches).sum::<u32>();
-    println!("  bit-level mismatches across mismatched-gate attempts: {}", bits);
+    println!(
+        "  bit-level mismatches across mismatched-gate attempts: {}",
+        bits
+    );
     let offsets: Vec<i64> = mismatched
         .iter()
         .map(|a| a.play_gate as i64 - a.rec_gate as i64)
@@ -338,17 +435,65 @@ fn report(attempts: &[Attempt], rec_gate: u32) -> bool {
         println!("\n  No matched-gate baseline ran — no control to judge against.");
         return false;
     }
-    let ctl_bits = control.iter().map(|a| a.bit_mismatches).min().unwrap_or(u32::MAX);
-    let ctl_drift = control.iter().map(|a| a.gate_rel_drift).fold(f32::INFINITY, f32::min);
-    let ctl_first = control.iter().filter_map(|a| a.first_mismatch).max();
+    let ctl = control
+        .iter()
+        .copied()
+        .max_by_key(|a| a.compared)
+        .expect("control is non-empty");
+    let ctl_bits = ctl.bit_mismatches;
+    let ctl_drift = ctl.gate_rel_drift;
+    let ctl_first = ctl.first_mismatch;
+    let short = mismatched
+        .iter()
+        .filter(|a| a.compared < ctl.compared)
+        .count();
+    if short > 0 {
+        println!(
+            "  FAIL: {} aligned run(s) covered fewer gate-relative ticks than the matched control ({})",
+            short, ctl.compared
+        );
+    }
     println!(
         "  control (baseline, gate matched): {} bit-mismatches from {:?}, drift {:.5}",
         ctl_bits, ctl_first, ctl_drift
     );
 
-    let worst = mismatched.iter().map(|a| a.gate_rel_drift).fold(0.0, f32::max);
-    let worst_bits = mismatched.iter().map(|a| a.bit_mismatches).max().unwrap_or(u32::MAX);
+    // Race time, aligned against the control. A trajectory can agree while the
+    // clock does not.
+    let ctl_race: Vec<u32> = control.iter().map(|a| a.race_time_cs).collect();
+    let ali_race: Vec<u32> = mismatched.iter().map(|a| a.race_time_cs).collect();
+    println!(
+        "  race time cs — control {:?}, aligned {:?}",
+        ctl_race, ali_race
+    );
+    let race_ok = !ctl.race_time_final
+        || mismatched.iter().all(|a| {
+            a.race_time_final && a.race_time_cs != u32::MAX && a.race_time_cs == ctl.race_time_cs
+        });
+    if !ctl.race_time_final {
+        println!("  race time is still running at the recording endpoint; not a finish verdict");
+    }
+    if !race_ok {
+        println!("  FAIL: an aligned replay finished on a different race time");
+    }
+
+    let worst = mismatched
+        .iter()
+        .map(|a| a.gate_rel_drift)
+        .fold(0.0, f32::max);
+    let worst_bits = mismatched
+        .iter()
+        .map(|a| a.bit_mismatches)
+        .max()
+        .unwrap_or(u32::MAX);
     let worst_first = mismatched.iter().filter_map(|a| a.first_mismatch).min();
+    let first_ok = mismatched
+        .iter()
+        .all(|a| match (a.first_mismatch, ctl_first) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(aligned), Some(control)) => aligned >= control,
+        });
     println!(
         "\n  {} aligned attempts landed a different gate than the recording; worst drift {:.5}",
         mismatched.len(),
@@ -357,14 +502,17 @@ fn report(attempts: &[Attempt], rec_gate: u32) -> bool {
     // No worse than the control, on every axis.
     let as_good = worst_bits <= ctl_bits
         && worst <= ctl_drift * 1.0001
-        && worst_first >= ctl_first
-        && short == 0;
+        && first_ok
+        && race_ok
+        && short == 0
+        && failed_attempts == 0;
     println!(
         "  aligned, gate mismatched:         {} bit-mismatches from {:?}, drift {:.5}",
         worst_bits, worst_first, worst
     );
     if as_good {
-        println!("  *** The gate index no longer matters. Alignment reproduces the run. ***");
+        println!("  *** Gate-offset input indexing matched the control in this sample. ***");
+        println!("  Hidden spawn state is a separate variable; product PLAY must still watch it.");
         true
     } else {
         println!("  Alignment did NOT reproduce the run — something depends on the");

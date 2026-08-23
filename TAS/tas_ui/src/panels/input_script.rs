@@ -75,14 +75,22 @@ pub fn runs_from_log(log: &[u8], recorded_count: u32) -> Vec<InputEvent> {
             match (on, start) {
                 (true, None) => start = Some(t as u32),
                 (false, Some(s)) => {
-                    out.push(InputEvent { bit, start: s, end: t as u32 });
+                    out.push(InputEvent {
+                        bit,
+                        start: s,
+                        end: t as u32,
+                    });
                     start = None;
                 }
                 _ => {}
             }
         }
         if let Some(s) = start {
-            out.push(InputEvent { bit, start: s, end: n as u32 });
+            out.push(InputEvent {
+                bit,
+                start: s,
+                end: n as u32,
+            });
         }
     }
     out.sort_by(|a, b| a.start.cmp(&b.start).then(a.bit.cmp(&b.bit)));
@@ -122,7 +130,11 @@ pub fn events_to_script(events: &[InputEvent], timer_start: u32) -> String {
     ));
     for ev in &evs {
         if let Some(kw) = keyword(ev.bit) {
-            let tag = if ev.start < timer_start { "   # pre-timer" } else { "" };
+            let tag = if ev.start < timer_start {
+                "   # pre-timer"
+            } else {
+                ""
+            };
             s.push_str(&format!("{}-{} press {}{}\n", ev.start, ev.end, kw, tag));
         }
     }
@@ -164,16 +176,20 @@ fn parse_line(line: &str) -> Result<InputEvent, String> {
     if !verb.eq_ignore_ascii_case("press") {
         return Err(format!("expected 'press', got '{}'", verb));
     }
-    let (a, b) = range
-        .split_once('-')
-        .ok_or("range must be 'start-end'")?;
+    let (a, b) = range.split_once('-').ok_or("range must be 'start-end'")?;
     let start: u32 = a
         .trim()
         .parse()
         .map_err(|_| format!("bad start tick '{}'", a))?;
-    let end: u32 = b.trim().parse().map_err(|_| format!("bad end tick '{}'", b))?;
+    let end: u32 = b
+        .trim()
+        .parse()
+        .map_err(|_| format!("bad end tick '{}'", b))?;
     if end <= start {
-        return Err(format!("end ({}) must be greater than start ({})", end, start));
+        return Err(format!(
+            "end ({}) must be greater than start ({})",
+            end, start
+        ));
     }
     let bit = bit_of(key).ok_or_else(|| format!("unknown key '{}'", key))?;
     Ok(InputEvent { bit, start, end })
@@ -193,9 +209,21 @@ mod tests {
     #[test]
     fn runs_round_trip_through_log() {
         let events = vec![
-            InputEvent { bit: LEFT, start: 10, end: 20 },
-            InputEvent { bit: UP, start: 5, end: 30 },
-            InputEvent { bit: UP, start: 40, end: 50 },
+            InputEvent {
+                bit: LEFT,
+                start: 10,
+                end: 20,
+            },
+            InputEvent {
+                bit: UP,
+                start: 5,
+                end: 30,
+            },
+            InputEvent {
+                bit: UP,
+                start: 40,
+                end: 50,
+            },
         ];
         let log = log_with(&events, 64);
         let mut back = runs_from_log(&log, 64);
@@ -208,18 +236,37 @@ mod tests {
     #[test]
     fn run_to_recorded_count_when_held_to_end() {
         // A hold that never releases closes at recorded_count, not buffer len.
-        let events = vec![InputEvent { bit: DOWN, start: 8, end: 16 }];
+        let events = vec![InputEvent {
+            bit: DOWN,
+            start: 8,
+            end: 16,
+        }];
         let mut log = vec![0u8; 64];
         apply_events_to_log(&mut log, 16, &events);
         let back = runs_from_log(&log, 16);
-        assert_eq!(back, vec![InputEvent { bit: DOWN, start: 8, end: 16 }]);
+        assert_eq!(
+            back,
+            vec![InputEvent {
+                bit: DOWN,
+                start: 8,
+                end: 16
+            }]
+        );
     }
 
     #[test]
     fn apply_only_touches_key_bits_and_clamps() {
         let mut log = vec![0u8; 10];
         log[0] = 0x80; // a non-input bit we must preserve
-        apply_events_to_log(&mut log, 10, &[InputEvent { bit: LEFT, start: 0, end: 100 }]);
+        apply_events_to_log(
+            &mut log,
+            10,
+            &[InputEvent {
+                bit: LEFT,
+                start: 0,
+                end: 100,
+            }],
+        );
         assert_eq!(log[0], 0x80 | LEFT); // preserved + set
         assert_eq!(log[9], LEFT); // clamped to recorded_count, still set
     }
@@ -227,8 +274,16 @@ mod tests {
     #[test]
     fn script_is_frame_based_with_pre_timer_tag() {
         let events = vec![
-            InputEvent { bit: LEFT, start: 100, end: 200 }, // before T=0
-            InputEvent { bit: UP, start: 950, end: 1000 },  // after T=0
+            InputEvent {
+                bit: LEFT,
+                start: 100,
+                end: 200,
+            }, // before T=0
+            InputEvent {
+                bit: UP,
+                start: 950,
+                end: 1000,
+            }, // after T=0
         ];
         let s = events_to_script(&events, 900);
         assert!(s.contains("100-200 press left   # pre-timer"));
@@ -239,16 +294,24 @@ mod tests {
     #[test]
     fn script_round_trips_through_parse() {
         let events = vec![
-            InputEvent { bit: JUMP, start: 12, end: 18 },
-            InputEvent { bit: SHIFT, start: 3, end: 9 },
+            InputEvent {
+                bit: JUMP,
+                start: 12,
+                end: 18,
+            },
+            InputEvent {
+                bit: SHIFT,
+                start: 3,
+                end: 9,
+            },
         ];
         let s = events_to_script(&events, 0);
         let (parsed, errs) = parse_script(&s);
         assert!(errs.is_empty(), "unexpected parse errors: {:?}", errs);
         let mut a = parsed;
         let mut b = events;
-        a.sort_by(|x, y| x.start.cmp(&y.start));
-        b.sort_by(|x, y| x.start.cmp(&y.start));
+        a.sort_by_key(|x| x.start);
+        b.sort_by_key(|x| x.start);
         assert_eq!(a, b);
     }
 
@@ -268,6 +331,13 @@ mod tests {
         let text = "# header\n\n  \n10-20 press down  # trailing note\n";
         let (events, errs) = parse_script(text);
         assert!(errs.is_empty());
-        assert_eq!(events, vec![InputEvent { bit: DOWN, start: 10, end: 20 }]);
+        assert_eq!(
+            events,
+            vec![InputEvent {
+                bit: DOWN,
+                start: 10,
+                end: 20
+            }]
+        );
     }
 }

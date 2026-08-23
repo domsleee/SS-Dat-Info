@@ -90,12 +90,20 @@ pub fn run(iterations: u32) -> bool {
         let fm = match tas_shared::cont::detect_first_moving(&coords, n as u32) {
             Some(f) if n >= MIN_TICKS => f,
             _ => {
-                eprintln!("  iter {}: no usable first_moving (ticks={}) — skipping", iter, n);
+                eprintln!(
+                    "  iter {}: no usable first_moving (ticks={}) — skipping",
+                    iter, n
+                );
                 continue;
             }
         };
 
-        println!("  iter {:>2}: fm={}  slots captured={}", iter, fm, mem.len());
+        println!(
+            "  iter {:>2}: fm={}  slots captured={}",
+            iter,
+            fm,
+            mem.len()
+        );
         samples.push(Sample {
             iter,
             first_moving: fm,
@@ -109,7 +117,10 @@ pub fn run(iterations: u32) -> bool {
 fn analyze(samples: &[Sample]) -> bool {
     println!("\n========== ANALYSIS ==========");
     if samples.len() < 6 {
-        println!("  Only {} usable samples — too few to trust any hit.", samples.len());
+        println!(
+            "  Only {} usable samples — too few to trust any hit.",
+            samples.len()
+        );
         println!("  A slot can match by luck across a handful of restarts; the whole point");
         println!("  of a brute-force scan is that it will find spurious matches unless the");
         println!("  sample count makes them implausible. Re-run with more iterations.");
@@ -153,16 +164,43 @@ fn analyze(samples: &[Sample]) -> bool {
         f: fn(u32) -> u32,
     }
     let derived: Vec<Derived> = vec![
-        Derived { name: "raw", f: |v| v },
-        Derived { name: "subtick/2", f: |v| (v % TICK_UNITS) * 2 / TICK_UNITS },
-        Derived { name: "subtick/3", f: |v| (v % TICK_UNITS) * 3 / TICK_UNITS },
-        Derived { name: "subtick/4", f: |v| (v % TICK_UNITS) * 4 / TICK_UNITS },
-        Derived { name: "subtick/6", f: |v| (v % TICK_UNITS) * 6 / TICK_UNITS },
-        Derived { name: "subtick/8", f: |v| (v % TICK_UNITS) * 8 / TICK_UNITS },
-        Derived { name: "subtick/16", f: |v| (v % TICK_UNITS) * 16 / TICK_UNITS },
+        Derived {
+            name: "raw",
+            f: |v| v,
+        },
+        Derived {
+            name: "subtick/2",
+            f: |v| (v % TICK_UNITS) * 2 / TICK_UNITS,
+        },
+        Derived {
+            name: "subtick/3",
+            f: |v| (v % TICK_UNITS) * 3 / TICK_UNITS,
+        },
+        Derived {
+            name: "subtick/4",
+            f: |v| (v % TICK_UNITS) * 4 / TICK_UNITS,
+        },
+        Derived {
+            name: "subtick/6",
+            f: |v| (v % TICK_UNITS) * 6 / TICK_UNITS,
+        },
+        Derived {
+            name: "subtick/8",
+            f: |v| (v % TICK_UNITS) * 8 / TICK_UNITS,
+        },
+        Derived {
+            name: "subtick/16",
+            f: |v| (v % TICK_UNITS) * 16 / TICK_UNITS,
+        },
         // centisecond-domain variants, in case the value is not QPC at all
-        Derived { name: "mod100/4", f: |v| (v % 100) * 4 / 100 },
-        Derived { name: "mod1000/4", f: |v| (v % 1000) * 4 / 1000 },
+        Derived {
+            name: "mod100/4",
+            f: |v| (v % 100) * 4 / 100,
+        },
+        Derived {
+            name: "mod1000/4",
+            f: |v| (v % 1000) * 4 / 1000,
+        },
     ];
 
     let mut hits: Vec<(String, usize, &'static str, usize)> = Vec::new();
@@ -216,10 +254,7 @@ fn analyze(samples: &[Sample]) -> bool {
     if !all_distinct.is_empty() {
         println!("\n--- slots that differ in EVERY sample (clock-like) ---");
         for k in all_distinct.iter().take(12) {
-            let vals: Vec<String> = samples
-                .iter()
-                .map(|s| format!("{}", s.mem[k]))
-                .collect();
+            let vals: Vec<String> = samples.iter().map(|s| format!("{}", s.mem[k])).collect();
             println!("  {}+{:#x}", k.0, k.1);
             println!("      values : {}", vals.join(" "));
             let rem: Vec<String> = samples
@@ -253,10 +288,7 @@ fn analyze(samples: &[Sample]) -> bool {
         for (s, v) in samples.iter().zip(vals.iter()) {
             m.entry(*v).or_default().insert(s.first_moving);
         }
-        let pairs: Vec<String> = m
-            .iter()
-            .map(|(v, f)| format!("{}->{:?}", v, f))
-            .collect();
+        let pairs: Vec<String> = m.iter().map(|(v, f)| format!("{}->{:?}", v, f)).collect();
         println!("  {}+{:#x}  {}", k.0, k.1, pairs.join(" "));
     }
     println!("\n========== RESULT ==========");
@@ -364,7 +396,11 @@ pub fn find_countdown(iterations: u32) -> bool {
                 found.insert(k.clone());
             }
         }
-        println!("  iter {:>2}: {} slot(s) moved like a countdown", iter, found.len());
+        println!(
+            "  iter {:>2}: {} slot(s) moved like a countdown",
+            iter,
+            found.len()
+        );
         survivors = Some(match survivors {
             None => found,
             Some(prev) => prev.intersection(&found).cloned().collect(),
@@ -386,7 +422,10 @@ pub fn find_countdown(iterations: u32) -> bool {
         println!("  and the phase is only knowable from the start stamp itself.");
         return false;
     }
-    println!("  {} slot(s) move at countdown rate on EVERY restart:", sv.len());
+    println!(
+        "  {} slot(s) move at countdown rate on EVERY restart:",
+        sv.len()
+    );
     for k in sv.iter().take(30) {
         println!("    {}+{:#x}", k.0, k.1);
     }
@@ -503,7 +542,9 @@ pub fn find_countdown_heap(iterations: u32) -> bool {
                             "      {:#x}: {:?}  (f32 {:?})",
                             ra.base + off,
                             vals,
-                            fv.iter().map(|x| (x * 1000.0).round() / 1000.0).collect::<Vec<f64>>()
+                            fv.iter()
+                                .map(|x| (x * 1000.0).round() / 1000.0)
+                                .collect::<Vec<f64>>()
                         );
                         shown += 1;
                     }
@@ -511,7 +552,11 @@ pub fn find_countdown_heap(iterations: u32) -> bool {
                 off += 4;
             }
         }
-        println!("  iter {:>2}: {} linear timer-like slot(s)", iter, found.len());
+        println!(
+            "  iter {:>2}: {} linear timer-like slot(s)",
+            iter,
+            found.len()
+        );
         survivors = Some(match survivors {
             None => found,
             Some(prev) => prev.intersection(&found).cloned().collect(),
@@ -554,7 +599,10 @@ fn linear_at(deltas: &[f64], expect: f64) -> bool {
     if first == 0.0 {
         return false;
     }
-    if !deltas.iter().all(|d| (*d > 0.0) == (first > 0.0) && *d != 0.0) {
+    if !deltas
+        .iter()
+        .all(|d| (*d > 0.0) == (first > 0.0) && *d != 0.0)
+    {
         return false;
     }
     let mean = deltas.iter().map(|d| d.abs()).sum::<f64>() / deltas.len() as f64;
@@ -646,7 +694,10 @@ pub fn bucket_scan_heap(iterations: u32) -> bool {
         if fms.is_empty() {
             first = Some(snap);
             fms.push(fm);
-            println!("  iter {:>2}: total={} (holding restart 1 for the diff)", iter, fm);
+            println!(
+                "  iter {:>2}: total={} (holding restart 1 for the diff)",
+                iter, fm
+            );
         } else if cands.is_empty() {
             let prev = first.take().expect("restart 1 snapshot must be held");
             for ra in &prev {
@@ -661,10 +712,16 @@ pub fn bucket_scan_heap(iterations: u32) -> bool {
                 let mut off = 0usize;
                 while off + 4 <= n4 {
                     let va = u32::from_le_bytes([
-                        ra.data[off], ra.data[off + 1], ra.data[off + 2], ra.data[off + 3],
+                        ra.data[off],
+                        ra.data[off + 1],
+                        ra.data[off + 2],
+                        ra.data[off + 3],
                     ]);
                     let vb = u32::from_le_bytes([
-                        rb.data[off], rb.data[off + 1], rb.data[off + 2], rb.data[off + 3],
+                        rb.data[off],
+                        rb.data[off + 1],
+                        rb.data[off + 2],
+                        rb.data[off + 3],
                     ]);
                     if va != vb {
                         cands.insert((ra.base, off), vec![va, vb]);
@@ -673,11 +730,19 @@ pub fn bucket_scan_heap(iterations: u32) -> bool {
                 }
             }
             fms.push(fm);
-            println!("  iter {:>2}: total={}  {} varying slots seeded", iter, fm, cands.len());
+            println!(
+                "  iter {:>2}: total={}  {} varying slots seeded",
+                iter,
+                fm,
+                cands.len()
+            );
         } else {
             let mut drop: Vec<(usize, usize)> = Vec::new();
             for (k, hist) in cands.iter_mut() {
-                let r = match snap.iter().find(|r| r.base == k.0 && k.1 + 4 <= r.data.len()) {
+                let r = match snap
+                    .iter()
+                    .find(|r| r.base == k.0 && k.1 + 4 <= r.data.len())
+                {
                     Some(r) => r,
                     None => {
                         drop.push(*k);
@@ -685,7 +750,10 @@ pub fn bucket_scan_heap(iterations: u32) -> bool {
                     }
                 };
                 let v = u32::from_le_bytes([
-                    r.data[k.1], r.data[k.1 + 1], r.data[k.1 + 2], r.data[k.1 + 3],
+                    r.data[k.1],
+                    r.data[k.1 + 1],
+                    r.data[k.1 + 2],
+                    r.data[k.1 + 3],
                 ]);
                 hist.push(v);
                 let d: BTreeSet<u32> = hist.iter().cloned().collect();
@@ -697,7 +765,12 @@ pub fn bucket_scan_heap(iterations: u32) -> bool {
                 cands.remove(&k);
             }
             fms.push(fm);
-            println!("  iter {:>2}: total={}  {} candidates left", iter, fm, cands.len());
+            println!(
+                "  iter {:>2}: total={}  {} candidates left",
+                iter,
+                fm,
+                cands.len()
+            );
         }
     }
 
@@ -742,10 +815,19 @@ pub fn bucket_scan_heap(iterations: u32) -> bool {
         println!("  restart landed relative to the tick, which nothing records.");
         return false;
     }
-    println!("  {} heap slot(s) partition the restarts EXACTLY like first_moving:", hits.len());
+    println!(
+        "  {} heap slot(s) partition the restarts EXACTLY like first_moving:",
+        hits.len()
+    );
     for ((base, off), n) in hits.iter().take(20) {
         let hist = &cands[&(*base, *off)];
-        println!("    {:#x}  ({} distinct)  values {:?}  fms {:?}", base + off, n, hist, fms);
+        println!(
+            "    {:#x}  ({} distinct)  values {:?}  fms {:?}",
+            base + off,
+            n,
+            hist,
+            fms
+        );
     }
     println!();
     println!("  Heap addresses shift between game launches, so a shipped judge would");

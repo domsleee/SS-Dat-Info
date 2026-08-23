@@ -107,7 +107,10 @@ pub fn run() -> bool {
             break;
         }
         if wait_start.elapsed() > Duration::from_secs(60) {
-            eprintln!("ERROR: Playback didn't reach pause frame within 60s (pos={})", pos);
+            eprintln!(
+                "ERROR: Playback didn't reach pause frame within 60s (pos={})",
+                pos
+            );
             return false;
         }
         thread::sleep(Duration::from_millis(20));
@@ -287,9 +290,7 @@ pub fn run() -> bool {
             "\n  First divergence at frame {}: rec=({:.6},{:.6},{:.6}) play=({:.6},{:.6},{:.6})",
             i, r[0], r[1], r[2], p[0], p[1], p[2]
         );
-        println!(
-            "\n*** PAUSE/RESUME REPLAY FAILED: trajectory diverges across pause+resume ***"
-        );
+        println!("\n*** PAUSE/RESUME REPLAY FAILED: trajectory diverges across pause+resume ***");
     } else {
         println!("\n*** PAUSE/RESUME REPLAY FAILED: drift > 0 but no bit-divergence found ***");
     }

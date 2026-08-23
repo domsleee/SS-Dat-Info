@@ -112,7 +112,10 @@ pub fn run() -> bool {
     // ---- Phase 2: Save to disk ----
     let out_dir = crate::output_dir();
     let tasrec_path = out_dir.join("save_reload_test.tasrec");
-    println!("\n--- Phase 2: Save recording to {} ---", tasrec_path.display());
+    println!(
+        "\n--- Phase 2: Save recording to {} ---",
+        tasrec_path.display()
+    );
 
     let state = client.state();
     let count = state.recorded_count as usize;
@@ -173,7 +176,10 @@ pub fn run() -> bool {
     let matched =
         harness::restart_play_and_match(&mut client, target, harness::START_MATCH_RETRIES);
     if !matched {
-        eprintln!("ERROR: Position match failed after {} retries", harness::START_MATCH_RETRIES);
+        eprintln!(
+            "ERROR: Position match failed after {} retries",
+            harness::START_MATCH_RETRIES
+        );
         return false;
     }
     let play_rotation_at_match = client.state().rotation_matrix;
@@ -199,8 +205,7 @@ pub fn run() -> bool {
     }
 
     let state = client.state();
-    let drift_result =
-        drift::compute_drift(state, loaded.count.min(state.playback_pos));
+    let drift_result = drift::compute_drift(state, loaded.count.min(state.playback_pos));
 
     println!(
         "\n  Drift: X={:.9} (frame {}) Z={:.9} (frame {})",

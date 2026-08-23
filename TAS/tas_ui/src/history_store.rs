@@ -13,9 +13,7 @@ pub struct LoadedHistory {
 
 /// Load the newest legacy `history.json` under `root` (by mtime), healing
 /// pre-`created_at_iso` entries so day-grouping stays correct.
-pub(crate) fn load_latest_history_from_root(
-    root: &Path,
-) -> Result<Option<LoadedHistory>, String> {
+pub(crate) fn load_latest_history_from_root(root: &Path) -> Result<Option<LoadedHistory>, String> {
     if !root.exists() {
         return Ok(None);
     }
@@ -54,8 +52,13 @@ pub(crate) fn load_latest_history_from_root(
 
     let json = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read persisted history {}: {}", path.display(), e))?;
-    let mut history: PersistedHistory = serde_json::from_str(&json)
-        .map_err(|e| format!("failed to parse persisted history {}: {}", path.display(), e))?;
+    let mut history: PersistedHistory = serde_json::from_str(&json).map_err(|e| {
+        format!(
+            "failed to parse persisted history {}: {}",
+            path.display(),
+            e
+        )
+    })?;
 
     // Heal entries that pre-date the `created_at_iso` field: fill from the
     // file's mtime + the entry's HH:MM:SS, and walk any future-dated timestamp

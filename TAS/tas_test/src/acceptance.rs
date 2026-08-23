@@ -16,6 +16,7 @@ use crate::patterns;
 /// Acceptance test verdicts (matches the acceptance_criteria.md contract).
 #[derive(Debug)]
 pub struct AcceptanceResult {
+    pub baseline_neutral: bool,
     pub steering: Verdict,
     pub replay_steered: Verdict,
     pub zero_drift: Verdict,
@@ -29,6 +30,8 @@ pub struct AcceptanceResult {
     /// Whether PLAY ran through to `rec_count`. A truncated playback makes the
     /// drift and gate numbers meaningless, so it is part of the verdict.
     pub playback_complete: bool,
+    pub rec_gate: u32,
+    pub play_gate: u32,
 }
 
 #[derive(Debug, PartialEq)]
@@ -50,21 +53,12 @@ impl std::fmt::Display for Verdict {
 
 impl AcceptanceResult {
     pub fn all_pass(&self) -> bool {
-        // Authoritative correctness check is the 4-gate assessment + zero drift.
-        // The steering/replay_steered differential verdicts compare baseline vs
-        // steered trajectories with a 1.0-unit threshold, but at the F5 spawn the
-        // game's slope dominates any L/R input: 5s of pure L only produces ~0.23
-        // units of 3D divergence (below the F5 bucket noise floor of ~0.56).
-        // The 4 gates already validate that inputs reached the game (Gate 1
-        // transitions>0 + recDeltaZ>0.1) and that replay reproduces the
-        // recording bit-perfectly (Gate 3), which is the TAS reliability
-        // property that actually matters.
-        //
-        // Completion IS required though: `compute_drift` and the gates only
-        // inspect frames that played, so a playback that stalled part-way
-        // yields a clean verdict over a truncated window. Previously this was
-        // only a printed WARNING.
-        self.gates_pass && self.zero_drift == Verdict::Pass && self.playback_complete
+        self.baseline_neutral
+            && self.steering == Verdict::Pass
+            && self.replay_steered == Verdict::Pass
+            && self.gates_pass
+            && self.zero_drift == Verdict::Pass
+            && self.playback_complete
     }
 }
 
@@ -73,14 +67,14 @@ const REC_DURATION_SECS: u64 = 5;
 
 /// Steering pattern for Phase 2.
 ///
-/// Must drive lateral displacement well above the F5-bucket position noise
-/// floor (~0.5 units, per f5-probe). The original "LRLRL" × 56-tick pattern
-/// alternates cancel out and yield ~0.05 units of net X deviation — below
-/// the noise floor and below the 1.0-unit verdict threshold. Holding L for
-/// the full record duration produces several units of lateral travel,
-/// trivially passing the steering-vs-baseline differential check.
-const STEER_PATTERN: &str = "L";
-const STEER_HOLD_TICKS: u32 = 500;
+/// RIGHT is the calibrated high-impact direction on Forest Easy (the dedicated
+/// steer-impact gate measures roughly ten lateral units over two moving
+/// seconds). The acceptance driver refreshes it before the Pico's 500ms
+/// watchdog, then records a neutral tail so the asynchronous HID key-up is
+/// captured before REC stops.
+const STEER_PATTERN: &str = "R";
+const STEER_HOLD_TICKS: u32 = 450;
+const STEER_RELEASE_TICKS: u32 = 50;
 
 /// Run the full 3-phase acceptance test.
 pub fn run() -> AcceptanceResult {
@@ -133,7 +127,7 @@ pub fn run() -> AcceptanceResult {
     // Phase 1 should be input-free — if anything appears in input_log, the Pico
     // is stuck in a non-neutral state and the steering verdict will spuriously
     // pass (both phases see the same input).
-    {
+    let baseline_neutral = {
         let s = client.state();
         let transitions = crate::drift::count_transitions(&s.input_log, n);
         let first_in = crate::drift::first_input_tick(&s.input_log, n);
@@ -141,7 +135,8 @@ pub fn run() -> AcceptanceResult {
             "  BASELINE diagnostics: transitions={} firstInput={}",
             transitions, first_in
         );
-    }
+        transitions == 0 && first_in < 0
+    };
 
     // ---- Phase 2: RECORD (with steering) ----
     println!("\n--- Phase 2: RECORD (with Pico steering) ---");
@@ -169,7 +164,6 @@ pub fn run() -> AcceptanceResult {
     let n_rec = rec_count as usize;
     let rec_coords: Vec<[f32; 3]> = client.state().rec_coords[..n_rec].to_vec();
 
-    // Capture REC start position for Phase 3 matching
     let rec_start = client.state().rec_coords[0];
     println!(
         "  REC start: ({:.4}, {:.4}, {:.4})",
@@ -178,12 +172,10 @@ pub fn run() -> AcceptanceResult {
 
     // ---- Phase 3: PLAYBACK ----
     println!("\n--- Phase 3: PLAYBACK ---");
-    // Match Phase 2 start position via play_coords[0] for zero drift
-    if !harness::restart_play_and_match_inprocess(&mut client, rec_start, 60) {
-        eprintln!("ERROR: Could not match REC position for Phase 3 after 60 F5 retries");
-    }
-    // Playback is already running from restart_play_and_match
-    let play_ok = harness::wait_playback(&client, rec_count);
+    let alignment = harness::restart_play_aligned_inprocess(&mut client);
+    let (rec_gate, play_gate) = alignment.unwrap_or((0, 0));
+    let expected_end = play_gate.saturating_add(rec_count.saturating_sub(rec_gate));
+    let play_ok = alignment.is_some() && harness::wait_playback(&client, expected_end);
 
     if !play_ok {
         eprintln!("WARNING: Playback did not complete normally");
@@ -238,8 +230,19 @@ pub fn run() -> AcceptanceResult {
         Verdict::Fail
     };
 
-    // Zero drift: REC vs PLAY coords
-    let drift_result = drift::compute_drift(state, rec_count);
+    // Zero drift: equal offsets from the independently observed gates.
+    let compared = state
+        .playback_pos
+        .saturating_sub(play_gate)
+        .min(rec_count.saturating_sub(rec_gate));
+    let drift_result = drift::compute_gate_relative_drift(state, rec_gate, play_gate, compared);
+    let first_bit_mismatch = (0..compared).find(|offset| {
+        let rec = state.rec_coords[(rec_gate + offset) as usize];
+        let play = state.play_coords[(play_gate + offset) as usize];
+        rec.iter()
+            .zip(play.iter())
+            .any(|(r, p)| r.to_bits() != p.to_bits())
+    });
     let zero_drift = if drift_result.is_zero() {
         Verdict::Pass
     } else {
@@ -247,10 +250,11 @@ pub fn run() -> AcceptanceResult {
     };
 
     // 4-gate assessment
-    let assessment = gates::run_gates(state, rec_count);
+    let assessment = gates::run_gates_aligned(state, rec_count, rec_gate, play_gate);
     assessment.print_summary();
 
     let result = AcceptanceResult {
+        baseline_neutral,
         steering,
         replay_steered,
         zero_drift,
@@ -262,12 +266,14 @@ pub fn run() -> AcceptanceResult {
         max_play_vs_base_x,
         gates_pass: assessment.all_pass(),
         playback_complete: play_ok,
+        rec_gate,
+        play_gate,
     };
 
     println!("\n=== ACCEPTANCE VERDICT ===");
     println!(
-        "VERDICT: steering={} replay_steered={} zero_drift={}",
-        result.steering, result.replay_steered, result.zero_drift
+        "VERDICT: baseline_neutral={} steering={} replay_steered={} zero_drift={}",
+        result.baseline_neutral, result.steering, result.replay_steered, result.zero_drift
     );
     println!(
         "  base_vs_rec_X={:.4}  play_vs_base_X={:.4}",
@@ -277,11 +283,27 @@ pub fn run() -> AcceptanceResult {
         "  max_drift_X={:.9}  max_drift_Z={:.9}",
         result.max_drift_x, result.max_drift_z
     );
+    println!(
+        "  first gate-relative bit mismatch={:?}",
+        first_bit_mismatch
+    );
 
     if result.all_pass() {
         println!("\n*** ACCEPTANCE TEST PASSED ***");
     } else {
         println!("\n*** ACCEPTANCE TEST FAILED ***");
+
+        println!("\n--- Failure control: legacy matched-bucket PLAY ---");
+        if harness::restart_play_and_match_inprocess(&mut client, rec_start, 12) {
+            let control_complete = harness::wait_playback(&client, rec_count);
+            let control = drift::compute_drift(client.state(), rec_count);
+            println!(
+                "  control complete={} max drift X/Y/Z={:.9}/{:.9}/{:.9}",
+                control_complete, control.max_drift_x, control.max_drift_y, control.max_drift_z
+            );
+        } else {
+            println!("  legacy control could not find an acceptable bucket");
+        }
     }
 
     result
@@ -289,5 +311,8 @@ pub fn run() -> AcceptanceResult {
 
 /// Drive Pico HID for acceptance test Phase 2 (delegates to harness).
 fn drive_pico_acceptance(steps: &[patterns::PatternStep]) {
-    harness::drive_pico_steps(steps, Some(REC_DURATION_SECS * 1000));
+    harness::drive_pico_steps_keepalive(steps, Some(STEER_HOLD_TICKS as u64 * 10), 200);
+    std::thread::sleep(std::time::Duration::from_millis(
+        STEER_RELEASE_TICKS as u64 * 10,
+    ));
 }

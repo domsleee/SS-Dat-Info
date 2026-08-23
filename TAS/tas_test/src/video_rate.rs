@@ -139,7 +139,12 @@ fn focus_game_and_rect() -> Option<Rect> {
                  in the background, so the measurement below is probably all zeros."
             );
         }
-        let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut r = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
         if GetWindowRect(hwnd, &mut r) == 0 {
             return None;
         }
@@ -470,7 +475,10 @@ pub fn run_region(secs: Option<u64>, region: Option<(i32, i32)>) -> bool {
         "\n  sampled {} times ({:.0} Hz) — this is the CEILING on what can be seen",
         samples, sample_hz
     );
-    println!("  distinct frames: {} ({:.1} fps)  <- what the SCREEN shows", transitions, change_hz);
+    println!(
+        "  distinct frames: {} ({:.1} fps)  <- what the SCREEN shows",
+        transitions, change_hz
+    );
     if let (Some(before), Some(c)) = (presents_before, shm.as_ref()) {
         let presents = c.state().present_count.wrapping_sub(before);
         println!(

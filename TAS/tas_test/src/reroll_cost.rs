@@ -161,6 +161,8 @@ fn force_rerolls(
         arm: Arm::Play,
         catchup_speed: 1.0,
         continue_from_frame: 0,
+        // Research command: preserve the old unaligned bucket-reroll behavior.
+        gate_align_rec: 0,
         target: Some(BucketTarget {
             expected_start_bits: start_bits,
             expected_first_moving: Some(target_fm),

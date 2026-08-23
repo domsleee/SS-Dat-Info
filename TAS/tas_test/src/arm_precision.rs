@@ -133,7 +133,6 @@ pub fn run(iterations: u32) -> bool {
         let actual_offset = consumed.wrapping_sub(t0);
         let clk_at_arm = client.state().clock_delta_lo;
 
-
         thread::sleep(Duration::from_secs(RECORD_SECS));
         let count = client.state().recorded_count as usize;
         harness::stop(&mut client);
@@ -186,7 +185,14 @@ fn phase_split(fms: &[u32], phases: &[u32]) {
         ph.sort_unstable();
         let lo = *ph.first().unwrap();
         let hi = *ph.last().unwrap();
-        println!("  fm={:<5} n={:<3} phase {:>6}..{:<6}  {:?}", fm, ph.len(), lo, hi, ph);
+        println!(
+            "  fm={:<5} n={:<3} phase {:>6}..{:<6}  {:?}",
+            fm,
+            ph.len(),
+            lo,
+            hi,
+            ph
+        );
         ranges.push((fm, lo, hi));
     }
     if ranges.len() < 2 {
@@ -213,8 +219,13 @@ fn phase_split(fms: &[u32], phases: &[u32]) {
         println!("  knowable AT ARM from a single u32 — no replay, no 3.1s wait.");
         println!("  Thresholds (midpoints between adjacent bands):");
         for w in sorted.windows(2) {
-            println!("    phase < {:>6} => fm {}   |   phase > {:>6} => fm {}",
-                (w[0].2 + w[1].1) / 2, w[0].0, (w[0].2 + w[1].1) / 2, w[1].0);
+            println!(
+                "    phase < {:>6} => fm {}   |   phase > {:>6} => fm {}",
+                (w[0].2 + w[1].1) / 2,
+                w[0].0,
+                (w[0].2 + w[1].1) / 2,
+                w[1].0
+            );
         }
     }
 }
@@ -259,12 +270,18 @@ fn report(fms: &[u32], offsets: &[u32], totals: &[u32]) -> bool {
         println!("  precise arm: poll tick_count and fire on the target tick. The residual");
         println!("  is the game's own +/-1 rounding and cannot be removed, only judged.");
     } else if oh.len() > 1 {
-        println!("  The arm offset itself still varies ({:?}), so this run did not actually", oh.keys());
+        println!(
+            "  The arm offset itself still varies ({:?}), so this run did not actually",
+            oh.keys()
+        );
         println!("  test the hypothesis — the poll is not landing on a fixed tick. Tighten");
         println!("  the wait before drawing any conclusion about the game.");
     } else {
         println!("  NOT confirmed. The arm landed on a fixed tick every time and yet");
-        println!("  first_moving still spread across {} values. That puts the variance back", fh.len());
+        println!(
+            "  first_moving still spread across {} values. That puts the variance back",
+            fh.len()
+        );
         println!("  in the game, and a precise arm cannot fix it.");
     }
     true

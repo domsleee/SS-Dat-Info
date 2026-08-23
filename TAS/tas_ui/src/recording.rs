@@ -990,7 +990,10 @@ impl RecordingHistory {
 
     fn alloc_id(&mut self) -> u64 {
         let id = self.next_entry_id;
-        self.next_entry_id = self.next_entry_id.checked_add(1).expect("entry_id overflow");
+        self.next_entry_id = self
+            .next_entry_id
+            .checked_add(1)
+            .expect("entry_id overflow");
         id
     }
 
@@ -1262,7 +1265,6 @@ impl RecordingHistory {
         }
     }
 
-
     /// Rebuild the in-memory history from a v2-store load. Unavailable entries
     /// (snapshot == None but kind expects one) come in inert (can't restore).
     pub fn apply_loaded(
@@ -1400,7 +1402,8 @@ impl RecordingHistory {
                 .map(|dt| dt.with_timezone(&chrono::Local))
                 .or_else(|| {
                     let today = chrono::Local::now().date_naive();
-                    let hms = chrono::NaiveTime::parse_from_str(&entry.timestamp, "%H:%M:%S").ok()?;
+                    let hms =
+                        chrono::NaiveTime::parse_from_str(&entry.timestamp, "%H:%M:%S").ok()?;
                     today
                         .and_time(hms)
                         .and_local_timezone(chrono::Local)
@@ -2296,7 +2299,10 @@ mod tests {
             std::hint::black_box(&s);
         }
         let per_snap = t.elapsed() / n;
-        println!("\n>>> from_state (per-frame snapshot): {:?} per call", per_snap);
+        println!(
+            "\n>>> from_state (per-frame snapshot): {:?} per call",
+            per_snap
+        );
 
         // 2) Disk-write cost (throttled, fires ~every debounce during REC).
         let root = unique_temp_root("measure_rec_cost");
@@ -2312,7 +2318,10 @@ mod tests {
                 .unwrap();
         }
         let per_write = t.elapsed() / n2;
-        println!(">>> persist (forced disk write): {:?} per write\n", per_write);
+        println!(
+            ">>> persist (forced disk write): {:?} per write\n",
+            per_write
+        );
     }
 
     #[test]
@@ -2352,7 +2361,10 @@ mod tests {
         let mut state = zeroed_state();
         state.recorded_count = TAS_MAX_TICKS as u32 + 50;
         let snap = RecordingSnapshot::from_state(&state);
-        assert_eq!(snap.recorded_count as usize, TAS_MAX_TICKS, "clamped to max");
+        assert_eq!(
+            snap.recorded_count as usize, TAS_MAX_TICKS,
+            "clamped to max"
+        );
     }
 
     /// The checkpoint cadence stretches as the recording grows (early→mid→late),
@@ -2373,11 +2385,9 @@ mod tests {
         assert_eq!(prod.effective_debounce(65_536).as_millis(), 10_000);
 
         // Test-mode zero base stays unthrottled at every length.
-        let test = RecoveryStore::new_in_root(
-            unique_temp_root("tas_ui_debounce_zero"),
-            Duration::ZERO,
-        )
-        .unwrap();
+        let test =
+            RecoveryStore::new_in_root(unique_temp_root("tas_ui_debounce_zero"), Duration::ZERO)
+                .unwrap();
         assert!(test.effective_debounce(0).is_zero());
         assert!(test.effective_debounce(60_000).is_zero());
     }
@@ -2622,7 +2632,7 @@ mod tests {
         let mut state = zeroed_state();
         state.recorded_count = n;
         for i in 0..(n as usize).min(TAS_MAX_TICKS) {
-            state.input_log[i] = (i + 1) as u8 ;
+            state.input_log[i] = (i + 1) as u8;
             state.rec_coords[i] = [i as f32, 0.0, i as f32 * 0.5];
         }
         state
@@ -2645,14 +2655,20 @@ mod tests {
         }
 
         let rev = h.revision();
-        assert_eq!(h.backfill_levels(crate::start_line::level_code_from_spawn), 1);
+        assert_eq!(
+            h.backfill_levels(crate::start_line::level_code_from_spawn),
+            1
+        );
         assert_eq!(h.entries()[0].level.as_deref(), Some("FE"));
         assert_eq!(h.entries()[1].level, None);
         assert!(h.revision() > rev, "tagging must mark history dirty");
 
         // Idempotent: second pass tags nothing, revision untouched.
         let rev = h.revision();
-        assert_eq!(h.backfill_levels(crate::start_line::level_code_from_spawn), 0);
+        assert_eq!(
+            h.backfill_levels(crate::start_line::level_code_from_spawn),
+            0
+        );
         assert_eq!(h.revision(), rev);
     }
 
@@ -2864,8 +2880,15 @@ mod tests {
 
         // On FM with only one FM entry, there is nothing to undo TO. The FE
         // entry is on another track and must not be offered.
-        assert_eq!(h.undo_depth(), 0, "an FE entry must not be undo-reachable from FM");
-        assert!(h.undo().is_none(), "Ctrl+Z must not restore another track's recording");
+        assert_eq!(
+            h.undo_depth(),
+            0,
+            "an FE entry must not be undo-reachable from FM"
+        );
+        assert!(
+            h.undo().is_none(),
+            "Ctrl+Z must not restore another track's recording"
+        );
 
         // Back on FE it is reachable again.
         h.set_live_level(Some("FE"));
@@ -2990,9 +3013,23 @@ mod tests {
         // A new push after reload must get a FRESH id, never an evicted one —
         // even though the evicted ids are now "gaps" below the surviving set.
         h2.push_snapshot(&state_with_ticks(5), "new");
-        let new_id = h2.entries().iter().find(|e| e.label == "new").unwrap().entry_id;
-        assert!(new_id >= next_before, "id {} reused (next was {})", new_id, next_before);
-        assert!(!evicted.contains(&new_id), "id {} reused an EVICTED id", new_id);
+        let new_id = h2
+            .entries()
+            .iter()
+            .find(|e| e.label == "new")
+            .unwrap()
+            .entry_id;
+        assert!(
+            new_id >= next_before,
+            "id {} reused (next was {})",
+            new_id,
+            next_before
+        );
+        assert!(
+            !evicted.contains(&new_id),
+            "id {} reused an EVICTED id",
+            new_id
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3023,7 +3060,9 @@ mod tests {
         h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
 
         assert!(
-            h2.entries().iter().any(|e| e.entry_id == pin_id && e.pinned),
+            h2.entries()
+                .iter()
+                .any(|e| e.entry_id == pin_id && e.pinned),
             "pinned entry must survive a lowered cap on load"
         );
         assert_eq!(
@@ -3143,7 +3182,11 @@ mod tests {
 
         let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
         store
-            .persist(&h.to_stored_entries(), h.current_entry_id(), h.next_entry_id())
+            .persist(
+                &h.to_stored_entries(),
+                h.current_entry_id(),
+                h.next_entry_id(),
+            )
             .unwrap();
         let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
         let mut h2 = RecordingHistory::new(16);
@@ -3151,12 +3194,19 @@ mod tests {
 
         let e = h2.entries().iter().find(|e| e.entry_id == id).unwrap();
         assert_eq!(e.custom_name.as_deref(), Some("my best run"));
-        assert_eq!(e.label, "Recorded 0:05", "auto label preserved alongside name");
+        assert_eq!(
+            e.label, "Recorded 0:05",
+            "auto label preserved alongside name"
+        );
 
         // Blank rename clears the custom name.
         assert!(h2.rename(id, "   "));
         assert_eq!(
-            h2.entries().iter().find(|e| e.entry_id == id).unwrap().custom_name,
+            h2.entries()
+                .iter()
+                .find(|e| e.entry_id == id)
+                .unwrap()
+                .custom_name,
             None
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -3213,17 +3263,26 @@ mod tests {
                 history.next_entry_id(),
             )
             .unwrap();
-        let (_hs, hres) =
-            crate::history_store_v2::HistoryStoreV2::open_in(v2dir.clone()).unwrap();
+        let (_hs, hres) = crate::history_store_v2::HistoryStoreV2::open_in(v2dir.clone()).unwrap();
         let reloaded = &hres.entries[0];
         assert!(reloaded.pinned, "recovered entry persisted as pinned");
-        assert!(reloaded.user_name.as_deref().unwrap().starts_with("Recovered"));
-        assert!(reloaded.snapshot.is_some(), "recovered snapshot persisted to disk");
+        assert!(reloaded
+            .user_name
+            .as_deref()
+            .unwrap()
+            .starts_with("Recovered"));
+        assert!(
+            reloaded.snapshot.is_some(),
+            "recovered snapshot persisted to disk"
+        );
         let _ = std::fs::remove_dir_all(&v2dir);
 
         // Clearing the checkpoint means it won't be recovered again.
         store.clear_pending().unwrap();
-        assert!(store.load_pending().unwrap().is_none(), "checkpoint cleared");
+        assert!(
+            store.load_pending().unwrap().is_none(),
+            "checkpoint cleared"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

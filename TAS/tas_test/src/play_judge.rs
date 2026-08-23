@@ -19,11 +19,10 @@
 //!
 //!   * accepted first_moving      — the fast path must land the same bucket
 //!   * prefix drift               — the accepted replay must track the recording
-//!                                  no worse than the 1x one does
+//!     no worse than the 1x one does
 //!   * handover position          — must be first_moving + 1, not a batch late
 //!   * speed after the handover   — must be the resume speed, and must STAY
-//!                                  there (the controller and the UI both
-//!                                  re-assert catch-up speeds on a timer)
+//!     there (the controller and the UI both re-assert catch-up speeds on a timer)
 //!   * time to first movement     — the reason the feature exists
 //!
 //! Failure here means the handover is not exact, or judging at speed changed
@@ -211,6 +210,9 @@ fn one_cycle(
         arm: Arm::Play,
         catchup_speed: speed,
         continue_from_frame: 0,
+        // This command deliberately exercises the retired bucket-judge path as
+        // a regression control, not the product's gate-aligned PLAY path.
+        gate_align_rec: 0,
         target: Some(BucketTarget {
             expected_start_bits,
             expected_first_moving: Some(fm),
@@ -273,7 +275,11 @@ fn one_cycle(
                 thread::sleep(Duration::from_millis(5));
             }
             StepOutcome::Wait { ms } => thread::sleep(Duration::from_millis(ms)),
-            StepOutcome::Reroll { attempt, suggested_delay_ms, .. } => {
+            StepOutcome::Reroll {
+                attempt,
+                suggested_delay_ms,
+                ..
+            } => {
                 retries = attempt;
                 // A reroll re-stages its own handover, so reset the sampler with
                 // it — otherwise the next attempt's handover reads as "already

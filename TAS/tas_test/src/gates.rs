@@ -146,6 +146,55 @@ pub fn run_gates(state: &TasSharedState, rec_count: u32) -> GateAssessment {
     }
 }
 
+/// Run the same gates for gate-aligned PLAY. The countdown is intentionally
+/// allowed to end at a different arm-relative index, so PLAY movement and drift
+/// are evaluated at equal offsets from each side's observed gate.
+pub fn run_gates_aligned(
+    state: &TasSharedState,
+    rec_count: u32,
+    rec_gate: u32,
+    play_gate: u32,
+) -> GateAssessment {
+    let mut assessment = run_gates(state, rec_count);
+    let owed = rec_count.saturating_sub(rec_gate);
+    let available = state.playback_pos.saturating_sub(play_gate).min(owed);
+    let complete = available == owed && owed > 0;
+
+    let play_start = (play_gate as usize).min(state.play_coords.len());
+    let play_count = (available as usize).min(state.play_coords.len().saturating_sub(play_start));
+    let (play_dx, _, play_dz) =
+        drift::compute_movement(&state.play_coords[play_start..], play_count);
+    assessment.gates[2] = GateResult {
+        gate: 2,
+        name: "PLAY movement",
+        passed: play_dz > 0.1,
+        detail: format!(
+            "gate-relative playDeltaX={:.4} playDeltaZ={:.4}",
+            play_dx, play_dz
+        ),
+    };
+
+    let drift_result = drift::compute_gate_relative_drift(state, rec_gate, play_gate, available);
+    assessment.gates[3] = GateResult {
+        gate: 3,
+        name: "Gate-relative zero drift",
+        passed: complete && drift_result.is_zero(),
+        detail: format!(
+            "compared={}/{} maxDriftX={:.9} (rec frame {}) maxDriftY={:.9} (rec frame {}) maxDriftZ={:.9} (rec frame {})",
+            available,
+            owed,
+            drift_result.max_drift_x,
+            drift_result.max_drift_frame_x,
+            drift_result.max_drift_y,
+            drift_result.max_drift_frame_y,
+            drift_result.max_drift_z,
+            drift_result.max_drift_frame_z,
+        ),
+    };
+    assessment.drift = drift_result;
+    assessment
+}
+
 /// Simplified gate check for straight-line tests (no steering input expected).
 /// Only checks Gate 0 (coords captured), Gate 2 (movement during play), and Gate 3 (drift).
 pub fn run_gates_straight(state: &TasSharedState, rec_count: u32) -> GateAssessment {
@@ -294,6 +343,21 @@ mod tests {
         let assessment = run_gates(&state, 1000);
         assert!(!assessment.gates[3].passed);
         assert!(!assessment.drift.is_zero());
+    }
+
+    #[test]
+    fn aligned_gates_accept_equal_trajectories_at_different_gate_indices() {
+        let mut state = perfect_steered_state(1000);
+        state.play_coords.fill([0.0; 3]);
+        let rec_gate = 10usize;
+        let play_gate = 12usize;
+        for offset in 0..(1000 - rec_gate) {
+            state.play_coords[play_gate + offset] = state.rec_coords[rec_gate + offset];
+        }
+        state.playback_pos = (play_gate + 1000 - rec_gate) as u32;
+
+        let assessment = run_gates_aligned(&state, 1000, rec_gate as u32, play_gate as u32);
+        assert!(assessment.all_pass(), "{:#?}", assessment.gates);
     }
 
     #[test]

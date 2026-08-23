@@ -211,7 +211,11 @@ pub fn show(
         // to at the splice), so highlight against that; otherwise the live play
         // speed. The buttons stay enabled during catch-up — editing the resume
         // speed mid-catch-up is exactly when you want it.
-        let selected = if catchup_active { resume_speed } else { *playback_speed };
+        let selected = if catchup_active {
+            resume_speed
+        } else {
+            *playback_speed
+        };
         for &spd in &[0.25f32, 0.5, 1.0, 2.0] {
             let label = format!("{}x", spd);
             let btn = egui::Button::new(&label);
