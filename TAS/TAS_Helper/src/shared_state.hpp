@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 31; // +secs_since_reset
+constexpr uint32_t TAS_SHARED_VERSION = 32; // +f5_press_tick/qpc
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -390,6 +390,11 @@ struct TasSharedState {
     // f64 bits: engine SECONDS accumulated since the level reset, full
     // precision. [esp+0x40] is a double in seconds that feeds fmul x100 then
     // __ftol; that truncation IS the bucket lottery. See the Rust doc.
+    // tick_count and 10MHz clock at the frame F5 is PRESSED. The level resets
+    // then, not at the release RESTART_F5_HOLD_FRAMES later. See the Rust doc.
+    volatile uint32_t f5_press_tick;
+    volatile uint32_t f5_press_qpc_lo;
+    volatile uint32_t f5_press_qpc_hi;
     volatile uint32_t secs_since_reset_lo;
     volatile uint32_t secs_since_reset_hi;
     volatile uint32_t arm_secs_lo;
@@ -423,7 +428,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1647576,
+static_assert(sizeof(TasSharedState) == 1647584,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 

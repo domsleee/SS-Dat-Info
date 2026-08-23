@@ -59,6 +59,8 @@ struct Cycle {
     gate_qpc: u64,
     arm_secs: u64,
     gate_secs: u64,
+    f5_press_tick: u32,
+    f5_press_qpc: u64,
 }
 
 impl Cycle {
@@ -177,6 +179,8 @@ fn one_cycle(client: &mut TasSharedMemoryClient, delay_ms: u64) -> Option<Cycle>
                 gate_qpc: ((s.gate_qpc_hi as u64) << 32) | s.gate_qpc_lo as u64,
                 arm_secs: ((s.arm_secs_hi as u64) << 32) | s.arm_secs_lo as u64,
                 gate_secs: ((s.gate_secs_hi as u64) << 32) | s.gate_secs_lo as u64,
+                f5_press_tick: s.f5_press_tick,
+                f5_press_qpc: ((s.f5_press_qpc_hi as u64) << 32) | s.f5_press_qpc_lo as u64,
             });
         }
         thread::sleep(Duration::from_millis(2));
@@ -280,6 +284,98 @@ fn analyse(cycles: &[Cycle]) -> bool {
     // The sub-tick test. If the countdown's start stamp is the QPC at the reset
     // frame, gate_qpc - reset_qpc is a constant 3 seconds and the residual
     // below is far smaller than one tick (~99,999 units at 10MHz).
+    // THE REFERENCE-POINT TEST. The countdown is 3.10000s = 310.003 ticks, and
+    // gate - restart_done measured 300/301 — a gap of ~10, which is exactly
+    // RESTART_F5_HOLD_FRAMES. If the level resets on the PRESS, measuring from
+    // there should collapse the spread that measuring from the release created.
+    println!("
+-- countdown length from the F5 PRESS (gate_tick - f5_press_tick) --");
+    let mut kp: Vec<i64> = cycles
+        .iter()
+        .map(|c| c.gate_tick as i64 - c.f5_press_tick as i64)
+        .collect();
+    kp.sort_unstable();
+    print_histogram(&kp);
+    let mut errp: Vec<i64> = {
+        let med = kp[kp.len() / 2];
+        cycles
+            .iter()
+            .map(|c| {
+                c.first_moving as i64
+                    - (med - (c.arm_tick as i64 - c.f5_press_tick as i64))
+            })
+            .collect()
+    };
+    errp.sort_unstable();
+    println!("-- F5-PRESS model error: fm - (K_press - (arm_tick - press_tick)) --");
+    print_histogram(&errp);
+    let worst_press = errp.iter().map(|e| e.abs()).max().unwrap_or(i64::MAX);
+    println!(
+        "  worst |error| {}, exact on {}/{}",
+        worst_press,
+        errp.iter().filter(|e| **e == 0).count(),
+        cycles.len()
+    );
+    if worst_press == 0 {
+        println!("  => EXACT. The countdown starts at the F5 press.");
+    }
+
+    // THE QPC MODEL. Stop counting ticks and do the arithmetic the game does:
+    // the gate is the first tick at or after press + 3.1s, and ticks are ~99,999
+    // apart at 10MHz. Every term is a measured QPC value, so if the countdown
+    // duration is genuinely fixed this is exact by construction.
+    println!("
+-- QPC: press -> gate, and the measured tick length --");
+    let mut span: Vec<i64> = cycles
+        .iter()
+        .map(|c| c.gate_qpc as i64 - c.f5_press_qpc as i64)
+        .collect();
+    span.sort_unstable();
+    if span.last().copied().unwrap_or(0) == 0 {
+        println!("  no QPC captured");
+    } else {
+        println!(
+            "  press->gate  min={} max={} spread={} ({:.4} ticks)",
+            span[0], span[span.len() - 1], span[span.len() - 1] - span[0],
+            (span[span.len() - 1] - span[0]) as f64 / 99_999.0
+        );
+        let mut tl: Vec<f64> = cycles
+            .iter()
+            .filter(|c| c.first_moving > 0)
+            .map(|c| (c.gate_qpc as i64 - c.arm_qpc as i64) as f64 / c.first_moving as f64)
+            .collect();
+        tl.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "  tick length  min={:.3} max={:.3} median={:.3} QPC units",
+            tl[0], tl[tl.len() - 1], tl[tl.len() / 2]
+        );
+
+        // Predict fm purely from QPC measured at the arm.
+        let dur = span[span.len() / 2];
+        let tick = tl[tl.len() / 2];
+        let mut errq: Vec<i64> = cycles
+            .iter()
+            .map(|c| {
+                let remaining = (c.f5_press_qpc as i64 + dur) - c.arm_qpc as i64;
+                let predicted = (remaining as f64 / tick).ceil() as i64;
+                c.first_moving as i64 - predicted
+            })
+            .collect();
+        errq.sort_unstable();
+        println!("-- QPC model error: fm - ceil((press_qpc + {} - arm_qpc) / {:.1}) --", dur, tick);
+        print_histogram(&errq);
+        let worst = errq.iter().map(|e| e.abs()).max().unwrap_or(i64::MAX);
+        println!(
+            "  worst |error| {}, exact on {}/{}",
+            worst,
+            errq.iter().filter(|e| **e == 0).count(),
+            cycles.len()
+        );
+        if worst == 0 {
+            println!("  => EXACT, from QPC measured at the arm.");
+        }
+    }
+
     // THE SUB-TICK TEST. Seconds accumulated since the reset, at the gate.
     // If the countdown trips at a fixed elapsed time, this is constant; and the
     // FRACTIONAL part at the arm is then exactly what decides 300 vs 301.
