@@ -2379,10 +2379,21 @@ pub mod transport {
                         return StepOutcome::InProgress;
                     }
                     let mode = port.mode();
-                    let aligned_play = self.cfg.arm == Arm::Play && self.cfg.gate_align_rec > 0;
-                    if mode == rec && !aligned_play {
-                        // Splice already fired (PLAY→REC) — bucket accepted.
-                        return self.finish(CompletedVia::Unjudged);
+                    // Alignment covers CONT now, not just PLAY. For aligned
+                    // CONT the gate-relative watcher runs during the prefix
+                    // replay (mode == PLAY); the splice sits far past the
+                    // gate + BUCKET_MATCH_WINDOW window, so a hidden-state
+                    // divergence is rerolled before it can be spliced.
+                    let aligned = self.cfg.gate_align_rec > 0;
+                    if mode == rec {
+                        // Splice already fired. For unaligned CONT that is the
+                        // accept. For aligned CONT it means the prefix replayed
+                        // clean past the watcher and reached the splice.
+                        return self.finish(if aligned {
+                            CompletedVia::BucketMatched
+                        } else {
+                            CompletedVia::Unjudged
+                        });
                     }
                     // Past the arm, "not in PLAY" means the replay ENDED (or the
                     // DLL refused the arm outright, which leaves it OFF forever).
@@ -2391,12 +2402,12 @@ pub mod transport {
                     // a recording shorter than first_moving + BUCKET_MATCH_WINDOW
                     // can never be ruled on and used to spin the cycle forever.
                     let replay_ended = mode != play;
-                    if aligned_play {
+                    if aligned {
                         let pos = port.playback_pos();
                         if pos == 0 && replay_ended {
                             self.phase = Phase::Aborted;
                             return StepOutcome::Aborted {
-                                reason: "the DLL refused aligned PLAY (nothing replayed)"
+                                reason: "the DLL refused the aligned arm (nothing replayed)"
                                     .to_string(),
                             };
                         }

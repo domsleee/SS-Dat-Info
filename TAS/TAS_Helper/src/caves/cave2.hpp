@@ -625,11 +625,14 @@ static void ProcessCommand(TasSharedState* s) {
             g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
             g_cave2_contArmed = 1;  // the ONLY place the splice gate opens
             // CONT hands over at its splice (cont_resume_speed), never
-            // mid-replay. Refuse any marker it might have inherited — and
-            // refuse gate alignment outright: CONT's splice is ARM-relative, so
-            // shifting its input stream would splice at the wrong place.
+            // mid-replay. Refuse any speed-handover marker it might have
+            // inherited. Gate alignment, however, is now SUPPORTED for CONT:
+            // the splice fires at the aligned index while the recording stays
+            // in rec-index space (see the splice block). The controller stages
+            // gate_align_rec immediately before this arm, so keep it — only a
+            // value from any OTHER route is stale, and STOP/RESTART/ARM_REC
+            // clear those.
             ClearSpeedHandoff(s);
-            ClearGateAlign(s);
             g_cave2_pendingLog = 5;
             break;
 
@@ -1149,10 +1152,19 @@ static void __declspec(noinline) Cave2_Logic() {
         // splice. A marker that lands in shared memory by any other route (stray
         // writer mid-replay, stale value, UI setting continue_from during PLAY)
         // must never hijack a plain replay into REC.
+        // Gate-aligned CONT: the splice fires at the aligned PLAY index, but
+        // the recording stays in rec-index space — recorded_count and the
+        // segment boundary are the ORIGINAL continue_from_frame, so the saved
+        // recording is byte-consistent with the one that was loaded and needs
+        // no input_log rewrite. Unaligned CONT: aligned==continue_from_frame
+        // and rec_splice==splice_pos, so this is byte-identical to before.
+        uint32_t aligned_splice = GateAlignedSplicePos(
+            s->continue_from_frame, s->gate_index, s->gate_align_rec);
         if (g_cave2_contArmed && s->continue_from_frame > 0
-                && s->playback_pos >= s->continue_from_frame) {
+                && s->playback_pos >= aligned_splice) {
             uint32_t splice_pos = s->playback_pos;
-            s->recorded_count = splice_pos;
+            uint32_t rec_splice = s->continue_from_frame;
+            s->recorded_count = rec_splice;
 
             // Stamp the splice instant. (cont_splice_fc - cont_replay_start_fc)
             // is the game-frames the replay took to reach the splice — the
@@ -1176,17 +1188,17 @@ static void __declspec(noinline) Cave2_Logic() {
             // Record new segment boundary
             uint32_t segIdx = s->segment_count;
             if (segIdx < TAS_MAX_SEGMENTS) {
-                s->segment_boundaries[segIdx].frame = splice_pos;
-                s->segment_boundaries[segIdx].input_log_offset = splice_pos;
+                s->segment_boundaries[segIdx].frame = rec_splice;
+                s->segment_boundaries[segIdx].input_log_offset = rec_splice;
                 s->segment_count = segIdx + 1;
                 s->segment_index = segIdx;
             }
-            s->segment_start_frame = splice_pos;
+            s->segment_start_frame = rec_splice;
 
             s->mode = MODE_REC;
             s->continue_from_frame = 0;  // Clear splice marker
             g_cave2_contArmed = 0;       // splice consumed — close the gate
-            g_cave2_logParam = splice_pos;
+            g_cave2_logParam = rec_splice;
             g_cave2_pendingLog = 6;
         }
     }

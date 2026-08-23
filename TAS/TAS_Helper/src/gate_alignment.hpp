@@ -9,6 +9,23 @@ inline constexpr uint32_t GATE_ALIGN_INVALID_SOURCE = 0xFFFFFFFFu;
 // mask, while earlier pre-gate transitions retain their original timing.
 inline constexpr uint32_t GATE_ALIGN_PRE_GATE_LEAD = 64u;
 
+// The play-index at which a CONT splice must fire when the prefix is
+// gate-aligned. The recording's splice is at rec-index continue_from_frame,
+// which is (continue_from_frame - rec_gate) ticks past the recording's gate;
+// the replay reaches the equivalent state that many ticks past ITS gate.
+//
+// Falls back to the plain arm-relative continue_from_frame when alignment is
+// off, the gate has not fired yet, or the splice is at/inside the countdown
+// (where the boarder is stationary and there is nothing to align). Unaligned
+// CONT is therefore byte-identical to before.
+inline uint32_t GateAlignedSplicePos(uint32_t continue_from_frame,
+                                     uint32_t live_gate, uint32_t rec_gate) {
+    if (rec_gate == 0 || live_gate == 0 || continue_from_frame <= rec_gate) {
+        return continue_from_frame;
+    }
+    return live_gate + (continue_from_frame - rec_gate);
+}
+
 inline uint32_t GateAlignedInputSource(uint32_t pos, uint32_t live_gate,
                                        uint32_t rec_gate, uint32_t recorded_count) {
     if (rec_gate == 0 || rec_gate >= recorded_count) {
