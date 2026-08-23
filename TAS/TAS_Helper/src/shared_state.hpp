@@ -6,7 +6,7 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 25; // +restart_done_tick, gate_tick, gate_index
+constexpr uint32_t TAS_SHARED_VERSION = 31; // +secs_since_reset
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -368,6 +368,49 @@ struct TasSharedState {
     volatile uint32_t restart_done_tick;  // tick_count when restart_state -> 2
     volatile uint32_t gate_tick;          // tick_count when the boarder first moved
     volatile uint32_t gate_index;         // REC/PLAY index at that moment
+    // restart_done_tick latched at THIS attempt's arm, published before
+    // arm_generation so the pair can never straddle two attempts.
+    volatile uint32_t arm_restart_tick;
+    // The GAME's own 16-bit centisecond clock (SG+0x1D5334) at the restart, the
+    // arm and the gate. tick_count is OUR counter and the countdown is not
+    // compared against it; the drift between the two is what limits the
+    // predicted first-moving frame to +/-1. See the Rust doc.
+    // tick_count of the most recent LEVEL RESET (the player teleporting back
+    // to spawn). This is what the countdown actually starts from;
+    // restart_done_tick is only when OUR F5 hold finished. See the Rust doc.
+    volatile uint32_t reset_tick;
+    volatile uint32_t arm_reset_tick;
+    volatile uint32_t gate_reset_tick;
+    // Raw bits of the player position at the ARM tick. The boarder SETTLES for
+    // a few ticks after the level reset before holding still, so this says how
+    // far into the settle the arm landed. See the Rust doc.
+    // The engine's QPC-domain clock (10MHz) at the reset, arm and gate frames.
+    // The only SUB-TICK quantity available: everything else is tick-quantised
+    // and identical across cycles that produce different gates. See Rust doc.
+    // f64 bits: engine SECONDS accumulated since the level reset, full
+    // precision. [esp+0x40] is a double in seconds that feeds fmul x100 then
+    // __ftol; that truncation IS the bucket lottery. See the Rust doc.
+    volatile uint32_t secs_since_reset_lo;
+    volatile uint32_t secs_since_reset_hi;
+    volatile uint32_t arm_secs_lo;
+    volatile uint32_t arm_secs_hi;
+    volatile uint32_t gate_secs_lo;
+    volatile uint32_t gate_secs_hi;
+    volatile uint32_t reset_qpc_lo;
+    volatile uint32_t reset_qpc_hi;
+    volatile uint32_t arm_qpc_lo;
+    volatile uint32_t arm_qpc_hi;
+    volatile uint32_t gate_qpc_lo;
+    volatile uint32_t gate_qpc_hi;
+    volatile uint32_t arm_pos_x;
+    volatile uint32_t arm_pos_y;
+    volatile uint32_t arm_pos_z;
+    volatile uint32_t restart_clk;
+    volatile uint32_t arm_clk;
+    volatile uint32_t gate_clk;
+    // 1 while every coordinate capture this session has succeeded. A failed
+    // capture still advances the index, leaving a stale hole in the prefix.
+    volatile uint32_t capture_ok;
     volatile uint32_t arm_at_tick;
     volatile uint32_t arm_consumed_tick;
     volatile uint32_t clock_delta_lo;
@@ -380,7 +423,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1647480,
+static_assert(sizeof(TasSharedState) == 1647576,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 

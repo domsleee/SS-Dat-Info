@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
 use std::sync::atomic::compiler_fence;
 
-pub const TAS_SHARED_VERSION: u32 = 25; // +restart_done_tick, gate_tick, gate_index (is the gate predictable?)
+pub const TAS_SHARED_VERSION: u32 = 31; // +secs_since_reset (the sub-tick phase, accumulated at full precision)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -405,6 +405,114 @@ pub struct TasSharedState {
     /// The REC/PLAY index at that same moment. This is `first_moving` stamped
     /// by the DLL, rather than re-derived from coordinates afterwards.
     pub gate_index: u32,
+    /// `restart_done_tick` as it stood when THIS attempt's arm was consumed,
+    /// copied by cave2 and published before `arm_generation`.
+    ///
+    /// Reading the live `restart_done_tick` instead pairs two independent
+    /// last-event fields: another writer issuing CMD_RESTART after our arm
+    /// moves one without moving the other, and the prediction would then be
+    /// confidently wrong about which restart started the countdown. The copy
+    /// is latched with the arm, so the pair always comes from one attempt.
+    pub arm_restart_tick: u32,
+    /// The GAME's own 16-bit centisecond clock (SG+0x1D5334) sampled at the
+    /// restart, the arm, and the gate.
+    ///
+    /// `tick_count` is OUR counter, incremented once per Supreme::Cycle. The
+    /// countdown is not compared against it — the game compares its own clock,
+    /// and race_timer.hpp already records that the two are not perfectly
+    /// phase-locked ("(clock - cs) occasionally lands +/-1 off, sub-tick
+    /// rounding"). That drift is the entire reason the predicted first-moving
+    /// frame is good to +/-1 and no better: the tick counter throws away the
+    /// phase the game is actually measuring.
+    ///
+    /// Sampling the game's clock at the same three moments is what tests
+    /// whether the countdown is a fixed number of ITS units even while it is a
+    /// wobbling number of ours.
+    /// tick_count of the most recent LEVEL RESET — the frame the player
+    /// teleported back to the spawn.
+    ///
+    /// This is the quantity `restart_done_tick` was standing in for and is
+    /// not. That one is when OUR F5 hold finished; the countdown starts when
+    /// the GAME actually resets the level, and the gap between the two is not
+    /// constant. Measured: gate - restart_done_tick is 300 or 301, while
+    /// arm -> gate drift is 0 on every cycle — so the whole residual sits
+    /// across the restart, which is exactly where these two events disagree.
+    ///
+    /// Detected from motion rather than from any game flag: riding moves the
+    /// player ~0.12 units per tick, and a reset moves it hundreds. Nothing to
+    /// reverse-engineer and nothing track-specific.
+    pub reset_tick: u32,
+    /// `reset_tick` latched at the arm, and again at the gate. If they agree,
+    /// the reset is already final when a cycle arms — which is what makes it
+    /// usable for prediction rather than only for post-hoc explanation.
+    pub arm_reset_tick: u32,
+    pub gate_reset_tick: u32,
+    /// Raw bits of the player's position at the ARM tick.
+    ///
+    /// The boarder is not still during the countdown's opening: it SETTLES for
+    /// a few ticks after the level reset and only then holds position until the
+    /// gate. That is visible as the frame-0 offsets of 0.116 x n between
+    /// restarts — arming at different offsets captures different settle frames.
+    ///
+    /// If the settle is deterministic, the position at the arm says exactly how
+    /// many ticks have passed since the reset — which is the phase `tick_count`
+    /// cannot see, and the whole reason the gate was only predictable to +/-1.
+    /// The engine's QPC-domain clock (10MHz, ~99,999 units per tick) latched
+    /// at the reset frame, the arm frame and the gate frame.
+    ///
+    /// THIS is the only sub-tick quantity available. Everything measured so
+    /// far — our tick counter, the game's centisecond clock, the player
+    /// position — is tick-quantised, and at the arm all three are IDENTICAL
+    /// across cycles that go on to produce different gates. Identical
+    /// observable state with different outcomes means the deciding information
+    /// is finer than a tick, and 10MHz is fine enough to see it.
+    ///
+    /// The test: if the countdown's start stamp is the QPC at the reset frame,
+    /// then gate_qpc - reset_qpc is a constant 3 seconds and the gate is
+    /// exactly the first tick whose QPC crosses it.
+    /// Raw bits of a f64: the engine's elapsed SECONDS accumulated since the
+    /// level reset, summed at full precision.
+    ///
+    /// `[esp+0x40]` is a double in seconds, not an integer clock — it feeds
+    /// `fmul [0x46DB0C]` (x100.0) and then `__ftol`. That truncation is the
+    /// documented root cause of the whole bucket lottery: a frame of 0.0099999s
+    /// yields `0.99999 -> 0` ticks and a frame a hair over 10ms yields 1, with
+    /// the remainder carried in the game's own accumulator.
+    ///
+    /// So the sub-tick phase is not hidden, it is arithmetic — and summing the
+    /// deltas from the reset reconstructs exactly the quantity the game is
+    /// comparing against 3 seconds. Every tick-quantised observable failed to
+    /// separate a 300 from a 301 (measured: identical position bits, identical
+    /// clock phase, 36/36); this is the one that cannot be quantised away.
+    pub secs_since_reset_lo: u32,
+    pub secs_since_reset_hi: u32,
+    /// The same accumulator latched at the arm — what a predictor would read.
+    pub arm_secs_lo: u32,
+    pub arm_secs_hi: u32,
+    /// ...and at the gate, which says what value actually tripped it.
+    pub gate_secs_lo: u32,
+    pub gate_secs_hi: u32,
+    pub reset_qpc_lo: u32,
+    pub reset_qpc_hi: u32,
+    pub arm_qpc_lo: u32,
+    pub arm_qpc_hi: u32,
+    pub gate_qpc_lo: u32,
+    pub gate_qpc_hi: u32,
+    pub arm_pos_x: u32,
+    pub arm_pos_y: u32,
+    pub arm_pos_z: u32,
+    pub restart_clk: u32,
+    pub arm_clk: u32,
+    pub gate_clk: u32,
+    /// 1 while every coordinate capture in this session has succeeded.
+    ///
+    /// `CapturePlayerCoords` can return having written nothing (no player
+    /// pointer, or a faulted read), but the caller still advances the index —
+    /// leaving a STALE coordinate inside the supposedly current prefix. A
+    /// first-moving scan can read that hole as early movement and learn a
+    /// countdown length that is simply wrong. Prediction refuses to learn from
+    /// a session that has one.
+    pub capture_ok: u32,
     pub arm_at_tick: u32,
     /// The tick at which ARM was actually consumed (diagnostic).
     pub arm_consumed_tick: u32,
@@ -1629,10 +1737,13 @@ pub mod transport {
         /// Monotonic counter the DLL bumps once per processed arm. Used to tell
         /// this attempt's replay state from the previous one's.
         fn arm_generation(&self) -> u32;
-        /// tick_count when this attempt's F5 restart completed.
-        fn restart_done_tick(&self) -> u32;
+        /// `restart_done_tick` latched when this attempt's arm was consumed.
+        fn arm_restart_tick(&self) -> u32;
         /// tick_count when this attempt's arm was consumed.
         fn arm_consumed_tick(&self) -> u32;
+        /// False if any coordinate capture in this session failed, which would
+        /// leave a stale hole in the prefix a first-moving scan reads.
+        fn capture_ok(&self) -> bool;
     }
 
     /// Fixed wall-clock delay (ms) between sending Stop and sending Restart.
@@ -1758,7 +1869,7 @@ pub mod transport {
     /// consumed — the only thing that moves `first_moving`. `None` when either
     /// stamp is missing, which just disables the predictive path.
     fn arm_offset(port: &impl TransportPort) -> Option<i64> {
-        let r = port.restart_done_tick();
+        let r = port.arm_restart_tick();
         let a = port.arm_consumed_tick();
         if r == 0 || a == 0 {
             return None;
@@ -2009,45 +2120,6 @@ pub mod transport {
                     if port.arm_generation() == self.arm_generation_at_arm {
                         return StepOutcome::InProgress;
                     }
-                    // THE PREDICTIVE REJECT. first_moving is decided by the arm
-                    // offset, not by anything that happens during the replay, so
-                    // once K is known this attempt's bucket is already determined
-                    // and a wrong one can be thrown away here — at zero replayed
-                    // ticks instead of after the whole countdown.
-                    //
-                    // It only ever REJECTS. A wrong prediction costs a reroll that
-                    // might have matched; it can never let a wrong bucket through,
-                    // because everything that survives still faces the full judge.
-                    if let (true, Some(k), Some(expected)) = (
-                        self.cfg.predict_bucket,
-                        self.learned_countdown_k,
-                        self.cfg.target.and_then(|t| t.expected_first_moving),
-                    ) {
-                        if let Some(off) = arm_offset(port) {
-                            let predicted = k - off;
-                            if (predicted - expected as i64).abs() > COUNTDOWN_K_JITTER {
-                                if self.blind_predictive_rejects >= MAX_BLIND_PREDICTIVE_REJECTS {
-                                    // Nothing has replayed in a while, so nothing
-                                    // has confirmed this K. Distrust it rather than
-                                    // the buckets: drop it, let the next attempt
-                                    // replay, and learn it again.
-                                    self.learned_countdown_k = None;
-                                    self.blind_predictive_rejects = 0;
-                                } else {
-                                    self.blind_predictive_rejects += 1;
-                                    self.predictive_rejects += 1;
-                                    return self.reroll(
-                                        port,
-                                        format!(
-                                            "arm landed {} tick(s) after the restart, which puts first-moving at {} not {}",
-                                            off, predicted, expected
-                                        ),
-                                        Some(predicted.max(0) as u32),
-                                    );
-                                }
-                            }
-                        }
-                    }
                     let mode = port.mode();
                     if mode == rec {
                         // Splice already fired (PLAY→REC) — bucket accepted.
@@ -2060,6 +2132,71 @@ pub mod transport {
                     // a recording shorter than first_moving + BUCKET_MATCH_WINDOW
                     // can never be ruled on and used to spin the cycle forever.
                     let replay_ended = mode != play;
+                    // THE PREDICTIVE REJECT. first_moving is decided by the arm
+                    // offset, not by anything that happens during the replay, so
+                    // once K is known this attempt's bucket is already determined
+                    // and a wrong one can be thrown away here — at zero replayed
+                    // ticks instead of after the whole countdown.
+                    //
+                    // It only ever REJECTS. A wrong prediction costs a reroll that
+                    // might have matched; it can never let a wrong bucket through,
+                    // because everything that survives still faces the full judge.
+                    //
+                    // It sits HERE, below the splice-success check and gated on
+                    // the replay still being live, rather than at the top of the
+                    // phase. Above them it could
+                    // reroll a CONT whose splice had already fired — sending STOP
+                    // and adding a duplicate segment boundary to a recording that
+                    // was already correctly spliced. A prediction must never be
+                    // able to overrule something that already happened.
+                    //
+                    // PLAY only, and never on the last retry:
+                    //
+                    // * CONT catches up at 256x, where the countdown it would skip
+                    //   is ~57ms of a ~1800ms reroll — a few percent, against a
+                    //   proven path that ends in a destructive splice. Not a trade
+                    //   worth making. The escape hatch is a flag; this is a floor.
+                    // * Reserving a retry guarantees at least one more attempt can
+                    //   actually replay and re-learn K. Without it a bad K can burn
+                    //   the remaining retries on predictions and abort the cycle
+                    //   having never observed anything to correct itself with.
+                    if self.cfg.predict_bucket
+                        && self.cfg.arm == Arm::Play
+                        && !replay_ended
+                        && self.retries_remaining > 1
+                    {
+                        if let (Some(k), Some(expected)) = (
+                            self.learned_countdown_k,
+                            self.cfg.target.and_then(|t| t.expected_first_moving),
+                        ) {
+                            if let Some(off) = arm_offset(port) {
+                                let predicted = k - off;
+                                if (predicted - expected as i64).abs() > COUNTDOWN_K_JITTER {
+                                    if self.blind_predictive_rejects
+                                        >= MAX_BLIND_PREDICTIVE_REJECTS
+                                    {
+                                        // Nothing has replayed in a while, so
+                                        // nothing has confirmed this K. Distrust
+                                        // it rather than the buckets: drop it and
+                                        // let this attempt replay and re-learn.
+                                        self.learned_countdown_k = None;
+                                        self.blind_predictive_rejects = 0;
+                                    } else {
+                                        self.blind_predictive_rejects += 1;
+                                        self.predictive_rejects += 1;
+                                        return self.reroll(
+                                            port,
+                                            format!(
+                                                "arm landed {} tick(s) after the restart, which puts first-moving at {} not {}",
+                                                off, predicted, expected
+                                            ),
+                                            Some(predicted.max(0) as u32),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let pos = port.playback_pos();
                     if pos == 0 {
                         if replay_ended {
@@ -2078,15 +2215,24 @@ pub mod transport {
                         }
                         return StepOutcome::InProgress;
                     }
-                    // Learn K from the first attempt that gets far enough to show
-                    // its first-moving frame. From here on this cycle predicts.
-                    if self.learned_countdown_k.is_none() {
+                    // Learn — or RE-learn — K from any attempt that gets far enough
+                    // to show its first-moving frame.
+                    //
+                    // Most recent observation wins, rather than the first: one odd
+                    // bucket then cannot poison the rest of the cycle. And ANY
+                    // observation clears the streak of unconfirmed rejections,
+                    // including when K was already known — otherwise a replay that
+                    // happened between rejections left the old streak standing and
+                    // dropped a K that had just been confirmed.
+                    //
+                    // Refuses to learn from a session where a coordinate capture
+                    // failed: the caller advances the index regardless, so the
+                    // prefix has a stale hole that reads as early movement.
+                    if port.capture_ok() {
                         if let (Some(o), Some(off)) =
                             (detect_first_moving(port.play_coords(), pos), arm_offset(port))
                         {
                             self.learned_countdown_k = Some(o as i64 + off);
-                            // An actual observation: the streak of unconfirmed
-                            // rejections is over.
                             self.blind_predictive_rejects = 0;
                         }
                     }
@@ -2224,8 +2370,9 @@ pub mod transport {
             speed_handoff_pos: u32,
             speed_after_handoff: f32,
             arm_generation: u32,
-            restart_done_tick: u32,
+            arm_restart_tick: u32,
             arm_consumed_tick: u32,
+            capture_ok_flag: bool,
             commands: Vec<TasCommand>,
             /// Invariant tracker: Restart must NEVER be sent while mode != OFF.
             restart_while_not_off: bool,
@@ -2279,11 +2426,14 @@ pub mod transport {
             fn arm_generation(&self) -> u32 {
                 self.arm_generation
             }
-            fn restart_done_tick(&self) -> u32 {
-                self.restart_done_tick
+            fn arm_restart_tick(&self) -> u32 {
+                self.arm_restart_tick
             }
             fn arm_consumed_tick(&self) -> u32 {
                 self.arm_consumed_tick
+            }
+            fn capture_ok(&self) -> bool {
+                self.capture_ok_flag
             }
         }
 
@@ -2564,11 +2714,14 @@ pub mod transport {
                 fn arm_generation(&self) -> u32 {
                     self.inner.arm_generation()
                 }
-                fn restart_done_tick(&self) -> u32 {
-                    self.inner.restart_done_tick()
+                fn arm_restart_tick(&self) -> u32 {
+                    self.inner.arm_restart_tick()
                 }
                 fn arm_consumed_tick(&self) -> u32 {
                     self.inner.arm_consumed_tick()
+                }
+                fn capture_ok(&self) -> bool {
+                    self.inner.capture_ok()
                 }
             }
 
@@ -2903,8 +3056,9 @@ pub mod transport {
         /// Build a port whose restart/arm stamps put the arm `off` ticks after
         /// the restart — the only quantity that moves first_moving.
         fn arm_at_offset(p: &mut FakePort, off: u32) {
-            p.restart_done_tick = 1000;
+            p.arm_restart_tick = 1000;
             p.arm_consumed_tick = 1000 + off;
+            p.capture_ok_flag = true;
         }
 
         /// THE POINT OF ALL THIS. Once the countdown length is known, a wrong
@@ -3451,11 +3605,14 @@ impl transport::TransportPort for TasSharedMemoryClient {
     fn arm_generation(&self) -> u32 {
         unsafe { std::ptr::read_volatile(&self.state().arm_generation as *const u32) }
     }
-    fn restart_done_tick(&self) -> u32 {
-        unsafe { std::ptr::read_volatile(&self.state().restart_done_tick as *const u32) }
+    fn arm_restart_tick(&self) -> u32 {
+        unsafe { std::ptr::read_volatile(&self.state().arm_restart_tick as *const u32) }
     }
     fn arm_consumed_tick(&self) -> u32 {
         unsafe { std::ptr::read_volatile(&self.state().arm_consumed_tick as *const u32) }
+    }
+    fn capture_ok(&self) -> bool {
+        unsafe { std::ptr::read_volatile(&self.state().capture_ok as *const u32) != 0 }
     }
 }
 
@@ -3519,11 +3676,14 @@ impl transport::TransportPort for TasSharedMemoryClient {
     fn arm_generation(&self) -> u32 {
         unsafe { std::ptr::read_volatile(&self.state().arm_generation as *const u32) }
     }
-    fn restart_done_tick(&self) -> u32 {
-        unsafe { std::ptr::read_volatile(&self.state().restart_done_tick as *const u32) }
+    fn arm_restart_tick(&self) -> u32 {
+        unsafe { std::ptr::read_volatile(&self.state().arm_restart_tick as *const u32) }
     }
     fn arm_consumed_tick(&self) -> u32 {
         unsafe { std::ptr::read_volatile(&self.state().arm_consumed_tick as *const u32) }
+    }
+    fn capture_ok(&self) -> bool {
+        unsafe { std::ptr::read_volatile(&self.state().capture_ok as *const u32) != 0 }
     }
 }
 
@@ -3547,7 +3707,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_480);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_647_576);
     }
 
     #[test]
