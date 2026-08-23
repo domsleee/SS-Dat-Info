@@ -252,6 +252,34 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
 // Helper: capture player coordinates (SEH-protected, NO FLOAT OPS)
 // Uses integer-width memcpy to avoid corrupting x87 FPU state.
 // Drift computation is deferred to Rust test harness post-playback.
+// Snapshot the player object and its physics sub-object, raw, dword by dword
+// under SEH. Returns how many dwords of each were readable. Integer copies
+// only — no float ops, this runs inside the cave.
+static void SnapshotPlayerObjects(TasSharedState* s,
+                                  volatile uint32_t* player_out,
+                                  volatile uint32_t* physics_out) {
+    s->objsnap_player_ok = 0;
+    s->objsnap_physics_ok = 0;
+    if (!s->player_ptr) return;
+    auto player = (const uint32_t*)s->player_ptr;
+    uint32_t n = 0;
+    __try {
+        for (; n < OBJSNAP_PLAYER_DWORDS; ++n) player_out[n] = player[n];
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    s->objsnap_player_ok = n;
+    uint32_t physics = 0;
+    __try {
+        memcpy(&physics, (const uint8_t*)s->player_ptr + GameAddresses::PLAYER_PHYSICS, 4);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { physics = 0; }
+    if (!physics) return;
+    auto phys = (const uint32_t*)(uintptr_t)physics;
+    n = 0;
+    __try {
+        for (; n < OBJSNAP_PHYSICS_DWORDS; ++n) physics_out[n] = phys[n];
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    s->objsnap_physics_ok = n;
+}
+
 static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
     // A capture that writes nothing still lets the caller advance the index,
     // leaving a STALE coordinate inside the current prefix. Anything scanning
@@ -319,6 +347,7 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
                 s->gate_clk = racetimer::ReadClk();
                 s->gate_reset_tick = s->reset_tick;
                 s->gate_seq = s->frame_count;
+                SnapshotPlayerObjects(s, s->objsnap_gate_player, s->objsnap_gate_physics);
                 s->gate_qpc_lo = s->clock_delta_lo;
                 s->gate_qpc_hi = s->clock_delta_hi;
                 s->gate_secs_lo = s->secs_since_reset_lo;
@@ -707,6 +736,7 @@ static void ProcessCommand(TasSharedState* s) {
         s->arm_clk = racetimer::ReadClk();
         s->arm_reset_tick = s->reset_tick;
         s->arm_seq = s->frame_count;
+        SnapshotPlayerObjects(s, s->objsnap_arm_player, s->objsnap_arm_physics);
         s->arm_qpc_lo = s->clock_delta_lo;
         s->arm_qpc_hi = s->clock_delta_hi;
         s->arm_secs_lo = s->secs_since_reset_lo;

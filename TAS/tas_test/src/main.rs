@@ -36,6 +36,7 @@ mod fe_cont_stress;
 mod gate_align;
 mod gate_predict;
 mod gate_trace;
+mod hidden_state;
 mod gates;
 mod harness;
 mod level_hunt;
@@ -272,6 +273,13 @@ fn main() {
             let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(8u32);
             let rec = args.get(3).map(|s| s.as_str());
             std::process::exit(if gate_align::run(n, rec) { 0 } else { 1 });
+        }
+        "hidden-state" => {
+            let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(12u32);
+            let rec = args.get(3).map(|s| s.as_str());
+            let fresh = args.iter().any(|a| a == "--fresh");
+            let rec = rec.filter(|r| !r.starts_with("--"));
+            std::process::exit(if hidden_state::run(n, rec, fresh) { 0 } else { 1 });
         }
         "gate-trace" => {
             let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(6u32);
