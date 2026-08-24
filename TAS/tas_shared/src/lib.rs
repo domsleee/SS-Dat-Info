@@ -1059,14 +1059,16 @@ pub fn zeroed_boxed() -> Box<TasSharedState> {
 /// Track identification shared by tas_ui (the status chip) and tas_test (the
 /// pre-flight guard below). Single source of truth for the `level_id` encoding.
 pub mod level {
-    /// The nine main Time-Attack Tracks, indexed by `level_id` = area*3 +
-    /// difficulty (area 0=Forest, 1=Alpine, 2=Village; diff 0=Easy, 1=Medium,
-    /// 2=Hard).
-    pub const CODES: [&str; 9] = ["FE", "FM", "FH", "AE", "AM", "AH", "VE", "VM", "VH"];
+    /// The nine main Time-Attack Tracks plus the start menu's Practice run,
+    /// indexed by `level_id` = area*3 + difficulty (area 0=Forest, 1=Alpine,
+    /// 2=Village, 3=Practice; diff 0=Easy, 1=Medium, 2=Hard). Practice has
+    /// exactly one difficulty on disk (Tracks/Easy), so its only id is
+    /// 3*3+0 = 9 = "PE".
+    pub const CODES: [&str; 10] = ["FE", "FM", "FH", "AE", "AM", "AH", "VE", "VM", "VH", "PE"];
 
     /// Level code from the DLL's published `level_id`. `None` = unknown: either
-    /// the menu, or a mode that is not one of the nine Tracks (Practice,
-    /// Halfpipe, ...). The DLL publishes 0xFFFFFFFF for all of those.
+    /// the menu, or a mode outside the table (Halfpipe, Ramp, ...). The DLL
+    /// publishes 0xFFFFFFFF for all of those.
     pub fn code_from_id(level_id: u32) -> Option<&'static str> {
         CODES.get(level_id as usize).copied()
     }
@@ -1200,9 +1202,10 @@ mod level_tests {
     fn id_maps_to_code_and_unknown_is_none() {
         assert_eq!(code_from_id(0), Some("FE"));
         assert_eq!(code_from_id(8), Some("VH"));
-        // Practice / Halfpipe / menu all publish 0xFFFFFFFF.
+        assert_eq!(code_from_id(9), Some("PE"), "practice is a level now");
+        // Halfpipe / Ramp / menu all publish 0xFFFFFFFF.
         assert_eq!(code_from_id(u32::MAX), None);
-        assert_eq!(code_from_id(9), None);
+        assert_eq!(code_from_id(10), None);
     }
 
     #[test]

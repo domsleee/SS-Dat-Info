@@ -36,6 +36,10 @@ pub const START_POINTS: &[(&str, &[[f32; 3]])] = &[
         "FM",
         &[[518.553, -1535.384, 99.917], [412.575, -257.286, -64.914]],
     ),
+    // PE hand-added from Practice/Tracks/Easy/Object_Data.txt (levelData.json
+    // has no Practice entry for the generator). Raw loc y, not terrain-snapped
+    // like generated rows - fine: crossing detection is z + lateral x only.
+    ("PE", &[[240.940, -319.582, 127.939]]),
     ("VE", &[[729.527, -457.721, 231.772]]),
     ("VH", &[[439.386, -501.646, 114.804]]),
     ("VM", &[[801.000, -481.165, 299.284]]),
@@ -51,6 +55,11 @@ pub const FINISH_POINTS: &[(&str, &[[f32; 3]])] = &[
     ("FE", &[[534.888, -284.278, 2_313.64]]),
     ("FH", &[[543.770, -304.486, 2_340.92]]),
     ("FM", &[[543.770, -304.486, 2_340.92]]),
+    // PE hand-added from Object_Data.txt - see START_POINTS note.
+    (
+        "PE",
+        &[[385.838, 112.783, 1_336.26], [346.814, 165.499, 1_338.70]],
+    ),
     ("VE", &[[430.776, 738.915, 2_657.77]]),
     ("VH", &[[211.158, 292.066, 1_897.36]]),
     (

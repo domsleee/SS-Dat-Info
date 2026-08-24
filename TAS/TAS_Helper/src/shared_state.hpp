@@ -326,8 +326,8 @@ struct TasSharedState {
     // The engine loads each track from loose files under
     // Data/Levels/<Area>/<Category>/<Difficulty>/..., so a file open IS the
     // level-identity event: exact, immediate, and richer than the heap scan
-    // (which only matches "<area>/Tracks/<diff>" and so cannot see Practice,
-    // Special, Halfpipe or Ramp at all).
+    // (which matches "<area>/Tracks/<diff>" - including practice/Tracks/easy,
+    // id 9 - but cannot see Special, Halfpipe or Ramp at all).
     // level_path_gen is bumped AFTER the string is written, so a reader that
     // sees a new generation can already see the path it refers to.
     char     level_path[TAS_LEVEL_PATH_MAX];

@@ -44,7 +44,10 @@ inline int MatchOne(const char* p, size_t n, const char* const* table, int count
     return -1;
 }
 
-inline const char* const AREAS[3] = { "forest", "alpine", "village" };
+// Practice (the start menu's practice run) is a first-class level: on disk it
+// is data/levels/Practice/Tracks/Easy/ - the exact grammar of the nine race
+// tracks, with exactly ONE difficulty. Area index 3, so id = 3*3+0 = 9 ("PE").
+inline const char* const AREAS[4] = { "forest", "alpine", "village", "practice" };
 inline const char* const DIFFS[3] = { "easy", "medium", "hard" };
 
 // Does `path` contain `seg` (lowercase) as a WHOLE path segment — i.e. bounded
@@ -80,7 +83,7 @@ inline bool IsPlausible(const char* s) {
     return HasSegmentNoCase(s, "levels") && HasSegmentNoCase(s, "tracks");
 }
 
-// Area index (0=Forest, 1=Alpine, 2=Village) from ".../levels/<area>/...", or -1.
+// Area index (0=Forest, 1=Alpine, 2=Village, 3=Practice) from ".../levels/<area>/...", or -1.
 //
 // This is the half of the identity the path answers RELIABLY. The difficulty
 // segment is NOT trustworthy: some tracks share the easy/ shadow asset, so
@@ -101,9 +104,9 @@ inline int AreaFrom(const char* path) {
         const char* seg = path + k + 1;
         size_t len = 0;
         while (seg[len] && !IsSep(seg[len])) len++;
-        int a = MatchOne(seg, len, AREAS, 3);
+        int a = MatchOne(seg, len, AREAS, 4);
         if (a >= 0) return a;
-        // "levels" appeared but the next segment is not an area (e.g. Practice,
+        // "levels" appeared but the next segment is not a known area (e.g.
         // Special, or a literal like "Data/Levels/" with nothing after it).
         // Keep scanning: the real one may appear later in the path.
     }

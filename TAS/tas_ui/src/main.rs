@@ -16,7 +16,7 @@ use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 /// display name for the game-state chip. The DLL detects the track in-process
 /// (see TAS_Helper `level_scan.hpp`) so the UI just reads the index.
 fn level_name_from_id(id: u32) -> Option<&'static str> {
-    const NAMES: [&str; 9] = [
+    const NAMES: [&str; 10] = [
         "Forest Easy",
         "Forest Medium",
         "Forest Hard",
@@ -26,6 +26,7 @@ fn level_name_from_id(id: u32) -> Option<&'static str> {
         "Village Easy",
         "Village Medium",
         "Village Hard",
+        "Practice",
     ];
     NAMES.get(id as usize).copied()
 }
@@ -1039,6 +1040,26 @@ impl TasApp {
         if self.cont_controller.is_some() {
             self.log_lines.push(format!(
                 "[{}] {:?} ignored: a restart/arm cycle is already in progress",
+                ts, command
+            ));
+            return;
+        }
+        // THE MENU GATE. Arming drives an in-process F5 restart, which
+        // assumes the engine is actually running a level. From a menu, the
+        // pause menu or a dialog the cycle is frozen (game_in_game alone is
+        // a stale flag there - same reasoning as the status chip), so an arm
+        // would fire into a stopped engine and leave a half-armed cycle.
+        // This is the single funnel for the transport buttons AND the
+        // F9/F10/F12 hotkeys, so gating here covers both.
+        let cycle_ticking = self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400);
+        let in_level = self
+            .shared
+            .as_ref()
+            .map(|sh| sh.state().game_in_game != 0)
+            .unwrap_or(false);
+        if !cycle_ticking || !in_level {
+            self.log_lines.push(format!(
+                "[{}] {:?} ignored: the game is in a menu / paused - enter a level first",
                 ts, command
             ));
             return;
@@ -2710,6 +2731,11 @@ impl eframe::App for TasApp {
                 // filtered to the old track and mis-stamped anything pushed
                 // mid-load. A wrong tag is worse than none: it can't be spotted.
 
+                // Mirror of queue_restart_then's menu gate, for the VISUAL
+                // disable: the buttons gray out in a menu instead of
+                // accepting a click the funnel would refuse anyway.
+                let arming_allowed = shared.state().game_in_game != 0
+                    && self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400);
                 transport::show(
                     ui,
                     mode,
@@ -2723,6 +2749,7 @@ impl eframe::App for TasApp {
                     shared.state(),
                     self.cont_catchup_speed.is_some(),
                     resume_speed,
+                    arming_allowed,
                 )
             } else {
                 Vec::new()

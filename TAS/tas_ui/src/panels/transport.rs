@@ -39,6 +39,11 @@ pub fn show(
     state: &TasSharedState,
     catchup_active: bool,
     resume_speed: f32,
+    // False while the game sits in a menu / pause / dialog (engine cycle
+    // frozen, or not in a level at all). Arming from there fires an F5 into
+    // a stopped engine, so REC/PLAY/CONT gray out. STOP stays available -
+    // it is the escape hatch and must work everywhere.
+    arming_allowed: bool,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
 
@@ -64,7 +69,8 @@ pub fn show(
             rec_text
         };
         if ui
-            .add_enabled(is_off, egui::Button::new(rec_text))
+            .add_enabled(is_off && arming_allowed, egui::Button::new(rec_text))
+            .on_disabled_hover_text("Enter a level first - can't record from a menu")
             .on_hover_text("Record (F9)")
             .clicked()
         {
@@ -81,7 +87,11 @@ pub fn show(
             play_text
         };
         if ui
-            .add_enabled(is_off && recorded > 0, egui::Button::new(play_text))
+            .add_enabled(
+                is_off && recorded > 0 && arming_allowed,
+                egui::Button::new(play_text),
+            )
+            .on_disabled_hover_text("Enter a level first - can't replay from a menu")
             .on_hover_text("Play (F10)")
             .clicked()
         {
@@ -109,7 +119,8 @@ pub fn show(
             cont_text
         };
         if ui
-            .add_enabled(can_continue, egui::Button::new(cont_text))
+            .add_enabled(can_continue && arming_allowed, egui::Button::new(cont_text))
+            .on_disabled_hover_text("Enter a level first - can't continue from a menu")
             .on_hover_text(format!(
                 "Continue from a specific frame · catch-up ×{}  (F12)",
                 *cont_catchup_speed

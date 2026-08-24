@@ -21,7 +21,9 @@
 // direct (no ReadProcessMemory) — much cheaper. It runs on a background thread
 // (the scan walks tens of MiB; must not block the game's main thread) and only
 // while game_in_game == 1, publishing the result into s->level_id:
-//   0..8 = area*3 + difficulty  (area 0=Forest,1=Alpine,2=Village;
+//   0..9 = area*3 + difficulty  (area 0=Forest,1=Alpine,2=Village,3=Practice;
+//          Practice has only Easy on disk, so of the practice ids only 9 can
+//          ever tally - 10/11 have no strings to match;
 //                                 diff 0=Easy,1=Medium,2=Hard)
 //   0xFFFFFFFF = unknown / in the menu.
 namespace levelscan {
@@ -228,7 +230,7 @@ static void pollLevelContext(TasSharedState* s) {
 
 // Tally "<area>/Tracks/<diff>" occurrences. Anchors on "racks/" (the always-
 // lowercase core of Tracks/tracks), then case-folds the short area/diff segments.
-static void scanRegion(const uint8_t* p, size_t n, int tally[9]) {
+static void scanRegion(const uint8_t* p, size_t n, int tally[12]) {
     if (n < 8) return;
     for (size_t i = 0; i + 6 < n; i++) {
         if (p[i] == 'r' && p[i + 1] == 'a' && p[i + 2] == 'c' &&
@@ -247,7 +249,7 @@ static void scanRegion(const uint8_t* p, size_t n, int tally[9]) {
             for (size_t j = dstart; j < n; j++) {
                 if (p[j] == '/' || p[j] == '\\') { dend = j; break; }
             }
-            int ai = matchOne((const char*)(p + astart), aend - astart, AREAS, 3);
+            int ai = matchOne((const char*)(p + astart), aend - astart, AREAS, 4);
             int di = matchOne((const char*)(p + dstart), dend - dstart, DIFFS, 3);
             if (ai >= 0 && di >= 0) tally[ai * 3 + di]++;
         }
@@ -294,7 +296,7 @@ static bool confidentEnough(int best, int second) {
 // winner from a DIFFERENT AREA could beat the real track. Restricting the tally
 // to the known area makes that impossible by construction.
 static int32_t scanLevelId(int* outBest, int* outSecond, int areaHint) {
-    int tally[9] = { 0 };
+    int tally[12] = { 0 };  // 3 areas x 3 diffs + practice (only 9 occurs)
     uint8_t* addr = nullptr;
     const uint8_t* MAXADDR = (const uint8_t*)0x7FFF0000u;
     MEMORY_BASIC_INFORMATION mbi;
@@ -324,7 +326,7 @@ static int32_t scanLevelId(int* outBest, int* outSecond, int areaHint) {
     // residue from a previous one is sparse. So report the top two counts and
     // let the caller apply the thresholds.
     int best = -1, bestc = 0, secondc = 0;
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < 12; i++) {
         // Outside the known area? Cannot be the current track.
         if (areaHint >= 0 && i / 3 != areaHint) continue;
         if (tally[i] > bestc) { secondc = bestc; bestc = tally[i]; best = i; }

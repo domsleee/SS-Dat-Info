@@ -59,8 +59,10 @@ int main() {
     }
 
     // --- Non-Track modes and junk must NOT produce an area. ---
-    check(AreaFrom("data/levels/Practice/x") == -1, "Practice is not one of the 3 areas");
-    check(AreaFrom("data/levels/Special/x") == -1, "Special is not one of the 3 areas");
+    check(AreaFrom("data/levels/Practice/x") == 3, "Practice is area 3");
+    check(AreaFrom("data/levels/Practice/Tracks/Easy/Cloudy/shadow.qua") == 3,
+          "practice full path resolves");
+    check(AreaFrom("data/levels/Special/x") == -1, "Special is not an area");
     check(AreaFrom("Data/Levels/") == -1, "bare prefix has no area");
     check(AreaFrom("no/paths/here") == -1, "unrelated path has no area");
     check(AreaFrom(nullptr) == -1, "null has no area");
