@@ -52,7 +52,10 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
         }
     };
     if rec.count <= splice_frame {
-        eprintln!("ERROR: recording has {} frames, need > {}", rec.count, splice_frame);
+        eprintln!(
+            "ERROR: recording has {} frames, need > {}",
+            rec.count, splice_frame
+        );
         return false;
     }
     println!("  Recording: {} ({} frames)", path.display(), rec.count);
@@ -69,8 +72,12 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
     // speed before arming.
     client.state_mut().playback_speed = catchup_speed;
 
-    let spliced =
-        harness::restart_continue_and_splice_inprocess(&mut client, rec_start, splice_frame, RETRIES);
+    let spliced = harness::restart_continue_and_splice_inprocess(
+        &mut client,
+        rec_start,
+        splice_frame,
+        RETRIES,
+    );
     if spliced.is_none() {
         println!("*** CONT-SPLICE-FRAME FAILED: never landed a CONT bucket ***");
         return false;
@@ -90,6 +97,14 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
         }
     };
     let recorded_at_splice = client.state().recorded_count;
+    // Gate-aligned CONT shifts the live play index; capture the gate fields
+    // now, because harness::stop() below clears gate_align_rec. Unaligned CONT
+    // has gate_align_rec == 0 and this reduces to raw-index drift.
+    let (splice_aligned, splice_rec_gate, splice_play_gate) = {
+        let s = client.state();
+        let aligned = s.gate_align_rec > 0 && s.gate_index > 0 && splice_frame > s.gate_align_rec;
+        (aligned, s.gate_align_rec, s.gate_index)
+    };
 
     // Now record at the SLOW speed for a short burst, exercising the
     // catch-up→record speed transition. The splice boundary (captured at the
@@ -106,7 +121,12 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
 
     let recorded = recorded_after_burst;
     let burst_frames = recorded_after_burst.saturating_sub(recorded_at_splice);
-    let d = drift::compute_drift(client.state(), splice_frame);
+    let d = if splice_aligned {
+        let rel = splice_frame.saturating_sub(splice_rec_gate);
+        drift::compute_drift_gate_relative(client.state(), splice_rec_gate, splice_play_gate, rel)
+    } else {
+        drift::compute_drift(client.state(), splice_frame)
+    };
 
     println!();
     println!("  requested splice frame: {}", splice_frame);
@@ -114,7 +134,10 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
         "  splice boundary frame:  {}   (segment_count={})",
         splice_boundary, seg_count
     );
-    println!("  mode after splice:      {}", if mode_rec { "REC" } else { "NOT REC" });
+    println!(
+        "  mode after splice:      {}",
+        if mode_rec { "REC" } else { "NOT REC" }
+    );
     println!(
         "  recorded_count:         {}   (= splice frame + post-splice frames)",
         recorded
@@ -124,8 +147,16 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
         burst_frames, record_speed
     );
     println!(
-        "  prefix drift [0..{}):    X={:.9}  Y={:.9}  Z={:.9}",
-        splice_frame, d.max_drift_x, d.max_drift_y, d.max_drift_z
+        "  prefix drift{} [0..{}):   X={:.9}  Y={:.9}  Z={:.9}",
+        if splice_aligned {
+            " (gate-relative)"
+        } else {
+            ""
+        },
+        splice_frame,
+        d.max_drift_x,
+        d.max_drift_y,
+        d.max_drift_z
     );
 
     let exact = splice_boundary == splice_frame;

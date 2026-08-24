@@ -162,7 +162,13 @@ impl ContReliabilityReport {
             let rerolls_list: Vec<String> = self
                 .results
                 .iter()
-                .map(|r| if r.spliced { r.rerolls.to_string() } else { "x".into() })
+                .map(|r| {
+                    if r.spliced {
+                        r.rerolls.to_string()
+                    } else {
+                        "x".into()
+                    }
+                })
                 .collect();
             println!();
             println!(
@@ -249,7 +255,12 @@ impl ContReliabilityReport {
 
         // Time to resume (restart→splice wall-clock) — the wait after pressing
         // CONT. min is the clean no-reroll catch-up; max includes reroll cycles.
-        let resume_times: Vec<f64> = self.results.iter().filter(|r| r.spliced).map(|r| r.resume_ms).collect();
+        let resume_times: Vec<f64> = self
+            .results
+            .iter()
+            .filter(|r| r.spliced)
+            .map(|r| r.resume_ms)
+            .collect();
         if !resume_times.is_empty() {
             let rmin = resume_times.iter().cloned().fold(f64::INFINITY, f64::min);
             let rmax = resume_times.iter().cloned().fold(0.0_f64, f64::max);
@@ -672,17 +683,27 @@ pub fn run(
                 let st = client.state();
                 let ticks = st.perf_cave2.calls;
                 let render_frames = st.perf_cave5.calls;
-                let cave2_cyc = if st.perf_cave2.calls > 0 {
-                    st.perf_cave2.cycles_total / st.perf_cave2.calls
-                } else { 0 };
-                let cave5_cyc = if st.perf_cave5.calls > 0 {
-                    st.perf_cave5.cycles_total / st.perf_cave5.calls
-                } else { 0 };
+                let cave2_cyc = st
+                    .perf_cave2
+                    .cycles_total
+                    .checked_div(st.perf_cave2.calls)
+                    .unwrap_or(0);
+                let cave5_cyc = st
+                    .perf_cave5
+                    .cycles_total
+                    .checked_div(st.perf_cave5.calls)
+                    .unwrap_or(0);
                 let secs = resume_ms / 1000.0;
-                let render_fps = if secs > 0.0 { render_frames as f64 / secs } else { 0.0 };
+                let render_fps = if secs > 0.0 {
+                    render_frames as f64 / secs
+                } else {
+                    0.0
+                };
                 let ticks_per_frame = if render_frames > 0 {
                     ticks as f64 / render_frames as f64
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
                 println!(
                     "  PERF: ticks(cave2)={} render_frames(cave5)={} | ticks/frame={:.1} (cap={}) | render_fps={:.0} | hook_cyc cave2={} cave5={}",
                     ticks, render_frames, ticks_per_frame, 64, render_fps, cave2_cyc, cave5_cyc
@@ -719,9 +740,39 @@ pub fn run(
                 replay_start_fc = state.cont_replay_start_fc;
                 splice_fc = state.cont_splice_fc;
                 playback_pos_at_splice = state.playback_pos;
-                replay_coverage_ok = playback_pos_at_splice >= splice_frame;
+                // Gate-aligned CONT shifts the live play index relative to the
+                // recording, so coverage and drift are gate-relative. Unaligned
+                // CONT has gate_align_rec == 0 and this reduces to the old
+                // raw-index comparison exactly.
+                // Mirror the caller fallback: alignment is only in effect when
+                // the gate fired AND the splice is past it, so a gate stamp
+                // cannot be mistaken and the gate-relative length cannot
+                // underflow.
+                let aligned = state.gate_align_rec > 0
+                    && state.gate_index > 0
+                    && splice_frame > state.gate_align_rec;
+                let (rec_gate, play_gate) = if aligned {
+                    (state.gate_align_rec, state.gate_index)
+                } else {
+                    (0, 0)
+                };
+                // Play index the splice fired at, in gate-relative terms.
+                let aligned_splice = if aligned {
+                    play_gate + (splice_frame - rec_gate)
+                } else {
+                    splice_frame
+                };
+                replay_coverage_ok = playback_pos_at_splice >= aligned_splice;
+                // Gate-relative prefix length: ticks of trajectory past the gate
+                // that both sides share.
+                let rel_count = (splice_frame.saturating_sub(rec_gate))
+                    .min(playback_pos_at_splice.saturating_sub(play_gate));
                 let assessed_prefix = splice_frame.min(playback_pos_at_splice);
-                let d = drift::compute_drift(state, assessed_prefix);
+                let d = if aligned {
+                    drift::compute_drift_gate_relative(state, rec_gate, play_gate, rel_count)
+                } else {
+                    drift::compute_drift(state, assessed_prefix)
+                };
                 max_drift_x = d.max_drift_x;
                 max_drift_y = d.max_drift_y;
                 max_drift_z = d.max_drift_z;

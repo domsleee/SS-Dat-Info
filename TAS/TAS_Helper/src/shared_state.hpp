@@ -6,7 +6,12 @@
 // Both use atomic uint32_t for command/mode fields.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
-constexpr uint32_t TAS_SHARED_VERSION = 20; // +level_ctx_seq (seqlock over the level-context group)
+constexpr size_t TRACE_FRAMES = 384;
+
+constexpr size_t OBJSNAP_PLAYER_DWORDS = 128;
+constexpr size_t OBJSNAP_PHYSICS_DWORDS = 512;
+
+constexpr uint32_t TAS_SHARED_VERSION = 40; // +cont_splice_approved (aligned-CONT splice interlock)
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -321,8 +326,8 @@ struct TasSharedState {
     // The engine loads each track from loose files under
     // Data/Levels/<Area>/<Category>/<Difficulty>/..., so a file open IS the
     // level-identity event: exact, immediate, and richer than the heap scan
-    // (which only matches "<area>/Tracks/<diff>" and so cannot see Practice,
-    // Special, Halfpipe or Ramp at all).
+    // (which matches "<area>/Tracks/<diff>" - including practice/Tracks/easy,
+    // id 9 - but cannot see Special, Halfpipe or Ramp at all).
     // level_path_gen is bumped AFTER the string is written, so a reader that
     // sees a new generation can already see the path it refers to.
     char     level_path[TAS_LEVEL_PATH_MAX];
@@ -342,6 +347,130 @@ struct TasSharedState {
     // level_scan_second_hits are NOT in the group: they are diagnostics nothing
     // branches on. If a field ever joins the decision, it joins the window too.
     volatile uint32_t level_ctx_seq;
+
+    // The engine's 64-bit elapsed-time delta for this cycle, {lo,hi}, read by
+    // cave5 from [esp+0x40] before __ftol truncates it to a tick count. This is
+    // the sub-tick phase: everything at tick resolution has already been ruled
+    // out by measurement as a bucket predictor (see tas_test bucket-predict).
+    // Defer ARM until tick_count reaches this (0 = immediate). Writing the
+    // command is a store from another process; cave2 consumes it on a later
+    // frame, so the consumption tick — which is what first_moving is measured
+    // from — was never actually controlled. See the Rust doc for the numbers.
+    // Replay position at which cave2 drops playback_speed to speed_after_handoff,
+    // on that exact tick, and asks cave5 to clear the catch-up backlog. CONT's
+    // splice handover generalised so a judged PLAY can replay the countdown fast
+    // and hand back to 1x exactly where the run becomes worth watching.
+    volatile uint32_t speed_handoff_pos;
+    volatile float speed_after_handoff;
+    // Bumped every time cave2 PROCESSES a replay-starting arm (ARM_PLAY /
+    // ARM_CONTINUE), refusals included. The judge uses it to tell this
+    // attempt's mode/position from the previous replay's - neither of those
+    // fields can answer that on its own. See the Rust doc.
+    volatile uint32_t arm_generation;
+    // Countdown-gate instrumentation. See the Rust doc: these exist to test
+    // whether first_moving is COMPUTABLE at arm time rather than only
+    // observable after replaying the whole countdown.
+    volatile uint32_t restart_done_tick;  // tick_count when restart_state -> 2
+    volatile uint32_t gate_tick;          // tick_count when the boarder first moved
+    volatile uint32_t gate_index;         // REC/PLAY index at that moment
+    // restart_done_tick latched at THIS attempt's arm, published before
+    // arm_generation so the pair can never straddle two attempts.
+    volatile uint32_t arm_restart_tick;
+    // The GAME's own 16-bit centisecond clock (SG+0x1D5334) at the restart, the
+    // arm and the gate. tick_count is OUR counter and the countdown is not
+    // compared against it; the drift between the two is what limits the
+    // predicted first-moving frame to +/-1. See the Rust doc.
+    // tick_count of the most recent LEVEL RESET (the player teleporting back
+    // to spawn). This is what the countdown actually starts from;
+    // restart_done_tick is only when OUR F5 hold finished. See the Rust doc.
+    volatile uint32_t reset_tick;
+    volatile uint32_t arm_reset_tick;
+    volatile uint32_t gate_reset_tick;
+    // Raw bits of the player position at the ARM tick. The boarder SETTLES for
+    // a few ticks after the level reset before holding still, so this says how
+    // far into the settle the arm landed. See the Rust doc.
+    // The engine's QPC-domain clock (10MHz) at the reset, arm and gate frames.
+    // The only SUB-TICK quantity available: everything else is tick-quantised
+    // and identical across cycles that produce different gates. See Rust doc.
+    // f64 bits: engine SECONDS accumulated since the level reset, full
+    // precision. [esp+0x40] is a double in seconds that feeds fmul x100 then
+    // __ftol; that truncation IS the bucket lottery. See the Rust doc.
+    // tick_count and 10MHz clock at the frame F5 is PRESSED. The level resets
+    // then, not at the release RESTART_F5_HOLD_FRAMES later. See the Rust doc.
+    // Frame-by-frame trace from the F5 press: [tick, x, y, z] raw bits. Every
+    // "where does the countdown start" detector so far was a guess that left a
+    // one or two tick residual; this records what actually happens instead.
+    volatile uint32_t trace_count;
+    // [tick_count, x, y, z, now_lo, now_hi] — the clock and the emitted ticks
+    // are what the game's own tick rule consumes, so the sub-tick residual can
+    // be reconstructed from this rather than found in memory. See Rust doc.
+    // [tick, x, y, z, now_lo, now_hi, physics_ptr]. The physics pointer is the
+    // reset signal that position cannot provide: a boarder already AT the spawn
+    // when the level reloads shows no position change at all. See the Rust doc.
+    volatile uint32_t trace[TRACE_FRAMES][7];
+    // cave2 CYCLE ordinals at press / arm / gate. tick_count is batched by
+    // cave5 (esi added before the cycles run), so it cannot tell cycles apart
+    // inside a batch — and first_moving counts cycles. See the Rust doc.
+    // The RECORDING's first-moving index; non-zero enables gate-relative input
+    // alignment for PLAY. Makes the gate index irrelevant rather than predicted.
+    // See the Rust doc.
+    volatile uint32_t gate_align_rec;
+    volatile uint32_t press_seq;
+    volatile uint32_t arm_seq;
+    volatile uint32_t gate_seq;
+    volatile uint32_t f5_press_tick;
+    volatile uint32_t f5_press_qpc_lo;
+    volatile uint32_t f5_press_qpc_hi;
+    volatile uint32_t secs_since_reset_lo;
+    volatile uint32_t secs_since_reset_hi;
+    volatile uint32_t arm_secs_lo;
+    volatile uint32_t arm_secs_hi;
+    volatile uint32_t gate_secs_lo;
+    volatile uint32_t gate_secs_hi;
+    volatile uint32_t reset_qpc_lo;
+    volatile uint32_t reset_qpc_hi;
+    volatile uint32_t arm_qpc_lo;
+    volatile uint32_t arm_qpc_hi;
+    volatile uint32_t gate_qpc_lo;
+    volatile uint32_t gate_qpc_hi;
+    volatile uint32_t arm_pos_x;
+    volatile uint32_t arm_pos_y;
+    volatile uint32_t arm_pos_z;
+    volatile uint32_t restart_clk;
+    volatile uint32_t arm_clk;
+    volatile uint32_t gate_clk;
+    // 1 while every coordinate capture this session has succeeded. A failed
+    // capture still advances the index, leaving a stale hole in the prefix.
+    volatile uint32_t capture_ok;
+    volatile uint32_t arm_at_tick;
+    volatile uint32_t arm_consumed_tick;
+    volatile uint32_t clock_delta_lo;
+    volatile uint32_t clock_delta_hi;
+    // Raw dwords of the player object and its physics sub-object at the ARM
+    // and at the GATE — the hunt for the hidden spawn state that makes the
+    // first moving coordinate differ with the gate index matched. See Rust.
+    volatile uint32_t objsnap_arm_player[OBJSNAP_PLAYER_DWORDS];
+    volatile uint32_t objsnap_arm_physics[OBJSNAP_PHYSICS_DWORDS];
+    volatile uint32_t objsnap_gate_player[OBJSNAP_PLAYER_DWORDS];
+    volatile uint32_t objsnap_gate_physics[OBJSNAP_PHYSICS_DWORDS];
+    volatile uint32_t objsnap_player_ok;
+    volatile uint32_t objsnap_physics_ok;
+    // Clock diagnostics from cave5: raw per-frame tick demand (the wall-clock
+    // backlog), the private tick-advance the in-game readers see (f32 bits),
+    // and how many times the backlog drain has fired. See the Rust doc.
+    volatile int32_t  diag_demand;
+    volatile uint32_t diag_tick_advance;
+    volatile uint32_t diag_drain_count;
+    // Aligned-CONT splice interlock. Written 1 by the controller when the
+    // gate-relative watcher has validated the prefix (bit-exact up to
+    // min(splice, gate+BUCKET_VALIDATE_WINDOW)). Until then cave5 refuses to
+    // run a tick past the aligned splice (parks at 0 ticks/frame) and cave2
+    // refuses to splice - so an unjudged or starved-controller prefix can
+    // never truncate the recording. Cleared by ARM_CONTINUE (each attempt
+    // starts unapproved) and by ClearGateAlign (STOP / RESTART / refusals /
+    // auto-stop). Unaligned CONT (gate_align_rec == 0) ignores it entirely.
+    volatile uint32_t cont_splice_approved;
+    volatile uint32_t pad_v40;  // explicit tail pad (struct is align-8) so the size pin stays honest
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -350,7 +479,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1647440,
+static_assert(sizeof(TasSharedState) == 1663504,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 

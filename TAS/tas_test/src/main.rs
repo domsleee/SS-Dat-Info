@@ -13,44 +13,58 @@
 //!   cont-reliability — CONT splice reliability test at long frame offsets
 
 mod acceptance;
+mod arm_precision;
 mod benchmark;
+mod bucket_predict;
+mod bucket_scan;
 mod cache;
+mod catchup_speed;
 mod certificate;
+mod cont_hijack;
 mod cont_reliability;
+mod cont_restart_race;
 mod cont_splice_frame;
 mod cont_stress;
-mod cont_restart_race;
+mod countdown_probe;
+mod dialog_speedup;
+mod dialog_e2e;
 mod drift;
 mod drift_speed;
+mod escape_speedup;
 mod f5_probe;
+mod fe10065_cont;
+mod fe_cont_reliability;
+mod fe_cont_stress;
+mod gate_align;
+mod gate_predict;
+mod gate_trace;
 mod gates;
 mod harness;
+mod hidden_state;
 mod level_hunt;
 mod level_seq;
-mod video_rate;
+mod menu_cap;
 mod patterns;
-mod catchup_speed;
-mod escape_speedup;
-mod fe_cont_reliability;
-mod fe10065_cont;
-mod fe_cont_stress;
 mod pause_resume;
+mod play_judge;
 mod play_pace;
+mod rec_repro;
 mod rec_start;
 mod refresh_recording;
 mod regression;
 mod reliability;
 mod replay;
+mod reroll_cost;
+mod restart_precision;
 mod restart_probe;
-mod snapshot_probe;
-mod snapshot_cont;
-mod cont_hijack;
 mod save_reload;
-mod rec_repro;
-mod steer_impact;
-mod stop_play_flake;
+mod snapshot_cont;
+mod snapshot_probe;
 mod speed;
 mod speed_reset;
+mod steer_impact;
+mod stop_play_flake;
+mod video_rate;
 
 use std::path::PathBuf;
 
@@ -75,17 +89,24 @@ fn main() {
         "acceptance" => {
             let out = output_dir();
             let cert_path = out.join("acceptance_certificate.json");
-            const ITERATIONS: u32 = 5;
+            let iterations = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(5u32);
+            if iterations == 0 {
+                eprintln!("acceptance iteration count must be at least 1");
+                std::process::exit(2);
+            }
             let mut last_result = None;
             let mut passed = 0u32;
-            for i in 1..=ITERATIONS {
-                println!("\n========== Acceptance run {}/{} ==========", i, ITERATIONS);
+            for i in 1..=iterations {
+                println!(
+                    "\n========== Acceptance run {}/{} ==========",
+                    i, iterations
+                );
                 let result = acceptance::run();
                 if result.all_pass() {
                     passed += 1;
-                    println!("Acceptance run {}/{} PASSED", i, ITERATIONS);
+                    println!("Acceptance run {}/{} PASSED", i, iterations);
                 } else {
-                    println!("Acceptance run {}/{} FAILED — aborting", i, ITERATIONS);
+                    println!("Acceptance run {}/{} FAILED — aborting", i, iterations);
                     last_result = Some(result);
                     break;
                 }
@@ -96,9 +117,9 @@ fn main() {
             }
             println!(
                 "\n=== Acceptance: {}/{} runs passed ===",
-                passed, ITERATIONS
+                passed, iterations
             );
-            std::process::exit(if passed == ITERATIONS { 0 } else { 1 });
+            std::process::exit(if passed == iterations { 0 } else { 1 });
         }
         "speed" => {
             let result = speed::run();
@@ -184,7 +205,7 @@ fn main() {
             let ok = escape_speedup::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
-"cont-restart-race" => {
+        "cont-restart-race" => {
             // Verifies the cave2 contract that tas_ui's Stop→Restart
             // serialisation depends on: confirms (1) sending Stop + Restart
             // back-to-back loses the Stop, so cave2 still sees REC/PLAY
@@ -241,9 +262,7 @@ fn main() {
             let mut iterations = 50u32;
             let mut i = 2;
             while i < args.len() {
-                if (args[i] == "--iterations" || args[i] == "-n")
-                    && i + 1 < args.len()
-                {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
                     iterations = args[i + 1].parse().unwrap_or(50);
                     i += 2;
                 } else {
@@ -251,6 +270,170 @@ fn main() {
                 }
             }
             f5_probe::run(iterations);
+            std::process::exit(0);
+        }
+        "gate-align" => {
+            let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(8u32);
+            let rec = args.get(3).map(|s| s.as_str());
+            std::process::exit(if gate_align::run(n, rec) { 0 } else { 1 });
+        }
+        "hidden-state" => {
+            let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(12u32);
+            let rec = args.get(3).map(|s| s.as_str());
+            let fresh = args.iter().any(|a| a == "--fresh");
+            let rec = rec.filter(|r| !r.starts_with("--"));
+            std::process::exit(if hidden_state::run(n, rec, fresh) {
+                0
+            } else {
+                1
+            });
+        }
+        "gate-trace" => {
+            let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(6u32);
+            std::process::exit(if gate_trace::run(n) { 0 } else { 1 });
+        }
+        "gate-predict" => {
+            let mut iterations = 3u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(3);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            std::process::exit(if gate_predict::run(iterations) { 0 } else { 1 });
+        }
+        "reroll-cost" => {
+            std::process::exit(if reroll_cost::run() { 0 } else { 1 });
+        }
+        "play-judge" => {
+            let mut iterations = 5u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(5);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            std::process::exit(if play_judge::run(iterations) { 0 } else { 1 });
+        }
+        "restart-precision" => {
+            let mut iterations = 10u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(10);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            restart_precision::run(iterations);
+            std::process::exit(0);
+        }
+        "arm-precision" => {
+            let mut iterations = 16u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(16);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            arm_precision::run(iterations);
+            std::process::exit(0);
+        }
+        "bucket-scan-heap" => {
+            let mut iterations = 14u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(14);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            bucket_scan::bucket_scan_heap(iterations);
+            std::process::exit(0);
+        }
+        "countdown-find-heap" => {
+            let mut iterations = 4u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(4);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            bucket_scan::find_countdown_heap(iterations);
+            std::process::exit(0);
+        }
+        "countdown-find" => {
+            let mut iterations = 6u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(6);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            bucket_scan::find_countdown(iterations);
+            std::process::exit(0);
+        }
+        "bucket-scan" => {
+            let mut iterations = 16u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(16);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            bucket_scan::run(iterations);
+            std::process::exit(0);
+        }
+        "countdown-probe" => {
+            let mut iterations = 20u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(20);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            countdown_probe::run(iterations);
+            std::process::exit(0);
+        }
+        "bucket-predict" => {
+            // Measurement, not a gate: pairs the early post-restart state with
+            // the bucket that restart actually produced, to see whether any of
+            // it predicts the bucket before the boarder moves.
+            let mut iterations = 24u32;
+            let mut i = 2;
+            while i < args.len() {
+                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
+                    iterations = args[i + 1].parse().unwrap_or(24);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            bucket_predict::run(iterations);
             std::process::exit(0);
         }
         "benchmark" => {
@@ -399,6 +582,51 @@ fn main() {
             let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
             std::process::exit(if level_hunt::run(sub) { 0 } else { 1 });
         }
+        "load" => {
+            // Load a .tasrec into shared memory and EXIT — without stopping
+            // tas_ui or arming anything. For driving the product UI from
+            // scripts: load here, then arm through tas_ui itself (F10), so the
+            // panel/controller behavior under test is the real one.
+            let Some(path) = args.get(2) else {
+                eprintln!("Usage: tas_test load <path.tasrec>");
+                std::process::exit(2);
+            };
+            let mut client = match tas_shared::TasSharedMemoryClient::open() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("ERROR: no TAS shared memory ({})", e);
+                    std::process::exit(1);
+                }
+            };
+            match replay::load_tasrec(std::path::Path::new(path)) {
+                Ok(r) => {
+                    replay::write_to_shared(&mut client, &r);
+                    println!("loaded {} ticks from {}", r.count, path);
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("ERROR: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        "dialog-e2e" => {
+            // END-TO-END: real finishes, real Pico keypress on the save dialog
+            // (PLAY and REC modes), then the ACTUAL main menu measured.
+            std::process::exit(if dialog_e2e::run() { 0 } else { 1 });
+        }
+        "dialog-speedup" => {
+            let speed: f32 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(1.0);
+            let rec = args.get(3).map(|s| s.as_str());
+            std::process::exit(if dialog_speedup::run(speed, rec) {
+                0
+            } else {
+                1
+            });
+        }
+        "menu-cap" => {
+            std::process::exit(if menu_cap::run() { 0 } else { 1 });
+        }
         "video-rate" => {
             // Measures the SCREEN, not shared memory, so the same command works
             // with TAS absent — which is the only way to get a no-TAS baseline
@@ -424,7 +652,11 @@ fn main() {
                     i += 1;
                 }
             }
-            std::process::exit(if video_rate::run_with_cap(secs, cap, region) { 0 } else { 1 });
+            std::process::exit(if video_rate::run_with_cap(secs, cap, region) {
+                0
+            } else {
+                1
+            });
         }
         "level-seq" => {
             // Wiring test for the level-context seqlock: proves the DLL actually
@@ -531,7 +763,9 @@ fn main() {
                         .and_then(|p| p.parent().map(PathBuf::from))
                         .unwrap_or_else(|| PathBuf::from("."));
                     let candidates = [
-                        exe_dir.join("../../..").join("TAS/recordings/FE-tremendous.tasrec"),
+                        exe_dir
+                            .join("../../..")
+                            .join("TAS/recordings/FE-tremendous.tasrec"),
                         PathBuf::from("TAS/recordings/FE-tremendous.tasrec"),
                         PathBuf::from("recordings/FE-tremendous.tasrec"),
                     ];
@@ -573,7 +807,10 @@ fn main() {
                         i += 2;
                     }
                     "--restart" => {
-                        restart = args.get(i + 1).cloned().unwrap_or_else(|| "inprocess".into());
+                        restart = args
+                            .get(i + 1)
+                            .cloned()
+                            .unwrap_or_else(|| "inprocess".into());
                         i += 2;
                     }
                     "--splice" => {
@@ -656,6 +893,7 @@ fn main() {
             println!("  speed-reset Speed reset verification (2x stop restores normal)");
             println!("  drift-speed Drift-at-speed verification (2x same, 1x/2x cross)");
             println!("  f5-probe    F5 bucket characterization (records starting positions)");
+            println!("  bucket-predict  can the F5 bucket be identified before the boarder moves?");
             println!("  benchmark   Cave hook perf benchmark (frame-window repeats)");
             println!(
                 "  reliability N consecutive REC+PLAY cycles at Nx speed (default 10x at 12x)"
@@ -921,8 +1159,7 @@ fn run_smoke_test() {
     // failure `complete_ok` is there to catch.
     // "Moved" means moved on ANY axis. Gating on Z alone would call a run that
     // travelled purely in X/Y motionless.
-    let (rec_dx, rec_dy, rec_dz) =
-        drift::compute_movement(&state.rec_coords, rec_count as usize);
+    let (rec_dx, rec_dy, rec_dz) = drift::compute_movement(&state.rec_coords, rec_count as usize);
     let (play_dx, play_dy, play_dz) =
         drift::compute_movement(&state.play_coords, rec_count.min(played) as usize);
     let rec_travel = rec_dx.max(rec_dy).max(rec_dz);

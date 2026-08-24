@@ -57,8 +57,13 @@ unsafe extern "system" {
     fn Module32Next(snap: Handle, me: *mut ModuleEntry32) -> i32;
     fn CloseHandle(h: Handle) -> i32;
     fn OpenProcess(access: Dword, inherit: i32, pid: Dword) -> Handle;
-    fn ReadProcessMemory(h: Handle, addr: usize, buf: *mut u8, size: usize, read: *mut usize)
-        -> i32;
+    fn ReadProcessMemory(
+        h: Handle,
+        addr: usize,
+        buf: *mut u8,
+        size: usize,
+        read: *mut usize,
+    ) -> i32;
 }
 
 const TH32CS_SNAPMODULE: Dword = 0x08;
@@ -168,6 +173,127 @@ fn capture_opt(pid: Dword, plausible_only: bool) -> HashMap<(String, usize), u32
     }
     unsafe { CloseHandle(h) };
     map
+}
+
+/// A snapshot of one committed memory region: base address plus raw bytes.
+///
+/// Raw bytes rather than a HashMap of slots on purpose. The module images are
+/// 2.6MB and a map is fine; the heap is orders of magnitude bigger, and a
+/// (String, usize) -> u32 entry per 4-byte slot would cost about forty times
+/// the memory it describes. Diffing two byte buffers costs nothing extra.
+pub struct RegionSnap {
+    pub base: usize,
+    pub data: Vec<u8>,
+}
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct MemoryBasicInformation {
+    base_address: usize,
+    allocation_base: usize,
+    allocation_protect: Dword,
+    region_size: usize,
+    state: Dword,
+    protect: Dword,
+    typ: Dword,
+}
+
+extern "system" {
+    fn VirtualQueryEx(h: usize, addr: usize, buf: *mut MemoryBasicInformation, len: usize)
+        -> usize;
+}
+
+/// Snapshot every committed, readable, WRITABLE, non-image region — i.e. the
+/// heap and other private data, which is where per-object state lives.
+///
+/// Writable-only is the filter that makes this tractable: read-only pages are
+/// code and constants and cannot hold a countdown. Image regions are excluded
+/// because `capture_all` already covers them.
+pub fn capture_heap(pid: Dword) -> Vec<RegionSnap> {
+    const MEM_COMMIT: Dword = 0x1000;
+    const MEM_IMAGE: Dword = 0x100_0000;
+    const PAGE_GUARD: Dword = 0x100;
+    const PAGE_NOACCESS: Dword = 0x01;
+    // readable AND writable protections
+    const WRITABLE: &[Dword] = &[
+        0x04, /*RW*/
+        0x08, /*WC*/
+        0x40, /*ERW*/
+        0x80, /*ERWC*/
+    ];
+    // Skip absurdly large regions: a multi-hundred-MB mapping is not game state
+    // and would dominate both the read time and the diff.
+    const MAX_REGION: usize = 64 * 1024 * 1024;
+
+    let mut out = Vec::new();
+    let h = unsafe { OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid) };
+    if h == 0 {
+        eprintln!("ERROR: OpenProcess failed");
+        return out;
+    }
+    let mut addr: usize = 0;
+    let mut total = 0usize;
+    loop {
+        let mut mbi = MemoryBasicInformation::default();
+        let got = unsafe {
+            VirtualQueryEx(
+                h,
+                addr,
+                &mut mbi,
+                std::mem::size_of::<MemoryBasicInformation>(),
+            )
+        };
+        if got == 0 {
+            break;
+        }
+        let next = mbi.base_address.saturating_add(mbi.region_size);
+        if next <= addr {
+            break; // no forward progress; stop rather than spin
+        }
+        let usable = mbi.state == MEM_COMMIT
+            && mbi.typ != MEM_IMAGE
+            && (mbi.protect & PAGE_GUARD) == 0
+            && mbi.protect != PAGE_NOACCESS
+            && WRITABLE.contains(&(mbi.protect & 0xFF))
+            && mbi.region_size <= MAX_REGION;
+        if usable {
+            let mut buf = vec![0u8; mbi.region_size];
+            let mut read = 0usize;
+            let ok = unsafe {
+                ReadProcessMemory(
+                    h,
+                    mbi.base_address,
+                    buf.as_mut_ptr(),
+                    mbi.region_size,
+                    &mut read,
+                )
+            };
+            if ok != 0 && read >= 4 {
+                buf.truncate(read);
+                total += read;
+                out.push(RegionSnap {
+                    base: mbi.base_address,
+                    data: buf,
+                });
+            }
+        }
+        addr = next;
+    }
+    unsafe { CloseHandle(h) };
+    println!(
+        "    heap: {} regions, {:.1} MB",
+        out.len(),
+        total as f64 / 1e6
+    );
+    out
+}
+
+/// Whole-image capture with NO value filtering, for callers that must not
+/// pre-judge what the value looks like (bucket_scan). `capture` keeps only
+/// small values because it is hunting a level index; a countdown deadline or a
+/// phase would be filtered straight out by that.
+pub fn capture_all(pid: Dword) -> HashMap<(String, usize), u32> {
+    capture_opt(pid, false)
 }
 
 fn capture(pid: Dword) -> HashMap<(String, usize), u32> {
@@ -303,18 +429,20 @@ pub fn run(sub: &str) -> bool {
                 if ok == 0 || got == 0 {
                     continue;
                 }
-                println!("  scanning {} ({} bytes) for pointers to a level path", m.name, got);
+                println!(
+                    "  scanning {} ({} bytes) for pointers to a level path",
+                    m.name, got
+                );
                 let mut i = 0usize;
                 while i + 4 <= got {
-                    let p = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]])
-                        as usize;
+                    let p =
+                        u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
                     // Plausible user-space address only.
-                    if p >= 0x10000 && p < 0x7fff_0000 {
+                    if (0x10000..0x7fff_0000).contains(&p) {
                         let mut s = [0u8; 160];
                         let mut rd = 0usize;
-                        let ok2 = unsafe {
-                            ReadProcessMemory(h, p, s.as_mut_ptr(), s.len(), &mut rd)
-                        };
+                        let ok2 =
+                            unsafe { ReadProcessMemory(h, p, s.as_mut_ptr(), s.len(), &mut rd) };
                         if ok2 != 0 && rd > 8 {
                             let end = s.iter().position(|&c| c == 0).unwrap_or(rd);
                             if end > 8 {
@@ -352,13 +480,14 @@ pub fn run(sub: &str) -> bool {
             let now = capture_opt(pid, false);
             let mut rows: Vec<(String, usize, u32)> = prev
                 .keys()
-                .filter_map(|(m, off)| {
-                    now.get(&(m.clone(), *off)).map(|v| (m.clone(), *off, *v))
-                })
+                .filter_map(|(m, off)| now.get(&(m.clone(), *off)).map(|v| (m.clone(), *off, *v)))
                 .collect();
             rows.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
-            println!("
-{} candidates, current values:", rows.len());
+            println!(
+                "
+{} candidates, current values:",
+                rows.len()
+            );
             for (m, off, v) in &rows {
                 println!("  {}+{:#x}	{}", m, off, v);
             }

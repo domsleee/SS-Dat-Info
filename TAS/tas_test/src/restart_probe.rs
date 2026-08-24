@@ -115,7 +115,10 @@ pub fn run() -> bool {
         }
     }
 
-    println!("\n  {:>6} {:>4} {:>3} {:>11} {:>11} {:>11}", "rel", "mode", "rs", "x", "y", "z");
+    println!(
+        "\n  {:>6} {:>4} {:>3} {:>11} {:>11} {:>11}",
+        "rel", "mode", "rs", "x", "y", "z"
+    );
     for (rel, mode, rs, x, y, z) in &samples {
         let mark = if *rel == spawn_rel {
             "  <- teleport/spawn"
@@ -124,32 +127,57 @@ pub fn run() -> bool {
         } else {
             ""
         };
-        println!("  {:>6} {:>4} {:>3} {:>11.3} {:>11.3} {:>11.3}{}", rel, mode, rs, x, y, z, mark);
+        println!(
+            "  {:>6} {:>4} {:>3} {:>11.3} {:>11.3} {:>11.3}{}",
+            rel, mode, rs, x, y, z, mark
+        );
     }
 
     println!("\n=== TIMELINE ===");
     println!("  F5-press:           rel 0");
-    println!("  restart_state==2:   rel {:?}  (F5 released / restart 'done')", rs2_rel);
-    println!("  teleport to spawn:  rel {}  (jump {:.2} to ({:.1},{:.1},{:.1}))", spawn_rel, max_jump, spawn.0, spawn.1, spawn.2);
+    println!(
+        "  restart_state==2:   rel {:?}  (F5 released / restart 'done')",
+        rs2_rel
+    );
+    println!(
+        "  teleport to spawn:  rel {}  (jump {:.2} to ({:.1},{:.1},{:.1}))",
+        spawn_rel, max_jump, spawn.0, spawn.1, spawn.2
+    );
     match first_move_rel {
         Some(fm) => {
             println!("  first motion:       rel {}", fm);
             let countdown_from_press = fm;
             let countdown_from_spawn = fm.saturating_sub(spawn_rel);
             println!();
-            println!("  >>> countdown F5-press -> first-motion = {} frames (~{:.2}s)", countdown_from_press, countdown_from_press as f32 / 100.0);
-            println!("  >>> countdown spawn   -> first-motion = {} frames (~{:.2}s)", countdown_from_spawn, countdown_from_spawn as f32 / 100.0);
+            println!(
+                "  >>> countdown F5-press -> first-motion = {} frames (~{:.2}s)",
+                countdown_from_press,
+                countdown_from_press as f32 / 100.0
+            );
+            println!(
+                "  >>> countdown spawn   -> first-motion = {} frames (~{:.2}s)",
+                countdown_from_spawn,
+                countdown_from_spawn as f32 / 100.0
+            );
             println!();
             if countdown_from_press >= 280 {
-                println!("  VERDICT: countdown is ~FULL (~300). The 211 first-moving is an ARM-TIMING");
+                println!(
+                    "  VERDICT: countdown is ~FULL (~300). The 211 first-moving is an ARM-TIMING"
+                );
                 println!("           problem — REC/PLAY captures play_coords[0] ~{} frames late. Fix the arm point.", countdown_from_press.saturating_sub(211));
             } else {
-                println!("  VERDICT: countdown is SHORT (~{}). The injected F5 itself yields a shorter", countdown_from_press);
+                println!(
+                    "  VERDICT: countdown is SHORT (~{}). The injected F5 itself yields a shorter",
+                    countdown_from_press
+                );
                 println!("           restart than a real keypress. Fix the F5 injection (hold length / BB3B10).");
             }
         }
         None => {
-            println!("  first motion:       NOT observed within {} frames", WATCH_FRAMES);
+            println!(
+                "  first motion:       NOT observed within {} frames",
+                WATCH_FRAMES
+            );
         }
     }
 

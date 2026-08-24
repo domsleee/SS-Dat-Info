@@ -74,9 +74,7 @@ fn drive_to_rec_mode(client: &mut tas_shared::TasSharedMemoryClient) -> bool {
 /// Send ArmContinue and wait briefly to see what cave2 does with the
 /// mode. Returns true if mode transitions to PLAY (= command accepted)
 /// or false if it stays OFF (= refused, cave2 set mode=OFF on refusal).
-fn send_arm_continue_and_observe_outcome(
-    client: &mut tas_shared::TasSharedMemoryClient,
-) -> bool {
+fn send_arm_continue_and_observe_outcome(client: &mut tas_shared::TasSharedMemoryClient) -> bool {
     client.state_mut().continue_from_frame = SPLICE_FRAME;
     client.send_command(TasCommand::ArmContinue);
     let start = Instant::now();
@@ -223,8 +221,14 @@ pub fn run() -> bool {
     client.send_command(TasCommand::Stop);
 
     println!("\n=== RESULT ===");
-    println!("  race_refused        = {} (true = bug exists in race condition)", race_refused);
-    println!("  serialised_accepted = {} (true = fix works)", serialised_ok);
+    println!(
+        "  race_refused        = {} (true = bug exists in race condition)",
+        race_refused
+    );
+    println!(
+        "  serialised_accepted = {} (true = fix works)",
+        serialised_ok
+    );
     if serialised_ok {
         println!("\n*** PASS: serialised Stop→Restart is accepted by cave2 ***");
     } else {

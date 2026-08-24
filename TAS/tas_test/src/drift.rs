@@ -38,53 +38,54 @@ impl DriftResult {
 fn compute_drift_between(
     rec_coords: &[[f32; 3]],
     play_coords: &[[f32; 3]],
-    start: usize,
-    end: usize,
+    rec_start: usize,
+    play_start: usize,
+    count: usize,
     normalize_to_start: bool,
 ) -> DriftResult {
     let mut result = DriftResult::default();
-    // Clamp to what the buffers actually hold. `count` comes from the DLL's
-    // recorded_count/playback_pos; a value past TAS_MAX_TICKS (or past a short
-    // reference slice) would otherwise index out of bounds and panic the whole
-    // run rather than report drift.
-    let end = end.min(rec_coords.len()).min(play_coords.len());
-    if start >= end {
+    let count = count
+        .min(rec_coords.len().saturating_sub(rec_start))
+        .min(play_coords.len().saturating_sub(play_start));
+    if count == 0 {
         return result;
     }
 
-    let rec_origin = rec_coords[start];
-    let play_origin = play_coords[start];
+    let rec_origin = rec_coords[rec_start];
+    let play_origin = play_coords[play_start];
 
-    for i in start..end {
+    for offset in 0..count {
+        let rec_i = rec_start + offset;
+        let play_i = play_start + offset;
         let rec_x = if normalize_to_start {
-            rec_coords[i][0] - rec_origin[0]
+            rec_coords[rec_i][0] - rec_origin[0]
         } else {
-            rec_coords[i][0]
+            rec_coords[rec_i][0]
         };
         let rec_y = if normalize_to_start {
-            rec_coords[i][1] - rec_origin[1]
+            rec_coords[rec_i][1] - rec_origin[1]
         } else {
-            rec_coords[i][1]
+            rec_coords[rec_i][1]
         };
         let rec_z = if normalize_to_start {
-            rec_coords[i][2] - rec_origin[2]
+            rec_coords[rec_i][2] - rec_origin[2]
         } else {
-            rec_coords[i][2]
+            rec_coords[rec_i][2]
         };
         let play_x = if normalize_to_start {
-            play_coords[i][0] - play_origin[0]
+            play_coords[play_i][0] - play_origin[0]
         } else {
-            play_coords[i][0]
+            play_coords[play_i][0]
         };
         let play_y = if normalize_to_start {
-            play_coords[i][1] - play_origin[1]
+            play_coords[play_i][1] - play_origin[1]
         } else {
-            play_coords[i][1]
+            play_coords[play_i][1]
         };
         let play_z = if normalize_to_start {
-            play_coords[i][2] - play_origin[2]
+            play_coords[play_i][2] - play_origin[2]
         } else {
-            play_coords[i][2]
+            play_coords[play_i][2]
         };
 
         let dx = (rec_x as f64 - play_x as f64).abs();
@@ -101,15 +102,15 @@ fn compute_drift_between(
 
         if dx > result.max_drift_x {
             result.max_drift_x = dx;
-            result.max_drift_frame_x = i;
+            result.max_drift_frame_x = rec_i;
         }
         if dy > result.max_drift_y {
             result.max_drift_y = dy;
-            result.max_drift_frame_y = i;
+            result.max_drift_frame_y = rec_i;
         }
         if dz > result.max_drift_z {
             result.max_drift_z = dz;
-            result.max_drift_frame_z = i;
+            result.max_drift_frame_z = rec_i;
         }
     }
 
@@ -122,16 +123,44 @@ pub fn compute_drift(state: &TasSharedState, count: u32) -> DriftResult {
         &state.rec_coords,
         &state.play_coords,
         0,
+        0,
         count as usize,
         false,
     )
 }
 
 /// Compute drift between rec_coords and play_coords over the window `[start, count)`.
+/// Gate-relative drift: rec_coords from rec_gate, play_coords from play_gate,
+/// for `count` samples. When the two gates differ (the countdown landed on a
+/// different tick), raw-index drift is meaningless but this is exactly zero on
+/// a correct aligned replay.
+pub fn compute_drift_gate_relative(
+    state: &TasSharedState,
+    rec_gate: u32,
+    play_gate: u32,
+    count: u32,
+) -> DriftResult {
+    compute_drift_between(
+        &state.rec_coords,
+        &state.play_coords,
+        rec_gate as usize,
+        play_gate as usize,
+        count as usize,
+        false,
+    )
+}
+
 pub fn compute_drift_window(state: &TasSharedState, start: u32, count: u32) -> DriftResult {
     let end = count as usize;
     let start = (start as usize).min(end);
-    compute_drift_between(&state.rec_coords, &state.play_coords, start, end, false)
+    compute_drift_between(
+        &state.rec_coords,
+        &state.play_coords,
+        start,
+        start,
+        end - start,
+        false,
+    )
 }
 
 /// Compute drift between rec_coords and play_coords over the window `[start, count)`,
@@ -143,7 +172,32 @@ pub fn compute_normalized_drift_window(
 ) -> DriftResult {
     let end = count as usize;
     let start = (start as usize).min(end);
-    compute_drift_between(&state.rec_coords, &state.play_coords, start, end, true)
+    compute_drift_between(
+        &state.rec_coords,
+        &state.play_coords,
+        start,
+        start,
+        end - start,
+        true,
+    )
+}
+
+/// Compare recording and playback at equal offsets from their independently
+/// observed gates. Drift frame indices are reported in recording coordinates.
+pub fn compute_gate_relative_drift(
+    state: &TasSharedState,
+    rec_gate: u32,
+    play_gate: u32,
+    count: u32,
+) -> DriftResult {
+    compute_drift_between(
+        &state.rec_coords,
+        &state.play_coords,
+        rec_gate as usize,
+        play_gate as usize,
+        count as usize,
+        false,
+    )
 }
 
 /// Compute max coordinate delta (movement) for a single coord log.
@@ -392,6 +446,27 @@ mod tests {
         let d = compute_normalized_drift_window(&state, 1, 5);
         assert_eq!(d.max_drift_x, 3.0);
         assert_eq!(d.max_drift_z, 4.0);
+    }
+
+    #[test]
+    fn gate_relative_drift_compares_equal_offsets_not_equal_indices() {
+        let mut state = zeroed_state();
+        let rec_gate = 3usize;
+        let play_gate = 5usize;
+        for offset in 0..6 {
+            let coord = [10.0 + offset as f32, 20.0, 30.0 + offset as f32];
+            state.rec_coords[rec_gate + offset] = coord;
+            state.play_coords[play_gate + offset] = coord;
+        }
+        assert!(!compute_drift(&state, 11).is_zero());
+        assert!(
+            compute_gate_relative_drift(&state, rec_gate as u32, play_gate as u32, 6).is_zero()
+        );
+
+        state.play_coords[play_gate + 4][1] += 0.25;
+        let d = compute_gate_relative_drift(&state, rec_gate as u32, play_gate as u32, 6);
+        assert_eq!(d.max_drift_y, 0.25);
+        assert_eq!(d.max_drift_frame_y, rec_gate + 4);
     }
 
     // ========== compute_movement ==========

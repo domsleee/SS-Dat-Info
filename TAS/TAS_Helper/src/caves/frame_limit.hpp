@@ -35,6 +35,45 @@ inline SafetyHookInline g_swapHook{};
 inline LARGE_INTEGER    g_qpcFreq{};
 inline LONGLONG         g_lastPresentQpc = 0;
 
+// ---- Input-aware bypass ----------------------------------------------------
+// The cap fixes the VIDEO's pace but a hard 20 presents/sec also redraws the
+// game-drawn cursor and menu navigation at 20 Hz - measured, and reported as
+// "cursor laggy, menu laggy" after the first level round-trip (the hook
+// installs lazily, so a fresh menu never showed it). No fixed cap can serve
+// both: the decoder's 40 ms gate makes mid caps play the video at HALF speed
+// on a fresh menu and FAST after a level (see the sweep below).
+//
+// So the throttle yields to the USER: while the mouse is moving or a menu key
+// is down (and for a short grace after), presents run at full refresh - the
+// cursor tracks 1:1 and navigation is instant. The video races only while the
+// hand is actually moving; the moment input stops, the cap re-engages and the
+// video is back at native pace - which is precisely when its pace is the thing
+// being looked at.
+inline DWORD g_lastInputMs = 0;
+inline POINT g_lastCursorPos{ -1, -1 };
+inline const DWORD INPUT_GRACE_MS = 700;
+
+inline bool MenuInputActive() {
+    DWORD now = GetTickCount();
+    POINT cp;
+    if (GetCursorPos(&cp)) {
+        if (cp.x != g_lastCursorPos.x || cp.y != g_lastCursorPos.y) {
+            g_lastCursorPos = cp;
+            g_lastInputMs = now;
+        }
+    }
+    // The keys the menu is driven with. GetAsyncKeyState is a cheap user32
+    // read; six of them per present is noise next to the wait itself.
+    static const int NAV_KEYS[] = { VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_RETURN, VK_ESCAPE };
+    for (int vk : NAV_KEYS) {
+        if (GetAsyncKeyState(vk) & 0x8000) {
+            g_lastInputMs = now;
+            break;
+        }
+    }
+    return g_lastInputMs != 0 && (now - g_lastInputMs) < INPUT_GRACE_MS;
+}
+
 // Defined below (it needs g_qpcFreq); declared here so the detour can call it.
 inline void PreciseWaitUntil(LONGLONG targetQpc);
 
@@ -57,8 +96,26 @@ inline BOOL WINAPI SwapBuffers_Detour(HDC hdc) {
         // throttle provably CONT-safe (catch-up replay ticks fast anyway, so it
         // wouldn't trip cycleFrozen, but the reload gap could — this closes it).
         bool contInFlight = s->cont_suppress_input != 0;
+        // ...but a CONT's reload freeze lasts a second or two at most. A
+        // cycle frozen for many seconds with the flag still up means the flag
+        // is STALE — a judged cycle that never tore down (crashed harness,
+        // session end, quit-to-menu mid-cycle). Left alone, a stale flag
+        // disables this cap forever, and the menu video then runs uncapped:
+        // half-speed dips on a fresh menu, ~3x after a level round-trip —
+        // the reported "menu is sometimes slow and sometimes fast".
+        if (contInFlight && (GetTickCount() - g_lastCycleMs) > 5000) {
+            // Clear the SHARED flag, not just our local copy: input_gate reads
+            // the same flag and swallows every non-ESC key while it is set, so
+            // a stale flag doesn't just uncap the menu — it leaves the
+            // keyboard dead until reinjection. This present hook is the one
+            // path that still runs when the cycle is frozen and cave2 is OFF,
+            // so retiring the flag here revives both the cap and the keyboard.
+            s->cont_suppress_input = 0;
+            contInFlight = false;
+        }
 
-        if (cap > 0 && cycleFrozen && !contInFlight && g_qpcFreq.QuadPart) {
+        if (cap > 0 && cycleFrozen && !contInFlight && !MenuInputActive()
+            && g_qpcFreq.QuadPart) {
             const LONGLONG minTicks = g_qpcFreq.QuadPart / cap;
             LARGE_INTEGER now;
             QueryPerformanceCounter(&now);

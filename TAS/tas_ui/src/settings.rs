@@ -20,21 +20,6 @@ pub struct Settings {
     /// entries and the current entry are always kept. Default preserves the old
     /// 500-entry depth so existing histories migrate without trimming.
     pub history_cap: usize,
-
-    /// Reroll the F5 restart on PLAY until it lands the recording's spawn
-    /// bucket, the way CONT already does.
-    ///
-    /// OFF, a PLAY starts on whatever bucket the restart happened to land, and a
-    /// near-miss diverges from the recording as soon as the boarder moves
-    /// (~tick 299) — the replay silently stops being the run you recorded.
-    ///
-    /// ON costs time before playback settles: the judge needs
-    /// first_moving + BUCKET_MATCH_WINDOW ticks of replay (~3.6s at 1x) plus the
-    /// restart (~1.8s), so a reroll is ~5s and the measured mean of 3.88
-    /// attempts is ~20s. That is the whole reason this is a switch and not just
-    /// always-on — CONT hides the same cost behind a 256x catch-up, and PLAY at
-    /// 1x cannot.
-    pub play_bucket_match: bool,
 }
 
 impl Default for Settings {
@@ -61,10 +46,6 @@ impl Default for Settings {
             // runs only ~20 ticks/frame.)
             cont_catchup_speed: 256.0,
             history_cap: 500,
-            // Default ON: a replay that quietly diverges from the recording is
-            // worse than a replay that takes longer to start, and until now PLAY
-            // had no way to tell you it had landed the wrong bucket.
-            play_bucket_match: true,
         }
     }
 }
@@ -113,12 +94,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn old_settings_file_without_play_bucket_match_defaults_on() {
-        // A settings file written before play_bucket_match existed must still
-        // load, with the new key defaulting on. Without #[serde(default)] on the
-        // struct this deserialize fails, load() falls back to Default, and every
-        // other setting the user had chosen is silently reset — which is a much
-        // louder bug than the one this field was added for.
+    fn old_play_bucket_settings_are_ignored_without_resetting_other_values() {
         let old = r#"{
             "show_pico_panel": true,
             "show_debug_drift": false,
@@ -128,23 +104,14 @@ mod tests {
             "show_trajectory": false,
             "playback_speed": 1.0,
             "cont_catchup_speed": 128.0,
-            "history_cap": 250
+            "history_cap": 250,
+            "play_bucket_match": false,
+            "play_judge_speed": 32.0
         }"#;
         let s: Settings = serde_json::from_str(old).expect("old file must still parse");
-        assert!(s.play_bucket_match, "new field defaults on");
-        // and the user's existing choices survive
         assert!(s.show_pico_panel);
         assert!(s.show_log);
         assert_eq!(s.history_cap, 250);
         assert_eq!(s.cont_catchup_speed, 128.0);
-    }
-
-    #[test]
-    fn play_bucket_match_round_trips() {
-        let mut s = Settings::default();
-        s.play_bucket_match = false;
-        let json = serde_json::to_string(&s).unwrap();
-        let back: Settings = serde_json::from_str(&json).unwrap();
-        assert!(!back.play_bucket_match);
     }
 }

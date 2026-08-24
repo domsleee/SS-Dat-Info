@@ -2,6 +2,7 @@
 #include "../stdafx.h"
 #include "../log.hpp"
 #include "../shared_state.hpp"
+#include "../gate_alignment.hpp"
 #include "../game_addresses.hpp"
 #include "../external/safetyhook.hpp"
 
@@ -216,10 +217,52 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // force_fixed_tick == 0 so the deterministic regression-suite path
         // is untouched.
         const int32_t CATCHUP_THRESHOLD = 50;
+
+        // Was the ENGINE itself frozen (dialog, menu, load) since our last
+        // run? A backlog that appears after a freeze is wall-clock debt, not
+        // simulation the user asked for — and it must be dropped at ANY
+        // playback speed. The old drain was gated on speed == 1.0, so a race
+        // finished at 2x left the save-replay dialog's whole idle time as
+        // demand, and dismissing it replayed 15s of backlog at 121.9x
+        // (measured). Deliberate catch-up (CONT at 256x) is not a freeze:
+        // cave5 runs every frame there, so the gap stays ~7-16ms and this
+        // never fires on it.
+        static uint32_t s_lastRunMs = 0;
+        uint32_t nowMs = GetTickCount();
+        bool resumed_from_freeze =
+            s_lastRunMs != 0 && (nowMs - s_lastRunMs) > 250;
+        s_lastRunMs = nowMs;
+
+        // PARK — the aligned-CONT splice interlock. The splice is DESTRUCTIVE
+        // (truncates recorded_count, flips PLAY to REC), and the gate-relative
+        // watcher that validates the prefix lives in the controller process.
+        // Its verdict normally lands thousands of ticks before the splice, but
+        // nothing FORCED that order — a starved controller could let the
+        // catch-up reach the splice unjudged. So an aligned CONT emits ZERO
+        // ticks from the moment playback reaches its splice until the
+        // controller writes cont_splice_approved. 0-tick frames are routine
+        // (the [1,1,0] pin emits one every third frame): the sim and
+        // playback_pos freeze in place, the renderer keeps presenting. If the
+        // controller dies parked, STOP or RESTART clears the alignment and
+        // lifts the park (the UI's cycle deadline sends exactly that).
+        // Unaligned CONT (gate_align_rec == 0) never parks.
+        bool splice_parked = false;
+        if (s->continue_from_frame > 0 && s->mode == MODE_PLAY
+            && s->gate_align_rec != 0 && s->cont_splice_approved == 0) {
+            uint32_t park_at = GateAlignedSplicePos(
+                s->continue_from_frame, s->gate_index, s->gate_align_rec);
+            splice_parked = s->playback_pos >= park_at;
+        }
+
         bool catchup_drain =
             realTick > CATCHUP_THRESHOLD
             && s->force_fixed_tick == 0
-            && s->playback_speed == 1.0f;
+            && !splice_parked  // a parked splice must not leak a drain tick
+            && (s->playback_speed == 1.0f || resumed_from_freeze);
+
+        // Diagnostics: the raw demand BEFORE any cap is the wall-clock backlog
+        // in ticks — the one number that explains a fast-forward burst.
+        s->diag_demand = realTick;
 
         // CONT clock-backlog reset (Problem B — zero-cost, frame-exact at full
         // speed). When cave2 flags a splice, advance the game's time accumulator
@@ -233,7 +276,7 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // speed-independent, and we do NOT process the backlog ticks (ctx.esi
         // stays capped below), so there's no recorded burst and no huge-dt jump.
         bool did_reset = false;
-        if (s->cont_reset_pending) {
+        if (s->cont_reset_pending && !splice_parked) {  // parked: keep it pending, no tick may leak
             if (ctx.ebp) {
                 float* prev_time = (float*)(uintptr_t)(ctx.ebp + 0x0C);
                 *prev_time += (float)realTick * g_nativeTickAdvance;
@@ -248,9 +291,24 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // LAST tick of the batch — no leftover catch-up ticks spill into the
         // resumed REC (that splice-frame remainder was most of the overshoot).
         // Free: the batch was already ≤ cap; only the final replay frame shortens.
-        if (s->continue_from_frame > 0 && s->mode == MODE_PLAY
-            && s->playback_pos < s->continue_from_frame) {
-            int32_t remaining = (int32_t)(s->continue_from_frame - s->playback_pos);
+        {
+            uint32_t aligned_splice = GateAlignedSplicePos(
+                s->continue_from_frame, s->gate_index, s->gate_align_rec);
+            if (s->continue_from_frame > 0 && s->mode == MODE_PLAY
+                && s->playback_pos < aligned_splice) {
+                int32_t remaining = (int32_t)(aligned_splice - s->playback_pos);
+                if (realTick > remaining) realTick = remaining;
+            }
+        }
+
+        // Same treatment for a PLAY speed handover: land the batch exactly ON the
+        // handoff position so the speed changes at that tick and not up to a whole
+        // batch late. Without this the catch-up would routinely overshoot by tens
+        // of ticks, which for a judged PLAY means skipping the start of the very
+        // run the user asked to watch.
+        if (s->speed_handoff_pos > 0 && s->mode == MODE_PLAY
+            && s->playback_pos < s->speed_handoff_pos) {
+            int32_t remaining = (int32_t)(s->speed_handoff_pos - s->playback_pos);
             if (realTick > remaining) realTick = remaining;
         }
 
@@ -297,8 +355,8 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         if (pinned) {
             // tick handling complete for this frame
         } else if (s->force_fixed_tick > 0) {
-            // Deterministic mode: exact tick count per frame
-            ctx.esi = s->force_fixed_tick;
+            // Deterministic mode: exact tick count per frame (0 while parked)
+            ctx.esi = splice_parked ? 0 : (uintptr_t)s->force_fixed_tick;
         } else if (did_reset) {
             // Splice frame's backlog was just zeroed (prev → now); process a
             // single resume tick so the first REC frame doesn't re-burst.
@@ -310,6 +368,7 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             if (g_tickAdvancePtr) {
                 *g_tickAdvancePtr = (float)realTick * g_nativeTickAdvance;
             }
+            s->diag_drain_count++;
             ctx.esi = 1;
         } else {
             // Clamp raw tick first (fix __ftol garbage). The game's own
@@ -331,6 +390,8 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
                 realTick = NATIVE_GAME_CLAMP_AT_1X;
             }
 
+            if (splice_parked) realTick = 0;  // hold AT the splice until approved
+
             ctx.esi = (uintptr_t)realTick;
         }
 
@@ -347,6 +408,9 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             } else {
                 *g_tickAdvancePtr = g_nativeTickAdvance;
             }
+        }
+        if (g_tickAdvancePtr) {
+            memcpy((void*)&s->diag_tick_advance, (const void*)g_tickAdvancePtr, 4);
         }
     }
 
@@ -369,6 +433,43 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             emitted = (uint32_t)CAVE5_PER_FRAME_TICK_CAP;
         }
         sp->tick_count += emitted;
+
+        // Publish the engine's own 64-bit elapsed-time delta for this cycle —
+        // the sub-tick phase, which is the last candidate for judging an F5
+        // bucket without replaying 3.1s to watch where the boarder leaves spawn.
+        //
+        // Provenance, from the disassembly of this function:
+        //   0x425C4A  call [0x46D15C]        Kernel::Time::Current -> now
+        //   0x425C63  lea  edx,[esp+0x40]    out param
+        //   0x425C6E  call [0x46D164]        delta = now - prev, WRITTEN TO [esp+0x40]
+        //   0x425C74  fmul [0x46DB0C]        * 100.0
+        //   0x425C7A  call __ftol            <- the fraction dies HERE
+        //   0x425C81  cmp esi,0x14           <- our hook site, esp unchanged
+        //
+        // So [esp+0x40] still holds the full-precision delta when we run: nothing
+        // between the lea and here pushes without popping (two calls, both of
+        // which restore esp; __ftol takes its argument on the FPU, not the stack).
+        // Reading it costs two loads and cannot perturb the game.
+        if (ctx.esp) {
+            sp->clock_delta_lo = *(volatile uint32_t*)(uintptr_t)(ctx.esp + 0x40);
+            sp->clock_delta_hi = *(volatile uint32_t*)(uintptr_t)(ctx.esp + 0x44);
+
+            // Accumulate it. The delta alone says nothing — it is ~0.01 every
+            // frame, which is why differencing two of them measured exactly
+            // zero. The SUM since the reset is the quantity the game compares
+            // against 3 seconds, and its fractional part is the sub-tick phase
+            // that decides whether the gate lands on tick 300 or 301.
+            //
+            // INTEGER, not float. The calibration says ~99,999 units per 10ms
+            // tick at 10MHz, so this is a 64-bit QPC delta. Reading those bytes
+            // as a double gives a denormal around 5e-319, which sums to nothing
+            // — which is exactly what the first attempt measured.
+            uint64_t delta = 0, accum = 0;
+            memcpy(&delta, (const void*)&sp->clock_delta_lo, 8);
+            memcpy(&accum, (const void*)&sp->secs_since_reset_lo, 8);
+            accum += delta;
+            memcpy((void*)&sp->secs_since_reset_lo, &accum, 8);
+        }
     }
 
     __asm { frstor [fpu_buf] }

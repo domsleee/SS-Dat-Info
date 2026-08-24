@@ -124,7 +124,10 @@ fn locate_recording() -> Option<PathBuf> {
 }
 
 pub fn run() -> bool {
-    println!("=== PLAY-PACE test (1× PLAY of {} frames must take ~native wall time) ===", PACE_TARGET);
+    println!(
+        "=== PLAY-PACE test (1× PLAY of {} frames must take ~native wall time) ===",
+        PACE_TARGET
+    );
 
     let path = match locate_recording() {
         Some(p) => p,
@@ -142,7 +145,10 @@ pub fn run() -> bool {
         }
     };
     if (rec.count as u32) < PACE_TARGET {
-        eprintln!("ERROR: recording has {} frames, need >= {}", rec.count, PACE_TARGET);
+        eprintln!(
+            "ERROR: recording has {} frames, need >= {}",
+            rec.count, PACE_TARGET
+        );
         return false;
     }
 
@@ -199,7 +205,10 @@ pub fn run() -> bool {
         );
         false
     } else {
-        println!("*** PLAY-PACE OK: 1× PLAY ran at {:.0}% of native wall time (within band). ***", ratio * 100.0);
+        println!(
+            "*** PLAY-PACE OK: 1× PLAY ran at {:.0}% of native wall time (within band). ***",
+            ratio * 100.0
+        );
         true
     }
 }

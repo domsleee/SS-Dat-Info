@@ -46,11 +46,8 @@ pub fn run(source: &str, out: &str) -> Result<(), String> {
         target[0], target[1], target[2]
     );
 
-    if !harness::restart_play_and_match_inprocess(
-        &mut client,
-        target,
-        harness::START_MATCH_RETRIES,
-    ) {
+    if !harness::restart_play_and_match_inprocess(&mut client, target, harness::START_MATCH_RETRIES)
+    {
         return Err("could not position-match live playback for refresh".into());
     }
 
