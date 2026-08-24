@@ -11,6 +11,7 @@
 #include "caves/frame_limit.hpp"
 #include "caves/race_timer.hpp"
 #include "level_scan.hpp"
+#include "caves/draw_probe.hpp"
 
 static TasSharedMemory g_sharedMem;
 static GameAddresses g_addr;
@@ -82,6 +83,13 @@ void run() {
         Log("  FrameLimit: ENABLED by TAS_FRAMELIMIT=1");
     } else {
         Log("  FrameLimit: off by default (costs ~12ms/menu-frame; 2x no longer reproduces)");
+    }
+
+    // DIAGNOSTIC: glDrawElements logger (TAS_DRAWPROBE=1). Off by default.
+    char dp[8] = {0};
+    if (GetEnvironmentVariableA("TAS_DRAWPROBE", dp, sizeof(dp)) > 0 && dp[0] == '1') {
+        drawprobe::Install(state);
+        Log("  DrawProbe: ENABLED by TAS_DRAWPROBE=1");
     }
 
     Log("=== Hook installation summary ===");
