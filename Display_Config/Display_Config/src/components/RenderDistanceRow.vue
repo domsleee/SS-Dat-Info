@@ -9,7 +9,12 @@
     <v-text-field
       v-model="renderSettings.renderDistance"
       type="number"
-      :rules="[(v: number) => (v && v > 0) || 'required']"
+      :rules="[
+        (v: number) => (v && v > 0) || 'required',
+        (v: number) => v <= maxSafeDistance || `max ${maxSafeDistance}m at Ground Detail ${renderSettings.groundDetail} — the terrain batch runs out of 16-bit vertex indices past that and distant triangles shred; lower Ground Detail to go further`,
+      ]"
+      :hint="`max ${maxSafeDistance}m at Ground Detail ${renderSettings.groundDetail}`"
+      persistent-hint
       label="Distance (m)"
     />
   </div>
@@ -17,13 +22,29 @@
 
 <script setup lang="ts">
 import { useRenderSettingsStore } from "@/stores/renderSettings";
-import { ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 
 // const { formIsLoading } = defineProps<{ formIsLoading: boolean }>();
 const { renderSettings } = useRenderSettingsStore();
 
 const renderDistanceSelection = ref("Custom");
 const renderDistanceOptions = ['200m (Near)', '300m (Normal)', '450m (Far)', 'Custom'];
+
+// The engine's terrain batch indexes vertices with 16 bits: the VISIBLE
+// terrain must stay under 65,536 vertices or far patches draw shredded
+// (measured live on Alpine Easy: detail 4 shreds between 480 and 500m —
+// exactly where 17x17-vertex patches exhaust the index space; 600m at
+// detail 3 is clean). Mirror of max_safe_render_distance in
+// src-tauri/src/detail_config.rs, which enforces the same cap on write.
+const maxSafeDistance = computed(() => {
+  // Number(): the persisted store can hand this back as a string.
+  switch (Number(renderSettings.groundDetail)) {
+    case 4: return 470;
+    case 3: return 600;
+    case 2: return 900;
+    default: return 1200;
+  }
+});
 updateBasedOnRenderDistance();
 
 watch(() => renderDistanceSelection.value, (newValue) => {
