@@ -35,6 +35,45 @@ inline SafetyHookInline g_swapHook{};
 inline LARGE_INTEGER    g_qpcFreq{};
 inline LONGLONG         g_lastPresentQpc = 0;
 
+// ---- Input-aware bypass ----------------------------------------------------
+// The cap fixes the VIDEO's pace but a hard 20 presents/sec also redraws the
+// game-drawn cursor and menu navigation at 20 Hz - measured, and reported as
+// "cursor laggy, menu laggy" after the first level round-trip (the hook
+// installs lazily, so a fresh menu never showed it). No fixed cap can serve
+// both: the decoder's 40 ms gate makes mid caps play the video at HALF speed
+// on a fresh menu and FAST after a level (see the sweep below).
+//
+// So the throttle yields to the USER: while the mouse is moving or a menu key
+// is down (and for a short grace after), presents run at full refresh - the
+// cursor tracks 1:1 and navigation is instant. The video races only while the
+// hand is actually moving; the moment input stops, the cap re-engages and the
+// video is back at native pace - which is precisely when its pace is the thing
+// being looked at.
+inline DWORD g_lastInputMs = 0;
+inline POINT g_lastCursorPos{ -1, -1 };
+inline const DWORD INPUT_GRACE_MS = 700;
+
+inline bool MenuInputActive() {
+    DWORD now = GetTickCount();
+    POINT cp;
+    if (GetCursorPos(&cp)) {
+        if (cp.x != g_lastCursorPos.x || cp.y != g_lastCursorPos.y) {
+            g_lastCursorPos = cp;
+            g_lastInputMs = now;
+        }
+    }
+    // The keys the menu is driven with. GetAsyncKeyState is a cheap user32
+    // read; six of them per present is noise next to the wait itself.
+    static const int NAV_KEYS[] = { VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_RETURN, VK_ESCAPE };
+    for (int vk : NAV_KEYS) {
+        if (GetAsyncKeyState(vk) & 0x8000) {
+            g_lastInputMs = now;
+            break;
+        }
+    }
+    return g_lastInputMs != 0 && (now - g_lastInputMs) < INPUT_GRACE_MS;
+}
+
 // Defined below (it needs g_qpcFreq); declared here so the detour can call it.
 inline void PreciseWaitUntil(LONGLONG targetQpc);
 
@@ -75,7 +114,8 @@ inline BOOL WINAPI SwapBuffers_Detour(HDC hdc) {
             contInFlight = false;
         }
 
-        if (cap > 0 && cycleFrozen && !contInFlight && g_qpcFreq.QuadPart) {
+        if (cap > 0 && cycleFrozen && !contInFlight && !MenuInputActive()
+            && g_qpcFreq.QuadPart) {
             const LONGLONG minTicks = g_qpcFreq.QuadPart / cap;
             LARGE_INTEGER now;
             QueryPerformanceCounter(&now);
