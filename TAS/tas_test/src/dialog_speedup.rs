@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tas_shared::{TasMode, TasSharedMemoryClient};
+use tas_shared::TasMode;
 
 use crate::harness;
 use crate::replay;
