@@ -582,6 +582,34 @@ fn main() {
             let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
             std::process::exit(if level_hunt::run(sub) { 0 } else { 1 });
         }
+        "load" => {
+            // Load a .tasrec into shared memory and EXIT — without stopping
+            // tas_ui or arming anything. For driving the product UI from
+            // scripts: load here, then arm through tas_ui itself (F10), so the
+            // panel/controller behavior under test is the real one.
+            let Some(path) = args.get(2) else {
+                eprintln!("Usage: tas_test load <path.tasrec>");
+                std::process::exit(2);
+            };
+            let mut client = match tas_shared::TasSharedMemoryClient::open() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("ERROR: no TAS shared memory ({})", e);
+                    std::process::exit(1);
+                }
+            };
+            match replay::load_tasrec(std::path::Path::new(path)) {
+                Ok(r) => {
+                    replay::write_to_shared(&mut client, &r);
+                    println!("loaded {} ticks from {}", r.count, path);
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("ERROR: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         "dialog-e2e" => {
             // END-TO-END: real finishes, real Pico keypress on the save dialog
             // (PLAY and REC modes), then the ACTUAL main menu measured.
