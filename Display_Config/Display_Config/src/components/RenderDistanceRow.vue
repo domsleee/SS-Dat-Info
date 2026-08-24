@@ -30,8 +30,8 @@ const { renderSettings } = useRenderSettingsStore();
 const renderDistanceSelection = ref("Custom");
 const renderDistanceOptions = ['200m (Near)', '300m (Normal)', '450m (Far)', 'Custom'];
 
-// The engine's terrain batch indexes vertices with 16 bits: the VISIBLE
-// terrain must stay under 65,536 vertices or far patches draw shredded
+// The engine caps VISIBLE terrain at 65,536 vertices (a 16-bit-addressable
+// vertex pool in the mesh build): past it, far patches draw shredded
 // (measured live on Alpine Easy: detail 4 shreds between 480 and 500m —
 // exactly where 17x17-vertex patches exhaust the index space; 600m at
 // detail 3 is clean). Mirror of max_safe_render_distance in
@@ -39,7 +39,7 @@ const renderDistanceOptions = ['200m (Near)', '300m (Normal)', '450m (Far)', 'Cu
 const maxSafeDistance = computed(() => {
   // Number(): the persisted store can hand this back as a string.
   switch (Number(renderSettings.groundDetail)) {
-    case 4: return 470;
+    case 4: return 480;
     case 3: return 600;
     case 2: return 900;
     default: return 1200;
