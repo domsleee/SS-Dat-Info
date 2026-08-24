@@ -2,7 +2,7 @@ set shell := ["pwsh.exe", "-NoProfile", "-c"]
 set unstable
 
 supreme_folder := 'T:\Games\SupremeORIG'
-dc_profile := 'debug'
+dc_profile := 'release'
 
 [parallel]
 all: display_config tas
