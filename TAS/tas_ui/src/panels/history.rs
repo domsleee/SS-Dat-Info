@@ -14,7 +14,12 @@ pub enum HistoryAction {
     Rename(u64, String),
 }
 
-pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction> {
+pub fn show(
+    ui: &mut egui::Ui,
+    history: &RecordingHistory,
+    in_menu: bool,
+    game_in_game: bool,
+) -> Vec<HistoryAction> {
     let mut actions = Vec::new();
     // Rows are clickable, not text — don't show the I-beam / allow text drag.
     ui.style_mut().interaction.selectable_labels = false;
@@ -40,19 +45,59 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
     let level_filter = history.live_level().map(str::to_owned);
     let resolving = history.level_is_resolving();
     if history.level_is_resolving() {
-        // Between a level change and the scan publishing the new track we do
-        // NOT know where we are. Say so instead of asserting the old track —
-        // silently showing the previous level's entries here is exactly the
-        // "loading Forest Medium, seeing Forest Easy's saves" confusion.
-        ui.label(
-            egui::RichText::new("Level: resolving…")
-                .size(10.0)
-                .color(egui::Color32::from_gray(120)),
-        )
-        .on_hover_text(
-            "The level changed and the track hasn't been identified yet \
-             (~1.5s). Rows are hidden until it is — showing the previous track's\n             entries here would also let you restore one over the live buffer.",
-        );
+        if in_menu {
+            // Quit-to-menu also unresolves the level context, but NOTHING is
+            // being resolved there — the scan is deliberately suppressed at
+            // menus (it would just re-confirm the track you left). A
+            // perpetual "resolving…" here read as a stuck spinner; say where
+            // the game actually is. Same three-way split as the status chip:
+            // the frozen-cycle state with the in-game flag still set could be
+            // the pause menu, a post-race dialog (save high time / save
+            // replay), OR the main menu after leaving a level — the engine
+            // keeps the level resident behind all of them, so they are
+            // indistinguishable from outside. Only a fresh boot (flag 0) is
+            // provably the plain menu.
+            let (label, hover) = if game_in_game {
+                (
+                    "Level: Menu / Paused",
+                    "The engine isn't simulating — the pause menu, a post-race \
+                     dialog, or the main menu after leaving a level (they look \
+                     identical from outside). Rows are hidden until a level is \
+                     running again.",
+                )
+            } else {
+                (
+                    "Level: In Menu",
+                    "The game is in a menu. Rows are hidden until a level is \
+                     entered — restoring a track's snapshot from the menu would \
+                     write over the live buffer.",
+                )
+            };
+            ui.label(
+                egui::RichText::new(label)
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(120)),
+            )
+            .on_hover_text(hover);
+        } else {
+            // Between a level change and the scan publishing the new track we
+            // do NOT know where we are. Say so instead of asserting the old
+            // track — silently showing the previous level's entries here is
+            // exactly the "loading Forest Medium, seeing Forest Easy's saves"
+            // confusion.
+            ui.label(
+                egui::RichText::new("Level: resolving…")
+                    .size(10.0)
+                    .color(egui::Color32::from_gray(120)),
+            )
+            .on_hover_text(
+                "The level changed and the track hasn't been identified yet \
+                 (usually a fraction of a second — the scan polls fast while \
+                 unresolved). Rows are hidden until it is — showing the previous \
+                 track's entries here would also let you restore one over the \
+                 live buffer.",
+            );
+        }
     } else if let Some(code) = level_filter.as_deref() {
         // Only CLAIM untagged entries are shown when some actually are. The
         // suffix was unconditional, so it kept advertising a caveat that had
@@ -60,6 +105,10 @@ pub fn show(ui: &mut egui::Ui, history: &RecordingHistory) -> Vec<HistoryAction>
         // filter is approximate", which is the opposite of the truth once every
         // entry is tagged.
         let any_untagged = history.entries().iter().any(|e| e.level.is_none());
+        // The nine race tracks read naturally as their codes (FE/VH — the
+        // user's own naming convention), but "PE" is cryptic: the practice
+        // run has a name, use it. (Entries/files still use the PE code.)
+        let code = if code == "PE" { "Practice" } else { code };
         let (text, hover) = if any_untagged {
             (
                 format!("Level: {} · untagged shown", code),
