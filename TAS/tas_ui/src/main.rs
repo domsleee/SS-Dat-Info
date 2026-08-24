@@ -499,7 +499,14 @@ struct TasApp {
     // while the cycle runs, so a fresh advance means the game is actually
     // ticking a level; a stale one means menu/paused. Sampled every frame.
     cycle_fc: u32,
+    // True once cycle_fc holds a real baseline sample. Without it the first
+    // sample after launch/reconnect counted as an "advance" and opened the
+    // transport gate ~400ms against a frozen engine.
+    cycle_fc_seeded: bool,
     cycle_advance_at: std::time::Instant,
+    // The menu auto-stop debounce, on its OWN clock - it must never make the
+    // engine look alive to the transport gate.
+    auto_stop_debounce: Option<std::time::Instant>,
 
     // The last track we were CONFIDENTLY on. Only used to name a save: the
     // engine stops its cycle for its own post-run dialog, so the live level
@@ -696,7 +703,13 @@ impl TasApp {
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
             cycle_fc: 0,
-            cycle_advance_at: std::time::Instant::now(),
+            cycle_fc_seeded: false,
+            // Ancient, not now(): "ticking" must be FALSE until a real
+            // frame_count advance is observed.
+            cycle_advance_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(600))
+                .unwrap_or_else(std::time::Instant::now),
+            auto_stop_debounce: None,
             last_resolved_level: None,
             last_resolved_epoch: None,
             #[cfg(windows)]
@@ -743,6 +756,10 @@ impl TasApp {
             Ok(s) => {
                 self.shared = Some(s);
                 self.connect_error = None;
+                // A fresh mapping = a fresh frame_count stream: force the
+                // heartbeat to re-baseline instead of treating the first
+                // sample as an advance (transport gate false-positive).
+                self.cycle_fc_seeded = false;
                 self.push_log("Connected to TAS_Helper.dll shared memory");
             }
             Err(e) => self.connect_error = Some(e),
@@ -941,8 +958,12 @@ impl TasApp {
         let Some(shared) = self.shared.as_ref() else {
             return;
         };
-        match tas_shared::level_context(shared.state()) {
-            Some((id, _path)) => {
+        // id and epoch from ONE seqlock window: a separate epoch read can pair
+        // the old track's id with the new epoch across a switch, and the stamp
+        // below then keeps the old track's history through the very change it
+        // exists to detect.
+        match tas_shared::resolved_level_id_with_epoch(shared.state()) {
+            Some((id, epoch)) => {
                 let code = crate::level::level_code_from_id(id);
                 // Remember the last track we were CONFIDENTLY on. Used only for
                 // naming a save: the engine freezes its cycle for its own post-run
@@ -951,7 +972,7 @@ impl TasApp {
                 if let Some(c) = code {
                     self.last_resolved_level = Some(c.to_string());
                 }
-                self.last_resolved_epoch = Some(shared.state().level_epoch);
+                self.last_resolved_epoch = Some(epoch);
                 self.history.set_live_level(code);
             }
             None => {
@@ -963,6 +984,10 @@ impl TasApp {
                 // Only a genuinely new context (epoch moved past the one we
                 // last resolved in) hides the rows until the new track is
                 // identified.
+                // Plain (non-seqlock) epoch read is fine HERE: this branch
+                // stamps nothing. A read torn across a switch costs at most
+                // one frame of the wrong verdict and self-corrects on the
+                // next poll — unlike the Some() branch, whose stamp persists.
                 let epoch_now = shared.state().level_epoch;
                 if self.last_resolved_epoch != Some(epoch_now) {
                     self.history.enter_resolving();
@@ -1819,7 +1844,14 @@ impl TasApp {
         // advance is the real "ticking a level" signal.
         if let Some(ref shared) = self.shared {
             let fc = shared.frame_count_volatile();
-            if fc != self.cycle_fc {
+            if !self.cycle_fc_seeded {
+                // Baseline only. The FIRST sample after launch or reconnect is
+                // not an advance — a frozen menu has a nonzero frame_count
+                // too, and counting it as one opened a ~400ms window where the
+                // transport gate read "ticking" against a stopped engine.
+                self.cycle_fc_seeded = true;
+                self.cycle_fc = fc;
+            } else if fc != self.cycle_fc {
                 self.cycle_fc = fc;
                 self.cycle_advance_at = std::time::Instant::now();
             }
@@ -2279,7 +2311,10 @@ impl eframe::App for TasApp {
             let racing = mode == TasMode::Rec as u32 || mode == TasMode::Play as u32;
             let frozen = self.cycle_fc != 0
                 && self.cycle_advance_at.elapsed() > std::time::Duration::from_secs(5);
-            if racing && frozen {
+            let debounced = self
+                .auto_stop_debounce
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
+            if racing && frozen && !debounced {
                 let ts = chrono::Local::now().format("%H:%M:%S").to_string();
                 self.log_lines.push(format!(
                     "[{}] Auto-stopped: left the level (game cycle stopped while {})",
@@ -2291,8 +2326,11 @@ impl eframe::App for TasApp {
                     }
                 ));
                 self.send_action_command(TasCommand::Stop, &ts);
-                // Don't re-fire next frame before mode flips / cycle resumes.
-                self.cycle_advance_at = std::time::Instant::now();
+                // Debounce the re-fire on its OWN timestamp. This used to
+                // reset cycle_advance_at, which also told the transport gate
+                // "the engine is ticking" for 400ms — at a frozen menu, i.e.
+                // exactly when arming must stay refused.
+                self.auto_stop_debounce = Some(std::time::Instant::now());
             }
         }
 
@@ -2637,8 +2675,7 @@ impl eframe::App for TasApp {
                         .as_ref()
                         .map(|s| s.state().game_in_game != 0)
                         .unwrap_or(false)
-                        && self.cycle_advance_at.elapsed()
-                            < std::time::Duration::from_millis(400));
+                        && self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400));
                     let game_flag = self
                         .shared
                         .as_ref()
@@ -3489,7 +3526,13 @@ mod tests {
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
             cycle_fc: 0,
-            cycle_advance_at: std::time::Instant::now(),
+            cycle_fc_seeded: false,
+            // Ancient, not now(): "ticking" must be FALSE until a real
+            // frame_count advance is observed.
+            cycle_advance_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(600))
+                .unwrap_or_else(std::time::Instant::now),
+            auto_stop_debounce: None,
             last_resolved_level: None,
             last_resolved_epoch: None,
             #[cfg(windows)]

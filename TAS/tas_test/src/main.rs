@@ -26,8 +26,8 @@ mod cont_restart_race;
 mod cont_splice_frame;
 mod cont_stress;
 mod countdown_probe;
-mod dialog_speedup;
 mod dialog_e2e;
+mod dialog_speedup;
 mod drift;
 mod drift_speed;
 mod escape_speedup;
@@ -598,6 +598,18 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+            // Refuse mid-session: bulk-writing the input/coord arrays races
+            // the DLL during REC (it is appending to them) and swaps the data
+            // a PLAY is actively consuming. OFF is the only safe state.
+            let mode = client.state().mode;
+            if mode != 0 {
+                eprintln!(
+                    "ERROR: refusing to load while the DLL is in mode {} (REC/PLAY \
+                     active). Press STOP first.",
+                    mode
+                );
+                std::process::exit(1);
+            }
             match replay::load_tasrec(std::path::Path::new(path)) {
                 Ok(r) => {
                     replay::write_to_shared(&mut client, &r);

@@ -251,6 +251,11 @@ static void scanRegion(const uint8_t* p, size_t n, int tally[12]) {
             }
             int ai = matchOne((const char*)(p + astart), aend - astart, AREAS, 4);
             int di = matchOne((const char*)(p + dstart), dend - dstart, DIFFS, 3);
+            // Practice has exactly ONE difficulty on disk (Tracks/Easy), so
+            // ids 10/11 do not exist. Stock data has no such strings, but a
+            // stray match must not be able to tally an id the Rust side
+            // (CODES has 10 entries, 9 = PE) would treat as unknown.
+            if (ai == 3 && di != 0) continue;
             if (ai >= 0 && di >= 0) tally[ai * 3 + di]++;
         }
     }
