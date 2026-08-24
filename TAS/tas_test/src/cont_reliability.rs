@@ -744,7 +744,13 @@ pub fn run(
                 // recording, so coverage and drift are gate-relative. Unaligned
                 // CONT has gate_align_rec == 0 and this reduces to the old
                 // raw-index comparison exactly.
-                let aligned = state.gate_align_rec > 0 && state.gate_index > 0;
+                // Mirror the caller fallback: alignment is only in effect when
+                // the gate fired AND the splice is past it, so a gate stamp
+                // cannot be mistaken and the gate-relative length cannot
+                // underflow.
+                let aligned = state.gate_align_rec > 0
+                    && state.gate_index > 0
+                    && splice_frame > state.gate_align_rec;
                 let (rec_gate, play_gate) = if aligned {
                     (state.gate_align_rec, state.gate_index)
                 } else {

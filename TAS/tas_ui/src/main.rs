@@ -1091,7 +1091,7 @@ impl TasApp {
             _ => tas_shared::transport::Arm::Rec,
         };
 
-        let target: Option<tas_shared::transport::BucketTarget> = None;
+        let mut target: Option<tas_shared::transport::BucketTarget> = None;
         let mut gate_align_rec = 0;
         let continue_from_frame;
         if command == TasCommand::ArmContinue {
@@ -1109,10 +1109,21 @@ impl TasApp {
             // byte-consistent with the loaded one. target stays None so the
             // controller runs the gate-relative watcher, not the old bucket
             // fingerprint.
-            gate_align_rec = self
+            // Only align when the splice is comfortably past the gate, so the
+            // watcher completes before the destructive splice and near-gate
+            // edge cases fall back to the proven bucket match (see harness).
+            let rg = self
                 .cont_bucket_target()
                 .and_then(|t| t.expected_first_moving)
                 .unwrap_or(0);
+            if rg > 0
+                && self.continue_from_frame > rg + tas_shared::cont::BUCKET_MATCH_WINDOW
+            {
+                gate_align_rec = rg; // aligned → controller runs the watcher
+            } else {
+                // Near-gate splice: fall back to the proven bucket match.
+                target = self.cont_bucket_target();
+            }
             continue_from_frame = self.continue_from_frame;
         } else {
             self.clear_cont_catchup();
