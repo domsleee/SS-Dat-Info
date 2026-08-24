@@ -962,6 +962,12 @@ static void __declspec(noinline) Cave2_Logic() {
             s->continue_from_frame = 0;
             g_cave2_contArmed = 0;
             ClearSpeedHandoff(s);
+            ClearGateAlign(s);
+            // The level was swapped out, so any judged cycle is definitionally
+            // over — release the live-input block. Left set, it permanently
+            // disables the menu present cap (frame_limit gates on it) and the
+            // menu video runs at the wrong speed.
+            s->cont_suppress_input = 0;
             g_armedRoot = 0;
             LogRing(s, LOG_WARN,
                 "TAS auto-stopped: level context changed (left the race / menu demo loaded)");

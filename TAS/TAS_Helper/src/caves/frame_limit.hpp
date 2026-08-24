@@ -57,6 +57,16 @@ inline BOOL WINAPI SwapBuffers_Detour(HDC hdc) {
         // throttle provably CONT-safe (catch-up replay ticks fast anyway, so it
         // wouldn't trip cycleFrozen, but the reload gap could — this closes it).
         bool contInFlight = s->cont_suppress_input != 0;
+        // ...but a CONT's reload freeze lasts a second or two at most. A
+        // cycle frozen for many seconds with the flag still up means the flag
+        // is STALE — a judged cycle that never tore down (crashed harness,
+        // session end, quit-to-menu mid-cycle). Left alone, a stale flag
+        // disables this cap forever, and the menu video then runs uncapped:
+        // half-speed dips on a fresh menu, ~3x after a level round-trip —
+        // the reported "menu is sometimes slow and sometimes fast".
+        if (contInFlight && (GetTickCount() - g_lastCycleMs) > 5000) {
+            contInFlight = false;
+        }
 
         if (cap > 0 && cycleFrozen && !contInFlight && g_qpcFreq.QuadPart) {
             const LONGLONG minTicks = g_qpcFreq.QuadPart / cap;

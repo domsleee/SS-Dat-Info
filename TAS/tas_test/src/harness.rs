@@ -178,6 +178,11 @@ Start-Sleep -Milliseconds 80
 /// silently fails when the game has a child modal dialog up (the very state
 /// we're trying to dismiss). PostMessage delivers the keystroke directly to
 /// the target window regardless of focus.
+/// Public wrapper so a test can dismiss the dialog at a moment IT chooses.
+pub fn dismiss_save_dialog_pub() {
+    dismiss_save_dialog();
+}
+
 fn dismiss_save_dialog() {
     if let Some(hwnd) = find_supreme_hwnd() {
         #[allow(non_snake_case)]

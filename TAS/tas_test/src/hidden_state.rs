@@ -22,7 +22,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tas_shared::cont::BucketVerdict;
-use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient, OBJSNAP_PHYSICS_DWORDS, OBJSNAP_PLAYER_DWORDS};
+use tas_shared::{
+    TasCommand, TasMode, TasSharedMemoryClient, OBJSNAP_PHYSICS_DWORDS, OBJSNAP_PLAYER_DWORDS,
+};
 
 use crate::harness;
 use crate::patterns;
@@ -125,7 +127,10 @@ pub fn run(iterations: u32, rec: Option<&str>, fresh: bool) -> bool {
             harness::stop(&mut client);
             let s = client.state();
             if s.recorded_count < 200 || s.gate_index == 0 {
-                println!("  iter {:>2}: REC too short or never moved ({} ticks)", i, s.recorded_count);
+                println!(
+                    "  iter {:>2}: REC too short or never moved ({} ticks)",
+                    i, s.recorded_count
+                );
                 continue;
             }
             rec_snaps = Some([
@@ -136,14 +141,14 @@ pub fn run(iterations: u32, rec: Option<&str>, fresh: bool) -> bool {
             ]);
         }
         let rec_gate = {
-        let s = client.state();
-        match tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count) {
-            Some(f) => f,
-            None => {
-                println!("  iter {:>2}: recording never moves", i);
-                continue;
+            let s = client.state();
+            match tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count) {
+                Some(f) => f,
+                None => {
+                    println!("  iter {:>2}: recording never moves", i);
+                    continue;
+                }
             }
-        }
         };
         match one_attempt(&mut client, rec_gate) {
             Some(mut a) => {
@@ -240,11 +245,27 @@ fn report_variance(label: &str, caps: &[Vec<u32>]) {
         if vals.len() > 1 {
             varying += 1;
             let hex: Vec<String> = vals.iter().take(6).map(|v| format!("{:08x}", v)).collect();
-            let flt: Vec<String> = vals.iter().take(6).map(|v| format!("{:.5}", f32::from_bits(*v))).collect();
-            lines.push(format!("    +0x{:03x}: {} distinct {:?} ({:?})", d * 4, vals.len(), hex, flt));
+            let flt: Vec<String> = vals
+                .iter()
+                .take(6)
+                .map(|v| format!("{:.5}", f32::from_bits(*v)))
+                .collect();
+            lines.push(format!(
+                "    +0x{:03x}: {} distinct {:?} ({:?})",
+                d * 4,
+                vals.len(),
+                hex,
+                flt
+            ));
         }
     }
-    println!("  {}: {} of {} dwords vary across {} restarts", label, varying, n, caps.len());
+    println!(
+        "  {}: {} of {} dwords vary across {} restarts",
+        label,
+        varying,
+        n,
+        caps.len()
+    );
     for l in lines.iter().take(60) {
         println!("{}", l);
     }
@@ -359,8 +380,8 @@ fn partition(
         gv.dedup();
         bv.sort_unstable();
         bv.dedup();
-        let all_same = gv.len() + bv.len() <= 1
-            || (gv.len() == 1 && bv.len() == 1 && gv[0] == bv[0]);
+        let all_same =
+            gv.len() + bv.len() <= 1 || (gv.len() == 1 && bv.len() == 1 && gv[0] == bv[0]);
         if all_same {
             continue;
         }
@@ -390,8 +411,14 @@ fn partition(
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        let gf: Vec<String> = gv.iter().map(|h| format!("{:.6}", f32::from_bits(u32::from_str_radix(h, 16).unwrap()))).collect();
-        let bf: Vec<String> = bv.iter().map(|h| format!("{:.6}", f32::from_bits(u32::from_str_radix(h, 16).unwrap()))).collect();
+        let gf: Vec<String> = gv
+            .iter()
+            .map(|h| format!("{:.6}", f32::from_bits(u32::from_str_radix(h, 16).unwrap())))
+            .collect();
+        let bf: Vec<String> = bv
+            .iter()
+            .map(|h| format!("{:.6}", f32::from_bits(u32::from_str_radix(h, 16).unwrap())))
+            .collect();
         println!(
             "    +0x{:03x}: MATCH {:?} ({:?})  MISMATCH {:?} ({:?})",
             d * 4,
@@ -405,7 +432,11 @@ fn partition(
 }
 
 fn pair_diff(label: &str, attempts: &[Attempt], pick: impl Fn(&Attempt) -> (&[u32], &[u32])) {
-    let n = attempts.iter().map(|a| pick(a).0.len().min(pick(a).1.len())).min().unwrap_or(0);
+    let n = attempts
+        .iter()
+        .map(|a| pick(a).0.len().min(pick(a).1.len()))
+        .min()
+        .unwrap_or(0);
     let mut hits: Vec<(usize, usize, usize)> = Vec::new(); // (dword, bad_diffs, good_diffs)
     for d in 0..n {
         let mut bad_diff = 0usize;
@@ -413,7 +444,11 @@ fn pair_diff(label: &str, attempts: &[Attempt], pick: impl Fn(&Attempt) -> (&[u3
         for a in attempts {
             let (p, r) = pick(a);
             if p[d] != r[d] {
-                if a.matched { good_diff += 1 } else { bad_diff += 1 }
+                if a.matched {
+                    good_diff += 1
+                } else {
+                    bad_diff += 1
+                }
             }
         }
         if bad_diff > 0 || good_diff > 0 {
@@ -422,17 +457,29 @@ fn pair_diff(label: &str, attempts: &[Attempt], pick: impl Fn(&Attempt) -> (&[u3
     }
     let n_bad = attempts.iter().filter(|a| !a.matched).count();
     let n_good = attempts.len() - n_bad;
-    let discriminating: Vec<_> = hits.iter().filter(|(_, b, g)| *b == n_bad && *g == 0).collect();
+    let discriminating: Vec<_> = hits
+        .iter()
+        .filter(|(_, b, g)| *b == n_bad && *g == 0)
+        .collect();
     println!(
         "  {}: {} dwords differ somewhere; {} differ in EVERY mismatch and NO match",
-        label, hits.len(), discriminating.len()
+        label,
+        hits.len(),
+        discriminating.len()
     );
     for (d, _, _) in discriminating.iter().take(40) {
-        let ex = attempts.iter().find(|a| !a.matched).map(|a| { let (p, r) = pick(a); (p[*d], r[*d]) });
+        let ex = attempts.iter().find(|a| !a.matched).map(|a| {
+            let (p, r) = pick(a);
+            (p[*d], r[*d])
+        });
         if let Some((pv, rv)) = ex {
             println!(
                 "    +0x{:03x}: play {:08x} ({:.6}) vs rec {:08x} ({:.6})",
-                d * 4, pv, f32::from_bits(pv), rv, f32::from_bits(rv)
+                d * 4,
+                pv,
+                f32::from_bits(pv),
+                rv,
+                f32::from_bits(rv)
             );
         }
     }
@@ -442,9 +489,16 @@ fn pair_diff(label: &str, attempts: &[Attempt], pick: impl Fn(&Attempt) -> (&[u3
 fn analyse(attempts: &[Attempt]) -> bool {
     let n_good = attempts.iter().filter(|a| a.matched).count();
     let n_bad = attempts.len() - n_good;
-    println!("\n=== ANALYSIS: {} attempts, {} matched, {} mismatched ===", attempts.len(), n_good, n_bad);
+    println!(
+        "\n=== ANALYSIS: {} attempts, {} matched, {} mismatched ===",
+        attempts.len(),
+        n_good,
+        n_bad
+    );
     if n_bad == 0 {
-        println!("  No mismatch observed — nothing to partition. Run more, or on a harder recording.");
+        println!(
+            "  No mismatch observed — nothing to partition. Run more, or on a harder recording."
+        );
         return false;
     }
     if n_good == 0 {
@@ -462,16 +516,42 @@ fn analyse(attempts: &[Attempt]) -> bool {
 
     // THE sub-tick test: does the TICK count to the gate split by outcome even
     // when the CYCLE count (gate index) matches?
-    let mut good_ticks: Vec<i64> = attempts.iter().filter(|a| a.matched).map(|a| a.gate_ticks).collect();
-    let mut bad_ticks: Vec<i64> = attempts.iter().filter(|a| !a.matched).map(|a| a.gate_ticks).collect();
-    good_ticks.sort_unstable(); good_ticks.dedup();
-    bad_ticks.sort_unstable(); bad_ticks.dedup();
-    println!("  gate TICK counts — matched {:?}, mismatched {:?}", good_ticks, bad_ticks);
-    let mut good_cyc: Vec<i64> = attempts.iter().filter(|a| a.matched).map(|a| a.gate_cycles).collect();
-    let mut bad_cyc: Vec<i64> = attempts.iter().filter(|a| !a.matched).map(|a| a.gate_cycles).collect();
-    good_cyc.sort_unstable(); good_cyc.dedup();
-    bad_cyc.sort_unstable(); bad_cyc.dedup();
-    println!("  gate CYCLE counts — matched {:?}, mismatched {:?}", good_cyc, bad_cyc);
+    let mut good_ticks: Vec<i64> = attempts
+        .iter()
+        .filter(|a| a.matched)
+        .map(|a| a.gate_ticks)
+        .collect();
+    let mut bad_ticks: Vec<i64> = attempts
+        .iter()
+        .filter(|a| !a.matched)
+        .map(|a| a.gate_ticks)
+        .collect();
+    good_ticks.sort_unstable();
+    good_ticks.dedup();
+    bad_ticks.sort_unstable();
+    bad_ticks.dedup();
+    println!(
+        "  gate TICK counts — matched {:?}, mismatched {:?}",
+        good_ticks, bad_ticks
+    );
+    let mut good_cyc: Vec<i64> = attempts
+        .iter()
+        .filter(|a| a.matched)
+        .map(|a| a.gate_cycles)
+        .collect();
+    let mut bad_cyc: Vec<i64> = attempts
+        .iter()
+        .filter(|a| !a.matched)
+        .map(|a| a.gate_cycles)
+        .collect();
+    good_cyc.sort_unstable();
+    good_cyc.dedup();
+    bad_cyc.sort_unstable();
+    bad_cyc.dedup();
+    println!(
+        "  gate CYCLE counts — matched {:?}, mismatched {:?}",
+        good_cyc, bad_cyc
+    );
     let ticks_split = good_ticks.iter().all(|t| !bad_ticks.contains(t)) && !bad_ticks.is_empty();
     if ticks_split {
         println!("  => the TICK count partitions the outcome: the residual IS the sub-tick.");
@@ -483,28 +563,60 @@ fn analyse(attempts: &[Attempt]) -> bool {
     // regardless is per-run noise — a pointer, a timer — and is ignored.
     if attempts.iter().all(|a| !a.rec_arm_physics.is_empty()) {
         println!("\n-- PLAY vs its own RECORDING --");
-        pair_diff("arm  player ", attempts, |a| (&a.arm_player, &a.rec_arm_player));
-        pair_diff("arm  physics", attempts, |a| (&a.arm_physics, &a.rec_arm_physics));
-        pair_diff("gate player ", attempts, |a| (&a.gate_player, &a.rec_gate_player));
-        pair_diff("gate physics", attempts, |a| (&a.gate_physics, &a.rec_gate_physics));
+        pair_diff("arm  player ", attempts, |a| {
+            (&a.arm_player, &a.rec_arm_player)
+        });
+        pair_diff("arm  physics", attempts, |a| {
+            (&a.arm_physics, &a.rec_arm_physics)
+        });
+        pair_diff("gate player ", attempts, |a| {
+            (&a.gate_player, &a.rec_gate_player)
+        });
+        pair_diff("gate physics", attempts, |a| {
+            (&a.gate_physics, &a.rec_gate_physics)
+        });
     }
 
     println!("\n-- at the ARM --");
-    let ap = partition("player ", attempts, |a| &a.arm_player, OBJSNAP_PLAYER_DWORDS);
-    let ah = partition("physics", attempts, |a| &a.arm_physics, OBJSNAP_PHYSICS_DWORDS);
+    let ap = partition(
+        "player ",
+        attempts,
+        |a| &a.arm_player,
+        OBJSNAP_PLAYER_DWORDS,
+    );
+    let ah = partition(
+        "physics",
+        attempts,
+        |a| &a.arm_physics,
+        OBJSNAP_PHYSICS_DWORDS,
+    );
     println!("\n-- at the GATE --");
-    let gp = partition("player ", attempts, |a| &a.gate_player, OBJSNAP_PLAYER_DWORDS);
-    let gh = partition("physics", attempts, |a| &a.gate_physics, OBJSNAP_PHYSICS_DWORDS);
+    let gp = partition(
+        "player ",
+        attempts,
+        |a| &a.gate_player,
+        OBJSNAP_PLAYER_DWORDS,
+    );
+    let gh = partition(
+        "physics",
+        attempts,
+        |a| &a.gate_physics,
+        OBJSNAP_PHYSICS_DWORDS,
+    );
 
     println!("\n=== VERDICT ===");
     if !ap.is_empty() || !ah.is_empty() {
         println!("  The hidden state is VISIBLE AT THE ARM — it can be rejected or fixed before replaying.");
         true
     } else if !gp.is_empty() || !gh.is_empty() {
-        println!("  The hidden state is visible only at the GATE — it evolves during the countdown.");
+        println!(
+            "  The hidden state is visible only at the GATE — it evolves during the countdown."
+        );
         true
     } else {
-        println!("  Nothing in these two objects partitions by outcome. The state lives elsewhere.");
+        println!(
+            "  Nothing in these two objects partitions by outcome. The state lives elsewhere."
+        );
         false
     }
 }

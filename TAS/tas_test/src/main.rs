@@ -26,6 +26,7 @@ mod cont_restart_race;
 mod cont_splice_frame;
 mod cont_stress;
 mod countdown_probe;
+mod dialog_speedup;
 mod drift;
 mod drift_speed;
 mod escape_speedup;
@@ -36,11 +37,12 @@ mod fe_cont_stress;
 mod gate_align;
 mod gate_predict;
 mod gate_trace;
-mod hidden_state;
 mod gates;
 mod harness;
+mod hidden_state;
 mod level_hunt;
 mod level_seq;
+mod menu_cap;
 mod patterns;
 mod pause_resume;
 mod play_judge;
@@ -279,7 +281,11 @@ fn main() {
             let rec = args.get(3).map(|s| s.as_str());
             let fresh = args.iter().any(|a| a == "--fresh");
             let rec = rec.filter(|r| !r.starts_with("--"));
-            std::process::exit(if hidden_state::run(n, rec, fresh) { 0 } else { 1 });
+            std::process::exit(if hidden_state::run(n, rec, fresh) {
+                0
+            } else {
+                1
+            });
         }
         "gate-trace" => {
             let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(6u32);
@@ -574,6 +580,18 @@ fn main() {
         "level-hunt" => {
             let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
             std::process::exit(if level_hunt::run(sub) { 0 } else { 1 });
+        }
+        "dialog-speedup" => {
+            let speed: f32 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(1.0);
+            let rec = args.get(3).map(|s| s.as_str());
+            std::process::exit(if dialog_speedup::run(speed, rec) {
+                0
+            } else {
+                1
+            });
+        }
+        "menu-cap" => {
+            std::process::exit(if menu_cap::run() { 0 } else { 1 });
         }
         "video-rate" => {
             // Measures the SCREEN, not shared memory, so the same command works

@@ -217,10 +217,30 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // force_fixed_tick == 0 so the deterministic regression-suite path
         // is untouched.
         const int32_t CATCHUP_THRESHOLD = 50;
+
+        // Was the ENGINE itself frozen (dialog, menu, load) since our last
+        // run? A backlog that appears after a freeze is wall-clock debt, not
+        // simulation the user asked for — and it must be dropped at ANY
+        // playback speed. The old drain was gated on speed == 1.0, so a race
+        // finished at 2x left the save-replay dialog's whole idle time as
+        // demand, and dismissing it replayed 15s of backlog at 121.9x
+        // (measured). Deliberate catch-up (CONT at 256x) is not a freeze:
+        // cave5 runs every frame there, so the gap stays ~7-16ms and this
+        // never fires on it.
+        static uint32_t s_lastRunMs = 0;
+        uint32_t nowMs = GetTickCount();
+        bool resumed_from_freeze =
+            s_lastRunMs != 0 && (nowMs - s_lastRunMs) > 250;
+        s_lastRunMs = nowMs;
+
         bool catchup_drain =
             realTick > CATCHUP_THRESHOLD
             && s->force_fixed_tick == 0
-            && s->playback_speed == 1.0f;
+            && (s->playback_speed == 1.0f || resumed_from_freeze);
+
+        // Diagnostics: the raw demand BEFORE any cap is the wall-clock backlog
+        // in ticks — the one number that explains a fast-forward burst.
+        s->diag_demand = realTick;
 
         // CONT clock-backlog reset (Problem B — zero-cost, frame-exact at full
         // speed). When cave2 flags a splice, advance the game's time accumulator
@@ -326,6 +346,7 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             if (g_tickAdvancePtr) {
                 *g_tickAdvancePtr = (float)realTick * g_nativeTickAdvance;
             }
+            s->diag_drain_count++;
             ctx.esi = 1;
         } else {
             // Clamp raw tick first (fix __ftol garbage). The game's own
@@ -363,6 +384,9 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             } else {
                 *g_tickAdvancePtr = g_nativeTickAdvance;
             }
+        }
+        if (g_tickAdvancePtr) {
+            memcpy((void*)&s->diag_tick_advance, (const void*)g_tickAdvancePtr, 4);
         }
     }
 
