@@ -667,8 +667,12 @@ static void ProcessCommand(TasSharedState* s) {
             // The replay a handover was staged for is about to stop existing.
             // Every armer stages its own AFTER its restart, so clearing here
             // cannot break a controller cycle - it only stops a bare F5 from
-            // leaving one armed for whatever replays next.
+            // leaving one armed for whatever replays next. Same for gate
+            // alignment: CONT keeps only the value the controller stages AFTER
+            // this restart, so a value left by a prior aligned PLAY that ended
+            // in OFF cannot leak into a legacy ARM_CONTINUE.
             ClearSpeedHandoff(s);
+            ClearGateAlign(s);
             // Clock-phase pin: restart the canonical [1,1,0] tick cycle here so
             // every in-process restart replays the same settle schedule (the
             // F5 bucket). See cave5's pin block.
@@ -1045,6 +1049,7 @@ static void __declspec(noinline) Cave2_Logic() {
         }
         if (pos >= play_end) {
             s->mode = MODE_OFF;
+            ClearGateAlign(s);  // aligned PLAY finished — don't leave it armed
             ReleaseTasInput(s, addr);  // replay done — un-stick its held keys
             g_cave2_contArmed = 0;  // hygiene — an armed CONT always splices before here
             ClearSpeedHandoff(s);   // ...and a handover always fires before here

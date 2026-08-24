@@ -1297,7 +1297,15 @@ pub fn restart_continue_and_splice_inprocess(
     // same win PLAY got. CONT_NO_ALIGN=1 falls back to the old bucket match
     // (splice arm-relative, reroll until the fingerprint matches) for A/B.
     let no_align = std::env::var("CONT_NO_ALIGN").is_ok();
-    let gate_align_rec = if no_align { 0 } else { expected_first_moving.unwrap_or(0) };
+    // Only align when the splice is comfortably past the gate: the
+    // gate-relative watcher needs BUCKET_MATCH_WINDOW samples to complete
+    // BEFORE the destructive splice, and near-gate / inside-countdown splices
+    // have their own edge cases (a delayed gate, a cave5 cap that spans the
+    // splice). Below the threshold, fall back to the proven bucket match.
+    // FE-10065 splices at 6200 vs gate ~298, far past this.
+    let rg = expected_first_moving.unwrap_or(0);
+    let align_ok = rg > 0 && splice_frame > rg + tas_shared::cont::BUCKET_MATCH_WINDOW;
+    let gate_align_rec = if no_align || !align_ok { 0 } else { rg };
     let cfg = ArmConfig {
         arm: Arm::Continue,
         catchup_speed,
