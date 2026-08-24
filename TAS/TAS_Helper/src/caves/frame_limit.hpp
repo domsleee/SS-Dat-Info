@@ -65,6 +65,13 @@ inline BOOL WINAPI SwapBuffers_Detour(HDC hdc) {
         // half-speed dips on a fresh menu, ~3x after a level round-trip —
         // the reported "menu is sometimes slow and sometimes fast".
         if (contInFlight && (GetTickCount() - g_lastCycleMs) > 5000) {
+            // Clear the SHARED flag, not just our local copy: input_gate reads
+            // the same flag and swallows every non-ESC key while it is set, so
+            // a stale flag doesn't just uncap the menu — it leaves the
+            // keyboard dead until reinjection. This present hook is the one
+            // path that still runs when the cycle is frozen and cave2 is OFF,
+            // so retiring the flag here revives both the cap and the keyboard.
+            s->cont_suppress_input = 0;
             contInFlight = false;
         }
 

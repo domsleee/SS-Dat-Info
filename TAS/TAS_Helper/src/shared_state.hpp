@@ -11,7 +11,7 @@ constexpr size_t TRACE_FRAMES = 384;
 constexpr size_t OBJSNAP_PLAYER_DWORDS = 128;
 constexpr size_t OBJSNAP_PHYSICS_DWORDS = 512;
 
-constexpr uint32_t TAS_SHARED_VERSION = 39; // +clock diagnostics
+constexpr uint32_t TAS_SHARED_VERSION = 40; // +cont_splice_approved (aligned-CONT splice interlock)
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -461,6 +461,16 @@ struct TasSharedState {
     volatile int32_t  diag_demand;
     volatile uint32_t diag_tick_advance;
     volatile uint32_t diag_drain_count;
+    // Aligned-CONT splice interlock. Written 1 by the controller when the
+    // gate-relative watcher has validated the prefix (bit-exact up to
+    // min(splice, gate+BUCKET_VALIDATE_WINDOW)). Until then cave5 refuses to
+    // run a tick past the aligned splice (parks at 0 ticks/frame) and cave2
+    // refuses to splice - so an unjudged or starved-controller prefix can
+    // never truncate the recording. Cleared by ARM_CONTINUE (each attempt
+    // starts unapproved) and by ClearGateAlign (STOP / RESTART / refusals /
+    // auto-stop). Unaligned CONT (gate_align_rec == 0) ignores it entirely.
+    volatile uint32_t cont_splice_approved;
+    volatile uint32_t pad_v40;  // explicit tail pad (struct is align-8) so the size pin stays honest
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -469,7 +479,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1663496,
+static_assert(sizeof(TasSharedState) == 1663504,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 

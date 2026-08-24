@@ -326,6 +326,7 @@ fn one_attempt(client: &mut TasSharedMemoryClient, rec_gate: u32) -> Option<Atte
         live_gate,
         rec_gate,
         s.capture_ok != 0,
+        0, // uncapped depth: research probe, no splice to park at
     );
     let (matched, first_bad) = match verdict {
         BucketVerdict::Match => (true, None),

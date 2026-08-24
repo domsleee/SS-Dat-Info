@@ -13,7 +13,7 @@ pub const OBJSNAP_PLAYER_DWORDS: usize = 128;
 /// at 0x1B4 so the object is at least 0x1D8, and this leaves headroom).
 pub const OBJSNAP_PHYSICS_DWORDS: usize = 512;
 
-pub const TAS_SHARED_VERSION: u32 = 39; // +clock diagnostics (demand, tick advance, drain count)
+pub const TAS_SHARED_VERSION: u32 = 40; // +cont_splice_approved (aligned-CONT splice interlock)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -633,6 +633,16 @@ pub struct TasSharedState {
     pub diag_demand: i32,
     pub diag_tick_advance: u32,
     pub diag_drain_count: u32,
+    /// Aligned-CONT splice interlock. The controller writes 1 when the
+    /// gate-relative watcher has validated the prefix (bit-exact up to
+    /// min(splice, gate+BUCKET_VALIDATE_WINDOW)). Until then cave5 parks
+    /// playback AT the aligned splice (0 ticks/frame) and cave2 refuses to
+    /// splice, so an unjudged prefix can never truncate the recording.
+    /// Cleared by ARM_CONTINUE and ClearGateAlign in the DLL. Unaligned
+    /// CONT ignores it.
+    pub cont_splice_approved: u32,
+    /// Explicit tail pad (align-8 struct) so the size pin stays honest.
+    pub pad_v40: u32,
 }
 
 /// How many times to retry a torn level-context read before giving up.
@@ -1277,6 +1287,29 @@ pub mod cont {
     /// will decide at all — enough settle trajectory to detect the first-moving
     /// frame and seed the blowup guard.
     pub const BUCKET_MATCH_WINDOW: u32 = 64;
+
+    /// Rust mirror of gate_alignment.hpp's GATE_ALIGN_PRE_GATE_LEAD - keep
+    /// the two in lock-step. During an aligned replay, every recorded input
+    /// frame in [rec_gate - LEAD, rec_gate) is REPLACED by the gate mask
+    /// while the live gate is pending, so the window must stay as narrow as
+    /// the observed gate jitter (max four cycles) allows.
+    pub const GATE_ALIGN_PRE_GATE_LEAD: u32 = 8;
+
+    /// How many recorded input frames inside the pre-gate hold window
+    /// differ from the gate mask - i.e. transitions that an aligned replay
+    /// will NOT reproduce at their recorded position. Non-zero means the
+    /// recording exercises input timing the alignment cannot honor; the
+    /// armers surface it as a warning so a deterministic reroll loop or a
+    /// late divergence is attributable instead of mysterious.
+    pub fn pre_gate_hold_overwrites(input_log: &[u8], rec_gate: u32) -> u32 {
+        let g = rec_gate as usize;
+        if g == 0 || g >= input_log.len() {
+            return 0;
+        }
+        let mask = input_log[g];
+        let from = g.saturating_sub(GATE_ALIGN_PRE_GATE_LEAD as usize);
+        input_log[from..g].iter().filter(|&&b| b != mask).count() as u32
+    }
 
     /// MAXIMUM frames past first-moving the judge bothers to validate before
     /// declaring Match (capped so a deep splice still gets a positive Match
@@ -1945,6 +1978,12 @@ pub mod transport {
         /// False if any coordinate capture in this session failed, which would
         /// leave a stale hole in the prefix a first-moving scan reads.
         fn capture_ok(&self) -> bool;
+        /// Approve the aligned CONT splice: the gate-relative watcher has
+        /// validated the whole prefix it will ever see. The DLL parks
+        /// playback AT the splice until this is written, so a starved or
+        /// dead controller can never let an unjudged prefix be spliced.
+        /// Default no-op for ports without a DLL behind them.
+        fn approve_cont_splice(&mut self) {}
     }
 
     /// Fixed wall-clock delay (ms) between sending Stop and sending Restart.
@@ -2087,6 +2126,7 @@ pub mod transport {
     /// the same semantic gate, so the resulting coordinates must be bit-exact.
     /// A differing hidden spawn state shows up immediately in this window and
     /// must be rerolled rather than allowed to become the watched run.
+    #[allow(clippy::too_many_arguments)] // a judge reads many independent shared-state fields
     pub fn judge_gate_aligned_play(
         play_coords: &[[f32; 3]],
         rec_coords: &[[f32; 3]],
@@ -2095,6 +2135,7 @@ pub mod transport {
         live_gate: u32,
         rec_gate: u32,
         capture_ok: bool,
+        max_depth_rel: u32,
     ) -> BucketVerdict {
         if !capture_ok {
             return BucketVerdict::WrongStart;
@@ -2110,7 +2151,22 @@ pub mod transport {
             return BucketVerdict::NoSignal;
         }
 
-        let depth = (rec_end - rec_gate).min(super::cont::BUCKET_MATCH_WINDOW as usize);
+        // Validate DEEP, not just through the settle. The old bucket judge
+        // was already burned by this once: a replay exact for the first 64
+        // frames then veering off later (live: drift growing 0.5 -> 11 over
+        // ticks ~fm+79..fm+773) sailed through a 64-frame window, which is
+        // why BUCKET_VALIDATE_WINDOW exists. `max_depth_rel` caps the depth
+        // at the splice for CONT (0 = uncapped): the verdict must be
+        // decidable from the prefix that exists while the DLL parks the
+        // splice waiting for approval.
+        let depth_cap = if max_depth_rel == 0 {
+            usize::MAX
+        } else {
+            max_depth_rel as usize
+        };
+        let depth = (rec_end - rec_gate)
+            .min(super::cont::BUCKET_VALIDATE_WINDOW as usize)
+            .min(depth_cap);
         if depth == 0 {
             return BucketVerdict::NoSignal;
         }
@@ -2423,6 +2479,18 @@ pub mod transport {
                                     .to_string(),
                             };
                         }
+                        // CONT: the watcher can only ever see the prefix up to
+                        // the splice (the DLL parks playback there until the
+                        // approval below), so cap the required depth at the
+                        // splice-relative distance or the verdict could never
+                        // complete. PLAY has no splice: full depth.
+                        let max_depth_rel = if self.cfg.arm == Arm::Continue
+                            && self.cfg.continue_from_frame > self.cfg.gate_align_rec
+                        {
+                            self.cfg.continue_from_frame - self.cfg.gate_align_rec
+                        } else {
+                            0
+                        };
                         let verdict = judge_gate_aligned_play(
                             port.play_coords(),
                             port.rec_coords(),
@@ -2431,6 +2499,7 @@ pub mod transport {
                             port.gate_index(),
                             self.cfg.gate_align_rec,
                             port.capture_ok(),
+                            max_depth_rel,
                         );
                         return match verdict {
                             BucketVerdict::KeepWaiting if replay_ended => self.reroll(
@@ -2439,7 +2508,18 @@ pub mod transport {
                                 None,
                             ),
                             BucketVerdict::KeepWaiting => StepOutcome::InProgress,
-                            BucketVerdict::Match => self.finish(CompletedVia::BucketMatched),
+                            BucketVerdict::Match => {
+                                // Aligned CONT: the DLL parks playback AT the
+                                // splice until this approval lands. Writing it
+                                // is the ONLY way the splice can fire, so a
+                                // starved controller merely delays the splice,
+                                // never lets it through unjudged. PLAY has
+                                // nothing to approve.
+                                if self.cfg.arm == Arm::Continue {
+                                    port.approve_cont_splice();
+                                }
+                                self.finish(CompletedVia::BucketMatched)
+                            }
                             BucketVerdict::WrongBucket { observed } => self.reroll(
                                 port,
                                 format!(
@@ -2825,32 +2905,60 @@ pub mod transport {
 
         #[test]
         fn aligned_play_judge_matches_a_shifted_gate_relative_trajectory() {
-            let (play, rec) = aligned_trajectory(299, 297, 64);
+            // recorded_count 400, rec_gate 299 -> full depth is 101; the
+            // watcher must see ALL of it before declaring Match.
+            let (play, rec) = aligned_trajectory(299, 297, 101);
             assert_eq!(
-                judge_gate_aligned_play(&play, &rec, 400, 361, 297, 299, true),
+                judge_gate_aligned_play(&play, &rec, 400, 398, 297, 299, true, 0),
+                BucketVerdict::Match
+            );
+        }
+
+        #[test]
+        fn aligned_play_judge_validates_past_the_settle_window() {
+            // Exact for the first 64 gate-relative frames, divergent at 80:
+            // the documented late-divergence bug. A 64-frame window accepted
+            // this; the deep watcher must reject it.
+            let (mut play, rec) = aligned_trajectory(299, 297, 101);
+            play[297 + 80][2] += 0.5;
+            assert_eq!(
+                judge_gate_aligned_play(&play, &rec, 400, 398, 297, 299, true, 0),
+                BucketVerdict::WrongBucket { observed: Some(80) }
+            );
+        }
+
+        #[test]
+        fn aligned_cont_judge_depth_is_capped_at_the_splice() {
+            // A CONT splicing 70 frames past the gate can only ever show the
+            // watcher 70 frames (the DLL parks there) - Match must be
+            // decidable from exactly that prefix.
+            let (play, rec) = aligned_trajectory(299, 297, 70);
+            assert_eq!(
+                judge_gate_aligned_play(&play, &rec, 400, 367, 297, 299, true, 70),
                 BucketVerdict::Match
             );
         }
 
         #[test]
         fn aligned_play_judge_rejects_a_one_bit_hidden_state_difference() {
-            let (mut play, rec) = aligned_trajectory(299, 297, 64);
+            let (mut play, rec) = aligned_trajectory(299, 297, 101);
             play[297][0] = f32::from_bits(play[297][0].to_bits() + 1);
             assert_eq!(
-                judge_gate_aligned_play(&play, &rec, 400, 298, 297, 299, true),
+                judge_gate_aligned_play(&play, &rec, 400, 298, 297, 299, true, 0),
                 BucketVerdict::WrongBucket { observed: Some(0) }
             );
         }
 
         #[test]
         fn aligned_play_judge_waits_for_the_full_window_and_capture() {
-            let (play, rec) = aligned_trajectory(299, 297, 64);
+            let (play, rec) = aligned_trajectory(299, 297, 101);
+            // One frame short of the full 101-frame depth: keep waiting.
             assert_eq!(
-                judge_gate_aligned_play(&play, &rec, 400, 360, 297, 299, true),
+                judge_gate_aligned_play(&play, &rec, 400, 397, 297, 299, true, 0),
                 BucketVerdict::KeepWaiting
             );
             assert_eq!(
-                judge_gate_aligned_play(&play, &rec, 400, 361, 297, 299, false),
+                judge_gate_aligned_play(&play, &rec, 400, 398, 297, 299, false, 0),
                 BucketVerdict::WrongStart
             );
         }
@@ -2892,12 +3000,14 @@ pub mod transport {
 
         #[test]
         fn aligned_play_stages_gate_only_after_restart() {
-            let (play_coords, rec_coords) = aligned_trajectory(299, 297, 64);
+            // recorded_count 400, rec_gate 299: the watcher validates the
+            // full 101-frame gate-relative prefix before declaring Match.
+            let (play_coords, rec_coords) = aligned_trajectory(299, 297, 101);
             let mut p = FakePort {
                 mode: TasMode::Off as u32,
                 gate_align_rec: 777,
                 gate_index: 297,
-                playback_pos: 361,
+                playback_pos: 398,
                 play_coords,
                 rec_coords,
                 recorded_count: 400,
@@ -2947,7 +3057,7 @@ pub mod transport {
 
         #[test]
         fn aligned_play_rerolls_hidden_state_mismatch_then_accepts_exact_retry() {
-            let (mut play_coords, rec_coords) = aligned_trajectory(299, 297, 64);
+            let (mut play_coords, rec_coords) = aligned_trajectory(299, 297, 101);
             play_coords[297][1] = f32::from_bits(play_coords[297][1].to_bits() + 1);
             let mut p = FakePort {
                 gate_index: 297,
@@ -2975,9 +3085,9 @@ pub mod transport {
             assert_eq!(p.gate_align_rec, 0, "reroll STOP must clear alignment");
 
             drive_reroll_to_judge(&mut c, &mut p);
-            let (play_coords, rec_coords) = aligned_trajectory(299, 300, 64);
+            let (play_coords, rec_coords) = aligned_trajectory(299, 300, 101);
             p.gate_index = 300;
-            p.playback_pos = 364;
+            p.playback_pos = 401;
             p.play_coords = play_coords;
             p.rec_coords = rec_coords;
             assert_eq!(
@@ -4122,6 +4232,14 @@ impl transport::TransportPort for TasSharedMemoryClient {
     fn capture_ok(&self) -> bool {
         unsafe { std::ptr::read_volatile(&self.state().capture_ok as *const u32) != 0 }
     }
+    fn approve_cont_splice(&mut self) {
+        // Volatile: the reader is cave5 in another process (see
+        // set_speed_handoff for why plain stores are not enough).
+        let s = self.state_mut();
+        unsafe {
+            std::ptr::write_volatile(&mut s.cont_splice_approved as *mut u32, 1);
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -4199,6 +4317,12 @@ impl transport::TransportPort for TasSharedMemoryClient {
     fn capture_ok(&self) -> bool {
         unsafe { std::ptr::read_volatile(&self.state().capture_ok as *const u32) != 0 }
     }
+    fn approve_cont_splice(&mut self) {
+        let s = self.state_mut();
+        unsafe {
+            std::ptr::write_volatile(&mut s.cont_splice_approved as *mut u32, 1);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4221,7 +4345,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_496);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_504);
     }
 
     #[test]

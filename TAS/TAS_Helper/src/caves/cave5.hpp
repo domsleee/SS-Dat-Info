@@ -233,9 +233,31 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             s_lastRunMs != 0 && (nowMs - s_lastRunMs) > 250;
         s_lastRunMs = nowMs;
 
+        // PARK — the aligned-CONT splice interlock. The splice is DESTRUCTIVE
+        // (truncates recorded_count, flips PLAY to REC), and the gate-relative
+        // watcher that validates the prefix lives in the controller process.
+        // Its verdict normally lands thousands of ticks before the splice, but
+        // nothing FORCED that order — a starved controller could let the
+        // catch-up reach the splice unjudged. So an aligned CONT emits ZERO
+        // ticks from the moment playback reaches its splice until the
+        // controller writes cont_splice_approved. 0-tick frames are routine
+        // (the [1,1,0] pin emits one every third frame): the sim and
+        // playback_pos freeze in place, the renderer keeps presenting. If the
+        // controller dies parked, STOP or RESTART clears the alignment and
+        // lifts the park (the UI's cycle deadline sends exactly that).
+        // Unaligned CONT (gate_align_rec == 0) never parks.
+        bool splice_parked = false;
+        if (s->continue_from_frame > 0 && s->mode == MODE_PLAY
+            && s->gate_align_rec != 0 && s->cont_splice_approved == 0) {
+            uint32_t park_at = GateAlignedSplicePos(
+                s->continue_from_frame, s->gate_index, s->gate_align_rec);
+            splice_parked = s->playback_pos >= park_at;
+        }
+
         bool catchup_drain =
             realTick > CATCHUP_THRESHOLD
             && s->force_fixed_tick == 0
+            && !splice_parked  // a parked splice must not leak a drain tick
             && (s->playback_speed == 1.0f || resumed_from_freeze);
 
         // Diagnostics: the raw demand BEFORE any cap is the wall-clock backlog
@@ -254,7 +276,7 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // speed-independent, and we do NOT process the backlog ticks (ctx.esi
         // stays capped below), so there's no recorded burst and no huge-dt jump.
         bool did_reset = false;
-        if (s->cont_reset_pending) {
+        if (s->cont_reset_pending && !splice_parked) {  // parked: keep it pending, no tick may leak
             if (ctx.ebp) {
                 float* prev_time = (float*)(uintptr_t)(ctx.ebp + 0x0C);
                 *prev_time += (float)realTick * g_nativeTickAdvance;
@@ -333,8 +355,8 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         if (pinned) {
             // tick handling complete for this frame
         } else if (s->force_fixed_tick > 0) {
-            // Deterministic mode: exact tick count per frame
-            ctx.esi = s->force_fixed_tick;
+            // Deterministic mode: exact tick count per frame (0 while parked)
+            ctx.esi = splice_parked ? 0 : (uintptr_t)s->force_fixed_tick;
         } else if (did_reset) {
             // Splice frame's backlog was just zeroed (prev → now); process a
             // single resume tick so the first REC frame doesn't re-burst.
@@ -367,6 +389,8 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             if (s->playback_speed <= 1.0f && realTick > NATIVE_GAME_CLAMP_AT_1X) {
                 realTick = NATIVE_GAME_CLAMP_AT_1X;
             }
+
+            if (splice_parked) realTick = 0;  // hold AT the splice until approved
 
             ctx.esi = (uintptr_t)realTick;
         }

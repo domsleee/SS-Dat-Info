@@ -459,6 +459,7 @@ static volatile uint32_t g_cave2_handoffArmed = 0;
 // the input stream while leaving the splice point where it was.
 static inline void ClearGateAlign(TasSharedState* s) {
     s->gate_align_rec = 0;
+    s->cont_splice_approved = 0;  // no alignment, nothing to approve
 }
 
 static inline void ClearSpeedHandoff(TasSharedState* s) {
@@ -589,6 +590,7 @@ static void ProcessCommand(TasSharedState* s) {
                 s->continue_from_frame = 0;  // refused — don't leave a stale marker armed
                 g_cave2_contArmed = 0;
                 ClearSpeedHandoff(s);
+                ClearGateAlign(s);  // refusal must not leave alignment armed for a later replay
                 g_cave2_pendingLog = 3;  // "stopped"
                 break;
             }
@@ -609,6 +611,7 @@ static void ProcessCommand(TasSharedState* s) {
                 s->continue_from_frame = 0;  // refused — don't leave a stale marker armed
                 g_cave2_contArmed = 0;
                 ClearSpeedHandoff(s);
+                ClearGateAlign(s);  // refusal must not leave alignment armed for a later replay
                 g_cave2_pendingLog = 3;  // "stopped"
                 break;
             }
@@ -624,6 +627,7 @@ static void ProcessCommand(TasSharedState* s) {
             s->mode = MODE_PLAY;  // Start as PLAY, will auto-switch in PLAY handler
             g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
             g_cave2_contArmed = 1;  // the ONLY place the splice gate opens
+            s->cont_splice_approved = 0;  // aligned attempts start unapproved (splice interlock)
             // CONT hands over at its splice (cont_resume_speed), never
             // mid-replay. Refuse any speed-handover marker it might have
             // inherited. Gate alignment, however, is now SUPPORTED for CONT:
@@ -1171,8 +1175,13 @@ static void __declspec(noinline) Cave2_Logic() {
         // and rec_splice==splice_pos, so this is byte-identical to before.
         uint32_t aligned_splice = GateAlignedSplicePos(
             s->continue_from_frame, s->gate_index, s->gate_align_rec);
+        // Aligned splice interlock: only a watcher-approved prefix may be
+        // spliced. cave5 parks playback AT the splice while unapproved, so
+        // this condition is normally decided long before it is reached —
+        // the check here is the second lock on the same door.
         if (g_cave2_contArmed && s->continue_from_frame > 0
-                && s->playback_pos >= aligned_splice) {
+                && s->playback_pos >= aligned_splice
+                && (s->gate_align_rec == 0 || s->cont_splice_approved != 0)) {
             uint32_t splice_pos = s->playback_pos;
             uint32_t rec_splice = s->continue_from_frame;
             s->recorded_count = rec_splice;
