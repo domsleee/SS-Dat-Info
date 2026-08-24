@@ -27,6 +27,7 @@ mod cont_splice_frame;
 mod cont_stress;
 mod countdown_probe;
 mod dialog_speedup;
+mod dialog_e2e;
 mod drift;
 mod drift_speed;
 mod escape_speedup;
@@ -580,6 +581,11 @@ fn main() {
         "level-hunt" => {
             let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
             std::process::exit(if level_hunt::run(sub) { 0 } else { 1 });
+        }
+        "dialog-e2e" => {
+            // END-TO-END: real finishes, real Pico keypress on the save dialog
+            // (PLAY and REC modes), then the ACTUAL main menu measured.
+            std::process::exit(if dialog_e2e::run() { 0 } else { 1 });
         }
         "dialog-speedup" => {
             let speed: f32 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(1.0);
