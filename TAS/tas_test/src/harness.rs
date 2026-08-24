@@ -770,7 +770,7 @@ pub fn verify_expected_level(client: &TasSharedMemoryClient) {
                 "ERROR: could not identify the track after {}s — level_id stayed 0x{:08X}.\n  \
                  That value means the game is NOT on one of the nine Time-Attack Tracks:\n  \
                  it is at a menu, mid-teardown, or in a mode the scan does not cover\n  \
-                 (Practice, Halfpipe). This run expects {}.\n  \
+                 (Halfpipe, Ramp). This run expects {}.\n  \
                  Navigate into {} (or set TAS_TEST_LEVEL=any to bypass).",
                 LEVEL_SCAN_TIMEOUT_SECS,
                 client.state().level_id,

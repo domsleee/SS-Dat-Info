@@ -16,13 +16,15 @@
 //! `saveReplayTimestamp`. Until then `parse_level_code` is exercised by tests
 //! and ready to format a name the moment the DLL starts publishing the path.
 
-/// Area folder → single-letter prefix. Forest/Alpine/Village are the three
-/// race areas; anything else (Practice/Special) has no stable convention yet.
+/// Area folder -> single-letter prefix. Forest/Alpine/Village are the three
+/// race areas; Practice is the start menu's practice run (id 9 = "PE").
+/// Anything else (Special) has no stable convention yet.
 fn area_initial(area: &str) -> Option<char> {
     match area.to_ascii_lowercase().as_str() {
         "forest" => Some('F'),
         "alpine" => Some('A'),
         "village" => Some('V'),
+        "practice" => Some('P'),
         _ => None,
     }
 }
@@ -187,7 +189,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_practice_track() {
+        assert_eq!(
+            parse_level_code("Data/Levels/Practice/Tracks/Easy/x"),
+            Some("PE".to_string())
+        );
+    }
+
+    #[test]
     fn parse_rejects_unknown_or_malformed() {
+        // Practice with an unknown CATEGORY still fails - only Tracks/
+        // Halfpipe/Ramp are categories.
         assert_eq!(parse_level_code("Levels/Practice/Foo/Bar"), None);
         assert_eq!(parse_level_code("Levels/Forest/Tracks"), None); // no difficulty
         assert_eq!(parse_level_code("nothing/useful/here"), None);
@@ -254,11 +266,12 @@ mod tests {
     }
 
     #[test]
-    fn level_code_from_id_maps_all_nine_tracks() {
+    fn level_code_from_id_maps_all_ten_levels() {
         assert_eq!(level_code_from_id(0), Some("FE"));
         assert_eq!(level_code_from_id(4), Some("AM"));
         assert_eq!(level_code_from_id(8), Some("VH"));
-        assert_eq!(level_code_from_id(9), None);
+        assert_eq!(level_code_from_id(9), Some("PE"), "practice is a level now");
+        assert_eq!(level_code_from_id(10), None);
         assert_eq!(level_code_from_id(0xFFFF_FFFF), None);
     }
 
