@@ -131,8 +131,15 @@ fn wait_for_shared_memory(name: &str, timeout: Duration) -> bool {
     use std::ffi::c_void;
     use std::iter;
 
+    // Win32's canonical type names, kept verbatim so the FFI signatures read
+    // like the SDK headers they mirror. Clippy 1.97 (the CI toolchain) flags
+    // fully-capitalized acronyms under -D warnings; renaming these to Dword
+    // etc. would be strictly less legible.
+    #[allow(clippy::upper_case_acronyms)]
     type HANDLE = *mut c_void;
+    #[allow(clippy::upper_case_acronyms)]
     type DWORD = u32;
+    #[allow(clippy::upper_case_acronyms)]
     type BOOL = i32;
     const FILE_MAP_READ: DWORD = 0x0004;
 
