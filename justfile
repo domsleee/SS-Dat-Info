@@ -23,16 +23,10 @@ tas_rust:
 # Compile + run the standalone C++ unit tests (pure gate-policy logic, no DLL).
 # Uses the VS dev shell's cl.exe via vswhere + VsDevCmd.
 test_dll:
-    $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath; \
-    $out = Join-Path $env:TEMP 'tas_test_input_gate.exe'; \
-    & cmd /c "`"$vsPath\Common7\Tools\VsDevCmd.bat`" -arch=x64 -no_logo && cl /nologo /EHsc /std:c++17 /Fe:`"$out`" /Fo:`"$env:TEMP\\`" .\TAS\TAS_Helper\src\tests\test_input_gate.cpp" ; \
-    if ($LASTEXITCODE -ne 0) { throw 'compile failed' }; \
-    & $out; \
-    if ($LASTEXITCODE -ne 0) { throw 'input_gate tests failed' }; \
-    $out2 = Join-Path $env:TEMP 'tas_test_level_path.exe'; \
-    & cmd /c "`"$vsPath\Common7\Tools\VsDevCmd.bat`" -arch=x64 -no_logo && cl /nologo /EHsc /std:c++17 /Fe:`"$out2`" /Fo:`"$env:TEMP\\`" .\TAS\TAS_Helper\src\tests\test_level_path.cpp" ; \
-    if ($LASTEXITCODE -ne 0) { throw 'compile failed (level_path)' }; \
-    & $out2
+    # All children run HIDDEN (see the script) — a console window popping here
+    # steals foreground from the game, and a deactivated game PAUSES. That
+    # froze an in-game suite mid-replay when a commit ran this hook.
+    & .\TAS\tools\test_dll_hidden.ps1
 
 [private]
 [no-exit-message]
