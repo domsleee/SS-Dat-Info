@@ -507,6 +507,14 @@ struct TasApp {
     // belongs to the track it was recorded on regardless of what is on screen
     // afterwards. Never used to decide what may be restored — that must be live.
     last_resolved_level: Option<String>,
+    // The level_epoch we were last RESOLVED in. Unresolved has two causes with
+    // opposite correct behaviour: a FREEZE (menu / pause / post-race dialog —
+    // the scan refuses to assert anything while the cycle is stopped, but the
+    // level is still resident and the epoch unchanged) and a REAL context
+    // change (root reallocated → epoch bumped). Hiding the history panel is
+    // only right for the second; hiding it on every save-high-time dialog was
+    // the "menu on the right disappears" report.
+    last_resolved_epoch: Option<u32>,
 
     // One-shot: force dark title bar on first frame
     #[cfg(windows)]
@@ -690,6 +698,7 @@ impl TasApp {
             cycle_fc: 0,
             cycle_advance_at: std::time::Instant::now(),
             last_resolved_level: None,
+            last_resolved_epoch: None,
             #[cfg(windows)]
             dark_title_bar_set: false,
         };
@@ -942,10 +951,23 @@ impl TasApp {
                 if let Some(c) = code {
                     self.last_resolved_level = Some(c.to_string());
                 }
+                self.last_resolved_epoch = Some(shared.state().level_epoch);
                 self.history.set_live_level(code);
             }
-            // Context changed, new track not identified yet.
-            None => self.history.enter_resolving(),
+            None => {
+                // Unresolved is AMBIGUOUS. A freeze (menu / pause / the
+                // post-race save dialogs) unresolves too — the scan won't
+                // assert a track while the cycle is stopped — but the level is
+                // still resident and level_epoch unchanged, so the history
+                // panel must NOT vanish there (same-track restores stay safe).
+                // Only a genuinely new context (epoch moved past the one we
+                // last resolved in) hides the rows until the new track is
+                // identified.
+                let epoch_now = shared.state().level_epoch;
+                if self.last_resolved_epoch != Some(epoch_now) {
+                    self.history.enter_resolving();
+                }
+            }
         }
     }
 
@@ -2604,7 +2626,25 @@ impl eframe::App for TasApp {
                         }
                     });
 
-                    history_actions = history::show(ui, &self.history);
+                    // The status chip's menu signal, reused: game_in_game is a
+                    // stale flag at menus (the Cycle hook stops writing it), so
+                    // gate on the cycle actually ticking. The panel uses this to
+                    // say "In Menu" instead of a perpetual "resolving…" — at a
+                    // menu nothing is being resolved, the scan is deliberately
+                    // suppressed there.
+                    let in_menu = !(self
+                        .shared
+                        .as_ref()
+                        .map(|s| s.state().game_in_game != 0)
+                        .unwrap_or(false)
+                        && self.cycle_advance_at.elapsed()
+                            < std::time::Duration::from_millis(400));
+                    let game_flag = self
+                        .shared
+                        .as_ref()
+                        .map(|s| s.state().game_in_game != 0)
+                        .unwrap_or(false);
+                    history_actions = history::show(ui, &self.history, in_menu, game_flag);
                 });
         }
 
@@ -3451,6 +3491,7 @@ mod tests {
             cycle_fc: 0,
             cycle_advance_at: std::time::Instant::now(),
             last_resolved_level: None,
+            last_resolved_epoch: None,
             #[cfg(windows)]
             dark_title_bar_set: false,
         }
