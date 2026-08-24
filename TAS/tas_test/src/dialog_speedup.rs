@@ -87,9 +87,40 @@ pub fn run(speed: f32, rec: Option<&str>) -> bool {
     let deadline = Instant::now() + Duration::from_secs(240);
     let mut stable_pos = 0u32;
     let mut stable_since = Instant::now();
+    // Diagnostic heartbeat: a battery run hit this deadline with the engine
+    // later found frozen — print enough state every 5s to attribute a stall
+    // (park/interlock fields included) instead of guessing afterwards.
+    let mut last_beat = Instant::now();
     loop {
+        if last_beat.elapsed() > Duration::from_secs(5) {
+            last_beat = Instant::now();
+            let s = client.state();
+            println!(
+                "  [beat] pos={} mode={} fc={} tc={} gate={} align={} cf={} approved={} speed={} demand={}",
+                s.playback_pos,
+                s.mode,
+                s.frame_count,
+                s.tick_count,
+                s.gate_index,
+                s.gate_align_rec,
+                s.continue_from_frame,
+                s.cont_splice_approved,
+                s.playback_speed,
+                s.diag_demand
+            );
+        }
         if Instant::now() > deadline {
-            eprintln!("ERROR: replay never reached the finish");
+            let s = client.state();
+            eprintln!(
+                "ERROR: replay never reached the finish (pos={} mode={} fc={} gate={} align={} cf={} approved={})",
+                s.playback_pos,
+                s.mode,
+                s.frame_count,
+                s.gate_index,
+                s.gate_align_rec,
+                s.continue_from_frame,
+                s.cont_splice_approved
+            );
             return false;
         }
         let s = client.state();
