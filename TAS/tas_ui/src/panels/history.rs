@@ -109,16 +109,20 @@ pub fn show(
         // user's own naming convention), but "PE" is cryptic: the practice
         // run has a name, use it. (Entries/files still use the PE code.)
         let code = if code == "PE" { "Practice" } else { code };
+        // The sticky level survives freezes (pause / post-race dialogs / the
+        // menu) so the rows stay usable there — but say the engine is not
+        // actually running this level right now.
+        let pause_suffix = if in_menu { " · paused" } else { "" };
         let (text, hover) = if any_untagged {
             (
-                format!("Level: {} · untagged shown", code),
+                format!("Level: {}{} · untagged shown", code, pause_suffix),
                 "History is per-level: entries made on this track, plus ones \
                  marked \"untagged\", which belong to no known track and so \
                  appear everywhere. Switches with the game.",
             )
         } else {
             (
-                format!("Level: {}", code),
+                format!("Level: {}{}", code, pause_suffix),
                 "History is per-level: only entries made on this track are listed. \
                  Switches with the game.",
             )

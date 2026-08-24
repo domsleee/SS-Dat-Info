@@ -732,6 +732,24 @@ pub fn resolved_level_id(state: &TasSharedState) -> Option<u32> {
     with_level_context(state, || read_identity(state)).flatten()
 }
 
+/// Like [`resolved_level_id`], but also returns the `level_epoch` the id was
+/// resolved IN, read in the SAME seqlock window.
+///
+/// Callers that stamp their own state with "we were resolved at epoch E" must
+/// use this rather than reading `level_epoch` in a separate access: across a
+/// context switch the separate read can pair the OLD track's id with the NEW
+/// epoch, and the stamp then keeps asserting the old track through the very
+/// switch it exists to detect.
+pub fn resolved_level_id_with_epoch(state: &TasSharedState) -> Option<(u32, u32)> {
+    with_level_context(state, || {
+        let id = read_identity(state)?;
+        // SAFETY: shared mapping written by the DLL; inside the seqlock window.
+        let epoch = unsafe { std::ptr::read_volatile(&state.level_epoch) };
+        Some((id, epoch))
+    })
+    .flatten()
+}
+
 /// A coherent snapshot of the level context: `(level_id, level_path)` together.
 ///
 /// The path is the harder half: 128 bytes that another process can be halfway

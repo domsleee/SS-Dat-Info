@@ -97,7 +97,10 @@ fn wait_engine_frozen(client: &tas_shared::TasSharedMemoryClient, deadline_secs:
 /// Idle at the dialog, dismiss with a REAL Pico Escape, profile the tick rate.
 /// Returns (max_ticks_per_sec, ok).
 fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str) -> (f64, bool) {
-    println!("  [{}] idling {}s at the dialog (untouched)...", label, DIALOG_IDLE_SECS);
+    println!(
+        "  [{}] idling {}s at the dialog (untouched)...",
+        label, DIALOG_IDLE_SECS
+    );
     let t0 = client.state().tick_count;
     thread::sleep(Duration::from_secs(DIALOG_IDLE_SECS));
     let idled = client.state().tick_count.wrapping_sub(t0);
@@ -113,7 +116,10 @@ fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str)
     // engine and would replay the backlog if the drain were broken, so Escape
     // exercises the same bug path the report describes.)
     if !harness::send_escape() {
-        eprintln!("  [{}] WARNING: Pico Escape failed — falling back to PostMessage Enter", label);
+        eprintln!(
+            "  [{}] WARNING: Pico Escape failed — falling back to PostMessage Enter",
+            label
+        );
         harness::dismiss_save_dialog_pub();
     }
 
@@ -137,19 +143,38 @@ fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str)
     (rate, ok)
 }
 
-fn run_keys(keys: &str, delay_ms: u32) {
-    let script = r"C:\Users\user\git\SS-Dat-Info\TAS\tools\keys.ps1";
-    let _ = Command::new("powershell")
+fn run_keys(keys: &str, delay_ms: u32) -> bool {
+    // Resolve relative to the exe (target/release/tas_test.exe -> repo root)
+    // instead of a hard-coded checkout path, and REPORT failure: a silently
+    // failed quit sequence turns Phase C into measuring the wrong screen.
+    let script = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(r"..\..\..\TAS\tools\keys.ps1")))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| r"TAS\tools\keys.ps1".to_string());
+    match Command::new("powershell")
         .args([
             "-NoProfile",
             "-File",
-            script,
+            &script,
             "-Keys",
             keys,
             "-DelayMs",
             &delay_ms.to_string(),
         ])
-        .output();
+        .output()
+    {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            eprintln!("  WARNING: keys.ps1 exited {} for {:?}", o.status, keys);
+            false
+        }
+        Err(e) => {
+            eprintln!("  WARNING: keys.ps1 failed to run: {}", e);
+            false
+        }
+    }
 }
 
 pub fn run() -> bool {
@@ -214,7 +239,11 @@ pub fn run() -> bool {
     println!(
         "  splice done: mode={} ({}) recorded_count={}",
         mode_after,
-        if mode_after == TasMode::Rec as u32 { "REC" } else { "not REC!" },
+        if mode_after == TasMode::Rec as u32 {
+            "REC"
+        } else {
+            "not REC!"
+        },
         client.state().recorded_count
     );
     if !wait_engine_frozen(&client, 120) {
@@ -234,7 +263,12 @@ pub fn run() -> bool {
     // ---------------- PHASE C: the REAL main menu ----------------------------
     println!("--- PHASE C: quit to the main menu, measure what the user sees ---");
     // Pause menu: DOWN x4 = Return To Menu; "Are you sure?" = LEFT then ENTER.
-    run_keys("ESC,DOWN,DOWN,DOWN,DOWN,ENTER,LEFT,ENTER", 700);
+    if !run_keys("ESC,DOWN,DOWN,DOWN,DOWN,ENTER,LEFT,ENTER", 700) {
+        eprintln!(
+            "ERROR: quit-to-menu key sequence failed; Phase C would measure the wrong screen"
+        );
+        return false;
+    }
     thread::sleep(Duration::from_secs(3));
 
     // Present cap: the menu freezes the cycle, so frame_limit must throttle
@@ -245,7 +279,10 @@ pub fn run() -> bool {
     thread::sleep(Duration::from_secs(2));
     let p1 = client.state().present_count;
     let present_rate = f64::from(p1.wrapping_sub(p0)) / 2.0;
-    let pass_c_cap = cap == 0 || present_rate < f64::from(cap) * 1.6;
+    // BOTH bounds: uncapped (165/s) is the "menu fast" bug, but HALF the cap
+    // (the coarse-timer regression this cap shipped with) must fail too.
+    let pass_c_cap =
+        cap == 0 || (present_rate < f64::from(cap) * 1.6 && present_rate > f64::from(cap) * 0.5);
     println!(
         "  main-menu present rate: {:.1}/s (cap {}) -> {}",
         present_rate,
@@ -265,7 +302,11 @@ pub fn run() -> bool {
     println!(
         "  cont_suppress_input at the menu: {} -> {}",
         suppress,
-        if pass_c_flag { "clear OK" } else { "STALE (keyboard dead)" }
+        if pass_c_flag {
+            "clear OK"
+        } else {
+            "STALE (keyboard dead)"
+        }
     );
 
     harness::stop(&mut client); // retire the frozen-armed REC left by the quit
@@ -277,7 +318,9 @@ pub fn run() -> bool {
     );
     let ok = pass_a && pass_b_rec && pass_b_burst && pass_c_cap && pass_c_video && pass_c_flag;
     if ok {
-        println!("\n*** DIALOG-E2E PASSED: save-dialog and menu behave at native speed end to end ***");
+        println!(
+            "\n*** DIALOG-E2E PASSED: save-dialog and menu behave at native speed end to end ***"
+        );
     } else {
         println!("\n*** DIALOG-E2E FAILED ***");
     }
