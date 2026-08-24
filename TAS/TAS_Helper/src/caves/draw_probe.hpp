@@ -60,6 +60,31 @@ inline void __stdcall VpDetour(int size, unsigned type, int stride, const void* 
     g_vpHook.stdcall<void, int, unsigned, int, const void*>(size, type, stride, ptr);
 }
 
+// Hook srGlobalRecycler::allocate(K) in sr.dll — the >=16KB allocator the
+// terrain vertex buffers come from. Capture the LARGEST K and the return
+// address that requested it: that caller is the terrain buffer sizer, where a
+// u16 vertex total would wrap. If maxK SHRINKS at 600 vs 450, caught.
+inline volatile uint32_t g_allocMaxK   = 0;  // largest allocation size seen
+inline volatile uint32_t g_allocMaxRet = 0;  // caller ret-addr for that maxK (SG-relative)
+inline volatile uint32_t g_allocCalls  = 0;
+inline uintptr_t g_sgBase = 0;               // Supreme_Game.dll live base
+
+inline void allocMid(SafetyHookContext& ctx) {
+    // __thiscall: ecx=this, K at [esp+4] (esp points at return addr on entry).
+    uint32_t* sp = (uint32_t*)ctx.esp;
+    uint32_t ret = sp[0];   // caller return address
+    uint32_t k   = sp[1];   // requested size in bytes
+    g_allocCalls++;
+    if (k > g_allocMaxK && k < 0x08000000u) {
+        g_allocMaxK = k;
+        // Report the caller as Supreme_Game-relative if it lives there.
+        g_allocMaxRet = (g_sgBase && ret >= g_sgBase && ret < g_sgBase + 0x300000)
+                            ? (uint32_t)(ret - g_sgBase)
+                            : ret;
+    }
+}
+inline SafetyHookMid g_allocMid{};
+
 inline void __stdcall Detour(unsigned mode, int count, unsigned type,
                              const void* indices) {
     if (count > 0) {
@@ -108,13 +133,28 @@ inline void __stdcall Detour(unsigned mode, int count, unsigned type,
             g_state->objsnap_arm_player[5] = g_maxIndex;
             g_state->objsnap_arm_player[6] = g_vpSpanVerts;  // vertices spanned by the pool
             g_state->objsnap_arm_player[7] = g_vpStride;
+            g_state->objsnap_arm_player[8] = g_allocMaxK;    // largest allocation (bytes)
+            g_state->objsnap_arm_player[9] = g_allocMaxRet;  // caller ret (SG-relative)
+            g_state->objsnap_arm_player[10] = g_allocCalls;
         }
     }
     g_hook.stdcall<void, unsigned, int, unsigned, const void*>(mode, count, type, indices);
 }
 
+
+
 inline DWORD WINAPI InstallThread(LPVOID param) {
     g_state = (TasSharedState*)param;
+    // Install the ALLOCATOR hook IMMEDIATELY — sr.dll is present from injection,
+    // and the terrain vertex buffers are allocated at LEVEL LOAD, which can
+    // happen before opengl32 comes up. Waiting would miss them.
+    g_sgBase = (uintptr_t)GetModuleHandleA("Supreme_Game.dll");
+    if (HMODULE sr0 = GetModuleHandleA("sr.dll")) {
+        void* al = (void*)((uintptr_t)sr0 + 0x3E9B0);
+        g_allocMid = safetyhook::create_mid(al, allocMid);
+        Log(g_allocMid ? "DrawProbe: srGlobalRecycler::allocate mid-hooked (early)"
+                       : "DrawProbe: srGlobalRecycler::allocate hook FAILED");
+    }
     // opengl32 loads well after DLL init (the game brings the renderer up
     // lazily). Poll for it, then hook glDrawElements.
     for (int i = 0; i < 600; i++) {  // up to ~60s
@@ -141,6 +181,8 @@ inline DWORD WINAPI InstallThread(LPVOID param) {
     Log("DrawProbe: opengl32.dll never appeared");
     return 0;
 }
+
+
 
 inline bool Install(TasSharedState* state) {
     CreateThread(nullptr, 0, InstallThread, state, 0, nullptr);
