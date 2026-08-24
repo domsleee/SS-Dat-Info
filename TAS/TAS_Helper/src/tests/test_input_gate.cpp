@@ -72,9 +72,9 @@ int main() {
     // --- Gate-relative replay source mapping --------------------------------
     check(GateAlignedInputSource(5, 0, 299, 500) == 5,
           "alignment_preserves_early_input_timing");
-    check(GateAlignedInputSource(234, 0, 299, 500) == 234,
+    check(GateAlignedInputSource(290, 0, 299, 500) == 290,
           "alignment_preserves_input_before_safety_window");
-    check(GateAlignedInputSource(235, 0, 299, 500) == 299,
+    check(GateAlignedInputSource(291, 0, 299, 500) == 299,
           "alignment_holds_gate_mask_in_safety_window");
     check(GateAlignedInputSource(297, 297, 299, 500) == 299,
           "alignment_maps_early_live_gate_to_recorded_gate");
@@ -82,8 +82,10 @@ int main() {
           "alignment_maps_positive_gate_offset");
     check(GateAlignedInputSource(502, 301, 299, 500) == GATE_ALIGN_INVALID_SOURCE,
           "alignment_rejects_source_after_recording");
-    check(GateAlignedInputSource(0, 0, 40, 500) == 40,
-          "short_countdown_holds_gate_mask_from_arm");
+    check(GateAlignedInputSource(31, 0, 40, 500) == 31,
+          "short_countdown_preserves_input_before_hold");
+    check(GateAlignedInputSource(32, 0, 40, 500) == 40,
+          "short_countdown_holds_gate_mask_in_hold");
 
     if (g_failures == 0) {
         std::printf("ALL PASS\n");

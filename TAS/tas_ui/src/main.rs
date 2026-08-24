@@ -1150,6 +1150,27 @@ impl TasApp {
             continue_from_frame = 0;
         }
 
+        // A recorded input transition inside the pre-gate hold window is
+        // replaced by the gate mask during an aligned replay (see
+        // gate_alignment.hpp). The shipped recordings hold their mask stable
+        // for 78-140 frames so this stays silent for them - but a recording
+        // that DOES pulse right before the gate would otherwise reroll or
+        // diverge with no visible reason.
+        if gate_align_rec > 0 {
+            if let Some(shared) = self.shared.as_ref() {
+                let n = tas_shared::cont::pre_gate_hold_overwrites(
+                    &shared.state().input_log,
+                    gate_align_rec,
+                );
+                if n > 0 {
+                    self.log_lines.push(format!(
+                        "[{}] WARNING: {} recorded input frame(s) in the {} frames before the gate differ from the gate mask; alignment replays them AS the gate mask",
+                        ts, n, tas_shared::cont::GATE_ALIGN_PRE_GATE_LEAD
+                    ));
+                }
+            }
+        }
+
         // Reflect the speed the controller will assert into the live state now
         // so the UI updates immediately (the controller re-asserts it too).
         // For CONT, also stage the RESUME speed so the DLL drops to it
@@ -3043,7 +3064,28 @@ impl eframe::App for TasApp {
                 // drift it's noise; when there is drift the banner is
                 // louder and the debug panel has the per-tick breakdown.
                 {
-                    let count = (state.playback_pos as usize).min(state.recorded_count as usize);
+                    // Gate-aligned replays are correct when
+                    // play[live_gate+k] == rec[rec_gate+k]; comparing raw
+                    // indices there reports the alignment shift itself as
+                    // drift - a false DRIFT banner on a bit-exact replay.
+                    // Scan gate-relative pairs when aligned (the pre-gate
+                    // settle is the watcher's business), raw indices
+                    // otherwise. The cache resets whenever the pair count
+                    // shrinks, which also covers the moment the gate fires
+                    // mid-replay and the indexing switches over.
+                    let live_gate = state.gate_index as usize;
+                    let rec_gate = state.gate_align_rec as usize;
+                    let aligned = rec_gate > 0 && live_gate > 0;
+                    let (play_base, rec_base) = if aligned {
+                        (live_gate, rec_gate)
+                    } else {
+                        (0, 0)
+                    };
+                    let count = (state.playback_pos as usize)
+                        .saturating_sub(play_base)
+                        .min((state.recorded_count as usize).saturating_sub(rec_base))
+                        .min(state.play_coords.len().saturating_sub(play_base))
+                        .min(state.rec_coords.len().saturating_sub(rec_base));
                     if count < self.last_drift_scan_count {
                         self.cached_max_drift_x = 0.0;
                         self.cached_max_drift_z = 0.0;
@@ -3053,11 +3095,15 @@ impl eframe::App for TasApp {
                     let prev_dx = self.cached_max_drift_x;
                     let prev_dz = self.cached_max_drift_z;
                     for i in self.last_drift_scan_count..count {
-                        let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
+                        let d = (state.play_coords[play_base + i][0]
+                            - state.rec_coords[rec_base + i][0])
+                            .abs();
                         if d > self.cached_max_drift_x {
                             self.cached_max_drift_x = d;
                         }
-                        let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
+                        let d = (state.play_coords[play_base + i][2]
+                            - state.rec_coords[rec_base + i][2])
+                            .abs();
                         if d > self.cached_max_drift_z {
                             self.cached_max_drift_z = d;
                         }

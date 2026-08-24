@@ -11,9 +11,12 @@
 //! down leaves that flag set forever, permanently disabling the cap: exactly
 //! the reported symptom.
 //!
-//! The fix under test: a cycle frozen for >5s with the flag still up treats
-//! the flag as stale and lets the cap engage anyway (no CONT reload freeze
-//! lasts that long), plus the root-change auto-stop clears the flag.
+//! The fix under test: a cycle frozen for >5s with the flag still up RETIRES
+//! the flag (clears shared cont_suppress_input - no CONT reload freeze lasts
+//! that long), which re-engages the cap AND un-blocks the keyboard: the
+//! input gate swallows every non-ESC key while the flag is set, so a stale
+//! flag used to leave the keyboard dead until reinjection. The root-change
+//! auto-stop clears the flag too.
 //!
 //! Method — the pause menu freezes the cycle exactly like the main menu, and
 //! `present_count` measures the present rate without screen capture:
@@ -76,6 +79,9 @@ pub fn run() -> bool {
     //    stale by definition and the cap must re-engage — THE FIX.
     thread::sleep(Duration::from_millis(2500));
     let paused_stale = presents_per_sec(&client, 2.0);
+    // The override must retire the SHARED flag (the input gate reads it
+    // too), not merely ignore it for the cap.
+    let flag_after_stale = client.state().cont_suppress_input;
     println!(
         "  paused, flag SET (>5s frozen):   {:.1} presents/s (stale override re-engages)",
         paused_stale
@@ -89,12 +95,13 @@ pub fn run() -> bool {
     let cap_engaged = paused_capped < CAP_FPS * 1.5;
     let guard_disengaged = paused_suppressed > CAP_FPS * 1.8 || live < CAP_FPS * 1.8;
     let stale_reengaged = paused_stale < CAP_FPS * 1.5;
+    let flag_retired = flag_after_stale == 0;
     println!();
     println!(
-        "  cap engages when frozen: {} | CONT guard disengages: {} | stale flag overridden: {}",
-        cap_engaged, guard_disengaged, stale_reengaged
+        "  cap engages when frozen: {} | CONT guard disengages: {} | stale flag overridden: {} | shared flag retired (keyboard revived): {}",
+        cap_engaged, guard_disengaged, stale_reengaged, flag_retired
     );
-    if cap_engaged && stale_reengaged {
+    if cap_engaged && stale_reengaged && flag_retired {
         println!("\n*** MENU-CAP PASSED: a stale suppress flag can no longer uncap the menu ***");
         true
     } else {

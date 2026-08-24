@@ -4,10 +4,16 @@
 inline constexpr uint32_t GATE_ALIGN_INVALID_SOURCE = 0xFFFFFFFFu;
 
 // The product controller arms immediately after a settled restart. Deliberate
-// 0..40 ms arm-delay sweeps moved the live gate by at most four cycles. Keep a
-// much wider window so the gate cycle always receives the recording's gate
-// mask, while earlier pre-gate transitions retain their original timing.
-inline constexpr uint32_t GATE_ALIGN_PRE_GATE_LEAD = 64u;
+// 0..40 ms arm-delay sweeps moved the live gate by at most four cycles. The
+// hold window exists so the gate cycle always receives the recording's gate
+// mask wherever the live gate lands — but every recorded input transition
+// INSIDE the window is REPLACED by that mask, so it must stay as narrow as
+// the jitter allows: 8 is twice the observed worst case, and a recorded
+// press/release pulse 9+ frames before the gate keeps its original timing.
+// (Was 64, which silently deleted legitimate transitions from a 640 ms
+// window; the four shipped test recordings hold their gate mask stable for
+// 78-140 frames, so they behave identically under either value.)
+inline constexpr uint32_t GATE_ALIGN_PRE_GATE_LEAD = 8u;
 
 // The play-index at which a CONT splice must fire when the prefix is
 // gate-aligned. The recording's splice is at rec-index continue_from_frame,
