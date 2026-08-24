@@ -11,7 +11,7 @@ constexpr size_t TRACE_FRAMES = 384;
 constexpr size_t OBJSNAP_PLAYER_DWORDS = 128;
 constexpr size_t OBJSNAP_PHYSICS_DWORDS = 512;
 
-constexpr uint32_t TAS_SHARED_VERSION = 38; // +object snapshots
+constexpr uint32_t TAS_SHARED_VERSION = 39; // +clock diagnostics
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -455,6 +455,12 @@ struct TasSharedState {
     volatile uint32_t objsnap_gate_physics[OBJSNAP_PHYSICS_DWORDS];
     volatile uint32_t objsnap_player_ok;
     volatile uint32_t objsnap_physics_ok;
+    // Clock diagnostics from cave5: raw per-frame tick demand (the wall-clock
+    // backlog), the private tick-advance the in-game readers see (f32 bits),
+    // and how many times the backlog drain has fired. See the Rust doc.
+    volatile int32_t  diag_demand;
+    volatile uint32_t diag_tick_advance;
+    volatile uint32_t diag_drain_count;
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -463,7 +469,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1663488,
+static_assert(sizeof(TasSharedState) == 1663496,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 

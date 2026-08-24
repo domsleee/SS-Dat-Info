@@ -102,9 +102,7 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
     // has gate_align_rec == 0 and this reduces to raw-index drift.
     let (splice_aligned, splice_rec_gate, splice_play_gate) = {
         let s = client.state();
-        let aligned = s.gate_align_rec > 0
-            && s.gate_index > 0
-            && splice_frame > s.gate_align_rec;
+        let aligned = s.gate_align_rec > 0 && s.gate_index > 0 && splice_frame > s.gate_align_rec;
         (aligned, s.gate_align_rec, s.gate_index)
     };
 
@@ -125,12 +123,7 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
     let burst_frames = recorded_after_burst.saturating_sub(recorded_at_splice);
     let d = if splice_aligned {
         let rel = splice_frame.saturating_sub(splice_rec_gate);
-        drift::compute_drift_gate_relative(
-            client.state(),
-            splice_rec_gate,
-            splice_play_gate,
-            rel,
-        )
+        drift::compute_drift_gate_relative(client.state(), splice_rec_gate, splice_play_gate, rel)
     } else {
         drift::compute_drift(client.state(), splice_frame)
     };
@@ -155,7 +148,11 @@ pub fn run(splice_frame: u32, catchup_speed: f32, record_speed: f32) -> bool {
     );
     println!(
         "  prefix drift{} [0..{}):   X={:.9}  Y={:.9}  Z={:.9}",
-        if splice_aligned { " (gate-relative)" } else { "" },
+        if splice_aligned {
+            " (gate-relative)"
+        } else {
+            ""
+        },
         splice_frame,
         d.max_drift_x,
         d.max_drift_y,

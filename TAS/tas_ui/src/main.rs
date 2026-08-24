@@ -1116,9 +1116,7 @@ impl TasApp {
                 .cont_bucket_target()
                 .and_then(|t| t.expected_first_moving)
                 .unwrap_or(0);
-            if rg > 0
-                && self.continue_from_frame > rg + tas_shared::cont::BUCKET_MATCH_WINDOW
-            {
+            if rg > 0 && self.continue_from_frame > rg + tas_shared::cont::BUCKET_MATCH_WINDOW {
                 gate_align_rec = rg; // aligned → controller runs the watcher
             } else {
                 // Near-gate splice: fall back to the proven bucket match.

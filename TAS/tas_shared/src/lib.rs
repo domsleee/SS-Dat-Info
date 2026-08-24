@@ -13,7 +13,7 @@ pub const OBJSNAP_PLAYER_DWORDS: usize = 128;
 /// at 0x1B4 so the object is at least 0x1D8, and this leaves headroom).
 pub const OBJSNAP_PHYSICS_DWORDS: usize = 512;
 
-pub const TAS_SHARED_VERSION: u32 = 38; // +object snapshots at arm and gate (the hidden-state hunt)
+pub const TAS_SHARED_VERSION: u32 = 39; // +clock diagnostics (demand, tick advance, drain count)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -621,6 +621,18 @@ pub struct TasSharedState {
     /// Dwords of each object that were actually readable (SEH-guarded).
     pub objsnap_player_ok: u32,
     pub objsnap_physics_ok: u32,
+    /// Clock diagnostics, published by cave5 every frame it runs. For the
+    /// "menu sometimes slow/fast" and "save-dialog fast-forward" reports:
+    /// what the tick machinery actually did is otherwise invisible.
+    ///
+    /// diag_demand: the RAW tick demand this frame, before any cap — the
+    /// wall-clock backlog in ticks. diag_tick_advance: f32 bits of the
+    /// private tick-advance the in-game readers currently see (native 0.01
+    /// means normal speed). diag_drain_count: how many times the one-tick
+    /// backlog drain has fired since injection.
+    pub diag_demand: i32,
+    pub diag_tick_advance: u32,
+    pub diag_drain_count: u32,
 }
 
 /// How many times to retry a torn level-context read before giving up.
@@ -4209,7 +4221,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_488);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_496);
     }
 
     #[test]
