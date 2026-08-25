@@ -44,6 +44,7 @@ inline void addWriteEIP(uint32_t eip) {
 }
 
 inline volatile int g_guardStepping = 0;
+inline int g_stackDumped = 0;
 inline void guardLog(EXCEPTION_POINTERS* ep, uintptr_t addr, bool isWrite) {
     uint32_t eip = (uint32_t)ep->ContextRecord->Eip;
     static uint32_t s_seen[64] = {}; static int s_seenN = 0;
@@ -53,6 +54,21 @@ inline void guardLog(EXCEPTION_POINTERS* ep, uintptr_t addr, bool isWrite) {
         Log(std::format("GUARDHIT: {} EIP_abs={:#x} off={:#x}",
                         isWrite ? "WRITE" : "read ", eip,
                         (uint32_t)(addr - g_guardBase)));
+    }
+    // On the FIRST few writes, dump the CALL STACK: scan ESP upward for return
+    // addresses inside Supreme_Game (0xCA0000..0xEA0000). Those frames are the
+    // TERRAIN RENDER code driving the T&L — where the 65,536 budget/cursor is.
+    if (isWrite && g_stackDumped < 3) {
+        g_stackDumped++;
+        uint32_t* sp = (uint32_t*)ep->ContextRecord->Esp;
+        int found = 0;
+        for (int i = 0; i < 256 && found < 12; i++) {
+            uint32_t v = sp[i];
+            if (v >= 0x00CA0000 && v < 0x00EA0000) {  // Supreme_Game range
+                Log(std::format("  STACK[{}]: SG+{:#x}", i, v - 0x00CA0000));
+                found++;
+            }
+        }
     }
 }
 

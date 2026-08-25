@@ -60,7 +60,8 @@ export function requiresInject(trainerSettings: TrainerSettings): boolean {
     || trainerSettings.disableDirectInput
     || trainerSettings.enableCustomControls
     || trainerSettings.hideBlinkingR
-    || trainerSettings.showReplaySpeed;
+    || trainerSettings.showReplaySpeed
+    || trainerSettings.extendRenderDistance;
 }
 
 export function getTrainerSettingsFromUI(trainerSettings: TrainerUISettings): TrainerSettings {
@@ -78,6 +79,7 @@ export function getTrainerSettingsFromUI(trainerSettings: TrainerUISettings): Tr
     enableCustomControls: trainerSettings.enableCustomControls,
     hideBlinkingR: trainerSettings.hideBlinkingR,
     showReplaySpeed: trainerSettings.showReplaySpeed,
+    extendRenderDistance: trainerSettings.extendRenderDistance,
   };
 }
 
@@ -106,4 +108,5 @@ export interface TrainerSettings {
   enableCustomControls: boolean;
   hideBlinkingR: boolean;
   showReplaySpeed: boolean;
+  extendRenderDistance: boolean;
 }

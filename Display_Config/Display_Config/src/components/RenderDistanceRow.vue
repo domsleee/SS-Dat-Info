@@ -11,7 +11,7 @@
       type="number"
       :rules="[
         (v: number) => (v && v > 0) || 'required',
-        (v: number) => v <= maxSafeDistance || `max ${maxSafeDistance}m at Ground Detail ${renderSettings.groundDetail} — the terrain batch runs out of 16-bit vertex indices past that and distant triangles shred; lower Ground Detail to go further`,
+        (v: number) => v <= maxSafeDistance || `max ${maxSafeDistance}m at Ground Detail ${renderSettings.groundDetail} — the ground renderer skips strips longer than its row cap past that, and distant triangles vanish; lower Ground Detail (or enable Extended render distance in Trainer Options) to go further`,
       ]"
       :hint="`max ${maxSafeDistance}m at Ground Detail ${renderSettings.groundDetail}`"
       persistent-hint
@@ -22,26 +22,28 @@
 
 <script setup lang="ts">
 import { useRenderSettingsStore } from "@/stores/renderSettings";
+import { useTrainerUISettingsStore } from "@/stores/trainerSettings";
 import { computed, ref, watch } from "vue";
 
 // const { formIsLoading } = defineProps<{ formIsLoading: boolean }>();
 const { renderSettings } = useRenderSettingsStore();
+const { trainerSettings } = useTrainerUISettingsStore();
 
 const renderDistanceSelection = ref("Custom");
 const renderDistanceOptions = ['200m (Near)', '300m (Normal)', '450m (Far)', 'Custom'];
 
-// The engine caps VISIBLE terrain at 65,536 vertices (a 16-bit-addressable
-// vertex pool in the mesh build): past it, far patches draw shredded
-// (measured live on Alpine Easy: detail 4 shreds between 480 and 500m —
-// exactly where 17x17-vertex patches exhaust the index space; 600m at
-// detail 3 is clean). Mirror of max_safe_render_distance in
-// src-tauri/src/detail_config.rs, which enforces the same cap on write.
+// The ground renderer skips strips longer than its row cap (rows are 1.2m x
+// detail step), so terrain past cap x spacing vanishes as missing triangles
+// (measured live on Alpine Easy: detail 4 clean at 480, shredded at 500).
+// The "Extended render distance" trainer fix patches the cap 400 -> 500,
+// lifting detail 4 from 480m to 600m. Mirror of max_safe_render_distance in
+// src-tauri/src/detail_config.rs (which assumes the default-on patch).
 const maxSafeDistance = computed(() => {
+  const patched = trainerSettings.extendRenderDistance;
   // Number(): the persisted store can hand this back as a string.
   switch (Number(renderSettings.groundDetail)) {
-    case 4: return 480;
-    case 3: return 600;
-    case 2: return 900;
+    case 4: return patched ? 600 : 480;
+    case 3: return patched ? 1200 : 960;
     default: return 1200;
   }
 });

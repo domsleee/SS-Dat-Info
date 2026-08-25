@@ -4,25 +4,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::path_util::get_supreme_folder;
 
-/// The engine caps VISIBLE terrain at 65,536 vertices — a 16-bit-addressable
-/// vertex pool in the mesh build (the GL draw calls themselves already use
-/// GL_UNSIGNED_INT, so the wall is upstream). Past the budget, wrapped slots
-/// draw the far patches as shredded/missing triangles (reported on Alpine Easy at
-/// distance 600 + detail 4, and reproduced live: shredding starts between 480
-/// and 500 at detail 4, exactly where 17x17-vertex patches exhaust the index
-/// space; at detail 3 the same 600m renders clean, as the budget predicts).
-/// The game's own UI capped distance at 450 for the same reason.
+/// The ground renderer draws the slope as vertical strips of rows (row
+/// spacing 1.2m x detail step; step=1 at ground detail 4, 2 at detail 3, ...)
+/// and SKIPS any strip longer than a hardcoded row cap (Supreme_Game.dll
+/// FUN_100b0ef0: `if (rows < 1 || rows > 400) skip`). At detail 4 that made
+/// terrain past 400 x 1.2 = 480m vanish as "shredded"/missing triangles
+/// (measured live on Alpine Easy: 480 clean / 500 shredded; the game's own UI
+/// capped distance at 450 for the same reason). Display_Config_Helper's
+/// "Extended render distance" fix (extendRenderDistance.hpp, default ON)
+/// patches the cap 400 -> 500, which lifts detail 4 to 500 x 1.2 = 600m.
 ///
-/// Enforce the pair here, at the single choke point every write goes through.
-/// Distance is clamped (keeping the user's chosen tessellation quality); the
-/// UI surfaces the cap so raising Ground Detail visibly lowers the max.
-/// Measured-safe caps with margin, per ground_detail level:
+/// Enforce a backstop here, at the single choke point every write goes
+/// through, assuming the (default-on) patch: distance is clamped, keeping the
+/// user's chosen tessellation quality, and the UI mirror in
+/// RenderDistanceRow.vue surfaces the toggle-aware limit:
 pub fn max_safe_render_distance(ground_detail: i32) -> i32 {
     match ground_detail {
-        4 => 480,  // 289 verts/patch -> budget exhausts ~482 (measured 480 ok / 500 shredded)
-        3 => 600,  // 169 verts/patch -> ~630 theoretical; 600 verified clean in-game
-        2 => 900,  // 81 verts/patch
-        _ => 1200, // detail 1/0: far below budget at any sane distance
+        4 => 600,  // 500 rows x 1.2m (patched cap; 480 unpatched)
+        3 => 1200, // 500 rows x 2.4m; also the overall sanity ceiling
+        _ => 1200, // detail <= 2: row spacing >= 4.8m, cap never binds below 1200
     }
 }
 
