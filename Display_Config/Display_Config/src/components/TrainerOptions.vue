@@ -50,6 +50,12 @@
           />
         </div>
       </div>
+      <v-checkbox
+        v-model="trainerSettings.extendRenderDistance"
+        label="Extended render distance"
+        hint="Fixes missing far terrain: raises the ground strip cap (400->500 rows) so 600m renders clean at max ground detail"
+        persistent-hint
+      />
     </v-card-text>
   </v-card>
 </template>

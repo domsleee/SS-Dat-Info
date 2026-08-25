@@ -8,6 +8,7 @@
 #include "PathUtil.hpp"
 #include "globalState.hpp"
 #include "disableDirectInput.hpp"
+#include "extendRenderDistance.hpp"
 #include "showSpeedAndHideBlinkingR.hpp"
 #include <fstream>
 using json = nlohmann::json;
@@ -28,12 +29,14 @@ public:
     bool enableCustomControls = false;
     bool showReplaySpeed = false;
     bool hideBlinkingR = false;
+    bool extendRenderDistance = true;
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DisplayConfig,
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(DisplayConfig,
     changeFov, fovWidth, fovHeight,
     use4xFonts, enableLogging, makeGhostsOpaque,
-    matchGhostSoundsToCharacter, disableDirectInput, enableCustomControls, showReplaySpeed, hideBlinkingR)
+    matchGhostSoundsToCharacter, disableDirectInput, enableCustomControls, showReplaySpeed, hideBlinkingR,
+    extendRenderDistance)
 
 
 void run() {
@@ -86,6 +89,10 @@ void run() {
 
     if (config.hideBlinkingR || config.showReplaySpeed) {
         DoShowSpeedAndHideBlinkingR(config.hideBlinkingR, config.showReplaySpeed);
+    }
+
+    if (config.extendRenderDistance) {
+        DoExtendRenderDistance();
     }
 }
 

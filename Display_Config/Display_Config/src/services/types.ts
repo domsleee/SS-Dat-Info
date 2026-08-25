@@ -29,4 +29,5 @@ export interface TrainerUISettings {
   enableCustomControls: boolean;
   hideBlinkingR: boolean;
   showReplaySpeed: boolean;
+  extendRenderDistance: boolean;
 }
