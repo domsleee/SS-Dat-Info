@@ -19,11 +19,13 @@ use crate::path_util::get_supreme_folder;
 /// user's chosen tessellation quality, and the UI mirror in
 /// RenderDistanceRow.vue surfaces the toggle-aware limit:
 pub fn max_safe_render_distance(ground_detail: i32) -> i32 {
-    match ground_detail {
-        4 => 600,  // 500 rows x 1.2m (patched cap; 480 unpatched)
-        3 => 1200, // 500 rows x 2.4m; also the overall sanity ceiling
-        _ => 1200, // detail <= 2: row spacing >= 4.8m, cap never binds below 1200
-    }
+    // 600 is the certified ceiling at EVERY detail: the user reports Village
+    // Hard crashes at 800/1200 (mid-run, likely the object system on the
+    // densest map - not reproducible with a start-area soak, so not
+    // certifiable), and 600 is deeply soak-tested on Alpine and Village.
+    // The row-cap patch makes detail 4 clean at exactly 600.
+    let _ = ground_detail;
+    600
 }
 
 #[tauri::command]
