@@ -69,8 +69,6 @@
         hint="Inject TAS_Helper.dll for tool-assisted speedrun recording/playback"
         persistent-hint
       />
-        persistent-hint
-      />
     </v-card-text>
   </v-card>
 </template>
