@@ -23,6 +23,68 @@ namespace drawprobe {
 inline SafetyHookInline g_hook{};
 inline TasSharedState*  g_state = nullptr;
 
+// ---- PAGE_GUARD writer-catcher (in-process, no debugger) -------------------
+// Guard a page of the terrain vertex buffer; the first access faults into our
+// VEH, which logs the WRITE instruction's EIP (the fill loop) — the exact code
+// that fills the terrain buffer, where the 65,536 budget counter lives. We
+// collect a handful of distinct write EIPs then stop. PAGE_GUARD auto-clears on
+// fault, so cost is trivial.
+inline volatile uintptr_t g_guardBase = 0;      // page-aligned guard target
+inline volatile int       g_guardArmed = 0;
+inline volatile int       g_guardArmSel = 0;    // TAS_DRAWGUARD=1 selects arming
+inline volatile int       g_guardRearm = 0;     // re-arm budget (catch N faults)
+inline uint32_t g_writeEIP[16] = {};
+inline volatile uint32_t g_writeEIPn = 0;
+inline uintptr_t g_sgBaseVEH = 0;
+inline PVOID g_veh = nullptr;
+
+inline void addWriteEIP(uint32_t eip) {
+    for (uint32_t i = 0; i < g_writeEIPn; i++) if (g_writeEIP[i] == eip) return;
+    if (g_writeEIPn < 16) g_writeEIP[g_writeEIPn++] = eip;
+}
+
+inline volatile int g_guardStepping = 0;
+inline void guardLog(EXCEPTION_POINTERS* ep, uintptr_t addr, bool isWrite) {
+    uint32_t eip = (uint32_t)ep->ContextRecord->Eip;
+    static uint32_t s_seen[64] = {}; static int s_seenN = 0;
+    for (int i = 0; i < s_seenN; i++) if (s_seen[i] == eip) return;
+    if (s_seenN < 64) {
+        s_seen[s_seenN++] = eip;
+        Log(std::format("GUARDHIT: {} EIP_abs={:#x} off={:#x}",
+                        isWrite ? "WRITE" : "read ", eip,
+                        (uint32_t)(addr - g_guardBase)));
+    }
+}
+
+inline LONG CALLBACK GuardVEH(EXCEPTION_POINTERS* ep) {
+    auto* er = ep->ExceptionRecord;
+    // Single-step after a guard hit: re-arm the guard and keep walking.
+    if (er->ExceptionCode == STATUS_SINGLE_STEP && g_guardStepping) {
+        g_guardStepping = 0;
+        if (g_guardRearm > 0) {
+            g_guardRearm--;
+            DWORD old;
+            VirtualProtect((void*)g_guardBase, 0x1000, PAGE_READWRITE | PAGE_GUARD, &old);
+        } else {
+            g_guardArmed = 0;
+        }
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (er->ExceptionCode != STATUS_GUARD_PAGE_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    uintptr_t addr = (uintptr_t)er->ExceptionInformation[1];
+    if (g_guardBase == 0 || addr < g_guardBase || addr >= g_guardBase + 0x1000)
+        return EXCEPTION_CONTINUE_SEARCH;
+    bool isWrite = er->ExceptionInformation[0] == 1;
+    guardLog(ep, addr, isWrite);
+    if (isWrite) addWriteEIP((uint32_t)ep->ContextRecord->Eip);
+    // The guard is auto-cleared by this fault. Single-step the faulting
+    // instruction so it completes, THEN re-arm in the step handler — this walks
+    // every access instead of re-faulting the same instruction forever.
+    ep->ContextRecord->EFlags |= 0x100;  // trap flag
+    g_guardStepping = 1;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
 // Per-frame terrain vertex accounting via a SwapBuffers boundary. If the
 // per-frame terrain total CAPS at 65,536 at 600 (but is lower at 450), the
 // visible terrain is being TRUNCATED at a u16 vertex budget — far patches
@@ -103,6 +165,23 @@ inline void __stdcall VpDetour(int size, unsigned type, int stride, const void* 
     if (p > 0x10000) {
         g_lastVpBase = p;
         if (stride > 0) g_vpStride = (uint32_t)stride;
+    }
+    // Arm the PAGE_GUARD writer-catcher ONCE, on a terrain buffer (stride 16),
+    // when TAS_DRAWGUARD=1. Guard the page around the ~65536-vertex boundary if
+    // reachable, else the buffer start — either way we catch the fill loop EIP.
+    if (g_guardArmSel && !g_guardArmed && p > 0x10000 && stride == 16) {
+        g_guardArmSel = 0;
+        // Guard a page a few KB into the buffer FROM THE BASE — where the vertex
+        // fill writes (indices reach ~4091 = ~0x10000 bytes). offset 0x4000 is
+        // solidly inside the vertex data for a mid/large draw.
+        g_guardBase = (p + 0x4000) & ~(uintptr_t)0xFFF;
+        g_guardRearm = 300;   // catch many faults -> all distinct writers
+        DWORD old;
+        if (VirtualProtect((void*)g_guardBase, 0x1000, PAGE_READWRITE | PAGE_GUARD, &old)) {
+            g_guardArmed = 1;
+            Log(std::format("DrawProbe: PAGE_GUARD armed at {:#x} (buffer {:#x})",
+                            (uint32_t)g_guardBase, (uint32_t)p));
+        }
     }
     if (g_vpLogLeft > 0 && p > 0x10000 && stride >= 12) {
         g_vpLogLeft--;
@@ -266,6 +345,10 @@ inline void __stdcall Detour(unsigned mode, int count, unsigned type,
             g_state->objsnap_gate_player[2] = g_u16calls;
             g_state->objsnap_gate_player[3] = g_frameMaxTerrain;  // max terrain verts/frame
             g_state->objsnap_gate_player[4] = g_frameMaxDraws;    // max terrain draws/frame
+            // PAGE_GUARD write EIPs (SG-relative): [5]=count, then the EIPs.
+            g_state->objsnap_gate_player[5] = g_writeEIPn;
+            for (uint32_t i = 0; i < g_writeEIPn && i < 16; i++)
+                g_state->objsnap_gate_player[6 + i] = g_writeEIP[i];
             g_state->objsnap_arm_player[8] = g_allocMaxK;    // largest allocation (bytes)
             g_state->objsnap_arm_player[9] = g_allocMaxRet;  // caller ret (SG-relative)
             g_state->objsnap_arm_player[10] = g_allocCalls;
@@ -289,6 +372,17 @@ inline DWORD WINAPI InstallThread(LPVOID param) {
     // and the terrain vertex buffers are allocated at LEVEL LOAD, which can
     // happen before opengl32 comes up. Waiting would miss them.
     g_sgBase = (uintptr_t)GetModuleHandleA("Supreme_Game.dll");
+    g_sgBaseVEH = g_sgBase;
+    // Register the PAGE_GUARD writer-catcher VEH (TAS_DRAWGUARD=1).
+    {
+        char dg[8] = {0};
+        if (GetEnvironmentVariableA("TAS_DRAWGUARD", dg, sizeof(dg)) > 0 && dg[0] == '1') {
+            g_veh = AddVectoredExceptionHandler(1, GuardVEH);
+            g_guardArmSel = 1;
+            Log(g_veh ? "DrawProbe: PAGE_GUARD VEH registered (arming on next terrain buffer)"
+                      : "DrawProbe: AddVectoredExceptionHandler FAILED");
+        }
+    }
     if (HMODULE sr0 = GetModuleHandleA("sr.dll")) {
         void* al = (void*)((uintptr_t)sr0 + 0x3E9B0);
         g_allocMid = safetyhook::create_mid(al, allocMid);
