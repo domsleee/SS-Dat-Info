@@ -56,11 +56,25 @@
         hint="Fixes missing far terrain: raises the ground strip cap (400->500 rows) so 600m renders clean at max ground detail"
         persistent-hint
       />
+      <v-checkbox
+        v-model="trainerSettings.extendRenderDistance"
+        label="Extended render distance"
+        hint="Fixes missing far terrain: raises the ground strip cap (400->500 rows) so 600m renders clean at max ground detail"
+        persistent-hint
+      />
+      <v-checkbox
+        v-model="trainerSettings.configCrashGuard"
+        label="Crash guard"
+        hint="Skips (and logs) the corrupted-config unlink that crashes the game at save/level-exit, e.g. on Village Hard"
+        persistent-hint
+      />
       <v-divider class="my-1" />
       <v-checkbox
         v-model="trainerSettings.enableTas"
         label="Enable TAS"
         hint="Inject TAS_Helper.dll for tool-assisted speedrun recording/playback"
+        persistent-hint
+      />
         persistent-hint
       />
     </v-card-text>

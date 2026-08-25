@@ -61,7 +61,8 @@ export function requiresInject(trainerSettings: TrainerSettings): boolean {
     || trainerSettings.enableCustomControls
     || trainerSettings.hideBlinkingR
     || trainerSettings.showReplaySpeed
-    || trainerSettings.extendRenderDistance;
+    || trainerSettings.extendRenderDistance
+    || trainerSettings.configCrashGuard;
 }
 
 export function getTrainerSettingsFromUI(trainerSettings: TrainerUISettings): TrainerSettings {
@@ -80,6 +81,7 @@ export function getTrainerSettingsFromUI(trainerSettings: TrainerUISettings): Tr
     hideBlinkingR: trainerSettings.hideBlinkingR,
     showReplaySpeed: trainerSettings.showReplaySpeed,
     extendRenderDistance: trainerSettings.extendRenderDistance,
+    configCrashGuard: trainerSettings.configCrashGuard,
   };
 }
 
@@ -109,4 +111,5 @@ export interface TrainerSettings {
   hideBlinkingR: boolean;
   showReplaySpeed: boolean;
   extendRenderDistance: boolean;
+  configCrashGuard: boolean;
 }

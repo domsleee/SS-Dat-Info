@@ -30,5 +30,7 @@ export interface TrainerUISettings {
   hideBlinkingR: boolean;
   showReplaySpeed: boolean;
   extendRenderDistance: boolean;
+  extendRenderDistance: boolean;
+  configCrashGuard: boolean;
   enableTas: boolean;
 }
