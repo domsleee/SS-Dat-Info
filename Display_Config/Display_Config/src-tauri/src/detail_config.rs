@@ -44,10 +44,8 @@ pub fn write_detail_config(detail_config: DetailConfig) -> Result<(), String> {
             .unwrap_or(4),
     };
     let cap = max_safe_render_distance(gd);
-    if let Some(d) = detail_config.render_distance {
-        if d > cap {
-            detail_config.render_distance = Some(cap);
-        }
+    if detail_config.render_distance.is_some_and(|d| d > cap) {
+        detail_config.render_distance = Some(cap);
     }
     let detail_config_path = get_detail_config_path();
 
