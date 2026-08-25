@@ -11,7 +11,7 @@
       type="number"
       :rules="[
         (v: number) => (v && v > 0) || 'required',
-        (v: number) => v <= maxSafeDistance || `max ${maxSafeDistance}m at Ground Detail ${renderSettings.groundDetail} — the ground renderer skips strips longer than its row cap past that, and distant triangles vanish; lower Ground Detail (or enable Extended render distance in Trainer Options) to go further`,
+        (v: number) => v <= maxSafeDistance || `max ${maxSafeDistance}m at Ground Detail ${renderSettings.groundDetail} — beyond this the game is unstable (Village Hard crashes at 800+) or, at Ground Detail 4 without the Extended render distance fix, distant triangles vanish past 480m`,
       ]"
       :hint="`max ${maxSafeDistance}m at Ground Detail ${renderSettings.groundDetail}`"
       persistent-hint
@@ -40,12 +40,12 @@ const renderDistanceOptions = ['200m (Near)', '300m (Normal)', '450m (Far)', 'Cu
 // src-tauri/src/detail_config.rs (which assumes the default-on patch).
 const maxSafeDistance = computed(() => {
   const patched = trainerSettings.extendRenderDistance;
+  // 600 is the certified ceiling at every detail: Village Hard crashes at
+  // 800/1200 mid-run (dense object map), while 600 is soak-tested clean.
+  // Without the row-cap patch, detail 4 additionally shreds past 480.
   // Number(): the persisted store can hand this back as a string.
-  switch (Number(renderSettings.groundDetail)) {
-    case 4: return patched ? 600 : 480;
-    case 3: return patched ? 1200 : 960;
-    default: return 1200;
-  }
+  if (Number(renderSettings.groundDetail) === 4 && !patched) return 480;
+  return 600;
 });
 updateBasedOnRenderDistance();
 
