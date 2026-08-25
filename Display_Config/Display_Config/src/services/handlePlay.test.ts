@@ -11,8 +11,6 @@ describe('handlePlay', () => {
     // out-of-the-box settings DO inject; with it off, nothing else should.
     expect(requiresInject(trainerSettings), 'extendRenderDistance defaults on and requires inject.').toBe(true);
     trainerSettings.extendRenderDistance = false;
-    expect(requiresInject(trainerSettings), 'configCrashGuard also defaults on and requires inject.').toBe(true);
-    trainerSettings.configCrashGuard = false;
     expect(requiresInject(trainerSettings), 'with every option off there is nothing to inject.').toBe(false);
 
     const boolKeys = (Object.keys(trainerSettings) as (keyof typeof trainerSettings)[])

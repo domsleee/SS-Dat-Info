@@ -31,14 +31,13 @@ public:
     bool showReplaySpeed = false;
     bool hideBlinkingR = false;
     bool extendRenderDistance = true;
-    bool configCrashGuard = true;
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(DisplayConfig,
     changeFov, fovWidth, fovHeight,
     use4xFonts, enableLogging, makeGhostsOpaque,
     matchGhostSoundsToCharacter, disableDirectInput, enableCustomControls, showReplaySpeed, hideBlinkingR,
-    extendRenderDistance, configCrashGuard)
+    extendRenderDistance)
 
 
 void run() {
@@ -94,10 +93,10 @@ void run() {
     }
 
     if (config.extendRenderDistance) {
+        // One toggle drives both the render-distance patch and the config-list
+        // crash guard: injection is gated on this flag, so bundling keeps the
+        // guard from silently never running when the box is left on (default).
         DoExtendRenderDistance();
-    }
-
-    if (config.configCrashGuard) {
         DoConfigCrashGuard();
     }
 }

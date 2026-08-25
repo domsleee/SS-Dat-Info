@@ -84,7 +84,7 @@ export type DownloadResult = { installed: boolean }
 export type RdConfig = { apiName: string; width: number; height: number; depth: number; cardId: number; fullscreen: boolean }
 export type StartupTimeInfo = { onMounted1: number; onMounted2: number; createAppTime: number; mountAppTime: number; registerPluginsTime: number; totalStartupTime: number }
 export type TAURI_CHANNEL<TSend> = null
-export type TrainerSettings = { use4xFonts: boolean; changeFov: boolean; fovWidth: number | null; fovHeight: number | null; enableLogging: boolean; makeGhostsOpaque: boolean; matchGhostSoundsToCharacter: boolean; disableDirectInput: boolean; enableCustomControls: boolean; hideBlinkingR: boolean; showReplaySpeed: boolean; extendRenderDistance: boolean; configCrashGuard: boolean }
+export type TrainerSettings = { use4xFonts: boolean; changeFov: boolean; fovWidth: number | null; fovHeight: number | null; enableLogging: boolean; makeGhostsOpaque: boolean; matchGhostSoundsToCharacter: boolean; disableDirectInput: boolean; enableCustomControls: boolean; hideBlinkingR: boolean; showReplaySpeed: boolean; extendRenderDistance: boolean }
 export type UpdateInfo = { currentVersion: string; latestVersion: string }
 
 /** tauri-specta globals **/
