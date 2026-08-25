@@ -7,7 +7,11 @@ describe('handlePlay', () => {
   test('requiresInject', () => {
     const trainerSettings = getTrainerSettingsFromUI(getDefaultTrainerUISettings().trainerSettings.value);
     trainerSettings.changeFov = false;
-    expect(requiresInject(trainerSettings), 'default UI settings should be false.').toBe(false);
+    // The render-distance fix (extendRenderDistance) ships default-ON, so
+    // out-of-the-box settings DO inject; with it off, nothing else should.
+    expect(requiresInject(trainerSettings), 'extendRenderDistance defaults on and requires inject.').toBe(true);
+    trainerSettings.extendRenderDistance = false;
+    expect(requiresInject(trainerSettings), 'with every option off there is nothing to inject.').toBe(false);
 
     const boolKeys = (Object.keys(trainerSettings) as (keyof typeof trainerSettings)[])
       .filter(key => trainerSettings[key] === false || trainerSettings[key] === true);
