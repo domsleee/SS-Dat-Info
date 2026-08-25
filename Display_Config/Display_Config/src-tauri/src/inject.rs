@@ -20,6 +20,7 @@ pub struct TrainerSettings {
     pub hide_blinking_r: bool,
     pub show_replay_speed: bool,
     pub extend_render_distance: bool,
+    pub config_crash_guard: bool,
 }
 
 #[tauri::command]

@@ -36,7 +36,7 @@ inline void DoExtendRenderDistance() {
     std::uint8_t* site = Memory::PatternScan(module,
         "F7 F9 47 85 FF 89 7C 24 20 8B D8 89 5C 24 14 0F 8E ?? ?? 00 00 81 FF 90 01 00 00 0F 8F");
     if (!site) {
-        Log("ExtendRenderDistance: pattern not found (game version mismatch?) - not patched");
+        Log("ExtendRenderDistance: NOT APPLIED (pattern not found - game version mismatch?): distances above 480m at ground detail 4 will show missing far terrain");
         return;
     }
 

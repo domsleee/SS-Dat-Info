@@ -41,15 +41,40 @@ inline bool probeReadable(const void* p) {
     }
 }
 
+// SEH-probed pointer-sized read; returns false (and leaves *out untouched) on fault.
+inline bool probeReadPtr(const void* p, void** out) {
+    if ((uintptr_t)p < 0x10000) return false;
+    __try {
+        *out = *(void* const volatile*)p;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 // Node layout (from the disassembly): +0 key/hash-links, +8 prev, +0xC next.
+//
+// Readability alone is NOT enough: a use-after-free node usually points into
+// still-mapped heap, so one-byte probes pass and the original unlink would
+// scribble on unrelated allocations. A node that is genuinely linked satisfies
+// RECIPROCITY - prev->next == node and next->prev == node - which stale or
+// corrupted nodes essentially never do. Require it (null prev/next allowed:
+// head/tail).
 inline bool nodeLooksSane(void* node) {
-    if (!probeReadable(node) || !probeReadable((char*)node + 0xC)) return false;
-    void* prev = *(void**)((char*)node + 0x8);
-    void* next = *(void**)((char*)node + 0xC);
-    // prev/next may legitimately be null (head/tail); non-null must be readable
-    // at the offsets the unlink writes to (prev+0xC, next+0x8).
-    if (prev && !probeReadable((char*)prev + 0xC)) return false;
-    if (next && !probeReadable((char*)next + 0x8)) return false;
+    void* prev = nullptr;
+    void* next = nullptr;
+    if (!probeReadPtr((char*)node + 0x8, &prev)) return false;
+    if (!probeReadPtr((char*)node + 0xC, &next)) return false;
+    if (prev) {
+        void* prevNext = nullptr;
+        if (!probeReadPtr((char*)prev + 0xC, &prevNext)) return false;
+        if (prevNext != node) return false;  // reciprocity broken
+    }
+    if (next) {
+        void* nextPrev = nullptr;
+        if (!probeReadPtr((char*)next + 0x8, &nextPrev)) return false;
+        if (nextPrev != node) return false;  // reciprocity broken
+    }
     return true;
 }
 

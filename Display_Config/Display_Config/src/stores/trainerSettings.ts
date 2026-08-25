@@ -22,7 +22,8 @@ export function getDefaultTrainerUISettings(): { trainerSettings: Ref<TrainerUIS
     enableCustomControls: false,
     hideBlinkingR: false,
     showReplaySpeed: false,
-    extendRenderDistance: true
+    extendRenderDistance: true,
+    configCrashGuard: true
   });
   return { trainerSettings: settings };
 }
