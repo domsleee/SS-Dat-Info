@@ -40,9 +40,15 @@ inline void DoExtendRenderDistance() {
         return;
     }
 
+    // 1024, not 500: the visibility volume extends 600m in BOTH directions
+    // along a strip, so mid-track strips span up to ~1000 rows (1200m / 1.2m).
+    // 500 covered the start-gate view but still dropped the longest strips
+    // mid-run, visible as missing terrain in the distance while riding. 1024
+    // covers the theoretical maximum at the launcher's 600m clamp; the
+    // renderer's scratch flushes every 4096 vertices, so long strips are safe.
     std::uint8_t* imm = site + 23;  // the 0x190 immediate inside `cmp edi, 0x190`
-    Log(std::format("ExtendRenderDistance: row cap at Supreme_Game.dll+{:x}, 400 -> 500",
+    Log(std::format("ExtendRenderDistance: row cap at Supreme_Game.dll+{:x}, 400 -> 1024",
                     imm - (std::uint8_t*)module));
-    Memory::Write<std::uint32_t>(imm, 500);
+    Memory::Write<std::uint32_t>(imm, 1024);
     Log("ExtendRenderDistance: applied (clean ground to 600m at ground detail 4)");
 }
