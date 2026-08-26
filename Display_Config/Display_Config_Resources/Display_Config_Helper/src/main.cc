@@ -10,7 +10,6 @@
 #include "disableDirectInput.hpp"
 #include "extendRenderDistance.hpp"
 #include "configCrashGuard.hpp"
-#include "presentGate.hpp"
 #include "showSpeedAndHideBlinkingR.hpp"
 #include <fstream>
 using json = nlohmann::json;
@@ -94,15 +93,10 @@ void run() {
     }
 
     if (config.extendRenderDistance) {
-        // One toggle drives the row-cap patch, the present gate and the
-        // config-list crash guard: injection is gated on this flag, so
-        // bundling keeps them from silently never running when the box is
-        // left on (default). The row-cap patch makes 600m@detail4 render
-        // correctly at steady state; the present gate stops the engine
-        // showing unfinished frames during restarts (held-F5 / fast replay),
-        // which at that workload was visible as serrated missing terrain.
+        // One toggle drives both the render-distance patch and the config-list
+        // crash guard: injection is gated on this flag, so bundling keeps the
+        // guard from silently never running when the box is left on (default).
         DoExtendRenderDistance();
-        DoPresentGate();
         DoConfigCrashGuard();
     }
 }
