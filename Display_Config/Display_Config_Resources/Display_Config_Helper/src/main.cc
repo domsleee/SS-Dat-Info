@@ -10,6 +10,7 @@
 #include "disableDirectInput.hpp"
 #include "extendRenderDistance.hpp"
 #include "configCrashGuard.hpp"
+#include "f5Debounce.hpp"
 #include "showSpeedAndHideBlinkingR.hpp"
 #include <fstream>
 using json = nlohmann::json;
@@ -93,10 +94,15 @@ void run() {
     }
 
     if (config.extendRenderDistance) {
-        // One toggle drives both the render-distance patch and the config-list
-        // crash guard: injection is gated on this flag, so bundling keeps the
-        // guard from silently never running when the box is left on (default).
+        // One toggle drives the render-distance patch, the F5 restart
+        // debounce and the config-list crash guard: injection is gated on
+        // this flag, so bundling keeps them from silently never running when
+        // the box is left on (default). A held F5 level-triggers a restart
+        // every engine tick, which keeps the renderer inside its multi-frame
+        // scene rebuild - at 600m/detail4 that shows as serrated half-built
+        // terrain. The debounce makes it one restart per press.
         DoExtendRenderDistance();
+        DoF5Debounce();
         DoConfigCrashGuard();
     }
 }
