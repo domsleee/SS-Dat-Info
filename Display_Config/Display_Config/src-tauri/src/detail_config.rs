@@ -4,9 +4,51 @@ use serde::{Deserialize, Serialize};
 
 use crate::path_util::get_supreme_folder;
 
+/// The ground renderer draws the slope as vertical strips of rows (row
+/// spacing 1.2m x detail step; step=1 at ground detail 4, 2 at detail 3, ...)
+/// and SKIPS any strip longer than a hardcoded row cap (Supreme_Game.dll
+/// FUN_100b0ef0: `if (rows < 1 || rows > 400) skip`). At detail 4 that made
+/// terrain past 400 x 1.2 = 480m vanish as "shredded"/missing triangles
+/// (measured live on Alpine Easy: 480 clean / 500 shredded; the game's own UI
+/// capped distance at 450 for the same reason). Display_Config_Helper's
+/// "Extended render distance" fix (extendRenderDistance.hpp, default ON)
+/// patches the cap 400 -> 500, which lifts detail 4 to 500 x 1.2 = 600m.
+///
+/// Enforce a backstop here, at the single choke point every write goes
+/// through, assuming the (default-on) patch: distance is clamped, keeping the
+/// user's chosen tessellation quality, and the UI mirror in
+/// RenderDistanceRow.vue surfaces the toggle-aware limit:
+pub fn max_safe_render_distance(ground_detail: i32) -> i32 {
+    // 600 is the certified ceiling at EVERY detail: the user reports Village
+    // Hard crashes at 800/1200 (mid-run, likely the object system on the
+    // densest map - not reproducible with a start-area soak, so not
+    // certifiable), and 600 is deeply soak-tested on Alpine and Village.
+    // The row-cap patch makes detail 4 clean at exactly 600.
+    let _ = ground_detail;
+    600
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn write_detail_config(detail_config: DetailConfig) -> Result<(), String> {
+    let mut detail_config = detail_config;
+    // Clamp against the CURRENT file's ground_detail when the write doesn't
+    // carry one, so a distance-only update still respects the budget.
+    let gd = match detail_config.ground_detail {
+        Some(g) => g,
+        None => read_detail_config()
+            .ok()
+            .and_then(|kv| {
+                kv.iter()
+                    .find(|(k, _)| k == "ground_detail")
+                    .and_then(|(_, v)| v.parse().ok())
+            })
+            .unwrap_or(4),
+    };
+    let cap = max_safe_render_distance(gd);
+    if detail_config.render_distance.is_some_and(|d| d > cap) {
+        detail_config.render_distance = Some(cap);
+    }
     let detail_config_path = get_detail_config_path();
 
     let content = fs::read_to_string(&detail_config_path)

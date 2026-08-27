@@ -19,6 +19,7 @@ pub struct TrainerSettings {
     pub enable_custom_controls: bool,
     pub hide_blinking_r: bool,
     pub show_replay_speed: bool,
+    pub extend_render_distance: bool,
 }
 
 #[tauri::command]

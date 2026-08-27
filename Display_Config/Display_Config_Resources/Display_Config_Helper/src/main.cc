@@ -8,6 +8,9 @@
 #include "PathUtil.hpp"
 #include "globalState.hpp"
 #include "disableDirectInput.hpp"
+#include "extendRenderDistance.hpp"
+#include "configCrashGuard.hpp"
+#include "f5Debounce.hpp"
 #include "showSpeedAndHideBlinkingR.hpp"
 #include <fstream>
 using json = nlohmann::json;
@@ -28,12 +31,14 @@ public:
     bool enableCustomControls = false;
     bool showReplaySpeed = false;
     bool hideBlinkingR = false;
+    bool extendRenderDistance = true;
 };
 
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DisplayConfig,
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(DisplayConfig,
     changeFov, fovWidth, fovHeight,
     use4xFonts, enableLogging, makeGhostsOpaque,
-    matchGhostSoundsToCharacter, disableDirectInput, enableCustomControls, showReplaySpeed, hideBlinkingR)
+    matchGhostSoundsToCharacter, disableDirectInput, enableCustomControls, showReplaySpeed, hideBlinkingR,
+    extendRenderDistance)
 
 
 void run() {
@@ -86,6 +91,19 @@ void run() {
 
     if (config.hideBlinkingR || config.showReplaySpeed) {
         DoShowSpeedAndHideBlinkingR(config.hideBlinkingR, config.showReplaySpeed);
+    }
+
+    if (config.extendRenderDistance) {
+        // One toggle drives the render-distance patch, the F5 restart
+        // debounce and the config-list crash guard: injection is gated on
+        // this flag, so bundling keeps them from silently never running when
+        // the box is left on (default). A held F5 level-triggers a restart
+        // every engine tick, which keeps the renderer inside its multi-frame
+        // scene rebuild - at 600m/detail4 that shows as serrated half-built
+        // terrain. The debounce makes it one restart per press.
+        DoExtendRenderDistance();
+        DoF5Debounce();
+        DoConfigCrashGuard();
     }
 }
 
