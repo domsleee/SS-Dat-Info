@@ -543,6 +543,11 @@ struct TasApp {
     frame_prof: FrameProfAccum,
     /// Last automatic `try_reconnect` while disconnected.
     last_reconnect_attempt: std::time::Instant,
+    /// Physics-mode stamp (renderer + x87 precision) of the take currently in
+    /// the recording buffer: the last loaded file / restored entry, or the live
+    /// mode when a REC started. Shown next to the live mode; a mismatch means
+    /// the buffer's inputs were recorded under different rounding.
+    loaded_physics: Option<String>,
     /// Soft cap (max unpinned entries) — from settings.
     history_cap: usize,
     recovery_store: Option<recording::RecoveryStore>,
@@ -824,6 +829,7 @@ impl TasApp {
                 ..Default::default()
             },
             last_reconnect_attempt: std::time::Instant::now(),
+            loaded_physics: None,
             history_cap,
             recovery_store,
             recovery_writer: recording::RecoveryWriter::new(),
@@ -930,6 +936,31 @@ impl TasApp {
             }
             Err(e) => self.connect_error = Some(e),
         }
+    }
+
+    /// After a history restore: remember the entry's physics-mode stamp for
+    /// the status chip and warn if it differs from the live mode (24-bit
+    /// DirectX vs 53-bit OpenGL round the sim differently).
+    fn note_restored_physics(&mut self) {
+        let Some(idx) = self.history.current_index() else {
+            return;
+        };
+        let stamp = self
+            .history
+            .entries()
+            .get(idx)
+            .and_then(|e| e.physics.clone());
+        if let (Some(stamp), Some(live)) = (stamp.as_deref(), self.history.live_physics()) {
+            if stamp != live {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                self.log_lines.push(format!(
+                    "[{}] WARNING: this take was recorded under {} but the game is running {}: \
+                     the physics round differently, a replay will not be bit-exact",
+                    ts, stamp, live
+                ));
+            }
+        }
+        self.loaded_physics = stamp;
     }
 
     fn push_log(&mut self, msg: &str) {
@@ -1141,6 +1172,9 @@ impl TasApp {
         let Some(shared) = self.shared.as_ref() else {
             return;
         };
+        // Renderer + x87 precision the game thread is running under (v41).
+        // Stamped onto every pushed history entry, compared on restore/load.
+        self.history.set_live_physics(shared.physics_mode());
         // id and epoch from ONE seqlock window: a separate epoch read can pair
         // the old track's id with the new epoch across a switch, and the stamp
         // below then keeps the old track's history through the very change it
@@ -1213,6 +1247,7 @@ impl TasApp {
                         }
                         self.log_lines
                             .push(format!("[{}] Undo: restored previous recording", ts));
+                        self.note_restored_physics();
                     }
                 }
             }
@@ -1224,6 +1259,7 @@ impl TasApp {
                         }
                         self.log_lines
                             .push(format!("[{}] Redo: restored next recording", ts));
+                        self.note_restored_physics();
                     }
                 }
             }
@@ -2454,6 +2490,11 @@ impl TasApp {
                 &path,
             );
             if loaded {
+                // The file's stamp (load_recording_path already logged a
+                // mismatch warning); the chip shows it next to the live mode.
+                self.loaded_physics = recording::RecordingFile::read_metadata(&path)
+                    .ok()
+                    .and_then(|m| m.physics_label());
                 let _ = self.history.push_loaded_snapshot(shared.state(), &path);
                 if shared.state().recorded_count > 0 {
                     self.queue_restart_then(TasCommand::ArmPlay, &ts);
@@ -2608,6 +2649,8 @@ impl eframe::App for TasApp {
                 // REC started
                 if current_mode == 1 {
                     self.start_recording_session(continue_from, recorded);
+                    // A fresh take is by definition in the live physics mode.
+                    self.loaded_physics = self.history.live_physics().map(str::to_string);
                     self.log_cont_resume_summary();
                     self.clear_cont_catchup();
                     // Splice fired (or REC began).
@@ -3031,6 +3074,7 @@ impl eframe::App for TasApp {
                                     .unwrap_or_else(|| format!("Entry {}", idx + 1));
                                 self.log_lines
                                     .push(format!("[{}] History restore: {}", ts, label));
+                                self.note_restored_physics();
                                 // Fit the timeline to the whole loaded recording.
                                 self.timeline_view.fit(count);
                             }
@@ -3260,6 +3304,38 @@ impl eframe::App for TasApp {
                                 "Game state — in a race/level (with the current track) \
                                  vs the main menu",
                             );
+                        // Renderer + x87 precision the physics run under. The
+                        // buffer's take carries its own stamp; a mismatch is the
+                        // "replay drifts for no reason" trap.
+                        let live_physics = tas_shared::physics_mode_label(
+                            state.renderer_id,
+                            state.fpu_control_word,
+                        );
+                        if let Some(live) = live_physics.as_deref() {
+                            let mismatch = self
+                                .loaded_physics
+                                .as_deref()
+                                .is_some_and(|stamp| stamp != live);
+                            let (txt, col) = if mismatch {
+                                (
+                                    format!(
+                                        "\u{26A0} {} (take: {})",
+                                        live,
+                                        self.loaded_physics.as_deref().unwrap_or("?")
+                                    ),
+                                    egui::Color32::from_rgb(255, 140, 60),
+                                )
+                            } else {
+                                (live.to_string(), egui::Color32::from_gray(150))
+                            };
+                            ui.label(egui::RichText::new(txt).color(col).size(12.0))
+                                .on_hover_text(
+                                    "Renderer / x87 precision the game thread runs the \
+                                     physics at (DirectX 6/7 = 24-bit, OpenGL = 53-bit). \
+                                     A take recorded under the other mode rounds \
+                                     differently and will not replay bit-exact.",
+                                );
+                        }
                         if state.race_time_cs != u32::MAX {
                             let cs = state.race_time_cs;
                             let t = format!(
@@ -3795,6 +3871,7 @@ mod tests {
                 ..Default::default()
             },
             last_reconnect_attempt: std::time::Instant::now(),
+            loaded_physics: None,
             history_cap: 64,
             recovery_store: None,
             log_lines: Vec::new(),

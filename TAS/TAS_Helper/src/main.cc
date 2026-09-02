@@ -150,6 +150,8 @@ bool run() {
         }
     }
 
+    Log(std::format("  Renderer plugin at init: {} (x87 control word is sampled on the game thread; see level-scan log lines)",
+        renderer::Name(renderer::Detect())));
     Log("=== TAS_Helper.dll ready (Phase 2) ===");
     return true;
 }

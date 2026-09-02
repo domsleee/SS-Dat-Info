@@ -11,7 +11,7 @@ constexpr size_t TRACE_FRAMES = 384;
 constexpr size_t OBJSNAP_PLAYER_DWORDS = 128;
 constexpr size_t OBJSNAP_PHYSICS_DWORDS = 512;
 
-constexpr uint32_t TAS_SHARED_VERSION = 40; // +cont_splice_approved (aligned-CONT splice interlock)
+constexpr uint32_t TAS_SHARED_VERSION = 41; // +fpu_control_word, renderer_id (renderer / x87-precision awareness)
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -29,6 +29,16 @@ enum TasCommand : uint32_t {
     CMD_SNAPSHOT     = 6,  // PROTOTYPE: capture writable memory snapshot at this frame
     CMD_RESTORE      = 7,  // PROTOTYPE: restore the last snapshot (instant rewind)
     CMD_SNAPSHOT_AT_SPAWN = 8, // PROTOTYPE: arm a snapshot at the next PLAY frame-0 (spawn)
+};
+
+// Renderer plugin loaded by sr.dll (shared-state renderer_id).
+enum TasRendererId : uint32_t {
+    TAS_RENDERER_UNKNOWN   = 0,
+    TAS_RENDERER_DIRECTX6  = 1,
+    TAS_RENDERER_DIRECTX7  = 2,
+    TAS_RENDERER_OPENGL    = 3,
+    TAS_RENDERER_GLIDE3X   = 4,
+    TAS_RENDERER_SOFTWARE2 = 5,
 };
 
 // Modes (DLL -> UI)
@@ -471,6 +481,17 @@ struct TasSharedState {
     // auto-stop). Unaligned CONT (gate_align_rec == 0) ignores it entirely.
     volatile uint32_t cont_splice_approved;
     volatile uint32_t pad_v40;  // explicit tail pad (struct is align-8) so the size pin stays honest
+
+    // v41: renderer / x87-precision awareness (wiki: "Why are replays sometimes
+    // 0.01s shorter than expected?"). Supreme.exe asks for 24-bit precision
+    // (_controlfp(_PC_24, _MCW_PC)); DirectX 6/7 keep it (CW 0x007F) while the
+    // OpenGL/Software2 path runs at 53-bit (CW 0x027F), so identical inputs
+    // give different physics per renderer. fpu_control_word is the raw x87 CW
+    // sampled ON THE GAME THREAD every Supreme::Cycle (per-thread state; the
+    // injector thread's word means nothing). renderer_id is the loaded
+    // srDD_*.dll (TasRendererId), refreshed by the level-scan worker.
+    volatile uint32_t fpu_control_word;
+    volatile uint32_t renderer_id;
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -479,7 +500,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1663504,
+static_assert(sizeof(TasSharedState) == 1663512,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 
