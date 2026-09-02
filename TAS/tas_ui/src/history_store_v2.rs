@@ -62,6 +62,10 @@ pub struct StoredEntry {
     pub start_tick: u32,
     pub end_tick: u32,
     pub first_moving: Option<u32>,
+    /// Race time (centiseconds) of a session that ended at the finish line.
+    pub finish_time_cs: Option<u32>,
+    /// Whether that time is the HUD timer's (exact) or geometry-derived.
+    pub finish_time_exact: bool,
     /// Level code (e.g. "FE") the entry was created on; None = unknown/legacy.
     pub level: Option<String>,
     /// Physics-mode stamp (`tas_shared::physics_mode_label`); None = unknown.
@@ -82,6 +86,10 @@ pub struct LoadedEntry {
     pub start_tick: u32,
     pub end_tick: u32,
     pub first_moving: Option<u32>,
+    /// Race time (centiseconds) of a session that ended at the finish line.
+    pub finish_time_cs: Option<u32>,
+    /// Whether that time is the HUD timer's (exact) or geometry-derived.
+    pub finish_time_exact: bool,
     /// Level code (e.g. "FE"); None on manifests written before this field.
     pub level: Option<String>,
     pub physics: Option<String>,
@@ -120,6 +128,13 @@ struct ManifestEntry {
     start_tick: u32,
     end_tick: u32,
     first_moving: Option<u32>,
+    /// Race time (centiseconds) of a session that ended at the finish line.
+    /// Absent on older manifests → None.
+    #[serde(default)]
+    finish_time_cs: Option<u32>,
+    /// Whether that time is the HUD timer's (exact) or geometry-derived.
+    #[serde(default)]
+    finish_time_exact: bool,
     /// Level code (e.g. "FE"). Absent on older manifests → None.
     #[serde(default)]
     level: Option<String>,
@@ -282,6 +297,8 @@ impl HistoryStoreV2 {
                     start_tick: me.start_tick,
                     end_tick: me.end_tick,
                     first_moving: me.first_moving,
+                    finish_time_cs: me.finish_time_cs,
+                    finish_time_exact: me.finish_time_exact,
                     level: me.level.clone(),
                     physics: me.physics.clone(),
                     created_at_iso: me.created_at_iso.clone(),
@@ -394,6 +411,8 @@ impl HistoryStoreV2 {
                 start_tick: e.start_tick,
                 end_tick: e.end_tick,
                 first_moving: e.first_moving,
+                finish_time_cs: e.finish_time_cs,
+                finish_time_exact: e.finish_time_exact,
                 level: e.level.clone(),
                 physics: e.physics.clone(),
                 created_at_iso: e.created_at_iso.clone(),
@@ -1016,6 +1035,8 @@ mod tests {
             start_tick: 0,
             end_tick: count,
             first_moving: None,
+            finish_time_cs: None,
+            finish_time_exact: false,
             level: None,
             physics: None,
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
@@ -1033,6 +1054,8 @@ mod tests {
             start_tick: 0,
             end_tick: 0,
             first_moving: None,
+            finish_time_cs: None,
+            finish_time_exact: false,
             level: None,
             physics: None,
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
@@ -1630,6 +1653,8 @@ mod tests {
                 start_tick: 0,
                 end_tick: 4,
                 first_moving: None,
+                finish_time_cs: None,
+                finish_time_exact: false,
                 level: None,
                 physics: None,
                 created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
@@ -1667,6 +1692,8 @@ mod tests {
             start_tick: 0,
             end_tick: 4,
             first_moving: None,
+            finish_time_cs: None,
+            finish_time_exact: false,
             level: None,
             physics: None,
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),

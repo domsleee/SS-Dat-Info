@@ -469,6 +469,23 @@ fn render_row(
                             .color(kind_color(entry.kind))
                             .size(13.0),
                     );
+                    // Finished run: the flag stays whatever the entry is
+                    // renamed to (the status chip shows the same glyph).
+                    if let Some(cs) = entry.finish_time_cs {
+                        let source = if entry.finish_time_exact {
+                            "the HUD timer"
+                        } else {
+                            "the start-line to finish-line ticks of the recording \
+                             (the HUD timer feed was empty; within ~0.05 s)"
+                        };
+                        ui.label(egui::RichText::new("\u{1F3C1}").size(13.0))
+                            .on_hover_text(format!(
+                                "Crossed the finish line — race time {} from {}; \
+                                 the recording was auto-stopped there",
+                                crate::recording::format_finish_time(cs, entry.finish_time_exact),
+                                source
+                            ));
+                    }
                     if editing {
                         let id = egui::Id::new(("hist_rename", entry.entry_id));
                         let (done, esc, name) = {
@@ -638,6 +655,22 @@ fn parse_snapshot(entry: &HistoryEntry) -> Parts {
         return parse_snapshot_label(&entry.label);
     }
     let total = in_game_duration(entry.end_tick, entry.first_moving);
+    // A run that ended at the finish line: the race time is the headline
+    // (the flag glyph is drawn by the row from the same field).
+    if let Some(cs) = entry.finish_time_cs {
+        let mut context = format!(
+            "Finish {}",
+            crate::recording::format_finish_time(cs, entry.finish_time_exact)
+        );
+        if entry.start_tick > 0 {
+            context.push_str(&format!(" · from {}", entry.start_tick));
+        }
+        return Parts {
+            total,
+            context,
+            is_marker: false,
+        };
+    }
     if entry.start_tick > 0 {
         return Parts {
             total,
