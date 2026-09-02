@@ -1330,9 +1330,20 @@ static void Cave2_MidCallback(SafetyHookContext& ctx) {
     uint64_t t0 = __rdtsc();
     uint8_t fpu_buf[108];
     __asm { fsave [fpu_buf] }
+    auto* s = g_cave2State;
+    if (s) {
+        // The game thread's x87 control word = the precision the renderer left
+        // the physics running at (0x007F DirectX 6/7 = 24-bit, OpenGL = 53/64).
+        // It is per-thread state, and FSAVE above re-initialises the FPU
+        // (an fnstcw inside Cave2_Logic reads the post-init 0x037F), so take
+        // it from the saved image: the FSAVE protected-mode layout starts
+        // with the control word.
+        uint16_t cw;
+        memcpy(&cw, fpu_buf, sizeof(cw));
+        s->fpu_control_word = cw;
+    }
     Cave2_Logic();
     __asm { frstor [fpu_buf] }
-    auto* s = g_cave2State;
     if (s) {
         PerfSample(s->perf_cave2, __rdtsc() - t0);
     }

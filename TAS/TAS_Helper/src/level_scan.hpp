@@ -5,6 +5,7 @@
 #include <cstddef>
 #include "shared_state.hpp"
 #include "caves/cave2.hpp"
+#include "renderer_info.hpp"
 #include "level_path_parse.hpp"
 #include <cstring>
 
@@ -508,6 +509,7 @@ static DWORD WINAPI threadProc(LPVOID param) {
             Sleep(100);
             pollLevelContext(s);
             if (cycleFrozen()) TryProcessStopCommand(s, false);
+            renderer::Refresh(s);
         }
     }
     return 0;

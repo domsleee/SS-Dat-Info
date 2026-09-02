@@ -64,6 +64,8 @@ pub struct StoredEntry {
     pub first_moving: Option<u32>,
     /// Level code (e.g. "FE") the entry was created on; None = unknown/legacy.
     pub level: Option<String>,
+    /// Physics-mode stamp (`tas_shared::physics_mode_label`); None = unknown.
+    pub physics: Option<String>,
     pub created_at_iso: String,
     pub snapshot: Option<PersistedSnapshot>,
 }
@@ -82,6 +84,7 @@ pub struct LoadedEntry {
     pub first_moving: Option<u32>,
     /// Level code (e.g. "FE"); None on manifests written before this field.
     pub level: Option<String>,
+    pub physics: Option<String>,
     pub created_at_iso: String,
     /// Inline bytes. Always `Some` for available snapshot entries under
     /// `LoadMode::Eager`; `None` under `LoadMode::Lazy` (see `blob`).
@@ -120,6 +123,10 @@ struct ManifestEntry {
     /// Level code (e.g. "FE"). Absent on older manifests → None.
     #[serde(default)]
     level: Option<String>,
+    /// Physics-mode stamp (renderer + x87 precision). Absent on older
+    /// manifests → None.
+    #[serde(default)]
+    physics: Option<String>,
     created_at_iso: String,
     /// `None` for marker entries with no blob.
     size: Option<u64>,
@@ -276,6 +283,7 @@ impl HistoryStoreV2 {
                     end_tick: me.end_tick,
                     first_moving: me.first_moving,
                     level: me.level.clone(),
+                    physics: me.physics.clone(),
                     created_at_iso: me.created_at_iso.clone(),
                     snapshot,
                     blob,
@@ -387,6 +395,7 @@ impl HistoryStoreV2 {
                 end_tick: e.end_tick,
                 first_moving: e.first_moving,
                 level: e.level.clone(),
+                physics: e.physics.clone(),
                 created_at_iso: e.created_at_iso.clone(),
                 size,
                 checksum,
@@ -1008,6 +1017,7 @@ mod tests {
             end_tick: count,
             first_moving: None,
             level: None,
+            physics: None,
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
             snapshot: Some(snap(count, id as u8)),
         }
@@ -1024,6 +1034,7 @@ mod tests {
             end_tick: 0,
             first_moving: None,
             level: None,
+            physics: None,
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
             snapshot: None,
         }
@@ -1620,6 +1631,7 @@ mod tests {
                 end_tick: 4,
                 first_moving: None,
                 level: None,
+                physics: None,
                 created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
                 size: size.or(Some(bytes.len() as u64)),
                 checksum: Some(crc32fast::hash(bytes)),
@@ -1656,6 +1668,7 @@ mod tests {
             end_tick: 4,
             first_moving: None,
             level: None,
+            physics: None,
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
             snapshot: res.entries[0].snapshot.clone(),
         };

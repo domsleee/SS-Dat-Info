@@ -194,7 +194,15 @@ pub fn show(
                     last_date = Some(entry_date);
                 }
                 let is_current = current == Some(idx);
-                render_row(ui, entry, idx, is_current, &mut edit, &mut actions);
+                render_row(
+                    ui,
+                    entry,
+                    idx,
+                    is_current,
+                    &mut edit,
+                    &mut actions,
+                    history.live_physics(),
+                );
             }
 
             // Empty space below the last row acts as a "deselect" target:
@@ -301,6 +309,7 @@ fn render_row(
     is_current: bool,
     edit: &mut Option<(u64, String)>,
     actions: &mut Vec<HistoryAction>,
+    live_physics: Option<&str>,
 ) {
     let parts = parse_entry(entry);
     let restorable = entry.can_restore();
@@ -397,6 +406,23 @@ fn render_row(
                             .color(egui::Color32::from_gray(120))
                             .monospace(),
                     );
+                    // Recorded under a different renderer / x87 precision than
+                    // the game is running now: restoring it replays different
+                    // physics (24-bit DirectX vs 53-bit OpenGL).
+                    if let (Some(stamp), Some(live)) = (entry.physics.as_deref(), live_physics) {
+                        if stamp != live {
+                            ui.label(
+                                egui::RichText::new("\u{26A0}")
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(255, 140, 60)),
+                            )
+                            .on_hover_text(format!(
+                                "Recorded under {}; the game is running {}. Different x87 \
+                                 precision, so this take will not replay bit-exact.",
+                                stamp, live
+                            ));
+                        }
+                    }
                     // UNTAGGED marker. These belong to no known track, so
                     // they show on EVERY one — which is indistinguishable
                     // from "this row belongs here" unless we say otherwise.

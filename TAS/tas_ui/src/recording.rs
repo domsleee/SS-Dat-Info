@@ -528,6 +528,27 @@ pub struct RecordingMetadata {
     pub notes: String,
     #[serde(default)]
     pub segments: Vec<Segment>,
+    /// Renderer plugin the take was recorded under (`OpenGL`, `DirectX6`, ...).
+    #[serde(default)]
+    pub renderer: Option<String>,
+    /// Raw x87 control word of the game thread at save time: 0x007F = 24-bit
+    /// (DirectX 6/7), 0x027F = 53-bit (OpenGL/Software2). The physics round
+    /// differently, so a replay under the other mode diverges.
+    #[serde(default)]
+    pub fpu_control_word: Option<u32>,
+}
+
+impl RecordingMetadata {
+    /// Canonical physics-mode stamp (see `tas_shared::physics_mode_label`);
+    /// `None` for files saved before the stamp existed.
+    pub fn physics_label(&self) -> Option<String> {
+        let id = self
+            .renderer
+            .as_deref()
+            .map(tas_shared::renderer_id_from_name)
+            .unwrap_or(tas_shared::TAS_RENDERER_UNKNOWN);
+        tas_shared::physics_mode_label(id, self.fpu_control_word.unwrap_or(0))
+    }
 }
 
 pub struct RecordingFile;
@@ -563,6 +584,9 @@ impl RecordingFile {
             timestamp: chrono::Local::now().to_rfc3339(),
             notes: String::new(),
             segments: segments.to_vec(),
+            renderer: (state.renderer_id != tas_shared::TAS_RENDERER_UNKNOWN)
+                .then(|| tas_shared::renderer_name(state.renderer_id).to_string()),
+            fpu_control_word: (state.fpu_control_word != 0).then_some(state.fpu_control_word),
         };
 
         let meta_json = serde_json::to_string_pretty(&meta).map_err(|e| format!("{}", e))?;
@@ -584,6 +608,29 @@ impl RecordingFile {
         }
 
         write_file_atomically(path, &data)
+    }
+
+    /// Parse only the JSON header of a `.tasrec` (same bounds as `load`).
+    pub fn read_metadata(path: &std::path::Path) -> Result<RecordingMetadata, String> {
+        let file = File::open(path).map_err(|e| format!("{}", e))?;
+        let mut head = Vec::new();
+        file.take((4 + MAX_TASREC_METADATA_BYTES) as u64)
+            .read_to_end(&mut head)
+            .map_err(|e| format!("{}", e))?;
+        if head.len() < 4 {
+            return Err("File too small".into());
+        }
+        let meta_len = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        if meta_len > MAX_TASREC_METADATA_BYTES {
+            return Err(format!("Recording metadata too large: {} bytes", meta_len));
+        }
+        let end = 4usize
+            .checked_add(meta_len)
+            .ok_or_else(|| "Recording metadata length overflow".to_string())?;
+        if head.len() < end {
+            return Err("Truncated metadata".into());
+        }
+        serde_json::from_slice::<RecordingMetadata>(&head[4..end]).map_err(|e| format!("{}", e))
     }
 
     pub fn load(
@@ -837,6 +884,10 @@ pub struct HistoryEntry {
     /// level_id at push time. `None` for legacy entries or when the level was
     /// unknown (menu). Used by the panel's per-level filter.
     pub level: Option<String>,
+    /// Physics-mode stamp at push time (`tas_shared::physics_mode_label`,
+    /// e.g. `OpenGL/53-bit`). None = unknown / pre-stamp entry. Restoring an
+    /// entry under a different mode replays different physics.
+    pub physics: Option<String>,
     snapshot: SnapshotSlot,
 }
 
@@ -859,6 +910,7 @@ impl HistoryEntry {
             end_tick,
             first_moving,
             level: None, // stamped from live_level by RecordingHistory on push
+            physics: None, // stamped from live_physics by RecordingHistory on push
             snapshot: SnapshotSlot::Loaded {
                 snapshot,
                 on_disk: None,
@@ -880,6 +932,7 @@ impl HistoryEntry {
             end_tick: 0,
             first_moving: None,
             level: None, // stamped from live_level by RecordingHistory on push
+            physics: None, // stamped from live_physics by RecordingHistory on push
             snapshot: SnapshotSlot::Marker,
         }
     }
@@ -995,6 +1048,9 @@ pub struct RecordingHistory {
     blob_dir: Option<PathBuf>,
     /// Problems hit while reading blobs on demand (the app logs and clears).
     warnings: Vec<String>,
+    /// Live physics-mode stamp from the DLL (renderer + x87 precision),
+    /// refreshed by the app every frame; stamped onto pushed entries.
+    live_physics: Option<String>,
 }
 
 impl RecordingHistory {
@@ -1009,7 +1065,19 @@ impl RecordingHistory {
             level_resolving: false,
             blob_dir: None,
             warnings: Vec::new(),
+            live_physics: None,
         }
+    }
+
+    /// Refresh the physics-mode stamp given to subsequently pushed entries.
+    pub fn set_live_physics(&mut self, label: Option<String>) {
+        if label.is_some() && self.live_physics != label {
+            self.live_physics = label;
+        }
+    }
+
+    pub fn live_physics(&self) -> Option<&str> {
+        self.live_physics.as_deref()
     }
 
     /// Where lazily-loaded entries read their blobs from. Set before
@@ -1388,6 +1456,7 @@ impl RecordingHistory {
                 end_tick: e.end_tick,
                 first_moving: e.first_moving,
                 level: e.level.clone(),
+                physics: e.physics.clone(),
                 created_at_iso: e.created_at.to_rfc3339(),
                 // Bytes travel only for snapshots the store does not have
                 // yet. On-disk and durable entries send `None`; the store
@@ -1525,6 +1594,7 @@ impl RecordingHistory {
                 end_tick: le.end_tick,
                 first_moving: le.first_moving,
                 level: le.level,
+                physics: le.physics,
                 snapshot,
             });
         }
@@ -1668,6 +1738,7 @@ impl RecordingHistory {
                 end_tick,
                 first_moving: entry.first_moving,
                 level: entry.level,
+                physics: None,
                 snapshot,
             });
         }
@@ -1754,6 +1825,7 @@ impl RecordingHistory {
         let mut entry = HistoryEntry::from_snapshot(label, kind, snapshot);
         entry.entry_id = self.alloc_id();
         entry.level = self.live_level.clone();
+        entry.physics = self.live_physics.clone();
         if let Some((start_tick, end_tick)) = session {
             entry = entry.with_session(start_tick, end_tick);
         }
@@ -1948,6 +2020,22 @@ pub fn load_recording_path(
             let ts = chrono::Local::now().format("%H:%M:%S");
             let seg_count = segments.len();
             tracker.restore_from(segments);
+            // The take carries the physics mode it was recorded under; the
+            // live one comes from the DLL. Different renderers round the sim
+            // differently (24-bit DirectX vs 53-bit OpenGL), so say so now
+            // rather than letting the replay drift "mysteriously".
+            if let Ok(meta) = RecordingFile::read_metadata(path) {
+                let live = tas_shared::physics_mode_label(state.renderer_id, state.fpu_control_word);
+                if let (Some(stamp), Some(live)) = (meta.physics_label(), live) {
+                    if stamp != live {
+                        log.push(format!(
+                            "[{}] WARNING: recording was made under {} but the game is running {}: \
+                             the physics round differently, this replay will not be bit-exact",
+                            ts, stamp, live
+                        ));
+                    }
+                }
+            }
             log.push(format!(
                 "[{}] Loaded {} ticks, {} segments from {}",
                 ts,
@@ -2812,6 +2900,7 @@ mod tests {
                 end_tick: count,
                 first_moving: None,
                 level: None,
+                physics: None,
                 created_at_iso: "2026-09-02T00:00:00+10:00".to_string(),
                 snapshot: Some(PersistedSnapshot {
                     recorded_count: count,
@@ -2896,6 +2985,96 @@ mod tests {
         history.restore_index(1).expect("restorable");
         assert!(matches!(history.entries()[2].snapshot, SnapshotSlot::OnDisk(_)));
         assert!(history.to_stored_entries()[2].snapshot.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recording_file_stamps_and_reports_physics_mode() {
+        let path = unique_temp_path("rec_physics", "tasrec");
+        let mut state = zeroed_state();
+        state.recorded_count = 2;
+        state.renderer_id = tas_shared::TAS_RENDERER_OPENGL;
+        state.fpu_control_word = 0x027F;
+        RecordingFile::save(&state, &path).unwrap();
+        let meta = RecordingFile::read_metadata(&path).unwrap();
+        assert_eq!(meta.renderer.as_deref(), Some("OpenGL"));
+        assert_eq!(meta.fpu_control_word, Some(0x027F));
+        assert_eq!(meta.physics_label().as_deref(), Some("OpenGL/53-bit"));
+
+        // Loading it into a DirectX/24-bit game warns; the same mode stays quiet.
+        let mut tracker = SegmentTracker::new();
+        let mut log = Vec::new();
+        let mut live = zeroed_state();
+        live.renderer_id = tas_shared::TAS_RENDERER_DIRECTX6;
+        live.fpu_control_word = 0x007F;
+        assert!(load_recording_path(&mut live, &mut tracker, &mut log, &path));
+        assert!(
+            log.iter().any(|l| l.contains("WARNING")
+                && l.contains("OpenGL/53-bit")
+                && l.contains("DirectX6/24-bit")),
+            "{:?}",
+            log
+        );
+        let mut same = zeroed_state();
+        same.renderer_id = tas_shared::TAS_RENDERER_OPENGL;
+        same.fpu_control_word = 0x027F;
+        let mut quiet = Vec::new();
+        assert!(load_recording_path(&mut same, &mut tracker, &mut quiet, &path));
+        assert!(!quiet.iter().any(|l| l.contains("WARNING")), "{:?}", quiet);
+
+        // A file saved before the stamp existed (or before the DLL sampled
+        // the game thread) has no opinion.
+        let mut unstamped = zeroed_state();
+        unstamped.recorded_count = 1;
+        RecordingFile::save(&unstamped, &path).unwrap();
+        assert_eq!(
+            RecordingFile::read_metadata(&path).unwrap().physics_label(),
+            None
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn history_entries_carry_the_physics_stamp_through_the_store() {
+        let mut history = RecordingHistory::new(8);
+        history.set_live_physics(Some("OpenGL/53-bit".to_string()));
+        let mut state = zeroed_state();
+        state.recorded_count = 3;
+        assert!(history.push_snapshot_data_with_session(
+            RecordingSnapshot::from_state(&state),
+            "take".to_string(),
+            0,
+            3
+        ));
+        assert_eq!(history.entries()[0].physics.as_deref(), Some("OpenGL/53-bit"));
+        // An unknown live mode (DLL not attached / not sampled yet) never
+        // erases a known one.
+        history.set_live_physics(None);
+        assert_eq!(history.live_physics(), Some("OpenGL/53-bit"));
+
+        let stored = history.to_stored_entries();
+        assert_eq!(stored[0].physics.as_deref(), Some("OpenGL/53-bit"));
+        let dir = std::env::temp_dir().join(format!(
+            "tas_ui_physics_{}_{}",
+            std::process::id(),
+            chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let (mut store, _) =
+            crate::history_store_v2::HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store
+            .persist(&stored, history.current_entry_id(), history.next_entry_id())
+            .unwrap();
+        drop(store);
+        let (_s, load) =
+            crate::history_store_v2::HistoryStoreV2::open_in_lazy(dir.clone()).unwrap();
+        assert_eq!(load.entries[0].physics.as_deref(), Some("OpenGL/53-bit"));
+        let mut reloaded = RecordingHistory::new(8);
+        reloaded.set_blob_dir(dir.clone());
+        reloaded.apply_loaded(load.entries, load.current_entry_id, load.next_entry_id);
+        assert_eq!(
+            reloaded.entries()[0].physics.as_deref(),
+            Some("OpenGL/53-bit")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

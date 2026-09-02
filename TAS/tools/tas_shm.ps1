@@ -3,10 +3,11 @@
 # Always prints version/command/mode/game_in_game.
 param([int]$Cmd = -1)
 $mmf = [System.IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting("Local\SupremeTAS")
-$acc = $mmf.CreateViewAccessor(0, 4096)
+$acc = $mmf.CreateViewAccessor(0, 1663520)
 if ($Cmd -ge 0) { $acc.Write(4, [uint32]$Cmd) }
 $ver = $acc.ReadUInt32(0)
 $cmd2 = $acc.ReadUInt32(4)
 $mode = $acc.ReadUInt32(36)
-"version=$ver command=$cmd2 mode=$mode"
+$cw = $acc.ReadUInt32(1663504); $rid = $acc.ReadUInt32(1663508)
+"version=$ver command=$cmd2 mode=$mode renderer_id=$rid fpu_cw=0x{0:X4}" -f $cw
 $acc.Dispose(); $mmf.Dispose()
