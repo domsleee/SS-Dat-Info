@@ -11,7 +11,7 @@ constexpr size_t TRACE_FRAMES = 384;
 constexpr size_t OBJSNAP_PLAYER_DWORDS = 128;
 constexpr size_t OBJSNAP_PHYSICS_DWORDS = 512;
 
-constexpr uint32_t TAS_SHARED_VERSION = 41; // +fpu_control_word, renderer_id (renderer / x87-precision awareness)
+constexpr uint32_t TAS_SHARED_VERSION = 42; // +rider_character, rider_stance (character / stance awareness)
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -39,6 +39,19 @@ enum TasRendererId : uint32_t {
     TAS_RENDERER_OPENGL    = 3,
     TAS_RENDERER_GLIDE3X   = 4,
     TAS_RENDERER_SOFTWARE2 = 5,
+};
+
+// Selectable riders (shared-state rider_character). The physics differ per
+// character, so recordings are stamped with this.
+enum TasCharacterId : uint32_t {
+    TAS_CHARACTER_UNKNOWN = 0,
+    TAS_CHARACTER_KEITH   = 1,
+    TAS_CHARACTER_VINCENT = 2,
+    TAS_CHARACTER_AKIKO   = 3,
+    TAS_CHARACTER_KARL    = 4,
+    TAS_CHARACTER_MIKE    = 5,
+    TAS_CHARACTER_ULRIKA  = 6,
+    TAS_CHARACTER_OTHER   = 7,   // a name outside this table (mod / custom rider)
 };
 
 // Modes (DLL -> UI)
@@ -492,6 +505,16 @@ struct TasSharedState {
     // srDD_*.dll (TasRendererId), refreshed by the level-scan worker.
     volatile uint32_t fpu_control_word;
     volatile uint32_t renderer_id;
+
+    // v42: who is riding. The physics depend on the character (a Keith
+    // recording does not line up under Vincent) and the stance (the board
+    // does not matter), so recordings carry both and a replay warns when the
+    // live loadout differs. Read by the level-scan worker from the human
+    // Player's Player_Config name / loadout object - see rider_identity.hpp.
+    // rider_character: TasCharacterId (0 = not resolved yet);
+    // rider_stance: the loadout's stance word (0xFFFFFFFF = unknown).
+    volatile uint32_t rider_character;
+    volatile uint32_t rider_stance;
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -500,7 +523,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1663512,
+static_assert(sizeof(TasSharedState) == 1663520,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 

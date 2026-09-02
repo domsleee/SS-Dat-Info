@@ -606,6 +606,9 @@ struct TasApp {
     /// mode when a REC started. Shown next to the live mode; a mismatch means
     /// the buffer's inputs were recorded under different rounding.
     loaded_physics: Option<String>,
+    /// Rider stamp (character · stance) of the take in the recording buffer,
+    /// same lifecycle as `loaded_physics`.
+    loaded_rider: Option<String>,
     /// Soft cap (max unpinned entries) — from settings.
     history_cap: usize,
     recovery_store: Option<recording::RecoveryStore>,
@@ -890,6 +893,7 @@ impl TasApp {
             },
             last_reconnect_attempt: std::time::Instant::now(),
             loaded_physics: None,
+            loaded_rider: None,
             history_cap,
             recovery_store,
             recovery_writer: recording::RecoveryWriter::new(),
@@ -1022,6 +1026,23 @@ impl TasApp {
             }
         }
         self.loaded_physics = stamp;
+        // Who rode the take vs who is on the board now (character / stance).
+        let rider = self
+            .history
+            .entries()
+            .get(idx)
+            .and_then(|e| e.rider.clone());
+        if let (Some(stamp), Some(live)) = (rider.as_deref(), self.history.live_rider()) {
+            if stamp != live {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                self.log_lines.push(format!(
+                    "[{}] WARNING: this take was recorded as {} but the rider is {}: \
+                     a different character or stance has different physics, a replay will not line up",
+                    ts, stamp, live
+                ));
+            }
+        }
+        self.loaded_rider = rider;
     }
 
     fn push_log(&mut self, msg: &str) {
@@ -1236,6 +1257,9 @@ impl TasApp {
         // Renderer + x87 precision the game thread is running under (v41).
         // Stamped onto every pushed history entry, compared on restore/load.
         self.history.set_live_physics(shared.physics_mode());
+        // Who is on the board (character · stance, v42): stamped onto every
+        // pushed history entry, compared on restore/load.
+        self.history.set_live_rider(shared.rider());
         // id and epoch from ONE seqlock window: a separate epoch read can pair
         // the old track's id with the new epoch across a switch, and the stamp
         // below then keeps the old track's history through the very change it
@@ -2595,9 +2619,9 @@ impl TasApp {
             if loaded {
                 // The file's stamp (load_recording_path already logged a
                 // mismatch warning); the chip shows it next to the live mode.
-                self.loaded_physics = recording::RecordingFile::read_metadata(&path)
-                    .ok()
-                    .and_then(|m| m.physics_label());
+                let meta = recording::RecordingFile::read_metadata(&path).ok();
+                self.loaded_physics = meta.as_ref().and_then(|m| m.physics_label());
+                self.loaded_rider = meta.as_ref().and_then(|m| m.rider_label());
                 let _ = self.history.push_loaded_snapshot(shared.state(), &path);
                 if shared.state().recorded_count > 0 {
                     self.queue_restart_then(TasCommand::ArmPlay, &ts);
@@ -3448,6 +3472,36 @@ impl eframe::App for TasApp {
                                      differently and will not replay bit-exact.",
                                 );
                         }
+                        // Who is on the board: character + stance (the board
+                        // itself does not change the physics). A take recorded
+                        // as someone else, or in the other stance, will not
+                        // line up.
+                        let live_rider =
+                            tas_shared::rider_label(state.rider_character, state.rider_stance);
+                        if let Some(live) = live_rider.as_deref() {
+                            let mismatch = self
+                                .loaded_rider
+                                .as_deref()
+                                .is_some_and(|stamp| stamp != live);
+                            let (txt, col) = if mismatch {
+                                (
+                                    format!(
+                                        "\u{26A0} {} (take: {})",
+                                        live,
+                                        self.loaded_rider.as_deref().unwrap_or("?")
+                                    ),
+                                    egui::Color32::from_rgb(255, 140, 60),
+                                )
+                            } else {
+                                (live.to_string(), egui::Color32::from_gray(150))
+                            };
+                            ui.label(egui::RichText::new(txt).color(col).size(12.0))
+                                .on_hover_text(
+                                    "Character and stance the human rider is using. The \
+                                     physics differ per character and per stance, so a take \
+                                     recorded as another rider will not line up.",
+                                );
+                        }
                         if state.race_time_cs != u32::MAX {
                             let cs = state.race_time_cs;
                             let t = format!(
@@ -3961,6 +4015,7 @@ mod tests {
             },
             last_reconnect_attempt: std::time::Instant::now(),
             loaded_physics: None,
+            loaded_rider: None,
             history_cap: 64,
             recovery_store: None,
             log_lines: Vec::new(),
