@@ -4570,6 +4570,30 @@ mod tests {
         assert_eq!(mem::size_of::<TasSharedState>(), 1_663_512);
     }
 
+    /// Prints field offsets for the out-of-process probes (tools/tas_shm.ps1).
+    /// Run with `cargo test -p tas_shared print_offsets -- --nocapture`.
+    #[test]
+    fn print_offsets() {
+        use std::mem::offset_of;
+        println!(
+            "offsets: version={} command={} mode={} frame_count={} recorded_count={} playback_pos={} \
+             replay_ptr={} player_ptr={} player_x={} rec_coords={} play_coords={} fpu_control_word={} renderer_id={}",
+            offset_of!(TasSharedState, version),
+            offset_of!(TasSharedState, command),
+            offset_of!(TasSharedState, mode),
+            offset_of!(TasSharedState, frame_count),
+            offset_of!(TasSharedState, recorded_count),
+            offset_of!(TasSharedState, playback_pos),
+            offset_of!(TasSharedState, replay_ptr),
+            offset_of!(TasSharedState, player_ptr),
+            offset_of!(TasSharedState, player_x),
+            offset_of!(TasSharedState, rec_coords),
+            offset_of!(TasSharedState, play_coords),
+            offset_of!(TasSharedState, fpu_control_word),
+            offset_of!(TasSharedState, renderer_id),
+        );
+    }
+
     /// The two control words the wiki documents: DirectX 6/7 leave the game
     /// at 24-bit, OpenGL/Software2 at 53-bit. The stamp must tell them apart
     /// and stay `None` until the game thread has been sampled.

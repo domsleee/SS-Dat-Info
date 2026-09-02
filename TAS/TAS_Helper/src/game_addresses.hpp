@@ -189,6 +189,16 @@ struct GameAddresses {
 
     // Replay object: player ptr at [replayObj+0x84]
     static constexpr uint32_t REPLAY_PLAYER_OFFSET = 0x84;
+    // Human-player identity (live pointer scan, 2026-09-02): the player object
+    // links to its controller at +0x1B8, and the HUMAN's controller holds the
+    // keyboard object ([root+0x530]) at +0x590. Ghost / AI players are driven
+    // by other controllers, so this is how the replay-capture hook tells the
+    // human's recorder from the ghosts' during a Time Attack restart. The
+    // player also links back to its recorder at +0x14C (= decompile
+    // param_1[0x53]).
+    static constexpr uint32_t PLAYER_CONTROLLER_OFFSET = 0x1B8;
+    static constexpr uint32_t CONTROLLER_KEYBOARD_OFFSET = 0x590;
+    static constexpr uint32_t PLAYER_RECORDER_OFFSET = 0x14C;
     // Player position offsets
     static constexpr uint32_t PLAYER_X = 0xF8;
     static constexpr uint32_t PLAYER_Y = 0xFC;

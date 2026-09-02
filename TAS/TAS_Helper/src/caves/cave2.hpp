@@ -907,6 +907,30 @@ static void __declspec(noinline) Cave2_Logic() {
 
     if (s->replay_ptr) {
         uint32_t playerPtr = SafeReadPtr(s->replay_ptr + GameAddresses::REPLAY_PLAYER_OFFSET);
+        // Diagnostic (ghost investigation): the player object behind the
+        // recorder is re-created on F5 with Time Attack ghosts enabled. Log
+        // every change with the frame/mode so a stale read is visible.
+        if (playerPtr != s->player_ptr) {
+            static uint32_t s_playerChanges = 0;
+            if (++s_playerChanges <= 40) {
+                char msg[96] = "player_ptr ";
+                char* p = msg + 11;
+                DiagHexU32(p, s->player_ptr); p += 8;
+                *p++ = '-'; *p++ = '>';
+                DiagHexU32(p, playerPtr); p += 8;
+                const char* t1 = " frame=";
+                while (*t1) *p++ = *t1++;
+                DiagHexU32(p, s->frame_count); p += 8;
+                const char* t2 = " mode=";
+                while (*t2) *p++ = *t2++;
+                *p++ = (char)('0' + (s->mode & 7));
+                const char* t3 = " restart=";
+                while (*t3) *p++ = *t3++;
+                *p++ = (char)('0' + (s->restart_state & 7));
+                *p = 0;
+                LogRing(s, LOG_DEBUG, msg);
+            }
+        }
         s->player_ptr = playerPtr;
     }
 
