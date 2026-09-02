@@ -21,6 +21,10 @@
 namespace renderer {
 
 inline uint32_t Detect() {
+    // The plugin cannot change at runtime: resolve it once instead of taking
+    // the loader lock five times every 100 ms from the worker.
+    static uint32_t s_cached = TAS_RENDERER_UNKNOWN;
+    if (s_cached != TAS_RENDERER_UNKNOWN) return s_cached;
     static const char* const kModules[] = {
         "srDD_DirectX6.dll",  // TAS_RENDERER_DIRECTX6
         "srDD_DirectX7.dll",  // TAS_RENDERER_DIRECTX7
@@ -29,7 +33,10 @@ inline uint32_t Detect() {
         "srDD_Software2.dll", // TAS_RENDERER_SOFTWARE2
     };
     for (uint32_t i = 0; i < 5; i++) {
-        if (GetModuleHandleA(kModules[i])) return i + 1;
+        if (GetModuleHandleA(kModules[i])) {
+            s_cached = i + 1;
+            return s_cached;
+        }
     }
     return TAS_RENDERER_UNKNOWN;
 }

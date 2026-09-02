@@ -4693,7 +4693,7 @@ mod tests {
         println!(
             "offsets: version={} command={} mode={} frame_count={} recorded_count={} playback_pos={} \
              replay_ptr={} player_ptr={} player_x={} input_log={} rec_coords={} play_coords={} \
-             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={}",
+             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
             offset_of!(TasSharedState, version),
             offset_of!(TasSharedState, command),
             offset_of!(TasSharedState, mode),
@@ -4717,6 +4717,12 @@ mod tests {
             offset_of!(TasSharedState, renderer_id),
             offset_of!(TasSharedState, rider_character),
             offset_of!(TasSharedState, rider_stance),
+            offset_of!(TasSharedState, perf_cave2),
+            offset_of!(TasSharedState, perf_cave5),
+            offset_of!(TasSharedState, perf_cave1c_down),
+            offset_of!(TasSharedState, perf_cave1c_up),
+            offset_of!(TasSharedState, perf_cave1d),
+            offset_of!(TasSharedState, perf_replay_capture),
         );
     }
 
