@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use crate::history_store_v2::BlobRef;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -27,6 +30,8 @@ const RECOVERY_PHASE_LATE_TICKS: u32 = 48_000; // ~8 min
 /// Early-phase interval; also the value the production `RecoveryStore::new`
 /// constructs with. A zero debounce (test-only) disables throttling entirely.
 const DEFAULT_RECOVERY_DEBOUNCE_MS: u64 = RECOVERY_DEBOUNCE_EARLY_MS;
+const MAX_TASREC_METADATA_BYTES: usize = 1024 * 1024;
+const MAX_TASREC_BYTES: u64 = (4 + MAX_TASREC_METADATA_BYTES + TAS_MAX_TICKS * (1 + 3 * 4)) as u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecordingSessionKind {
@@ -472,6 +477,27 @@ fn atomic_replace_file(temp_path: &Path, final_path: &Path) -> Result<(), String
     })
 }
 
+fn write_file_atomically(path: &Path, data: &[u8]) -> Result<(), String> {
+    let temp = temp_path_for(path);
+    let write_result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| format!("failed to create {}: {}", temp.display(), e))?;
+        file.write_all(data)
+            .map_err(|e| format!("failed to write {}: {}", temp.display(), e))?;
+        file.sync_all()
+            .map_err(|e| format!("failed to flush {}: {}", temp.display(), e))?;
+        drop(file);
+        atomic_replace_file(&temp, path)
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    write_result
+}
+
 fn remove_if_exists(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
@@ -521,6 +547,9 @@ impl RecordingFile {
         if count == 0 {
             return Err("Nothing recorded".into());
         }
+        if count > TAS_MAX_TICKS {
+            return Err(format!("Recording too long: {} ticks", count));
+        }
 
         let meta = RecordingMetadata {
             version: state.version,
@@ -554,20 +583,43 @@ impl RecordingFile {
             }
         }
 
-        std::fs::write(path, &data).map_err(|e| format!("{}", e))
+        write_file_atomically(path, &data)
     }
 
     pub fn load(
         state: &mut TasSharedState,
         path: &std::path::Path,
     ) -> Result<(u32, Vec<Segment>), String> {
-        let data = std::fs::read(path).map_err(|e| format!("{}", e))?;
+        let file = File::open(path).map_err(|e| format!("{}", e))?;
+        let reported_len = file.metadata().map_err(|e| format!("{}", e))?.len();
+        if reported_len > MAX_TASREC_BYTES {
+            return Err(format!(
+                "Recording file too large: {} bytes (maximum {})",
+                reported_len, MAX_TASREC_BYTES
+            ));
+        }
+        let mut data = Vec::with_capacity(reported_len as usize);
+        file.take(MAX_TASREC_BYTES + 1)
+            .read_to_end(&mut data)
+            .map_err(|e| format!("{}", e))?;
+        if data.len() as u64 > MAX_TASREC_BYTES {
+            return Err(format!(
+                "Recording file too large: more than {} bytes",
+                MAX_TASREC_BYTES
+            ));
+        }
         if data.len() < 4 {
             return Err("File too small".into());
         }
 
         let meta_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        if data.len() < 4 + meta_len {
+        if meta_len > MAX_TASREC_METADATA_BYTES {
+            return Err(format!("Recording metadata too large: {} bytes", meta_len));
+        }
+        let metadata_end = 4usize
+            .checked_add(meta_len)
+            .ok_or_else(|| "Recording metadata length overflow".to_string())?;
+        if data.len() < metadata_end {
             return Err("Truncated metadata".into());
         }
 
@@ -581,8 +633,10 @@ impl RecordingFile {
             return Err(format!("Recording too long: {} ticks", count));
         }
 
-        let input_start = 4 + meta_len;
-        let input_end = input_start + count;
+        let input_start = metadata_end;
+        let input_end = input_start
+            .checked_add(count)
+            .ok_or_else(|| "Recording input length overflow".to_string())?;
         if data.len() < input_end {
             return Err("Truncated input log".into());
         }
@@ -603,7 +657,10 @@ impl RecordingFile {
         }
         let coords_start = input_end;
         let coords_size = count * 3 * 4; // 3 floats * 4 bytes
-        if data.len() >= coords_start + coords_size {
+        let coords_end = coords_start
+            .checked_add(coords_size)
+            .ok_or_else(|| "Recording coordinate length overflow".to_string())?;
+        if data.len() >= coords_end {
             let mut offset = coords_start;
             for i in 0..count {
                 for j in 0..3 {
@@ -709,6 +766,40 @@ pub enum HistoryEntryKind {
     LoadSnapshot,
 }
 
+/// Where an entry's recording lives. Entries loaded from the v2 store start
+/// `OnDisk`: the panel only needs the metadata, and a restore reads the blob
+/// then. Keeping every snapshot resident cost a fixed 852 KB per entry (533
+/// entries = 454 MB at startup, measured 2026-09-02) and made every persist
+/// clone all of it on the UI thread.
+pub(crate) enum SnapshotSlot {
+    /// Marker entry (save/load landmark): nothing to restore.
+    Marker,
+    /// Resident. `on_disk` is set once the store holds this exact blob, which
+    /// makes the resident copy droppable (`demote_resident_except`).
+    Loaded {
+        snapshot: RecordingSnapshot,
+        on_disk: Option<BlobRef>,
+    },
+    /// Restorable; read from the store on demand.
+    OnDisk(BlobRef),
+    /// Blob missing/corrupt: visible but inert. The store keeps the blob
+    /// reference itself (so a reappearing file recovers), nothing is needed here.
+    Unavailable,
+}
+
+impl SnapshotSlot {
+    fn restorable(&self) -> bool {
+        matches!(self, SnapshotSlot::Loaded { .. } | SnapshotSlot::OnDisk(_))
+    }
+
+    fn loaded(&self) -> Option<&RecordingSnapshot> {
+        match self {
+            SnapshotSlot::Loaded { snapshot, .. } => Some(snapshot),
+            _ => None,
+        }
+    }
+}
+
 pub struct HistoryEntry {
     /// Stable, monotonic, never-reused id (the storage identity — NOT the
     /// positional index). Assigned by `RecordingHistory` on push.
@@ -746,7 +837,7 @@ pub struct HistoryEntry {
     /// level_id at push time. `None` for legacy entries or when the level was
     /// unknown (menu). Used by the panel's per-level filter.
     pub level: Option<String>,
-    snapshot: Option<RecordingSnapshot>,
+    snapshot: SnapshotSlot,
 }
 
 impl HistoryEntry {
@@ -768,7 +859,10 @@ impl HistoryEntry {
             end_tick,
             first_moving,
             level: None, // stamped from live_level by RecordingHistory on push
-            snapshot: Some(snapshot),
+            snapshot: SnapshotSlot::Loaded {
+                snapshot,
+                on_disk: None,
+            },
         }
     }
 
@@ -786,7 +880,7 @@ impl HistoryEntry {
             end_tick: 0,
             first_moving: None,
             level: None, // stamped from live_level by RecordingHistory on push
-            snapshot: None,
+            snapshot: SnapshotSlot::Marker,
         }
     }
 
@@ -797,7 +891,7 @@ impl HistoryEntry {
     }
 
     pub fn can_restore(&self) -> bool {
-        self.snapshot.is_some()
+        self.snapshot.restorable()
     }
 }
 
@@ -897,6 +991,10 @@ pub struct RecordingHistory {
     /// Set between a level change and the scan publishing the new track, so
     /// "we don't know yet" is distinguishable from "we are on this track".
     level_resolving: bool,
+    /// v2 store directory; where `OnDisk` entries are read from on restore.
+    blob_dir: Option<PathBuf>,
+    /// Problems hit while reading blobs on demand (the app logs and clears).
+    warnings: Vec<String>,
 }
 
 impl RecordingHistory {
@@ -909,6 +1007,97 @@ impl RecordingHistory {
             revision: 0,
             live_level: None,
             level_resolving: false,
+            blob_dir: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Where lazily-loaded entries read their blobs from. Set before
+    /// `apply_loaded`; without it an `OnDisk` entry cannot be restored.
+    pub fn set_blob_dir(&mut self, dir: PathBuf) {
+        self.blob_dir = Some(dir);
+    }
+
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
+    }
+
+    /// Make entry `index` resident (reading its blob if needed) and return it.
+    /// A blob that fails to read turns the entry `Unavailable` and records a
+    /// warning; the cursor is NOT moved here so a failed restore leaves the
+    /// selection where it was.
+    fn load_slot(&mut self, index: usize) -> Option<&RecordingSnapshot> {
+        let blob = match &self.entries[index].snapshot {
+            SnapshotSlot::Loaded { .. } => return self.entries[index].snapshot.loaded(),
+            SnapshotSlot::OnDisk(blob) => *blob,
+            SnapshotSlot::Marker | SnapshotSlot::Unavailable => return None,
+        };
+        let id = self.entries[index].entry_id;
+        let loaded = self
+            .blob_dir
+            .as_deref()
+            .ok_or_else(|| "history store directory unknown".to_string())
+            .and_then(|dir| crate::history_store_v2::load_blob(dir, id, blob))
+            .and_then(RecordingSnapshot::from_persisted);
+        match loaded {
+            Ok(snapshot) => {
+                self.entries[index].snapshot = SnapshotSlot::Loaded {
+                    snapshot,
+                    on_disk: Some(blob),
+                };
+                self.entries[index].snapshot.loaded()
+            }
+            Err(e) => {
+                self.warnings.push(format!(
+                    "history entry {} ('{}') cannot be restored: {}",
+                    id, self.entries[index].label, e
+                ));
+                self.entries[index].snapshot = SnapshotSlot::Unavailable;
+                None
+            }
+        }
+    }
+
+    /// Drop resident copies the store already holds, except `keep` and the
+    /// current entry. Restores are rare user actions and a blob re-reads in
+    /// about a millisecond, so "at most the one you just used" is enough.
+    fn demote_resident_except(&mut self, keep: usize) {
+        let current = self.current_index;
+        for (i, e) in self.entries.iter_mut().enumerate() {
+            if i == keep || current == Some(i) {
+                continue;
+            }
+            if let SnapshotSlot::Loaded {
+                on_disk: Some(blob),
+                ..
+            } = &e.snapshot
+            {
+                let blob = *blob;
+                e.snapshot = SnapshotSlot::OnDisk(blob);
+            }
+        }
+    }
+
+    /// The writer committed `id`'s blob: its resident copy is now droppable,
+    /// and is dropped unless it is the current entry.
+    pub fn mark_durable(&mut self, id: u64, blob: BlobRef) {
+        let Some(i) = self.entries.iter().position(|e| e.entry_id == id) else {
+            return;
+        };
+        if let SnapshotSlot::Loaded { on_disk, .. } = &mut self.entries[i].snapshot {
+            if on_disk.is_none() {
+                *on_disk = Some(blob);
+            }
+        }
+        if self.current_index != Some(i) {
+            if let SnapshotSlot::Loaded {
+                on_disk: Some(blob),
+                ..
+            } = &self.entries[i].snapshot
+            {
+                let blob = *blob;
+                self.entries[i].snapshot = SnapshotSlot::OnDisk(blob);
+            }
         }
     }
 
@@ -967,18 +1156,29 @@ impl RecordingHistory {
         F: Fn(&[f32; 3]) -> Option<&'static str>,
     {
         let mut tagged = 0;
-        for e in &mut self.entries {
-            if e.level.is_some() {
+        for i in 0..self.entries.len() {
+            if self.entries[i].level.is_some() {
                 continue;
             }
-            let Some(snap) = e.snapshot.as_ref() else {
+            // Only the spawn coordinate is needed. For an on-disk entry read
+            // the blob transiently rather than making it resident: this runs
+            // once per untagged entry, and the tag is persisted afterwards.
+            let spawn = match &self.entries[i].snapshot {
+                SnapshotSlot::Loaded { snapshot, .. } => {
+                    (snapshot.recorded_count > 0).then_some(snapshot.rec_coords[0])
+                }
+                SnapshotSlot::OnDisk(blob) => self.blob_dir.as_deref().and_then(|dir| {
+                    crate::history_store_v2::load_blob(dir, self.entries[i].entry_id, *blob)
+                        .ok()
+                        .and_then(|ps| ps.rec_coords.first().copied())
+                }),
+                SnapshotSlot::Marker | SnapshotSlot::Unavailable => None,
+            };
+            let Some(spawn) = spawn else {
                 continue;
             };
-            if snap.recorded_count == 0 {
-                continue;
-            }
-            if let Some(code) = classify(&snap.rec_coords[0]) {
-                e.level = Some(code.to_string());
+            if let Some(code) = classify(&spawn) {
+                self.entries[i].level = Some(code.to_string());
                 tagged += 1;
             }
         }
@@ -1119,19 +1319,25 @@ impl RecordingHistory {
         let current = self.current_index?;
         let prev = (0..current)
             .rev()
-            .find(|&i| self.entries[i].snapshot.is_some() && self.entry_on_current_level(i))?;
+            .find(|&i| self.entries[i].can_restore() && self.entry_on_current_level(i))?;
+        // Load BEFORE moving the cursor: an unreadable blob must not leave the
+        // selection on an entry that just turned inert.
+        self.load_slot(prev)?;
         self.current_index = Some(prev);
+        self.demote_resident_except(prev);
         self.bump();
-        self.entries[prev].snapshot.as_ref()
+        self.entries[prev].snapshot.loaded()
     }
 
     pub fn redo(&mut self) -> Option<&RecordingSnapshot> {
         let current = self.current_index?;
         let next = ((current + 1)..self.entries.len())
-            .find(|&i| self.entries[i].snapshot.is_some() && self.entry_on_current_level(i))?;
+            .find(|&i| self.entries[i].can_restore() && self.entry_on_current_level(i))?;
+        self.load_slot(next)?;
         self.current_index = Some(next);
+        self.demote_resident_except(next);
         self.bump();
-        self.entries[next].snapshot.as_ref()
+        self.entries[next].snapshot.loaded()
     }
 
     pub fn restore_index(&mut self, index: usize) -> Option<&RecordingSnapshot> {
@@ -1147,10 +1353,11 @@ impl RecordingHistory {
         if !self.entry_on_current_level(index) {
             return None;
         }
-        self.entries[index].snapshot.as_ref()?;
+        self.load_slot(index)?;
         self.current_index = Some(index);
+        self.demote_resident_except(index);
         self.bump();
-        self.entries[index].snapshot.as_ref()
+        self.entries[index].snapshot.loaded()
     }
 
     pub fn current_index(&self) -> Option<usize> {
@@ -1182,7 +1389,16 @@ impl RecordingHistory {
                 first_moving: e.first_moving,
                 level: e.level.clone(),
                 created_at_iso: e.created_at.to_rfc3339(),
-                snapshot: e.snapshot.as_ref().map(RecordingSnapshot::to_persisted),
+                // Bytes travel only for snapshots the store does not have
+                // yet. On-disk and durable entries send `None`; the store
+                // keeps their blob reference (ids are never reused).
+                snapshot: match &e.snapshot {
+                    SnapshotSlot::Loaded {
+                        snapshot,
+                        on_disk: None,
+                    } => Some(snapshot.to_persisted()),
+                    _ => None,
+                },
             })
             .collect()
     }
@@ -1275,9 +1491,24 @@ impl RecordingHistory {
     ) {
         let mut entries = Vec::with_capacity(loaded.len());
         for le in loaded {
-            let snapshot = le
-                .snapshot
-                .and_then(|ps| RecordingSnapshot::from_persisted(ps).ok());
+            let snapshot = match (le.snapshot, le.blob, le.available) {
+                (Some(ps), blob, _) => match RecordingSnapshot::from_persisted(ps) {
+                    Ok(snapshot) => SnapshotSlot::Loaded {
+                        snapshot,
+                        on_disk: blob,
+                    },
+                    Err(_) => {
+                        if blob.is_some() {
+                            SnapshotSlot::Unavailable
+                        } else {
+                            SnapshotSlot::Marker
+                        }
+                    }
+                },
+                (None, Some(blob), true) => SnapshotSlot::OnDisk(blob),
+                (None, Some(_), false) => SnapshotSlot::Unavailable,
+                (None, None, _) => SnapshotSlot::Marker,
+            };
             let created_at = chrono::DateTime::parse_from_rfc3339(&le.created_at_iso)
                 .ok()
                 .map(|dt| dt.with_timezone(&chrono::Local))
@@ -1307,7 +1538,7 @@ impl RecordingHistory {
         // the nearest available entry, or None). Do NOT silently jump to newest.
         self.current_index = current_entry_id
             .and_then(|id| self.entries.iter().position(|e| e.entry_id == id))
-            .filter(|&i| self.entries[i].snapshot.is_some());
+            .filter(|&i| self.entries[i].can_restore());
         // A lowered cap (e.g. settings changed between sessions) trims on load.
         self.enforce_capacity_preserving_none();
         self.bump();
@@ -1329,7 +1560,7 @@ impl RecordingHistory {
             return 0;
         };
         (0..current)
-            .filter(|&i| self.entries[i].snapshot.is_some() && self.entry_on_current_level(i))
+            .filter(|&i| self.entries[i].can_restore() && self.entry_on_current_level(i))
             .count()
     }
 
@@ -1338,7 +1569,7 @@ impl RecordingHistory {
             return 0;
         };
         ((current + 1)..self.entries.len())
-            .filter(|&i| self.entries[i].snapshot.is_some() && self.entry_on_current_level(i))
+            .filter(|&i| self.entries[i].can_restore() && self.entry_on_current_level(i))
             .count()
     }
 
@@ -1366,7 +1597,7 @@ impl RecordingHistory {
                 timestamp: entry.timestamp.clone(),
                 created_at_iso: entry.created_at.to_rfc3339(),
                 kind: entry.kind,
-                snapshot: entry.snapshot.as_ref().map(RecordingSnapshot::to_persisted),
+                snapshot: entry.snapshot.loaded().map(RecordingSnapshot::to_persisted),
                 start_tick: entry.start_tick,
                 end_tick: entry.end_tick,
                 first_moving: entry.first_moving,
@@ -1386,8 +1617,11 @@ impl RecordingHistory {
         let mut entries = Vec::with_capacity(persisted.entries.len());
         for entry in persisted.entries {
             let snapshot = match entry.snapshot {
-                Some(snapshot) => Some(RecordingSnapshot::from_persisted(snapshot)?),
-                None => None,
+                Some(snapshot) => SnapshotSlot::Loaded {
+                    snapshot: RecordingSnapshot::from_persisted(snapshot)?,
+                    on_disk: None,
+                },
+                None => SnapshotSlot::Marker,
             };
             // Parse the persisted ISO timestamp into a chrono DateTime.
             // For legacy entries that pre-date the `created_at_iso` field,
@@ -1418,7 +1652,7 @@ impl RecordingHistory {
             // for the context phrase.
             let mut end_tick = entry.end_tick;
             if end_tick == 0 {
-                if let Some(snap) = snapshot.as_ref() {
+                if let Some(snap) = snapshot.loaded() {
                     end_tick = snap.recorded_count;
                 }
             }
@@ -1444,7 +1678,7 @@ impl RecordingHistory {
             .filter(|idx| *idx < self.entries.len());
 
         if let Some(idx) = self.current_index {
-            if self.entries[idx].snapshot.is_none() {
+            if !self.entries[idx].can_restore() {
                 self.current_index = None;
             }
         }
@@ -1469,7 +1703,7 @@ impl RecordingHistory {
                 .iter()
                 .enumerate()
                 .rev()
-                .find_map(|(idx, entry)| entry.snapshot.as_ref().map(|_| idx));
+                .find_map(|(idx, entry)| entry.can_restore().then_some(idx));
         }
     }
 
@@ -1524,7 +1758,11 @@ impl RecordingHistory {
             entry = entry.with_session(start_tick, end_tick);
         }
         self.entries.push(entry);
-        self.current_index = Some(self.entries.len() - 1);
+        let newest = self.entries.len() - 1;
+        self.current_index = Some(newest);
+        // The previous take is no longer current: if the store already holds
+        // its blob, its resident 852 KB copy can go.
+        self.demote_resident_except(newest);
         self.enforce_capacity();
         self.bump();
         true
@@ -2554,12 +2792,155 @@ mod tests {
     }
 
     #[test]
+    fn lazy_history_entries_restore_from_store_and_stay_off_heap() {
+        use crate::history_store_v2::{HistoryStoreV2, StoredEntry};
+        let dir = std::env::temp_dir().join(format!(
+            "tas_ui_lazy_hist_{}_{}",
+            std::process::id(),
+            chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let mk = |id: u64, count: u32| {
+            let mut input_log = vec![0u8; count as usize];
+            input_log[0] = id as u8;
+            StoredEntry {
+                entry_id: id,
+                name: format!("take {}", id),
+                user_name: None,
+                pinned: false,
+                kind: HistoryEntryKind::Snapshot,
+                start_tick: 0,
+                end_tick: count,
+                first_moving: None,
+                level: None,
+                created_at_iso: "2026-09-02T00:00:00+10:00".to_string(),
+                snapshot: Some(PersistedSnapshot {
+                    recorded_count: count,
+                    input_log,
+                    rec_coords: vec![[id as f32, 0.0, 0.0]; count as usize],
+                }),
+            }
+        };
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store.persist(&[mk(1, 3), mk(2, 5)], Some(2), 3).unwrap();
+        drop(store);
+
+        let (_lazy, load) = HistoryStoreV2::open_in_lazy(dir.clone()).unwrap();
+        let mut history = RecordingHistory::new(8);
+        history.set_blob_dir(dir.clone());
+        history.apply_loaded(load.entries, load.current_entry_id, load.next_entry_id);
+        assert_eq!(history.len(), 2);
+        assert!(history.entries().iter().all(|e| e.can_restore()));
+        assert!(
+            history
+                .entries()
+                .iter()
+                .all(|e| matches!(e.snapshot, SnapshotSlot::OnDisk(_))),
+            "nothing resident after a lazy load"
+        );
+        // Re-persisting sends no bytes for on-disk entries.
+        assert!(history
+            .to_stored_entries()
+            .iter()
+            .all(|e| e.snapshot.is_none()));
+
+        // Restore reads the blob on demand.
+        let snap = history.restore_index(0).expect("restorable");
+        assert_eq!(snap.recorded_count, 3);
+        assert_eq!(snap.input_log[0], 1);
+        assert!(matches!(
+            history.entries()[0].snapshot,
+            SnapshotSlot::Loaded { .. }
+        ));
+        // Restoring another entry drops the previous resident copy to disk.
+        history.restore_index(1).expect("restorable");
+        assert!(matches!(history.entries()[0].snapshot, SnapshotSlot::OnDisk(_)));
+        assert!(matches!(
+            history.entries()[1].snapshot,
+            SnapshotSlot::Loaded { .. }
+        ));
+
+        // A corrupt blob makes the entry inert with a warning; the cursor
+        // stays on the entry that was current.
+        let p = dir.join("1.tasrec");
+        let mut bytes = std::fs::read(&p).unwrap();
+        bytes[4] ^= 0xFF;
+        std::fs::write(&p, &bytes).unwrap();
+        assert!(history.restore_index(0).is_none());
+        assert!(!history.entries()[0].can_restore());
+        assert_eq!(history.current_index(), Some(1));
+        assert!(!history.take_warnings().is_empty());
+
+        // A session take stays resident until the writer reports it durable,
+        // then drops once it is no longer current.
+        let mut state = zeroed_state();
+        state.recorded_count = 4;
+        state.input_log[0] = 9;
+        assert!(history.push_snapshot_data_with_session(
+            RecordingSnapshot::from_state(&state),
+            "take 3".to_string(),
+            0,
+            4
+        ));
+        let stored = history.to_stored_entries();
+        assert!(stored[2].snapshot.is_some(), "new take travels with bytes");
+        let blob = crate::history_store_v2::BlobRef {
+            size: 0,
+            checksum: 0,
+            format: 2,
+        };
+        history.mark_durable(stored[2].entry_id, blob);
+        assert!(
+            matches!(history.entries()[2].snapshot, SnapshotSlot::Loaded { .. }),
+            "current entry stays resident"
+        );
+        history.restore_index(1).expect("restorable");
+        assert!(matches!(history.entries()[2].snapshot, SnapshotSlot::OnDisk(_)));
+        assert!(history.to_stored_entries()[2].snapshot.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recording_file_atomically_replaces_existing_save() {
+        let path = unique_temp_path("rec_replace", "tasrec");
+        let mut first = zeroed_state();
+        first.recorded_count = 2;
+        first.input_log[..2].copy_from_slice(&[1, 2]);
+        RecordingFile::save(&first, &path).unwrap();
+
+        let mut second = zeroed_state();
+        second.recorded_count = 3;
+        second.input_log[..3].copy_from_slice(&[7, 8, 9]);
+        RecordingFile::save(&second, &path).unwrap();
+
+        let mut loaded = zeroed_state();
+        RecordingFile::load(&mut loaded, &path).unwrap();
+        assert_eq!(loaded.recorded_count, 3);
+        assert_eq!(&loaded.input_log[..3], &[7, 8, 9]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn recording_file_load_truncated_errors() {
         let path = unique_temp_path("rec_trunc", "tasrec");
         std::fs::write(&path, [0u8; 2]).unwrap(); // Too small
         let mut state = zeroed_state();
         assert!(RecordingFile::load(&mut state, &path).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn recording_file_rejects_oversized_file_before_reading_it() {
+        let path = unique_temp_path("rec_oversized", "tasrec");
+        let file = File::create(&path).unwrap();
+        file.set_len(MAX_TASREC_BYTES + 1).unwrap();
+        drop(file);
+        let mut state = zeroed_state();
+        let error = match RecordingFile::load(&mut state, &path) {
+            Ok(_) => panic!("oversized recording unexpectedly loaded"),
+            Err(error) => error,
+        };
+        assert!(error.contains("too large"), "unexpected error: {error}");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -3273,7 +3654,7 @@ mod tests {
             .starts_with("Recovered"));
         assert!(
             reloaded.snapshot.is_some(),
-            "recovered snapshot persisted to disk"
+            "recovered snapshot persisted to disk (eager open returns bytes)"
         );
         let _ = std::fs::remove_dir_all(&v2dir);
 

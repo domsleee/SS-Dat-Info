@@ -20,6 +20,11 @@ pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
 pub const TAS_LOG_ENTRY_SIZE: usize = 120;
 
+/// Value the DLL parks in the command slot while an out-of-cycle consumer
+/// (level-scan worker / SwapBuffers hook) applies a STOP (`CAVE2_CMD_CLAIMED_STOP`
+/// in cave2.hpp). It is not a `TasCommand`; readers treat it as "STOP in flight".
+pub const TAS_CMD_CLAIMED_STOP: u32 = u32::MAX;
+
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TasCommand {
@@ -927,8 +932,26 @@ mod platform {
             }
             unsafe {
                 let cmd_ptr = std::ptr::addr_of_mut!((*self.ptr).command);
-                std::ptr::write_volatile(cmd_ptr, cmd as u32);
+                (&*(cmd_ptr.cast::<AtomicU32>())).store(cmd as u32, Ordering::Release);
             }
+        }
+
+        /// Acquire-read the command publication/acknowledgement word.
+        fn command_word(&self) -> u32 {
+            unsafe {
+                let cmd_ptr = std::ptr::addr_of!((*self.ptr).command);
+                (&*(cmd_ptr.cast::<AtomicU32>())).load(Ordering::Acquire)
+            }
+        }
+
+        pub fn command_idle(&self) -> bool {
+            self.command_word() == TasCommand::Idle as u32
+        }
+
+        /// True while a STOP is published or being consumed by the DLL.
+        pub fn stop_pending(&self) -> bool {
+            let cmd = self.command_word();
+            cmd == TasCommand::Stop as u32 || cmd == TAS_CMD_CLAIMED_STOP
         }
 
         /// Volatile read of mode (poll-hot field written by DLL).
@@ -1052,6 +1075,15 @@ mod platform {
                 self.state.force_fixed_tick = 0;
             }
             self.state.command = cmd as u32;
+        }
+
+        pub fn command_idle(&self) -> bool {
+            self.state.command == TasCommand::Idle as u32
+        }
+
+        pub fn stop_pending(&self) -> bool {
+            self.state.command == TasCommand::Stop as u32
+                || self.state.command == TAS_CMD_CLAIMED_STOP
         }
 
         pub fn restart_state(&self) -> u32 {
@@ -1966,6 +1998,8 @@ pub mod transport {
     /// raw `u32` for mode/restart_state to match the live client's accessors.
     pub trait TransportPort {
         fn send_command(&mut self, cmd: TasCommand);
+        /// True only after Cave2 consumed and cleared the single command slot.
+        fn command_idle(&self) -> bool;
         fn mode(&self) -> u32;
         fn restart_state(&self) -> u32;
         fn reset_restart_state(&mut self);
@@ -2007,9 +2041,9 @@ pub mod transport {
         fn approve_cont_splice(&mut self) {}
     }
 
-    /// Fixed wall-clock delay (ms) between sending Stop and sending Restart.
-    /// This both serialises the single-u32 command slot (cave2 processes Stop →
-    /// mode OFF before Restart) AND — critically — fixes the F5 phase: the
+    /// Fixed wall-clock delay (ms) between an acknowledged Stop and Restart.
+    /// Command-slot serialization comes from the explicit idle/OFF
+    /// acknowledgement; this additional delay fixes the F5 phase. The
     /// post-restart bucket is decided by the wall-clock-modulo-tick at the
     /// Restart, so a CONSISTENT Stop→Restart delay lands a consistent (good)
     /// bucket. The old "poll until mode==OFF" fired Restart at a variable,
@@ -2069,8 +2103,9 @@ pub mod transport {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Phase {
         Start,
-        /// Stop sent; the caller is honouring a fixed STOP_SETTLE_MS wait (during
-        /// which cave2 flips mode to OFF) before we send Restart.
+        /// Stop sent; wait until Cave2 has consumed it and published MODE_OFF.
+        StopWaitAck,
+        /// Stop acknowledged; the caller is honouring the deterministic delay.
         StopSettle,
         /// Restart sent; waiting for restart_state == 2.
         RestartWaitDone,
@@ -2302,6 +2337,7 @@ pub mod transport {
         pub fn phase_name(&self) -> &'static str {
             match self.phase {
                 Phase::Start => "Start",
+                Phase::StopWaitAck => "StopWaitAck (waiting for Cave2 to consume Stop)",
                 Phase::StopSettle => "StopSettle (waiting out the fixed Stop->Restart delay)",
                 Phase::RestartWaitDone => "RestartWaitDone (waiting for the F5 restart)",
                 Phase::ArmSettle => "ArmSettle",
@@ -2313,6 +2349,22 @@ pub mod transport {
 
         pub fn is_terminal(&self) -> bool {
             matches!(self.phase, Phase::Done | Phase::Aborted)
+        }
+
+        /// True while the NEXT transition's timing feeds the F5 spawn phase
+        /// (Stop acknowledgement, restart-done detection, arm settle): a driver
+        /// should poll these without vsync quantization. The multi-second
+        /// `JudgeBucket` replay gains nothing from sub-frame latency, so a UI
+        /// driver can poll it once per frame instead of spinning.
+        pub fn needs_tight_polling(&self) -> bool {
+            matches!(
+                self.phase,
+                Phase::Start
+                    | Phase::StopWaitAck
+                    | Phase::StopSettle
+                    | Phase::RestartWaitDone
+                    | Phase::ArmSettle
+            )
         }
 
         fn retries_used(&self) -> u32 {
@@ -2379,8 +2431,24 @@ pub mod transport {
                     // the legacy loop), so the Restart fires at a consistent
                     // wall-clock phase → consistent (good) F5 bucket.
                     port.send_command(TasCommand::Stop);
-                    self.phase = Phase::StopSettle;
-                    StepOutcome::Wait { ms: STOP_SETTLE_MS }
+                    if port.command_idle() && port.mode() == TasMode::Off as u32 {
+                        self.phase = Phase::StopSettle;
+                        StepOutcome::Wait { ms: STOP_SETTLE_MS }
+                    } else {
+                        self.phase = Phase::StopWaitAck;
+                        StepOutcome::InProgress
+                    }
+                }
+                Phase::StopWaitAck => {
+                    // A wall-clock delay cannot serialize a command slot when
+                    // the game can hitch longer than that delay. Begin the
+                    // phase-pinning settle only after Stop is acknowledged.
+                    if port.command_idle() && port.mode() == TasMode::Off as u32 {
+                        self.phase = Phase::StopSettle;
+                        StepOutcome::Wait { ms: STOP_SETTLE_MS }
+                    } else {
+                        StepOutcome::InProgress
+                    }
                 }
                 Phase::StopSettle => {
                     // The settle wait elapsed (caller honoured the Wait), so cave2
@@ -2770,12 +2838,12 @@ pub mod transport {
             port.set_gate_align_rec(0);
             port.set_playback_speed(self.cfg.catchup_speed);
             port.send_command(TasCommand::Stop);
-            self.phase = Phase::StopSettle;
-            // Wait the fixed settle plus any escape jitter before the next
-            // Restart, so the reroll's Restart phase is settle-pinned too.
+            self.phase = Phase::StopWaitAck;
+            // Jitter can elapse while Stop is in flight, but the fixed settle is
+            // applied only after acknowledgement in StopWaitAck.
             StepOutcome::Reroll {
                 attempt,
-                suggested_delay_ms: STOP_SETTLE_MS + cont_retry_jitter_ms(attempt),
+                suggested_delay_ms: cont_retry_jitter_ms(attempt),
                 observed,
                 expected: self.cfg.target.and_then(|t| t.expected_first_moving),
             }
@@ -2805,6 +2873,9 @@ pub mod transport {
             arm_consumed_tick: u32,
             capture_ok_flag: bool,
             commands: Vec<TasCommand>,
+            /// False by default: existing unit tests model immediate Cave2
+            /// consumption. Set true to exercise a delayed acknowledgement.
+            command_busy: bool,
             /// Invariant tracker: Restart must NEVER be sent while mode != OFF.
             restart_while_not_off: bool,
         }
@@ -2819,6 +2890,9 @@ pub mod transport {
                     self.arm_generation = self.arm_generation.wrapping_add(1);
                 }
                 self.commands.push(cmd);
+            }
+            fn command_idle(&self) -> bool {
+                !self.command_busy
             }
             fn mode(&self) -> u32 {
                 self.mode
@@ -2988,16 +3062,22 @@ pub mod transport {
         fn rec_restart_serializes_stop_before_restart() {
             let mut p = FakePort {
                 mode: TasMode::Rec as u32,
+                command_busy: true,
                 ..Default::default()
             };
             let mut c = TransportController::new(cfg(Arm::Rec, None, 0));
 
-            // Start: Stop, then a FIXED settle wait before Restart.
-            assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: STOP_SETTLE_MS });
+            // Start publishes Stop but cannot start the settle until Cave2 acks.
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress);
             assert_eq!(p.commands, vec![TasCommand::Stop]);
-            // During the settle, cave2 processes the Stop → mode flips OFF.
+            // Even MODE_OFF is insufficient while the command slot still holds
+            // Stop: Restart would overwrite the unacknowledged command.
             p.mode = TasMode::Off as u32;
-            // StopSettle: Restart fires (mode is OFF, so no clobber).
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress);
+            assert_eq!(p.commands, vec![TasCommand::Stop]);
+            p.command_busy = false;
+            assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: STOP_SETTLE_MS });
+            // Only after acknowledgement + the fixed settle does Restart fire.
             assert_eq!(c.step(&mut p), StepOutcome::InProgress);
             assert_eq!(p.commands.last(), Some(&TasCommand::Restart));
 
@@ -3098,7 +3178,7 @@ pub mod transport {
                 c.step(&mut p),
                 StepOutcome::Reroll {
                     attempt: 1,
-                    suggested_delay_ms: STOP_SETTLE_MS,
+                    suggested_delay_ms: 0,
                     observed: Some(0),
                     expected: None,
                 }
@@ -3152,10 +3232,14 @@ pub mod transport {
         /// Drive the controller through restart until it's armed CONT and in the
         /// JudgeBucket phase. Returns once ArmContinue has been sent.
         fn drive_to_judge(c: &mut TransportController, p: &mut FakePort) {
-            // Start (Stop, Wait) → settle→OFF → StopSettle (Restart) → rs=2 →
-            // RestartWaitDone (arm-settle Wait) → ArmSettle (ArmContinue).
-            c.step(p);
+            // Start publishes Stop. Tests may begin in REC/PLAY, so model Cave2
+            // consuming it before the deterministic settle begins.
+            let first = c.step(p);
             p.mode = TasMode::Off as u32;
+            p.command_busy = false;
+            if first == StepOutcome::InProgress {
+                assert_eq!(c.step(p), StepOutcome::Wait { ms: STOP_SETTLE_MS });
+            }
             c.step(p);
             p.restart_state = 2;
             c.step(p); // RestartWaitDone -> ArmSettle (Wait)
@@ -3170,6 +3254,8 @@ pub mod transport {
         /// Drive the reroll restart (after a Reroll outcome) up to re-arm.
         fn drive_reroll_to_judge(c: &mut TransportController, p: &mut FakePort) {
             p.mode = TasMode::Off as u32;
+            p.command_busy = false;
+            c.step(p); // StopWaitAck -> fixed settle wait
             c.step(p); // StopSettle -> Restart
             p.restart_state = 2;
             c.step(p); // RestartWaitDone -> ArmSettle (Wait)
@@ -3287,6 +3373,9 @@ pub mod transport {
                 fn send_command(&mut self, cmd: TasCommand) {
                     self.inner.send_command(cmd)
                 }
+                fn command_idle(&self) -> bool {
+                    self.inner.command_idle()
+                }
                 fn mode(&self) -> u32 {
                     self.inner.mode()
                 }
@@ -3369,9 +3458,10 @@ pub mod transport {
             // shared helper takes a FakePort.
             c.step(&mut p);
             p.inner.mode = TasMode::Off as u32;
-            c.step(&mut p);
+            c.step(&mut p); // StopWaitAck -> StopSettle wait
+            c.step(&mut p); // StopSettle -> Restart
             p.inner.restart_state = 2;
-            c.step(&mut p);
+            c.step(&mut p); // RestartWaitDone -> ArmSettle wait
             c.step(&mut p); // ArmSettle: stages the handover, sends ArmPlay
             p.inner.mode = TasMode::Play as u32;
             p.inner.play_coords = coords;
@@ -4183,6 +4273,9 @@ impl transport::TransportPort for TasSharedMemoryClient {
     fn send_command(&mut self, cmd: TasCommand) {
         self.send_command(cmd);
     }
+    fn command_idle(&self) -> bool {
+        self.command_idle()
+    }
     fn mode(&self) -> u32 {
         self.mode_volatile()
     }
@@ -4208,13 +4301,19 @@ impl transport::TransportPort for TasSharedMemoryClient {
         unsafe { std::ptr::read_volatile(&self.state().gate_index as *const u32) }
     }
     fn set_continue_from_frame(&mut self, frame: u32) {
-        self.state_mut().continue_from_frame = frame;
+        unsafe {
+            std::ptr::write_volatile(&mut self.state_mut().continue_from_frame as *mut u32, frame);
+        }
     }
     fn set_gate_align_rec(&mut self, frame: u32) {
-        self.state_mut().gate_align_rec = frame;
+        unsafe {
+            std::ptr::write_volatile(&mut self.state_mut().gate_align_rec as *mut u32, frame);
+        }
     }
     fn set_playback_speed(&mut self, speed: f32) {
-        self.state_mut().playback_speed = speed;
+        unsafe {
+            std::ptr::write_volatile(&mut self.state_mut().playback_speed as *mut f32, speed);
+        }
     }
     fn set_speed_handoff(&mut self, pos: u32, speed: f32) {
         // Payload first, THEN the marker that arms it. cave2 tests the marker
@@ -4267,6 +4366,9 @@ impl transport::TransportPort for TasSharedMemoryClient {
 impl transport::TransportPort for TasSharedMemoryClient {
     fn send_command(&mut self, cmd: TasCommand) {
         self.send_command(cmd);
+    }
+    fn command_idle(&self) -> bool {
+        self.command_idle()
     }
     fn mode(&self) -> u32 {
         self.state().mode

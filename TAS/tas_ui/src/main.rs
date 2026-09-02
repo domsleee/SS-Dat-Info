@@ -368,6 +368,153 @@ fn normalize_playback_speed(speed: f32) -> f32 {
     DEFAULT_PLAYBACK_SPEED
 }
 
+/// Per-frame section stopwatch. Inert unless `TAS_UI_PROFILE=1` was set at
+/// launch; then `FrameProfAccum` logs a `[perf] frame` summary every 2 s.
+struct FrameProf {
+    enabled: bool,
+    t0: std::time::Instant,
+    last: std::time::Instant,
+    laps: Vec<(&'static str, f64)>,
+}
+
+impl FrameProf {
+    fn start(enabled: bool) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            enabled,
+            t0: now,
+            last: now,
+            laps: Vec::new(),
+        }
+    }
+
+    /// Close the section that began at the previous lap (or frame start).
+    fn lap(&mut self, name: &'static str) {
+        if !self.enabled {
+            return;
+        }
+        let now = std::time::Instant::now();
+        self.laps
+            .push((name, (now - self.last).as_secs_f64() * 1000.0));
+        self.last = now;
+    }
+}
+
+/// Process private bytes (MB) for the profiler line, so a slow leak shows up
+/// as a trend across the 2-second summaries.
+#[cfg(windows)]
+fn process_private_mb() -> f64 {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct ProcessMemoryCountersEx {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+        private_usage: usize,
+    }
+    extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn K32GetProcessMemoryInfo(
+            process: *mut c_void,
+            counters: *mut ProcessMemoryCountersEx,
+            cb: u32,
+        ) -> i32;
+    }
+    let mut pmc: ProcessMemoryCountersEx = unsafe { std::mem::zeroed() };
+    pmc.cb = std::mem::size_of::<ProcessMemoryCountersEx>() as u32;
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb) };
+    if ok != 0 {
+        pmc.private_usage as f64 / (1024.0 * 1024.0)
+    } else {
+        0.0
+    }
+}
+
+#[cfg(not(windows))]
+fn process_private_mb() -> f64 {
+    0.0
+}
+
+#[derive(Default)]
+struct FrameProfAccum {
+    enabled: bool,
+    frames: u32,
+    total_ms: f64,
+    max_ms: f64,
+    sections: Vec<(&'static str, f64)>,
+    window_start: Option<std::time::Instant>,
+}
+
+impl FrameProfAccum {
+    fn record(&mut self, prof: FrameProf, eframe_cpu_ms: Option<f32>, log: &mut Vec<String>) {
+        if !self.enabled {
+            return;
+        }
+        let total = prof.t0.elapsed().as_secs_f64() * 1000.0;
+        self.frames += 1;
+        self.total_ms += total;
+        self.max_ms = self.max_ms.max(total);
+        for (name, ms) in prof.laps {
+            match self.sections.iter_mut().find(|(n, _)| *n == name) {
+                Some(e) => e.1 += ms,
+                None => self.sections.push((name, ms)),
+            }
+        }
+        let started = *self
+            .window_start
+            .get_or_insert_with(std::time::Instant::now);
+        let window = started.elapsed();
+        if window < std::time::Duration::from_secs(2) {
+            return;
+        }
+        let n = self.frames.max(1) as f64;
+        let parts: Vec<String> = self
+            .sections
+            .iter()
+            .map(|(name, ms)| format!("{}={:.2}", name, ms / n))
+            .collect();
+        log.push(format!(
+            "[perf] frame avg {:.2}ms max {:.2}ms, {} frames in {:.1}s ({:.1} fps), eframe cpu {:.2}ms, private {:.2} MB | {}",
+            self.total_ms / n,
+            self.max_ms,
+            self.frames,
+            window.as_secs_f64(),
+            n / window.as_secs_f64(),
+            eframe_cpu_ms.unwrap_or(0.0) * 1000.0,
+            process_private_mb(),
+            parts.join(" ")
+        ));
+        self.frames = 0;
+        self.total_ms = 0.0;
+        self.max_ms = 0.0;
+        self.sections.clear();
+        self.window_start = Some(std::time::Instant::now());
+    }
+}
+
+fn stop_is_acknowledged(mode: u32, command_idle: bool) -> bool {
+    mode == TasMode::Off as u32 && command_idle
+}
+
+/// `stop_pending` = a STOP is already published or being consumed. Any OTHER
+/// pending command (e.g. a tick-scheduled arm that never fired because the
+/// level was left) must not suppress the auto-stop: STOP overwrites it.
+fn should_request_auto_stop(
+    racing: bool,
+    cycle_frozen: bool,
+    debounced: bool,
+    stop_pending: bool,
+) -> bool {
+    racing && cycle_frozen && !debounced && !stop_pending
+}
+
 #[derive(Clone, Copy)]
 struct ActiveRecordingSession {
     kind: RecordingSessionKind,
@@ -385,8 +532,17 @@ struct TasApp {
     pico: PicoState,
     history: RecordingHistory,
     history_writer: Option<history_store_v2::HistoryWriter>,
-    /// `history.revision()` value as of the last persist (dirty detection).
+    /// Highest history revision the worker confirmed durably committed.
     last_persisted_revision: u64,
+    /// Highest revision currently queued/in flight. Kept separate from durable
+    /// state so a failed background write remains dirty and can be retried.
+    last_queued_revision: u64,
+    last_failed_revision: u64,
+    history_retry_after: Option<std::time::Instant>,
+    /// `TAS_UI_PROFILE=1` frame-section profiler (inert otherwise).
+    frame_prof: FrameProfAccum,
+    /// Last automatic `try_reconnect` while disconnected.
+    last_reconnect_attempt: std::time::Instant,
     /// Soft cap (max unpinned entries) — from settings.
     history_cap: usize,
     recovery_store: Option<recording::RecoveryStore>,
@@ -544,6 +700,8 @@ impl TasApp {
         let mut history_notices: Vec<String> = Vec::new();
         let history_writer = match history_store_v2::HistoryWriter::open(history_dir.clone()) {
             Ok((writer, load)) => {
+                // Entries load lazily: a restore reads its blob from here.
+                history.set_blob_dir(history_dir.clone());
                 if load.entries.is_empty() {
                     // Even with NO entries, honor the store's computed
                     // next_entry_id and surface its warnings. A valid empty
@@ -658,6 +816,14 @@ impl TasApp {
             history,
             history_writer,
             last_persisted_revision: 0,
+            last_queued_revision: 0,
+            last_failed_revision: 0,
+            history_retry_after: None,
+            frame_prof: FrameProfAccum {
+                enabled: std::env::var_os("TAS_UI_PROFILE").is_some_and(|v| v == "1"),
+                ..Default::default()
+            },
+            last_reconnect_attempt: std::time::Instant::now(),
             history_cap,
             recovery_store,
             recovery_writer: recording::RecoveryWriter::new(),
@@ -880,18 +1046,19 @@ impl TasApp {
     /// Without this, a load while recording races the DLL's cycle hook — it's
     /// appending to input_log as the UI rewrites the whole buffer, corrupting
     /// state and silently dropping the in-progress recording. Returns once the
-    /// DLL is OFF (or the timeout elapses; we proceed either way, having at
-    /// least sent STOP). The file-dialog that precedes a load already blocked
-    /// far longer, so a sub-frame spin here is unnoticeable.
-    fn stop_active_session_for_load(&mut self, ts: impl std::fmt::Display) {
-        let mode = self
+    /// DLL is OFF and the STOP command is acknowledged. Returns `false` rather
+    /// than overwriting the recording buffer if the bounded wait expires. The
+    /// file dialog that precedes a load already blocked far longer, so a
+    /// sub-frame spin here is unnoticeable.
+    fn stop_active_session_for_load(&mut self, ts: impl std::fmt::Display) -> bool {
+        let (mode, command_idle) = self
             .shared
             .as_ref()
-            .map(|s| s.mode_volatile())
-            .unwrap_or(TasMode::Off as u32);
-        if mode == TasMode::Off as u32 {
+            .map(|s| (s.mode_volatile(), s.command_idle()))
+            .unwrap_or((TasMode::Off as u32, true));
+        if stop_is_acknowledged(mode, command_idle) {
             self.sync_live_level();
-            return;
+            return true;
         }
         let was_rec = mode == TasMode::Rec as u32;
         let ts = ts.to_string();
@@ -901,16 +1068,31 @@ impl TasApp {
         // Spin up to ~250ms for the DLL's cycle hook to process CMD_STOP and
         // flip to OFF (typically 1-2 cycles, ~7-14ms).
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        let mut stopped = false;
         while std::time::Instant::now() < deadline {
-            let off = self
+            stopped = self
                 .shared
                 .as_ref()
-                .map(|s| s.mode_volatile() == TasMode::Off as u32)
+                .map(|s| stop_is_acknowledged(s.mode_volatile(), s.command_idle()))
                 .unwrap_or(true);
-            if off {
+            if stopped {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        if !stopped {
+            stopped = self
+                .shared
+                .as_ref()
+                .map(|s| stop_is_acknowledged(s.mode_volatile(), s.command_idle()))
+                .unwrap_or(true);
+        }
+        if !stopped {
+            self.log_lines.push(format!(
+                "[{}] Load/restore refused: Stop was not acknowledged; recording buffer unchanged",
+                ts
+            ));
+            return false;
         }
         // Finalize the just-stopped recording into history NOW, before the
         // caller overwrites the buffer — same as a normal STOP, so the
@@ -945,6 +1127,7 @@ impl TasApp {
         // coherent; it cannot make a stale read fresh. Re-reading here, at the
         // last moment before the write, is what closes it.
         self.sync_live_level();
+        true
     }
 
     /// Pull the live track from shared memory into the history filter, which is
@@ -1023,23 +1206,25 @@ impl TasApp {
             // bulk-copy over it; Ctrl+Z did not, and its buttons are
             // mode-independent, so undo during REC raced the DLL writer.
             transport::Action::Undo => {
-                self.stop_active_session_for_load(ts);
-                if let Some(snap) = self.history.undo() {
-                    if let Some(shared) = self.shared.as_mut() {
-                        snap.restore_to(shared.state_mut());
+                if self.stop_active_session_for_load(ts) {
+                    if let Some(snap) = self.history.undo() {
+                        if let Some(shared) = self.shared.as_mut() {
+                            snap.restore_to(shared.state_mut());
+                        }
+                        self.log_lines
+                            .push(format!("[{}] Undo: restored previous recording", ts));
                     }
-                    self.log_lines
-                        .push(format!("[{}] Undo: restored previous recording", ts));
                 }
             }
             transport::Action::Redo => {
-                self.stop_active_session_for_load(ts);
-                if let Some(snap) = self.history.redo() {
-                    if let Some(shared) = self.shared.as_mut() {
-                        snap.restore_to(shared.state_mut());
+                if self.stop_active_session_for_load(ts) {
+                    if let Some(snap) = self.history.redo() {
+                        if let Some(shared) = self.shared.as_mut() {
+                            snap.restore_to(shared.state_mut());
+                        }
+                        self.log_lines
+                            .push(format!("[{}] Redo: restored next recording", ts));
                     }
-                    self.log_lines
-                        .push(format!("[{}] Redo: restored next recording", ts));
                 }
             }
             transport::Action::SetContinueFrame(frame) => {
@@ -1334,8 +1519,9 @@ impl TasApp {
         // (the post-settle command — Restart/Arm — fires immediately, phase
         // intact). Only the InProgress polling phases (restart-done wait, bucket
         // judge) yield to render, and only after a short bounded spin so the
-        // restart-done DETECTION isn't quantized to vsync either. The spin budget
-        // keeps the UI responsive (~25 fps) during the multi-second replay.
+        // restart-done DETECTION isn't quantized to vsync either. The spin is
+        // skipped entirely in the judge phase (see below), so the multi-second
+        // replay renders at full rate.
         let spin_until = std::time::Instant::now() + std::time::Duration::from_millis(40);
         loop {
             let outcome = match (self.cont_controller.as_mut(), self.shared.as_mut()) {
@@ -1385,9 +1571,17 @@ impl TasApp {
                     }
                     // Safe to yield here: restart-done polling / bucket judging
                     // don't set the F5 arm phase. Spin tightly for a bounded
-                    // budget (so detection stays ~3ms, not vsync-quantized), then
-                    // hand control back to the render loop and resume next frame.
-                    if std::time::Instant::now() >= spin_until {
+                    // budget (so restart-done detection stays ~3ms, not
+                    // vsync-quantized) ONLY while the phase feeds the arm
+                    // timing. The multi-second JudgeBucket replay gains nothing
+                    // from sub-frame latency, and spinning through it held every
+                    // PLAY/CONT at ~25 fps (measured 2026-09-02: 38-42 ms per
+                    // frame, all in this loop) - there, poll once per frame.
+                    let tight = self
+                        .cont_controller
+                        .as_ref()
+                        .is_some_and(|c| c.needs_tight_polling());
+                    if !tight || std::time::Instant::now() >= spin_until {
                         ctx.request_repaint();
                         return;
                     }
@@ -1533,7 +1727,11 @@ impl TasApp {
         self.persist_history_if_needed();
         let durable = match self.history_writer.as_ref() {
             Some(writer) => match writer.flush() {
-                Ok(()) => true,
+                Ok(()) => {
+                    self.last_persisted_revision =
+                        self.last_persisted_revision.max(writer.durable_revision());
+                    true
+                }
                 Err(e) => {
                     self.log_lines.push(format!(
                         "[history] persist failed — keeping recovery checkpoint: {}",
@@ -1557,12 +1755,38 @@ impl TasApp {
 
     fn persist_history_if_needed(&mut self) {
         let revision = self.history.revision();
-        if revision == self.last_persisted_revision {
-            return; // nothing changed since the last persist
-        }
         let Some(writer) = self.history_writer.as_ref() else {
             return;
         };
+
+        self.last_persisted_revision = self.last_persisted_revision.max(writer.durable_revision());
+        // Takes the writer has committed no longer need a resident copy.
+        for (id, blob) in writer.take_durable_blobs() {
+            self.history.mark_durable(id, blob);
+        }
+        let failed = writer.failed_revision();
+        if failed == 0 {
+            self.last_failed_revision = 0;
+        } else if failed != self.last_failed_revision && failed > self.last_persisted_revision {
+            self.last_failed_revision = failed;
+            self.last_queued_revision = self.last_persisted_revision;
+            self.history_retry_after =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+            self.log_lines.push(format!(
+                "[history] background persist of revision {} failed; retrying",
+                failed
+            ));
+        }
+
+        if revision == self.last_persisted_revision || revision == self.last_queued_revision {
+            return;
+        }
+        if self
+            .history_retry_after
+            .is_some_and(|deadline| std::time::Instant::now() < deadline)
+        {
+            return;
+        }
         let _t = std::time::Instant::now();
         // UI-thread cost is only the clone; the worker does serialize + disk.
         let entries = self.history.to_stored_entries();
@@ -1571,10 +1795,18 @@ impl TasApp {
         // Only mark the revision persisted if the job actually reached the
         // worker. If the writer thread is gone, leave the revision dirty so a
         // later frame retries instead of silently dropping the change.
-        if !writer.persist(entries, current, next) {
+        if !writer.persist(entries, current, next, revision) {
             return;
         }
-        self.last_persisted_revision = revision;
+        // The re-queue is a new attempt: forget the failure we already reacted
+        // to. `persist()` cleared the writer's failed marker, but if the worker
+        // fails again before this thread observes that 0, the marker comes
+        // back holding the SAME revision. Without this reset that would compare
+        // equal to `last_failed_revision`, no retry would be scheduled, and the
+        // revision would stay queued-but-never-durable until history changed.
+        self.last_failed_revision = 0;
+        self.last_queued_revision = revision;
+        self.history_retry_after = None;
         let dt = _t.elapsed();
         if dt.as_millis() > 30 {
             self.log_lines.push(format!(
@@ -1865,7 +2097,14 @@ impl TasApp {
             let current_frame = shared.frame_count_volatile();
             if current_frame == self.last_frame_count {
                 self.stale_frame_ticks += 1;
-                if self.stale_frame_ticks == 5 {
+                // Re-test liveness every 5 stale seconds, not once. The cycle
+                // also freezes at the menu while the game is alive, so a
+                // one-shot check passes there and then never runs again when
+                // the game exits later. That left tas_ui "connected" to a dead
+                // mapping for days: repainting at full rate against a stale
+                // MODE_PLAY, re-sending STOP every 2 s, and leaking until it
+                // burned most of a core (2026-09-02 post-mortem).
+                if self.stale_frame_ticks % 5 == 0 {
                     // Check if Supreme.exe is actually running
                     if !is_supreme_running() {
                         self.push_log("Game process not found — disconnecting shared memory");
@@ -2184,7 +2423,9 @@ impl TasApp {
             return;
         };
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-        self.stop_active_session_for_load(&ts);
+        if !self.stop_active_session_for_load(&ts) {
+            return;
+        }
         // Open bypassed the per-level guarantee entirely: the dialog merely
         // STARTED in the current track's folder, then accepted any file the user
         // picked and auto-played it. Recordings are named `<CODE>-<name>`, so the
@@ -2255,6 +2496,8 @@ impl eframe::App for TasApp {
             set_dark_title_bar("SSB Inspect");
         }
 
+        let mut prof = FrameProf::start(self.frame_prof.enabled);
+
         // Persist any new log lines added since last frame to the on-disk
         // session log. Done first so a panic later in the frame still
         // captures the events that led up to it.
@@ -2314,7 +2557,11 @@ impl eframe::App for TasApp {
             let debounced = self
                 .auto_stop_debounce
                 .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
-            if racing && frozen && !debounced {
+            // Once STOP is pending, do not overwrite/re-log it every two
+            // seconds. At a static menu the DLL's out-of-cycle fallback
+            // acknowledges it because Supreme::Cycle is not running.
+            let stop_pending = shared.stop_pending();
+            if should_request_auto_stop(racing, frozen, debounced, stop_pending) {
                 let ts = chrono::Local::now().format("%H:%M:%S").to_string();
                 self.log_lines.push(format!(
                     "[{}] Auto-stopped: left the level (game cycle stopped while {})",
@@ -2335,16 +2582,28 @@ impl eframe::App for TasApp {
         }
 
         // Track mode transitions for segment history + recovery checkpoints.
-        let mut mode_snapshot: Option<(u32, u32, u32, recording::RecordingSnapshot)> = None;
-        if let Some(ref shared) = self.shared {
-            mode_snapshot = Some((
+        let mode_probe = self.shared.as_ref().map(|shared| {
+            (
                 shared.mode_volatile(),
                 shared.recorded_count_volatile(),
                 shared.state().continue_from_frame,
-                recording::RecordingSnapshot::from_state(shared.state()),
-            ));
-        }
-        if let Some((current_mode, recorded, continue_from, state_snapshot)) = mode_snapshot {
+            )
+        });
+        if let Some((current_mode, recorded, continue_from)) = mode_probe {
+            // The snapshot copies ~850 KB (full input_log + rec_coords). Only a
+            // live REC (recovery checkpoints) or a REC that just ended (history
+            // entry) consumes it, so build it only then rather than every frame.
+            // (Measured 2026-09-02: the per-frame copy was not the source of
+            // the slow memory growth, but it is still 850 KB of memcpy a frame
+            // that nothing reads.)
+            let need_snapshot = current_mode == 1 || (self.last_mode == 1 && current_mode == 0);
+            let state_snapshot = if need_snapshot {
+                self.shared
+                    .as_ref()
+                    .map(|shared| recording::RecordingSnapshot::from_state(shared.state()))
+            } else {
+                None
+            };
             if current_mode != self.last_mode {
                 // REC started
                 if current_mode == 1 {
@@ -2375,7 +2634,9 @@ impl eframe::App for TasApp {
                 if self.last_mode == 1 && current_mode == 0 {
                     let _t = std::time::Instant::now();
                     self.segment_tracker.on_rec_stop(recorded);
-                    self.finalize_recording_session(&state_snapshot, recorded);
+                    if let Some(snap) = state_snapshot.as_ref() {
+                        self.finalize_recording_session(snap, recorded);
+                    }
                     let dt = _t.elapsed();
                     if dt.as_millis() > 30 {
                         self.log_lines
@@ -2385,7 +2646,9 @@ impl eframe::App for TasApp {
                 self.last_mode = current_mode;
             }
             if current_mode == 1 {
-                self.update_recording_recovery_progress(&state_snapshot);
+                if let Some(snap) = state_snapshot.as_ref() {
+                    self.update_recording_recovery_progress(snap);
+                }
 
                 // Finish-line watch (1.7): when the recording crosses the
                 // track's finish line, stop REC — the race is over, the timer
@@ -2443,6 +2706,7 @@ impl eframe::App for TasApp {
         let mut shortcut_actions = self.handle_shortcuts(ctx);
         shortcut_actions.extend(self.poll_global_shortcuts());
 
+        prof.lap("pre");
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -2539,11 +2803,23 @@ impl eframe::App for TasApp {
                 .resizable(true)
                 .default_height(100.0)
                 .show(ctx, |ui| {
+                    prof.lap("menu");
                     log_panel::show(ui, &mut self.log_lines);
+                    prof.lap("log_panel");
                 });
         }
 
         // Connection error state
+        if self.connect_error.is_some() {
+            // Retry on our own every 2 s (the repaint floor below): the game
+            // is often launched, or relaunched, after tas_ui, and the mapping
+            // only exists once TAS_Helper has initialized. Until 2026-09-02
+            // this needed a click on "Retry Connection".
+            if self.last_reconnect_attempt.elapsed() >= std::time::Duration::from_secs(2) {
+                self.last_reconnect_attempt = std::time::Instant::now();
+                self.try_reconnect();
+            }
+        }
         if self.connect_error.is_some() {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
@@ -2632,6 +2908,7 @@ impl eframe::App for TasApp {
             .as_ref()
             .map(|_| history_store_v2::default_history_dir());
         let mut open_history_dir = false;
+        prof.lap("side_rest");
         if self.show_history {
             egui::SidePanel::right("history_panel")
                 .resizable(true)
@@ -2681,7 +2958,9 @@ impl eframe::App for TasApp {
                         .as_ref()
                         .map(|s| s.state().game_in_game != 0)
                         .unwrap_or(false);
+                    prof.lap("history_hdr");
                     history_actions = history::show(ui, &self.history, in_menu, game_flag);
+                    prof.lap("history_rows");
                 });
         }
 
@@ -2716,7 +2995,9 @@ impl eframe::App for TasApp {
                         // oldest entry and shift positional indices — so a
                         // post-stop restore_index(idx) could target the wrong row.
                         let target_id = self.history.entries().get(idx).map(|e| e.entry_id);
-                        self.stop_active_session_for_load(&ts);
+                        if !self.stop_active_session_for_load(&ts) {
+                            continue;
+                        }
                         let idx = target_id
                             .and_then(|id| {
                                 self.history.entries().iter().position(|e| e.entry_id == id)
@@ -2781,6 +3062,7 @@ impl eframe::App for TasApp {
         self.poll_script_file();
         self.apply_pending_input_edit();
 
+        prof.lap("history_actions");
         // Main central area
         egui::CentralPanel::default().show(ctx, |ui| {
             // Transport bar at top
@@ -3057,6 +3339,7 @@ impl eframe::App for TasApp {
                 // here when toggled (it's a wide table that reads best
                 // next to the timeline it's drifting against).
                 ui.label(egui::RichText::new("Input Timeline").strong());
+                prof.lap("central_pre");
                 let tl_outcome = timeline::show(
                     ui,
                     state,
@@ -3120,6 +3403,7 @@ impl eframe::App for TasApp {
                     }
                 });
 
+                prof.lap("timeline");
                 if self.show_debug_drift {
                     ui.separator();
                     ui.label(egui::RichText::new("Debug drift").strong());
@@ -3252,6 +3536,7 @@ impl eframe::App for TasApp {
             }
         });
 
+        prof.lap("central_rest");
         // Poll DLL log ring buffer
         if let Some(ref shared) = self.shared {
             use tas_shared::TasLogSeverity;
@@ -3269,7 +3554,15 @@ impl eframe::App for TasApp {
             }
         }
 
+        prof.lap("dll_log");
+        for w in self.history.take_warnings() {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            self.log_lines.push(format!("[{}] History: {}", ts, w));
+        }
         self.persist_history_if_needed();
+        prof.lap("persist");
+        self.frame_prof
+            .record(prof, _frame.info().cpu_usage, &mut self.log_lines);
 
         // AUTO-REFRESH, but only as fast as there is something to show.
         //
@@ -3292,7 +3585,14 @@ impl eframe::App for TasApp {
             .map(|s| s.mode_volatile() != TasMode::Off as u32)
             .unwrap_or(false);
         let cycle_ticking = self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400);
-        let refresh_ms = if mode_active || cycle_ticking {
+        // eframe 0.29 still runs update()+paint while minimized, and every
+        // painted frame costs a little renderer-side memory on the DX12/Vulkan
+        // path (measured ~15 KB/s at 60 fps, none on GL). Nobody can see a
+        // minimized window, so idle it hard regardless of mode.
+        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        let refresh_ms = if minimized {
+            500
+        } else if mode_active || cycle_ticking {
             33
         } else {
             250
@@ -3304,29 +3604,11 @@ impl eframe::App for TasApp {
 /// Check if Supreme.exe (or Supreme_v1.035.exe) is running.
 #[cfg(windows)]
 fn is_supreme_running() -> bool {
-    use std::process::Command;
-    // Use tasklist to check — lightweight and doesn't require extra crates
-    if let Ok(output) = Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq Supreme.exe", "/NH"])
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if stdout.contains("Supreme") {
-            return true;
-        }
-    }
-    if let Ok(output) = Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq Supreme_v1.035.exe", "/NH"])
-        .creation_flags(0x08000000)
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if stdout.contains("Supreme") {
-            return true;
-        }
-    }
-    false
+    // In-process Toolhelp walk (same name set as the global-shortcut PID
+    // lookup). This runs from the UI thread every 5 stale seconds, i.e. the
+    // whole time the game sits at a menu; the previous implementation spawned
+    // `tasklist` twice per call, a ~100 ms stall each time.
+    find_supreme_pid().is_some()
 }
 
 #[cfg(not(windows))]
@@ -3376,8 +3658,12 @@ fn main() -> eframe::Result {
     }
 
     // Single-instance guard via named mutex (cross-platform crate, uses Windows mutex underneath).
+    // SSB_INSPECT_ALLOW_MULTI=1 skips it for diagnostics (e.g. profiling a
+    // second build against a copied SSB_INSPECT_DATA_DIR while the deployed
+    // instance keeps running).
+    let allow_multi = std::env::var_os("SSB_INSPECT_ALLOW_MULTI").is_some_and(|v| v == "1");
     let instance = single_instance::SingleInstance::new("SSBInspect").unwrap();
-    if !instance.is_single() {
+    if !allow_multi && !instance.is_single() {
         eprintln!("SSB Inspect is already running.");
         #[cfg(windows)]
         unsafe {
@@ -3470,6 +3756,25 @@ mod tests {
     use egui::{Event, Key, Modifiers, RawInput};
     use tas_shared::TasSharedState;
 
+    #[test]
+    fn recording_buffer_overwrite_requires_stop_acknowledgement() {
+        assert!(!stop_is_acknowledged(TasMode::Play as u32, false));
+        assert!(!stop_is_acknowledged(TasMode::Play as u32, true));
+        assert!(!stop_is_acknowledged(TasMode::Off as u32, false));
+        assert!(stop_is_acknowledged(TasMode::Off as u32, true));
+    }
+
+    #[test]
+    fn pending_frozen_stop_is_not_reissued() {
+        // Idle slot, or a stale non-STOP command: request the stop.
+        assert!(should_request_auto_stop(true, true, false, false));
+        // STOP already published/claimed: leave it alone.
+        assert!(!should_request_auto_stop(true, true, false, true));
+        assert!(!should_request_auto_stop(false, true, false, false));
+        assert!(!should_request_auto_stop(true, false, false, false));
+        assert!(!should_request_auto_stop(true, true, true, false));
+    }
+
     /// Test constructor: creates TasApp without shared memory or Pico.
     fn test_app() -> TasApp {
         TasApp {
@@ -3482,6 +3787,14 @@ mod tests {
             history_writer: None,
             recovery_writer: recording::RecoveryWriter::new(),
             last_persisted_revision: 0,
+            last_queued_revision: 0,
+            last_failed_revision: 0,
+            history_retry_after: None,
+            frame_prof: FrameProfAccum {
+                enabled: std::env::var_os("TAS_UI_PROFILE").is_some_and(|v| v == "1"),
+                ..Default::default()
+            },
+            last_reconnect_attempt: std::time::Instant::now(),
             history_cap: 64,
             recovery_store: None,
             log_lines: Vec::new(),
