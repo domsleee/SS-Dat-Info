@@ -12,7 +12,7 @@ public class K {
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool x);
 }
 "@
-function Scan($n){ switch($n){ "UP"{,@(0x48,$true)} "DOWN"{,@(0x50,$true)} "LEFT"{,@(0x4B,$true)} "RIGHT"{,@(0x4D,$true)} "ENTER"{,@(0x1C,$false)} "ESC"{,@(0x01,$false)} default{$null} } }
+function Scan($n){ switch($n){ "UP"{,@(0x48,$true)} "DOWN"{,@(0x50,$true)} "LEFT"{,@(0x4B,$true)} "RIGHT"{,@(0x4D,$true)} "ENTER"{,@(0x1C,$false)} "ESC"{,@(0x01,$false)} "F5"{,@(0x3F,$false)} "F9"{,@(0x43,$false)} "F10"{,@(0x44,$false)} "F11"{,@(0x57,$false)} "F12"{,@(0x58,$false)} default{$null} } }
 $p=Get-Process Supreme -EA SilentlyContinue|Select-Object -First 1; if(-not $p){"NO GAME";exit 1}
 $h=$p.MainWindowHandle
 $fg=[K]::GetForegroundWindow();$ft=[K]::GetWindowThreadProcessId($fg,[IntPtr]::Zero);$mt=[K]::GetCurrentThreadId()

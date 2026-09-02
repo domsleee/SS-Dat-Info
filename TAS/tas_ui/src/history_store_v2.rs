@@ -15,7 +15,9 @@ use crate::recording::{HistoryEntryKind, PersistedSnapshot};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use tas_shared::TAS_MAX_TICKS;
 
@@ -81,7 +83,12 @@ pub struct LoadedEntry {
     /// Level code (e.g. "FE"); None on manifests written before this field.
     pub level: Option<String>,
     pub created_at_iso: String,
+    /// Inline bytes. Always `Some` for available snapshot entries under
+    /// `LoadMode::Eager`; `None` under `LoadMode::Lazy` (see `blob`).
     pub snapshot: Option<PersistedSnapshot>,
+    /// The on-disk blob backing this entry (`None` for markers). Under lazy
+    /// loading this is what a later `load_blob` needs.
+    pub blob: Option<BlobRef>,
     pub available: bool,
 }
 
@@ -136,14 +143,16 @@ struct Manifest {
     entries: Vec<ManifestEntry>,
 }
 
-#[derive(Clone, Copy)]
-struct BlobInfo {
-    size: u64,
-    checksum: u32,
+/// Identity of an immutable on-disk blob (`<id>.tasrec`): enough to read and
+/// verify it later (`load_blob`) without holding its contents in memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlobRef {
+    pub size: u64,
+    pub checksum: u32,
     /// Encoding of the on-disk blob (so a reused/preserved legacy blob keeps
     /// its `blob_format` in the rewritten manifest rather than being mislabeled
     /// as the current raw format).
-    format: u32,
+    pub format: u32,
 }
 
 pub struct HistoryStoreV2 {
@@ -152,16 +161,38 @@ pub struct HistoryStoreV2 {
     referenced: HashSet<u64>,
     /// Blob info for ids that currently have a blob on disk (lets us skip
     /// re-serializing immutable blobs and carry checksums into the manifest).
-    blobs: HashMap<u64, BlobInfo>,
+    blobs: HashMap<u64, BlobRef>,
     /// Ids whose manifest entry references a blob that was missing/corrupt at
     /// load. We preserve their blob metadata across re-persists so a transient
     /// disappearance doesn't permanently demote a snapshot entry to a marker
     /// (and so the entry recovers if the file reappears).
-    unavailable: HashMap<u64, BlobInfo>,
+    unavailable: HashMap<u64, BlobRef>,
+}
+
+/// How `open_in_with` treats blob-bearing rows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoadMode {
+    /// Read, verify and return every blob (tests; small stores).
+    Eager,
+    /// Verify existence and size only; hand back `blob` references and let
+    /// the caller read a blob when it is actually restored (`load_blob`).
+    Lazy,
 }
 
 impl HistoryStoreV2 {
+    /// Open, reading every blob into memory.
     pub fn open_in(dir: PathBuf) -> Result<(Self, LoadResult), String> {
+        Self::open_in_with(dir, LoadMode::Eager)
+    }
+
+    /// Open without reading blob contents: entries come back with
+    /// `snapshot: None` and `blob: Some(..)`. The production path — reading
+    /// 533 entries eagerly cost 454 MB resident at startup (2026-09-02).
+    pub fn open_in_lazy(dir: PathBuf) -> Result<(Self, LoadResult), String> {
+        Self::open_in_with(dir, LoadMode::Lazy)
+    }
+
+    pub fn open_in_with(dir: PathBuf, mode: LoadMode) -> Result<(Self, LoadResult), String> {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("failed to create history dir {}: {}", dir.display(), e))?;
 
@@ -172,7 +203,7 @@ impl HistoryStoreV2 {
         let mut entries = Vec::new();
         let mut referenced = HashSet::new();
         let mut blobs = HashMap::new();
-        let mut unavailable: HashMap<u64, BlobInfo> = HashMap::new();
+        let mut unavailable: HashMap<u64, BlobRef> = HashMap::new();
         let mut max_manifest_id = 0u64;
         let mut stored_next = 0u64;
         let mut persisted_current = None;
@@ -190,18 +221,28 @@ impl HistoryStoreV2 {
                     referenced.insert(me.entry_id);
                 }
 
-                let blob_info = BlobInfo {
+                let blob_info = BlobRef {
                     size: me.size.unwrap_or(0),
                     checksum: me.checksum.unwrap_or(0),
                     format: me.blob_format,
                 };
-                let (snapshot, available) = match me.checksum {
-                    None => (None, true), // marker entry, no blob expected
+                let (snapshot, available, blob) = match me.checksum {
+                    None => (None, true, None), // marker entry, no blob expected
                     Some(expected) => {
-                        match read_blob(&dir, me.entry_id, expected, me.size, me.blob_format) {
+                        let read = match mode {
+                            LoadMode::Eager => {
+                                read_blob(&dir, me.entry_id, expected, me.size, me.blob_format)
+                                    .map(Some)
+                            }
+                            // Existence + size only. Checksum and parse happen
+                            // on first restore (`load_blob`), which quarantines
+                            // a corrupt blob exactly as this path would.
+                            LoadMode::Lazy => stat_blob(&dir, me.entry_id, me.size).map(|()| None),
+                        };
+                        match read {
                             Ok(snap) => {
                                 blobs.insert(me.entry_id, blob_info);
-                                (Some(snap), true)
+                                (snap, true, Some(blob_info))
                             }
                             Err(BlobError::Missing) => {
                                 warnings.push(format!(
@@ -209,7 +250,7 @@ impl HistoryStoreV2 {
                                     me.entry_id, me.name
                                 ));
                                 unavailable.insert(me.entry_id, blob_info);
-                                (None, false)
+                                (None, false, Some(blob_info))
                             }
                             Err(BlobError::Corrupt) => {
                                 // Quarantine so we don't re-hit it every launch.
@@ -219,7 +260,7 @@ impl HistoryStoreV2 {
                                     me.entry_id, me.name
                                 ));
                                 unavailable.insert(me.entry_id, blob_info);
-                                (None, false)
+                                (None, false, Some(blob_info))
                             }
                         }
                     }
@@ -237,6 +278,7 @@ impl HistoryStoreV2 {
                     level: me.level.clone(),
                     created_at_iso: me.created_at_iso.clone(),
                     snapshot,
+                    blob,
                     available,
                 });
             }
@@ -305,12 +347,20 @@ impl HistoryStoreV2 {
         for e in entries {
             let (size, checksum, blob_format) = match &e.snapshot {
                 None => {
-                    // No bytes in hand. If this id is a snapshot entry whose
-                    // blob is currently missing/corrupt, preserve its manifest
-                    // blob reference (don't demote it to a marker) so it can
-                    // recover if the file reappears — keeping its original
-                    // encoding so a preserved legacy blob isn't mislabeled.
-                    match self.unavailable.get(&e.entry_id) {
+                    // No bytes in hand. Two legitimate reasons: the entry was
+                    // loaded lazily (its immutable blob is on disk and this
+                    // store knows it), or its blob is missing/corrupt. Either
+                    // way keep the manifest's blob reference — demoting to a
+                    // marker would GC a perfectly good blob in the lazy case,
+                    // and would stop a missing one from recovering if the file
+                    // reappears. The original encoding is kept so a preserved
+                    // legacy blob isn't mislabeled. Ids are never reused, so
+                    // a known id without bytes can only mean one of these.
+                    match self
+                        .blobs
+                        .get(&e.entry_id)
+                        .or_else(|| self.unavailable.get(&e.entry_id))
+                    {
                         Some(info) => (Some(info.size), Some(info.checksum), info.format),
                         None => (None, None, CURRENT_BLOB_FORMAT),
                     }
@@ -385,7 +435,7 @@ impl HistoryStoreV2 {
         Ok(outcome)
     }
 
-    fn write_blob(&self, id: u64, snapshot: &PersistedSnapshot) -> Result<BlobInfo, String> {
+    fn write_blob(&self, id: u64, snapshot: &PersistedSnapshot) -> Result<BlobRef, String> {
         // New blobs use the bounded raw layout (never bincode). crc32 still
         // guards accidental corruption.
         let bytes = serialize_raw_blob(snapshot);
@@ -405,7 +455,7 @@ impl HistoryStoreV2 {
             let _ = std::fs::remove_file(&tmp);
             format!("failed to finalize blob {}: {}", final_path.display(), e)
         })?;
-        Ok(BlobInfo {
+        Ok(BlobRef {
             size,
             checksum,
             format: CURRENT_BLOB_FORMAT,
@@ -414,6 +464,12 @@ impl HistoryStoreV2 {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Reference for a blob this store currently holds on disk (loaded or
+    /// written by it); `None` for markers, unavailable ids, and unknown ids.
+    pub fn blob_ref(&self, id: u64) -> Option<BlobRef> {
+        self.blobs.get(&id).copied()
     }
 }
 
@@ -464,6 +520,11 @@ fn migrate_legacy_in(
 pub struct HistoryWriter {
     tx: Option<Sender<WriteMsg>>,
     worker: Option<JoinHandle<()>>,
+    durable_revision: Arc<AtomicU64>,
+    failed_revision: Arc<AtomicU64>,
+    /// Blob references for inline snapshots the worker has committed and the
+    /// UI has not yet collected (`take_durable_blobs`).
+    durable_blobs: Arc<Mutex<Vec<(u64, BlobRef)>>>,
 }
 
 enum WriteMsg {
@@ -471,6 +532,7 @@ enum WriteMsg {
         entries: Vec<StoredEntry>,
         current_entry_id: Option<u64>,
         next_entry_id: u64,
+        revision: u64,
     },
     /// Drain barrier. The worker answers with the durability result of the most
     /// recent persist (Ok only if the manifest actually committed). Callers gate
@@ -481,8 +543,14 @@ enum WriteMsg {
 impl HistoryWriter {
     /// Open (loading existing data) and spawn the writer thread.
     pub fn open(dir: PathBuf) -> Result<(Self, LoadResult), String> {
-        let (store, load) = HistoryStoreV2::open_in(dir)?;
+        let (store, load) = HistoryStoreV2::open_in_lazy(dir)?;
         let (tx, rx) = channel::<WriteMsg>();
+        let durable_revision = Arc::new(AtomicU64::new(0));
+        let failed_revision = Arc::new(AtomicU64::new(0));
+        let durable_blobs: Arc<Mutex<Vec<(u64, BlobRef)>>> = Arc::new(Mutex::new(Vec::new()));
+        let worker_durable_revision = Arc::clone(&durable_revision);
+        let worker_failed_revision = Arc::clone(&failed_revision);
+        let worker_durable_blobs = Arc::clone(&durable_blobs);
         let worker = std::thread::Builder::new()
             .name("history-v2-writer".into())
             .spawn(move || {
@@ -495,7 +563,7 @@ impl HistoryWriter {
                     // Coalesce: keep only the newest desired state (each job is
                     // the full set; the store diffs it against disk), and answer
                     // every flush in the batch after writing.
-                    let mut latest: Option<(Vec<StoredEntry>, Option<u64>, u64)> = None;
+                    let mut latest: Option<(Vec<StoredEntry>, Option<u64>, u64, u64)> = None;
                     let mut acks: Vec<Sender<Result<(), String>>> = Vec::new();
                     let mut next = Some(msg);
                     while let Some(m) = next {
@@ -504,16 +572,42 @@ impl HistoryWriter {
                                 entries,
                                 current_entry_id,
                                 next_entry_id,
-                            } => latest = Some((entries, current_entry_id, next_entry_id)),
+                                revision,
+                            } => {
+                                latest = Some((entries, current_entry_id, next_entry_id, revision))
+                            }
                             WriteMsg::Flush(a) => acks.push(a),
                         }
                         next = rx.try_recv().ok();
                     }
-                    if let Some((entries, current, next_id)) = latest {
+                    if let Some((entries, current, next_id, revision)) = latest {
                         last_result = match store.persist(&entries, current, next_id) {
-                            Ok(_) => Ok(()),
+                            Ok(_) => {
+                                // Every inline snapshot in this job is now an
+                                // immutable blob on disk: tell the UI so it can
+                                // drop its resident copy (see
+                                // RecordingHistory::mark_durable). Published
+                                // BEFORE the revision so a reader that sees the
+                                // revision can collect them.
+                                let refs: Vec<(u64, BlobRef)> = entries
+                                    .iter()
+                                    .filter(|e| e.snapshot.is_some())
+                                    .filter_map(|e| {
+                                        store.blob_ref(e.entry_id).map(|b| (e.entry_id, b))
+                                    })
+                                    .collect();
+                                if !refs.is_empty() {
+                                    if let Ok(mut pending) = worker_durable_blobs.lock() {
+                                        pending.extend(refs);
+                                    }
+                                }
+                                worker_durable_revision.store(revision, Ordering::Release);
+                                worker_failed_revision.store(0, Ordering::Release);
+                                Ok(())
+                            }
                             Err(e) => {
                                 eprintln!("[history v2] persist failed: {}", e);
+                                worker_failed_revision.store(revision, Ordering::Release);
                                 Err(e)
                             }
                         };
@@ -528,6 +622,9 @@ impl HistoryWriter {
             Self {
                 tx: Some(tx),
                 worker: Some(worker),
+                durable_revision,
+                failed_revision,
+                durable_blobs,
             },
             load,
         ))
@@ -541,17 +638,41 @@ impl HistoryWriter {
         entries: Vec<StoredEntry>,
         current_entry_id: Option<u64>,
         next_entry_id: u64,
+        revision: u64,
     ) -> bool {
         match &self.tx {
-            Some(tx) => tx
-                .send(WriteMsg::Persist {
+            Some(tx) => {
+                // Clear the previous failure before retrying the same revision,
+                // so callers can distinguish a new failed attempt.
+                self.failed_revision.store(0, Ordering::Release);
+                tx.send(WriteMsg::Persist {
                     entries,
                     current_entry_id,
                     next_entry_id,
+                    revision,
                 })
-                .is_ok(),
+                .is_ok()
+            }
             None => false,
         }
+    }
+
+    pub fn durable_revision(&self) -> u64 {
+        self.durable_revision.load(Ordering::Acquire)
+    }
+
+    pub fn failed_revision(&self) -> u64 {
+        self.failed_revision.load(Ordering::Acquire)
+    }
+
+    /// Blob references for snapshots the worker has committed since the last
+    /// call (in persist order). The UI hands them to
+    /// `RecordingHistory::mark_durable`.
+    pub fn take_durable_blobs(&self) -> Vec<(u64, BlobRef)> {
+        self.durable_blobs
+            .lock()
+            .map(|mut pending| std::mem::take(&mut *pending))
+            .unwrap_or_default()
     }
 
     /// Block until every queued write has hit disk, returning the durability
@@ -628,6 +749,38 @@ fn read_blob(
     // demote a present-but-bad blob to a marker on the next persist.
     snapshot.validate().map_err(|_| BlobError::Corrupt)?;
     Ok(snapshot)
+}
+
+/// Existence + size check for lazy loading. Mirrors `read_blob`'s pre-read
+/// bounds; the checksum is deferred to `load_blob`.
+fn stat_blob(dir: &Path, id: u64, expected_size: Option<u64>) -> Result<(), BlobError> {
+    let meta = std::fs::metadata(blob_path(dir, id)).map_err(|_| BlobError::Missing)?;
+    let len = meta.len();
+    if len > MAX_SNAPSHOT_BYTES {
+        return Err(BlobError::Corrupt);
+    }
+    if let Some(sz) = expected_size {
+        if len != sz {
+            return Err(BlobError::Corrupt);
+        }
+    }
+    Ok(())
+}
+
+/// Read and verify one blob on demand (the lazy counterpart of `open_in`'s
+/// eager read). A corrupt blob is quarantined here, exactly as at eager load.
+pub fn load_blob(dir: &Path, id: u64, blob: BlobRef) -> Result<PersistedSnapshot, String> {
+    match read_blob(dir, id, blob.checksum, Some(blob.size), blob.format) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(BlobError::Missing) => Err(format!("blob {} missing", blob_path(dir, id).display())),
+        Err(BlobError::Corrupt) => {
+            quarantine_blob(dir, id);
+            Err(format!(
+                "blob {} corrupt (quarantined)",
+                blob_path(dir, id).display()
+            ))
+        }
+    }
 }
 
 /// Raw blob layout (`BLOB_FORMAT_RAW_V2`):
@@ -786,7 +939,10 @@ fn resolve_current(
     let Some(pos) = pos else {
         return None; // cursor pointed at a now-absent entry
     };
-    let restorable = |e: &LoadedEntry| e.available && e.snapshot.is_some();
+    // Restorable = an available snapshot entry, whether its bytes were read
+    // (eager) or only referenced (lazy). Markers have neither.
+    let restorable =
+        |e: &LoadedEntry| e.available && (e.snapshot.is_some() || e.blob.is_some());
     if restorable(&entries[pos]) {
         return Some(target);
     }
@@ -871,6 +1027,96 @@ mod tests {
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
             snapshot: None,
         }
+    }
+
+    #[test]
+    fn history_writer_advances_revision_only_after_durable_commit() {
+        let dir = tmp_dir("writer_revision");
+        let (writer, _) = HistoryWriter::open(dir.clone()).unwrap();
+        assert!(writer.persist(vec![entry(1, "A", false, 3)], Some(1), 2, 42));
+        writer.flush().unwrap();
+        assert_eq!(writer.durable_revision(), 42);
+        assert_eq!(writer.failed_revision(), 0);
+        drop(writer);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn history_writer_reports_failed_revision_without_marking_it_durable() {
+        let dir = tmp_dir("writer_failed_revision");
+        let (writer, _) = HistoryWriter::open(dir.clone()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(writer.persist(vec![entry(1, "A", false, 3)], Some(1), 2, 7));
+        assert!(writer.flush().is_err());
+        assert_eq!(writer.durable_revision(), 0);
+        assert_eq!(writer.failed_revision(), 7);
+    }
+
+    #[test]
+    fn lazy_open_defers_blobs_and_persist_keeps_them() {
+        let dir = tmp_dir("lazy");
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let entries = vec![
+            entry(1, "A", false, 3),
+            entry(2, "B", true, 5),
+            marker(3, "saved"),
+        ];
+        store.persist(&entries, Some(2), 4).unwrap();
+        drop(store);
+
+        let (mut lazy, res) = HistoryStoreV2::open_in_lazy(dir.clone()).unwrap();
+        assert_eq!(res.entries.len(), 3);
+        assert!(res.entries[0].snapshot.is_none() && res.entries[0].available);
+        let blob1 = res.entries[0].blob.expect("lazy row carries its blob ref");
+        assert!(res.entries[2].blob.is_none(), "marker has no blob");
+        assert_eq!(lazy.blob_ref(1), Some(blob1));
+        assert_eq!(res.current_entry_id, Some(2));
+
+        // The bridge re-persists lazily-loaded rows WITHOUT bytes: the blob
+        // reference and file must survive (not demoted to a marker + GC'd).
+        let again = vec![
+            StoredEntry {
+                snapshot: None,
+                ..entry(1, "A", false, 3)
+            },
+            StoredEntry {
+                snapshot: None,
+                ..entry(2, "B", true, 5)
+            },
+            marker(3, "saved"),
+        ];
+        let outcome = lazy.persist(&again, Some(2), 4).unwrap();
+        assert_eq!(outcome.blobs_written, 0);
+        assert_eq!(outcome.blobs_deleted, 0);
+        assert!(blob_path(&dir, 1).exists() && blob_path(&dir, 2).exists());
+
+        // On-demand read returns the original bytes; an eager reopen still
+        // sees every snapshot.
+        assert_eq!(
+            load_blob(&dir, 1, blob1).unwrap(),
+            entries[0].snapshot.clone().unwrap()
+        );
+        assert_loads_as(&dir, &entries, Some(2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_blob_quarantines_corrupt_blob() {
+        let dir = tmp_dir("lazy_corrupt");
+        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store.persist(&[entry(1, "A", false, 4)], Some(1), 2).unwrap();
+        drop(store);
+        let (_lazy, res) = HistoryStoreV2::open_in_lazy(dir.clone()).unwrap();
+        assert!(res.entries[0].available, "lazy open only stats the file");
+        let blob = res.entries[0].blob.unwrap();
+        // Same size, different bytes: passes the lazy stat, fails the checksum.
+        let p = blob_path(&dir, 1);
+        let mut bytes = std::fs::read(&p).unwrap();
+        bytes[4] ^= 0xFF;
+        std::fs::write(&p, &bytes).unwrap();
+        assert!(load_blob(&dir, 1, blob).is_err());
+        assert!(!p.exists(), "corrupt blob quarantined on demand");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Assert the loaded store matches the desired entries + cursor exactly.
