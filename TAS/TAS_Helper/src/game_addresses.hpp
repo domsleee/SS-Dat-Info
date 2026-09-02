@@ -134,6 +134,10 @@ struct GameAddresses {
     std::uint8_t* cave2_site = nullptr;     // SG+0x13FE40: Supreme::Cycle
     std::uint8_t* replay_capture_site = nullptr; // SG+0x9E8F0: replay object capture
     std::uint8_t* player_base = nullptr;    // SG+0x1D5450: root pointer
+    // Live vtable addresses (SG base + RVA) the replay-capture hook classifies
+    // recorder owners with; 0 until Resolve validated the constructor sites.
+    std::uint32_t player_vtable = 0;
+    std::uint32_t ghost_vtable = 0;
     // SG+0x1D3304: pointer to the CURRENT level's resource path string.
     // Found by differential RE (tas_test level-hunt ptr) and verified on four
     // tracks. The pointed-to string changes the instant a level loads, which is
@@ -189,16 +193,21 @@ struct GameAddresses {
 
     // Replay object: player ptr at [replayObj+0x84]
     static constexpr uint32_t REPLAY_PLAYER_OFFSET = 0x84;
-    // Human-player identity (live pointer scan, 2026-09-02): the player object
-    // links to its controller at +0x1B8, and the HUMAN's controller holds the
-    // keyboard object ([root+0x530]) at +0x590. Ghost / AI players are driven
-    // by other controllers, so this is how the replay-capture hook tells the
-    // human's recorder from the ghosts' during a Time Attack restart. The
-    // player also links back to its recorder at +0x14C (= decompile
-    // param_1[0x53]).
-    static constexpr uint32_t PLAYER_CONTROLLER_OFFSET = 0x1B8;
-    static constexpr uint32_t CONTROLLER_KEYBOARD_OFFSET = 0x590;
+    // Human-player identity (RTTI + live scan, 2026-09-02): the rider the
+    // keyboard drives in a race is a plain `Player` (the base class, vtable
+    // below); Time Attack ghosts / the guide are `Ghost_Player`, computer riders
+    // `AI_Player`, network riders `Net_Player` - each with its own vtable. The
+    // player links back to its recorder at +0x14C (decompile param_1[0x53]);
+    // the replay-capture hook adopts a recorder only if its owner is a Player
+    // that still points at it (see replay_identity.hpp). Both vtable RVAs are
+    // validated against the constructors' `mov [this], offset vtable`
+    // immediates in Resolve.
+    // (A first attempt keyed on [[player+0x1B8]+0x590] == keyboard object; that
+    // was heap adjacency - +0x1B8 is the player's Player_Event_Interface - and
+    // never matched in a fresh process.)
     static constexpr uint32_t PLAYER_RECORDER_OFFSET = 0x14C;
+    static constexpr uint32_t PLAYER_VTABLE_RVA = 0x169E10;        // .?AVPlayer@Supreme_Snowboarding@Housemarque@@
+    static constexpr uint32_t GHOST_PLAYER_VTABLE_RVA = 0x169B74;  // .?AVGhost_Player@...
     // Player position offsets
     static constexpr uint32_t PLAYER_X = 0xF8;
     static constexpr uint32_t PLAYER_Y = 0xFC;
@@ -293,14 +302,29 @@ struct GameAddresses {
             { 0x83, 0xEC, 0x08, 0x56, 0x8B, 0xF1 };
         static constexpr uint8_t kBb3b10[] =                      // push -1; push HMG+0x583A (relocated)
             { 0x6A, 0xFF, 0x68, 0x3A, 0x58, 0x00, 0x10 };
+        // Player::Player (SG+0x83DF0) at +0x5F: mov [esi+1C4],ebx;
+        // mov dword ptr [esi], offset Player vtable (relocated imm32 at +8).
+        static constexpr uint8_t kPlayerCtor[] =
+            { 0x89, 0x9E, 0xC4, 0x01, 0x00, 0x00, 0xC7, 0x06, 0x10, 0x9E, 0x16, 0x10 };
+        // Ghost_Player::Ghost_Player (SG+0x7FF10) at +0x28:
+        // mov dword ptr [ebp+0], offset Ghost_Player vtable (imm32 at +3).
+        static constexpr uint8_t kGhostCtor[] =
+            { 0xC7, 0x45, 0x00, 0x74, 0x9B, 0x16, 0x10 };
         if (!ValidateCode("Supreme.exe+0x25C81", cave5_site, kCave5) ||
             !ValidateCode("Supreme_Game.dll+0x13FE40", cave2_site, kCave2) ||
             !ValidateCode("Supreme_Game.dll+0x9E8F0", replay_capture_site, kReplay) ||
             !ValidateCodeOrHooked("HMG_Cetsup_Win32.dll+0x3940", cave1c_down, kKeyDown) ||
             !ValidateCodeOrHooked("HMG_Cetsup_Win32.dll+0x3980", cave1c_up, kKeyUp) ||
-            !ValidateCodeAbs<3>("HMG_Cetsup_Win32.dll+0x3B10", bb3b10, kBb3b10, hmgBase, 0x583A)) {
+            !ValidateCodeAbs<3>("HMG_Cetsup_Win32.dll+0x3B10", bb3b10, kBb3b10, hmgBase, 0x583A) ||
+            !ValidateCodeAbs<8>("Supreme_Game.dll+0x83E4F (Player ctor)", sgBase + 0x83E4F, kPlayerCtor,
+                                sgBase, PLAYER_VTABLE_RVA) ||
+            !ValidateCodeAbs<3>("Supreme_Game.dll+0x7FF38 (Ghost_Player ctor)", sgBase + 0x7FF38,
+                                kGhostCtor, sgBase, GHOST_PLAYER_VTABLE_RVA)) {
             return false;
         }
+        player_vtable = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(sgBase + PLAYER_VTABLE_RVA));
+        ghost_vtable = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(sgBase + GHOST_PLAYER_VTABLE_RVA));
+        Log(std::format("Rider class vtables: Player {:#010x}, Ghost_Player {:#010x}", player_vtable, ghost_vtable));
 
         Log(std::format("EXE base: {:p}", (void*)exeBase));
         Log(std::format("SG base: {:p}", (void*)sgBase));

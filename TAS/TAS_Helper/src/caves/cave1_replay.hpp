@@ -4,6 +4,7 @@
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
 #include "../replay_capture_policy.hpp"
+#include "../replay_identity.hpp"
 #include "../external/safetyhook.hpp"
 
 // Replay object capture hook at SG+0x9E8F0.
@@ -12,10 +13,11 @@
 // recorder's per-frame "push 112-byte frame"). We capture it so Cave 2 can
 // derive the player pointer from [recorder+0x84] every cycle.
 //
-// Only the HUMAN's recorder is followed (see replay_capture_policy.hpp): its
-// owner player is the one whose controller holds the keyboard object. Ghost /
-// AI recorders that reach this site around a restart are ignored, and a
-// re-created human recorder is adopted immediately, even mid-run.
+// Only the HUMAN's recorder is followed (see replay_identity.hpp /
+// replay_capture_policy.hpp): the one whose owner is a plain `Player` that still links
+// back to it. Ghost / AI recorders that reach this site around a restart are
+// ignored, and a re-created human recorder is adopted immediately, even
+// mid-run.
 
 inline TasSharedState* g_replayState = nullptr;
 inline GameAddresses* g_replayAddr = nullptr;
@@ -44,20 +46,9 @@ static void ReplayHexU32(char* dst, uint32_t v) {
         v >>= 4;
     }
 }
-
-// Is `recorder` owned by the keyboard-driven (human) player?
-//   owner      = [recorder + 0x84]
-//   controller = [owner + 0x1B8]
-//   [controller + 0x590] == [root + 0x530]  (the keyboard object)
-static bool ReplayRecorderIsHuman(uint32_t recorder, uint32_t* ownerOut) {
-    uint32_t owner = ReplaySafeReadU32(recorder + GameAddresses::REPLAY_PLAYER_OFFSET);
-    if (ownerOut) *ownerOut = owner;
-    if (!owner || !g_replayAddr) return false;
-    uint32_t root = ReplaySafeReadU32((uint32_t)g_replayAddr->player_base);
-    uint32_t kb = ReplaySafeReadU32(root + GameAddresses::KEYBOARD_OBJ_OFFSET);
-    if (!kb) return false;
-    uint32_t controller = ReplaySafeReadU32(owner + GameAddresses::PLAYER_CONTROLLER_OFFSET);
-    return ReplaySafeReadU32(controller + GameAddresses::CONTROLLER_KEYBOARD_OFFSET) == kb;
+static char* ReplayPut(char* p, const char* s) {
+    while (*s) *p++ = *s++;
+    return p;
 }
 
 bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
@@ -65,15 +56,21 @@ bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
         Log("Replay capture: hook site not resolved");
         return false;
     }
+    if (!addr.player_vtable) {
+        Log("Replay capture: Player vtable not resolved - cannot identify the human rider");
+        return false;
+    }
 
     g_replayState = state;
     g_replayAddr = &addr;
-    Log(std::format("Replay capture: hooking at {:p} (SG+0x9E8F0)", (void*)addr.replay_capture_site));
+    Log(std::format("Replay capture: hooking at {:p} (SG+0x9E8F0), human = Player vtable {:#010x}",
+                    (void*)addr.replay_capture_site, addr.player_vtable));
 
     replayCaptureHook = safetyhook::create_mid(addr.replay_capture_site, [](SafetyHookContext& ctx) {
         uint64_t t0 = __rdtsc();
         auto* s = g_replayState;
-        if (!s) return;
+        auto* addr = g_replayAddr;
+        if (!s || !addr) return;
 
         // ECX holds the recorder object at this hook site.
         auto newPtr = (uint32_t)ctx.ecx;
@@ -81,29 +78,33 @@ bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
         static ReplayCaptureState s_capture;
         static uint32_t s_logged = 0;
         if (newPtr != s_capture.cached) {
-            uint32_t owner = 0;
-            const bool human = ReplayRecorderIsHuman(newPtr, &owner);
+            ReplayIdentityEnv env{};
+            env.player_vtable = addr->player_vtable;
+            env.ghost_vtable = addr->ghost_vtable;
+            ReplayIdentityTrace trace{};
+            const ReplayOwnerKind kind = ClassifyRecorderOwner(newPtr, env, ReplaySafeReadU32, &trace);
+            const bool human = kind == OWNER_HUMAN;
             const uint32_t rejectedBefore = s_capture.rejected;
             const bool adopted = ReplayCaptureAdopt(s->mode == MODE_OFF, newPtr, human, s_capture);
             if (adopted) {
                 s->replay_ptr = newPtr;
             }
             // Ring-log adoptions and rejections (rate-limited) with the owner
-            // player: this is how the ghost/AI behaviour around restarts was
-            // established, keep it visible.
-            if ((adopted || s_capture.rejected != rejectedBefore) && ++s_logged <= 40) {
-                char msg[96] = "replay-capture ecx=";
-                char* p = msg + 19;
+            // and its class: this is how the ghost/AI behaviour around
+            // restarts was established, keep it visible.
+            if ((adopted || s_capture.rejected != rejectedBefore) && ++s_logged <= 60) {
+                char msg[128];
+                char* p = ReplayPut(msg, "replay-capture ecx=");
                 ReplayHexU32(p, newPtr);
-                p += 8;
-                const char* tag = " owner=";
-                while (*tag) *p++ = *tag++;
-                ReplayHexU32(p, owner);
-                p += 8;
-                const char* tail = adopted
+                p = ReplayPut(p + 8, " owner=");
+                ReplayHexU32(p, trace.owner);
+                p = ReplayPut(p + 8, " vt=");
+                ReplayHexU32(p, trace.owner_vtable);
+                p = ReplayPut(p + 8, " ");
+                p = ReplayPut(p, ReplayOwnerKindName(kind));
+                p = ReplayPut(p, adopted
                     ? ((s->mode == MODE_OFF) ? " adopted (idle)" : " adopted (MID-RUN re-creation)")
-                    : " ignored (not the keyboard-driven player)";
-                while (*tail) *p++ = *tail++;
+                    : " ignored");
                 *p = 0;
                 LogRing(s, LOG_DEBUG, msg);
             }

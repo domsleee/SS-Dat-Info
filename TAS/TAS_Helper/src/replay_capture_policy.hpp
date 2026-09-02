@@ -25,10 +25,11 @@
 //     5-13 rerolls per PLAY.
 //
 // So the hook decides by IDENTITY, not by timing: a recorder is adopted iff
-// its owner is the keyboard-driven player ([[player+0x1B8]+0x590] ==
-// [root+0x530], see GameAddresses). That is true for the human's recorder
-// whether it was just re-created (adopt, even mid-run) and false for ghosts,
-// AI riders and garbage owners (ignore, however often they push).
+// its owner is the keyboard-driven rider - a plain `Player`, still linking
+// back to this recorder (replay_identity.hpp). That is true for the human's
+// recorder whether it was just re-created (adopt, even mid-run) and false for
+// ghosts (Ghost_Player), AI riders and garbage owners (ignore, however often
+// they push).
 struct ReplayCaptureState {
     uint32_t cached = 0;                 // recorder the DLL currently follows
     uint32_t changes_while_active = 0;   // re-creations adopted during REC/PLAY (diagnostic)
