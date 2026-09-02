@@ -14,24 +14,25 @@
 
 static TasSharedMemory g_sharedMem;
 static GameAddresses g_addr;
+static volatile LONG g_initState = 0; // 0=not started, 1=running, 2=ready, 3=failed
 
-void run() {
+bool run() {
     Log("=== TAS_Helper.dll loading (Phase 2) ===");
     Log(std::format("  sizeof(TasSharedState) = {}", sizeof(TasSharedState)));
 
-    // Step 1: Create shared memory
+    // Resolve and validate the exact game build before creating the readiness
+    // signal or changing any game code.
+    if (!g_addr.Resolve()) {
+        Log("FATAL: Failed to resolve/validate game addresses");
+        return false;
+    }
+
     if (!g_sharedMem.Create()) {
         Log("FATAL: Failed to create shared memory mapping");
-        return;
+        return false;
     }
     Log(std::format("Shared memory '{}' created ({} bytes)",
         TAS_SHARED_MEMORY_NAME, sizeof(TasSharedState)));
-
-    // Step 2: Resolve game addresses
-    if (!g_addr.Resolve()) {
-        Log("FATAL: Failed to resolve game addresses");
-        return;
-    }
 
     auto* state = g_sharedMem.state;
 
@@ -50,10 +51,29 @@ void run() {
     // after a level round-trip.
     char nc5[8] = {};
     bool cave5_ok = false;
-    if (GetEnvironmentVariableA("TAS_NO_CAVE5", nc5, sizeof(nc5)) > 0 && nc5[0] == '1') {
+    bool cave5_skipped =
+        GetEnvironmentVariableA("TAS_NO_CAVE5", nc5, sizeof(nc5)) > 0 && nc5[0] == '1';
+    if (cave5_skipped) {
         Log("  Cave 5: SKIPPED (TAS_NO_CAVE5=1)");
     } else {
         cave5_ok = InstallCave5(g_addr, state);
+    }
+
+    // These hooks are one functional unit. Reporting ready after any of them
+    // failed leaves a partially intercepted input/game loop in production and
+    // makes Injector.exe's explicit initialization result meaningless. Roll
+    // back in reverse dependency order while shared state is still mapped.
+    bool core_ok = replay_ok && cave1d_ok && cave1c_ok && cave2_ok
+        && (cave5_skipped || cave5_ok);
+    if (!core_ok) {
+        Log("FATAL: required TAS hook installation failed; rolling back all core hooks");
+        UninstallCave5();
+        UninstallCave2();
+        UninstallCave1C();
+        UninstallCave1D();
+        UninstallReplayCapture();
+        g_sharedMem.Destroy();
+        return false;
     }
     // OFF BY DEFAULT — measured to cost more than it fixes.
     //
@@ -89,20 +109,17 @@ void run() {
     Log(std::format("  Cave 1D (BB3B10 gate):      {}", cave1d_ok ? "OK" : "FAILED"));
     Log(std::format("  Cave 1C (handler gate):      {}", cave1c_ok ? "OK" : "FAILED"));
     Log(std::format("  Cave 2  (Supreme::Cycle):    {}", cave2_ok ? "OK" : "FAILED"));
-    Log(std::format("  Cave 5  (fixed tick):        {}", cave5_ok ? "OK" : "FAILED"));
+    Log(std::format("  Cave 5  (fixed tick):        {}",
+        cave5_skipped ? "SKIPPED" : (cave5_ok ? "OK" : "FAILED")));
     Log(std::format("  FrameLimit (SwapBuffers):    {}",
         framelimit_ok ? "OK" : "off (default — see TAS_FRAMELIMIT)"));
 
-    if (!cave2_ok) {
-        Log("CRITICAL: Cave 2 hook failed - TAS will not function");
-    }
-    if (!cave1d_ok || !cave1c_ok) {
-        Log("WARNING: Gate hooks failed - input blocking won't work correctly");
-    }
-
     // Background thread: detect the current track via an in-process heap scan.
     // Gated by TAS_NO_LEVELSCAN=1 to A/B whether the scan thread perturbs
-    // replay determinism.
+    // replay determinism. NOTE: this worker is also the default out-of-cycle
+    // STOP consumer (cave2 TryProcessStopCommand); without it a STOP sent at a
+    // menu is only acknowledged once a level's Supreme::Cycle runs again, and
+    // tas_ui refuses undo/redo/load until then.
     char nls[8] = {};
     if (GetEnvironmentVariableA("TAS_NO_LEVELSCAN", nls, sizeof(nls)) > 0 && nls[0] == '1') {
         Log("  Level scan thread: SKIPPED (TAS_NO_LEVELSCAN=1)");
@@ -126,36 +143,57 @@ void run() {
     if (GetEnvironmentVariableA("TAS_NO_RACETIMER", nrt, sizeof(nrt)) > 0 && nrt[0] == '1') {
         Log("  Race timer: SKIPPED (TAS_NO_RACETIMER=1)");
     } else {
-        racetimer::Install(g_addr, state);
-        Log("  Race timer: started");
+        if (racetimer::Install(g_addr, state)) {
+            Log("  Race timer: started");
+        } else {
+            Log("  Race timer: unavailable");
+        }
     }
 
     Log("=== TAS_Helper.dll ready (Phase 2) ===");
+    return true;
 }
 
-BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_DETACH) {
-        Log("TAS_Helper.dll unloading");
-        racetimer::Stop();
-        levelscan::Stop();
-        // Must run before the image goes away: cave5 patches four of the game's
-        // instructions to read a float that lives in THIS DLL.
-        UninstallCave5();
-        g_sharedMem.Destroy();
-        return TRUE;
-    }
-
-    if (reason != DLL_PROCESS_ATTACH) {
-        return TRUE;
-    }
-
+// Injector.exe calls this only after its LoadLibrary remote thread has returned,
+// so none of the CRT, file I/O, hook installation or worker startup below runs
+// under the Windows loader lock.
+extern "C" __declspec(dllexport) DWORD WINAPI TAS_Initialize(LPVOID) {
+    LONG previous = InterlockedCompareExchange(&g_initState, 1, 0);
+    if (previous == 2) return 1;
+    if (previous != 0) return 0;
     try {
-        run();
+        if (!run()) {
+            InterlockedExchange(&g_initState, 3);
+            return 0;
+        }
     }
     catch (const std::exception& e) {
         Log(std::format("FATAL exception: {}", e.what()));
-        return TRUE;
+        InterlockedExchange(&g_initState, 3);
+        return 0;
     }
 
+    // This DLL installs callbacks whose code and data are referenced directly by
+    // the game. Pin it after successful initialization so an accidental
+    // FreeLibrary cannot unload those callbacks and turn the next game tick into
+    // a jump through freed memory. Process termination needs no explicit teardown.
+    HMODULE pinned = nullptr;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCSTR>(&TAS_Initialize), &pinned)) {
+        Log(std::format("WARNING: failed to pin TAS_Helper.dll (error {})", GetLastError()));
+    }
+    InterlockedExchange(&g_initState, 2);
+    return 1;
+}
+
+#if defined(_M_IX86)
+#pragma comment(linker, "/EXPORT:TAS_Initialize=_TAS_Initialize@4")
+#endif
+
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+    if (reason == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(module);
+    }
     return TRUE;
 }

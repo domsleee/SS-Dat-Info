@@ -73,7 +73,6 @@ inline bool MenuInputActive() {
     }
     return g_lastInputMs != 0 && (now - g_lastInputMs) < INPUT_GRACE_MS;
 }
-
 // Defined below (it needs g_qpcFreq); declared here so the detour can call it.
 inline void PreciseWaitUntil(LONGLONG targetQpc);
 
@@ -87,6 +86,14 @@ inline BOOL WINAPI SwapBuffers_Detour(HDC hdc) {
         // g_lastCycleMs every gameplay tick; >250 ms stale means no gameplay
         // is advancing (main menu, pause menu, dialog, level load).
         bool cycleFrozen = (GetTickCount() - g_lastCycleMs) > 250;
+
+        // STOP cannot rely solely on cave2: leaving a level stops
+        // Supreme::Cycle, which is the exact condition that asks tas_ui to
+        // auto-stop. Consume it from this still-live render hook so MODE_OFF and
+        // the input/speed/splice cleanup are acknowledged even at a static menu.
+        if (cycleFrozen) {
+            TryProcessStopCommand(s, false);
+        }
 
         // NEVER throttle during a CONT. cont_suppress_input is set for the
         // whole Continue cycle (before the F5 restart through the splice). A
@@ -284,25 +291,4 @@ inline bool InstallFrameLimit(TasSharedState* state) {
     Log(std::format("FrameLimit: gdi32!SwapBuffers hooked at {:p} (menu_fps_cap={})",
         (void*)fn, state->menu_fps_cap));
     return true;
-}
-
-// Install on FIRST USE rather than at DLL init.
-//
-// Measured: the hook costs ~12 ms per frame on the FRESH main menu merely by
-// existing (48.5 ms without it, 59.9 ms with it even at cap=0, so it is not the
-// throttle). But it is genuinely needed AFTER a level round-trip, where the menu
-// video becomes present-locked and runs at 64 fps against a native 20.
-//
-// Those two facts only reconcile if the hook is absent until a level has
-// actually been loaded. Before that it can do nothing useful, and it demonstrably
-// does harm. `levelscan` calls this the first time it identifies a track.
-inline bool g_frameLimitInstalled = false;
-inline void EnsureFrameLimitInstalled(TasSharedState* state) {
-    if (g_frameLimitInstalled) return;
-    g_frameLimitInstalled = true;   // set first: never retry a failed install
-    if (InstallFrameLimit(state)) {
-        Log("FrameLimit: installed on first level load (menu video is present-locked after this)");
-    } else {
-        Log("FrameLimit: first-level-load install FAILED");
-    }
 }

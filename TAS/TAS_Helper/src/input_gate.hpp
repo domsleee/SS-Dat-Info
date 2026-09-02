@@ -13,10 +13,19 @@
 struct InputGateInputs {
     uint32_t mode;       // TasMode: 0=OFF, 1=REC, 2=PLAY
     bool cont_suppress;  // shared cont_suppress_input: a Continue is in flight
-    bool injecting;      // cave2_injecting: our OWN injected call (must pass)
+    bool injecting;      // this THREAD is inside our injected call (must pass)
     bool game_paused;    // cycle heartbeat stale (>250ms): pause menu/dialog/reload
     bool is_escape;      // the event is ESC (always exempt: abort hatch + menu nav)
 };
+
+// The shared cave2_injecting word is useful diagnostics, but it cannot identify
+// who made a concurrent call. Gate exemptions must be thread-scoped so a real
+// keyboard event on another game thread cannot slip through during injection.
+inline thread_local uint32_t g_tasInjectionDepth = 0;
+
+inline bool IsTasInjectionThread() {
+    return g_tasInjectionDepth != 0;
+}
 
 // TasMode::Off as a plain constant (avoid pulling shared_state.hpp into tests).
 inline constexpr uint32_t INPUT_GATE_MODE_OFF = 0;

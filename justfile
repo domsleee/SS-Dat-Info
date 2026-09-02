@@ -52,7 +52,8 @@ deploy: tas stop_game
     Copy-Item .\TAS\TAS_Helper\Release\TAS_Helper.dll $dest\ -Force; \
     Copy-Item .\TAS\target\release\tas_ui.exe $dest\ -Force; \
     Copy-Item .\TAS\target\release\tas_test.exe $dest\ -Force; \
-    Write-Host "Deployed TAS to $dest"
+    Copy-Item .\Display_Config\Display_Config_Resources\Injector\Release\Injector.exe '{{supreme_folder}}\Display_Config_Resources\' -Force; \
+    Write-Host "Deployed TAS (+ Injector.exe: TAS_Helper's DllMain no longer initializes, the injector calls TAS_Initialize) to $dest"
 
 # Launch the game (direct exe, NO scripted navigation — scripted nav can land
 # the engine in its demo/attract state) and a fresh tas_ui AFTER it. Order

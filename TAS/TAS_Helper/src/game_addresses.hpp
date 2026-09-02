@@ -20,6 +20,100 @@ struct KernelTime { uint32_t lo; uint32_t hi; };
 using KernelTimeCurrentFn = KernelTime*(__fastcall*)(KernelTime* out, void* edx_unused);
 
 struct GameAddresses {
+    struct ModuleIdentity {
+        const char* name;
+        uint32_t timestamp;
+        uint32_t image_size;
+    };
+
+    static bool ValidateModule(HMODULE module, const ModuleIdentity& expected) {
+        if (!module) {
+            Log(std::format("ERROR: {} is not loaded", expected.name));
+            return false;
+        }
+
+        auto* base = reinterpret_cast<std::uint8_t*>(module);
+        auto* dos = reinterpret_cast<PIMAGE_DOS_HEADER>(base);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+            Log(std::format("ERROR: {} has an invalid DOS header", expected.name));
+            return false;
+        }
+        auto* nt = reinterpret_cast<PIMAGE_NT_HEADERS>(base + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) {
+            Log(std::format("ERROR: {} has an invalid PE header", expected.name));
+            return false;
+        }
+
+        const uint32_t timestamp = nt->FileHeader.TimeDateStamp;
+        const uint32_t imageSize = nt->OptionalHeader.SizeOfImage;
+        if (timestamp != expected.timestamp || imageSize != expected.image_size) {
+            Log(std::format(
+                "ERROR: unsupported {} build (timestamp=0x{:08X}, image_size=0x{:X}; "
+                "expected 0x{:08X}/0x{:X})",
+                expected.name, timestamp, imageSize, expected.timestamp, expected.image_size));
+            return false;
+        }
+        return true;
+    }
+
+    static std::string HexBytes(const std::uint8_t* p, size_t n) {
+        std::string s;
+        for (size_t i = 0; i < n; i++) s += std::format("{}{:02X}", i ? " " : "", p[i]);
+        return s;
+    }
+
+    static bool ValidateCodeBytes(const char* label, const std::uint8_t* address,
+                                  const std::uint8_t* expected, size_t n) {
+        if (std::memcmp(address, expected, n) == 0) return true;
+        Log(std::format("ERROR: unsupported game build: {} bytes do not match (live [{}], expected [{}])",
+                        label, HexBytes(address, n), HexBytes(expected, n)));
+        return false;
+    }
+
+    // Patterns must not contain absolute-address immediates: Supreme_Game,
+    // HMG_Cetsup_Win32 and SR_UIT all prefer ImageBase 0x10000000 and are
+    // always relocated, so any imm32 the loader fixes up differs from the
+    // on-disk bytes. Use ValidateCodeAbs for those.
+    template <size_t N>
+    static bool ValidateCode(const char* label, const std::uint8_t* address,
+                             const std::uint8_t (&expected)[N]) {
+        return ValidateCodeBytes(label, address, expected, N);
+    }
+
+    // Compare live code whose imm32 at `AbsOffset` is an absolute address the
+    // loader rebases. `expected` holds the on-disk bytes; the immediate is
+    // rewritten to `moduleBase + absRva` before comparing, so the check holds
+    // wherever the module landed. (Verified against the .reloc tables: each of
+    // these sites carries a HIGHLOW fixup at +3.)
+    template <size_t AbsOffset, size_t N>
+    static bool ValidateCodeAbs(const char* label, const std::uint8_t* address,
+                                const std::uint8_t (&expected)[N],
+                                const std::uint8_t* moduleBase, uint32_t absRva) {
+        static_assert(AbsOffset + sizeof(uint32_t) <= N, "imm32 must lie inside the pattern");
+        std::uint8_t rebased[N];
+        std::memcpy(rebased, expected, N);
+        const uint32_t abs = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(moduleBase + absRva));
+        std::memcpy(rebased + AbsOffset, &abs, sizeof(abs));
+        return ValidateCodeBytes(label, address, rebased, N);
+    }
+
+    // Like ValidateCode, but also accepts a relative JMP (E9) at the site.
+    // Display_Config_Helper is injected BEFORE this DLL (handlePlay.ts) and
+    // inline-hooks the two HMG key handlers for its F5 debounce, so on a normal
+    // launch those sites already start with a JMP. The module identity check
+    // still proves which image this is, and SafetyHook chains onto the
+    // existing hook (it did on every launch before byte validation existed).
+    template <size_t N>
+    static bool ValidateCodeOrHooked(const char* label, const std::uint8_t* address,
+                                     const std::uint8_t (&expected)[N]) {
+        if (address[0] == 0xE9) {
+            Log(std::format("{}: already inline-hooked by another module ({}); chaining",
+                            label, HexBytes(address, 5)));
+            return true;
+        }
+        return ValidateCodeBytes(label, address, expected, N);
+    }
+
     // Module bases
     HMODULE exe = nullptr;   // Supreme.exe
     HMODULE sg = nullptr;    // Supreme_Game.dll
@@ -123,6 +217,24 @@ struct GameAddresses {
         if (!sg) { Log("ERROR: Supreme_Game.dll not loaded"); return false; }
         if (!hmg) { Log("ERROR: HMG_Cetsup_Win32.dll not loaded"); return false; }
 
+        // Every address below is a fixed RVA for the stock v1.035 image. Refuse
+        // to patch a merely-similar process: a different executable or DLL build
+        // can put unrelated instructions at the same offsets.
+        static constexpr ModuleIdentity kExeIdentity{
+            "Supreme.exe v1.035", 0x381DA4A3u, 0x0008A000u
+        };
+        static constexpr ModuleIdentity kSgIdentity{
+            "Supreme_Game.dll v1.035", 0x381DA46Eu, 0x001FE000u
+        };
+        static constexpr ModuleIdentity kHmgIdentity{
+            "HMG_Cetsup_Win32.dll v1.035", 0x3811D8D7u, 0x0000B000u
+        };
+        if (!ValidateModule(exe, kExeIdentity) ||
+            !ValidateModule(sg, kSgIdentity) ||
+            !ValidateModule(hmg, kHmgIdentity)) {
+            return false;
+        }
+
         // Kernel::Time::Current — non-fatal if missing (injection falls back
         // to the keypress-calibrated arg4), but it should always resolve.
         if (kernel) {
@@ -153,6 +265,32 @@ struct GameAddresses {
         cave1c_down = hmgBase + 0x3940;
         cave1c_up = hmgBase + 0x3980;
         bb3b10 = hmgBase + 0x3B10;
+
+        // Verify every REQUIRED code target before installing ANY hook. Module
+        // metadata catches different releases; these signatures also catch a
+        // locally-modified image of the supported release. Optional features
+        // (race timer) validate their own sites and degrade instead of failing
+        // initialization. All bytes are the on-disk form.
+        static constexpr uint8_t kCave5[] =                       // cmp esi,0x14; mov [esp+0x3C],esi
+            { 0x83, 0xFE, 0x14, 0x89, 0x74, 0x24, 0x3C };
+        static constexpr uint8_t kCave2[] =                       // push ebp; mov ebp,esp; push -1; push (SEH)
+            { 0x55, 0x8B, 0xEC, 0x6A, 0xFF, 0x68 };
+        static constexpr uint8_t kReplay[] =                      // sub esp,0x80
+            { 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00 };
+        static constexpr uint8_t kKeyDown[] =                     // sub esp,8; push esi; mov esi,ecx
+            { 0x83, 0xEC, 0x08, 0x56, 0x8B, 0xF1 };
+        static constexpr uint8_t kKeyUp[] =
+            { 0x83, 0xEC, 0x08, 0x56, 0x8B, 0xF1 };
+        static constexpr uint8_t kBb3b10[] =                      // push -1; push HMG+0x583A (relocated)
+            { 0x6A, 0xFF, 0x68, 0x3A, 0x58, 0x00, 0x10 };
+        if (!ValidateCode("Supreme.exe+0x25C81", cave5_site, kCave5) ||
+            !ValidateCode("Supreme_Game.dll+0x13FE40", cave2_site, kCave2) ||
+            !ValidateCode("Supreme_Game.dll+0x9E8F0", replay_capture_site, kReplay) ||
+            !ValidateCodeOrHooked("HMG_Cetsup_Win32.dll+0x3940", cave1c_down, kKeyDown) ||
+            !ValidateCodeOrHooked("HMG_Cetsup_Win32.dll+0x3980", cave1c_up, kKeyUp) ||
+            !ValidateCodeAbs<3>("HMG_Cetsup_Win32.dll+0x3B10", bb3b10, kBb3b10, hmgBase, 0x583A)) {
+            return false;
+        }
 
         Log(std::format("EXE base: {:p}", (void*)exeBase));
         Log(std::format("SG base: {:p}", (void*)sgBase));
