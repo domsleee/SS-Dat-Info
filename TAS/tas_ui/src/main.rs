@@ -1459,6 +1459,19 @@ impl TasApp {
                 return;
             }
         }
+        // A take recorded as another character or stance cannot replay as
+        // the rider is now, and no restart changes that (the game bakes both
+        // into the rider when the level is entered from the menu) - say
+        // exactly which screen fixes it. The arm still goes ahead. REC keeps
+        // whatever the player chose.
+        if command != TasCommand::ArmRec {
+            if let Some(advice) = tas_shared::rider_mismatch_advice(
+                self.loaded_rider.as_deref(),
+                self.history.live_rider(),
+            ) {
+                self.log_lines.push(format!("[{}] WARNING: {}", ts, advice));
+            }
+        }
         let arm = match command {
             TasCommand::ArmPlay => tas_shared::transport::Arm::Play,
             TasCommand::ArmContinue => tas_shared::transport::Arm::Continue,
@@ -2778,6 +2791,9 @@ impl eframe::App for TasApp {
                     self.start_recording_session(continue_from, recorded);
                     // A fresh take is by definition in the live physics mode.
                     self.loaded_physics = self.history.live_physics().map(str::to_string);
+                    // Same for the rider: the take now in the buffer was recorded as the
+                    // live character / stance, so a later PLAY compares against that.
+                    self.loaded_rider = self.history.live_rider().map(str::to_string);
                     self.log_cont_resume_summary();
                     self.clear_cont_catchup();
                     // Splice fired (or REC began).

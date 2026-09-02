@@ -219,10 +219,26 @@ struct GameAddresses {
     static constexpr uint32_t PLAYER_LOADOUT_OFFSET = 0x20;
     static constexpr uint32_t PLAYER_CONFIG_OFFSET = 0x48;
     static constexpr uint32_t LOADOUT_FOLDER_STRING = 0x10;
-    static constexpr uint32_t LOADOUT_STANCE_WORD = 0x20;
     static constexpr uint32_t PLAYER_CONFIG_NAME_STRING = 0x48;
     static constexpr uint32_t MSVC6_STRING_PTR = 0x4;
     static constexpr uint32_t MSVC6_STRING_SIZE = 0x8;
+    // The STANCE is not on the Player at all. The menu keeps a game-setup
+    // object (3-state heap differential, 2026-09-02) that the game builds
+    // every rider from on each (re)start: MSVC6 std::strings for the area /
+    // difficulty / weather / character 1 (+0x1D0) / character 2 / board 1 /
+    // board 2, then the stance dword at +0x220 (0 = regular = left-foot
+    // icon, the default; 1 = goofy = right-foot icon), the player name at
+    // +0x224 and the controller ("Keyboard") at +0x290. Nothing static points
+    // at it reliably (Main_Menu.dll+0x6B9A4 did on one launch and not the
+    // next), so rider_identity.hpp finds it by this layout. The dword is
+    // READ-ONLY for us: writing it and restarting (in-process or the game's
+    // F5) keeps the rider's stance-baked config - the game applies the
+    // stance only when a level is entered from the menu (a goofy rider
+    // "switched" to regular that way still coasted like goofy, 3.8e-6 off
+    // at gate+32, reroll forever).
+    static constexpr uint32_t SETUP_CHARACTER_STRING = 0x1D0;
+    static constexpr uint32_t SETUP_STANCE = 0x220;
+    static constexpr uint32_t SETUP_CONTROLLER_STRING = 0x290;
     static constexpr uint32_t PLAYER_VTABLE_RVA = 0x169E10;        // .?AVPlayer@Supreme_Snowboarding@Housemarque@@
     static constexpr uint32_t GHOST_PLAYER_VTABLE_RVA = 0x169B74;  // .?AVGhost_Player@...
     // Player position offsets
