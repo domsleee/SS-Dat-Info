@@ -206,6 +206,23 @@ struct GameAddresses {
     // was heap adjacency - +0x1B8 is the player's Player_Event_Interface - and
     // never matched in a fresh process.)
     static constexpr uint32_t PLAYER_RECORDER_OFFSET = 0x14C;
+    // Rider identity (live object-graph dump, 2026-09-02). The Player's
+    // loadout object ([player+0x20], no RTTI) holds MSVC6 std::strings
+    // ({allocator, char* ptr, size, capacity} = 16 bytes each): the character
+    // folder at +0x10 ("vincent"), the character config path at +0x30
+    // ("data/characters/vincent/plrcnf.txt"), the board config path at +0x60
+    // ("data/boards/board_1/boardcnf.txt" - the board does not affect the
+    // physics, not published), plus a word at +0x20 whose low half flips
+    // with the stance (published raw). The Player_Config ([player+0x48],
+    // RTTI Player_Config) carries the display name as a std::string at +0x48
+    // ("Vincent").
+    static constexpr uint32_t PLAYER_LOADOUT_OFFSET = 0x20;
+    static constexpr uint32_t PLAYER_CONFIG_OFFSET = 0x48;
+    static constexpr uint32_t LOADOUT_FOLDER_STRING = 0x10;
+    static constexpr uint32_t LOADOUT_STANCE_WORD = 0x20;
+    static constexpr uint32_t PLAYER_CONFIG_NAME_STRING = 0x48;
+    static constexpr uint32_t MSVC6_STRING_PTR = 0x4;
+    static constexpr uint32_t MSVC6_STRING_SIZE = 0x8;
     static constexpr uint32_t PLAYER_VTABLE_RVA = 0x169E10;        // .?AVPlayer@Supreme_Snowboarding@Housemarque@@
     static constexpr uint32_t GHOST_PLAYER_VTABLE_RVA = 0x169B74;  // .?AVGhost_Player@...
     // Player position offsets

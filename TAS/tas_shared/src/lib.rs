@@ -13,7 +13,7 @@ pub const OBJSNAP_PLAYER_DWORDS: usize = 128;
 /// at 0x1B4 so the object is at least 0x1D8, and this leaves headroom).
 pub const OBJSNAP_PHYSICS_DWORDS: usize = 512;
 
-pub const TAS_SHARED_VERSION: u32 = 41; // +fpu_control_word, renderer_id (renderer / x87-precision awareness)
+pub const TAS_SHARED_VERSION: u32 = 42; // +rider_character, rider_stance (character / stance awareness)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -78,6 +78,62 @@ pub fn fpu_precision_bits(control_word: u32) -> u32 {
 /// than expected?"). Recordings and history entries carry this stamp; a
 /// mismatch with the live mode means a replay cannot be bit-exact. `None`
 /// until the DLL has sampled the game thread.
+/// Selectable riders published in `TasSharedState::rider_character` (v42).
+pub const TAS_CHARACTER_UNKNOWN: u32 = 0;
+pub const TAS_CHARACTER_KEITH: u32 = 1;
+pub const TAS_CHARACTER_VINCENT: u32 = 2;
+pub const TAS_CHARACTER_AKIKO: u32 = 3;
+pub const TAS_CHARACTER_KARL: u32 = 4;
+pub const TAS_CHARACTER_MIKE: u32 = 5;
+pub const TAS_CHARACTER_ULRIKA: u32 = 6;
+pub const TAS_CHARACTER_OTHER: u32 = 7;
+
+/// Inverse of `character_name` (case-insensitive); unknown names map to
+/// `TAS_CHARACTER_OTHER`, an empty name to `TAS_CHARACTER_UNKNOWN`.
+pub fn character_id_from_name(name: &str) -> u32 {
+    let name = name.trim();
+    if name.is_empty() {
+        return TAS_CHARACTER_UNKNOWN;
+    }
+    for id in TAS_CHARACTER_KEITH..=TAS_CHARACTER_OTHER {
+        if character_name(id).eq_ignore_ascii_case(name) {
+            return id;
+        }
+    }
+    TAS_CHARACTER_OTHER
+}
+
+pub fn character_name(id: u32) -> &'static str {
+    match id {
+        TAS_CHARACTER_KEITH => "Keith",
+        TAS_CHARACTER_VINCENT => "Vincent",
+        TAS_CHARACTER_AKIKO => "Akiko",
+        TAS_CHARACTER_KARL => "Karl",
+        TAS_CHARACTER_MIKE => "Mike",
+        TAS_CHARACTER_ULRIKA => "Ulrika",
+        TAS_CHARACTER_OTHER => "other",
+        _ => "unknown",
+    }
+}
+
+/// Canonical rider stamp, e.g. `Vincent · stance 0`. The physics depend on
+/// the character (a Keith recording does not line up under Vincent) and on
+/// the stance (it changed the trajectory in the 2026-09-02 measurements; the
+/// board does not), so this travels with recordings and history entries and
+/// is compared against the live loadout. `None` until the character is
+/// known; the stance is omitted when unknown so an older stamp still
+/// compares by character.
+pub fn rider_label(character: u32, stance: u32) -> Option<String> {
+    if character == TAS_CHARACTER_UNKNOWN {
+        return None;
+    }
+    let mut label = character_name(character).to_string();
+    if stance != u32::MAX {
+        label.push_str(&format!(" · stance {}", stance));
+    }
+    Some(label)
+}
+
 pub fn physics_mode_label(renderer_id: u32, fpu_control_word: u32) -> Option<String> {
     let bits = fpu_precision_bits(fpu_control_word);
     if bits == 0 && renderer_id == TAS_RENDERER_UNKNOWN {
@@ -720,6 +776,11 @@ pub struct TasSharedState {
     pub fpu_control_word: u32,
     /// v41: loaded renderer plugin, see `TAS_RENDERER_*`.
     pub renderer_id: u32,
+    /// v42: the human rider's character, see `TAS_CHARACTER_*` (0 until the
+    /// DLL has resolved the live loadout).
+    pub rider_character: u32,
+    /// v42: the loadout's stance word (0 / 1; `u32::MAX` = unknown).
+    pub rider_stance: u32,
 }
 
 /// How many times to retry a torn level-context read before giving up.
@@ -1041,6 +1102,13 @@ mod platform {
             physics_mode_label(self.renderer_id(), self.fpu_control_word())
         }
 
+        /// Live rider stamp (character · stance, v42), `None` until the DLL
+        /// has resolved the human rider's loadout.
+        pub fn rider(&self) -> Option<String> {
+            let s = self.state();
+            rider_label(s.rider_character, s.rider_stance)
+        }
+
         /// Volatile read of mode (poll-hot field written by DLL).
         pub fn mode_volatile(&self) -> u32 {
             unsafe {
@@ -1183,6 +1251,10 @@ mod platform {
 
         pub fn physics_mode(&self) -> Option<String> {
             physics_mode_label(self.renderer_id(), self.fpu_control_word())
+        }
+
+        pub fn rider(&self) -> Option<String> {
+            rider_label(self.state.rider_character, self.state.rider_stance)
         }
 
         pub fn restart_state(&self) -> u32 {
@@ -4567,7 +4639,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_512);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_520);
     }
 
     /// Prints field offsets for the out-of-process probes (tools/tas_shm.ps1).
@@ -4578,7 +4650,7 @@ mod tests {
         println!(
             "offsets: version={} command={} mode={} frame_count={} recorded_count={} playback_pos={} \
              replay_ptr={} player_ptr={} player_x={} input_log={} rec_coords={} play_coords={} \
-             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} fpu_control_word={} renderer_id={}",
+             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={}",
             offset_of!(TasSharedState, version),
             offset_of!(TasSharedState, command),
             offset_of!(TasSharedState, mode),
@@ -4600,12 +4672,37 @@ mod tests {
             offset_of!(TasSharedState, game_in_game),
             offset_of!(TasSharedState, fpu_control_word),
             offset_of!(TasSharedState, renderer_id),
+            offset_of!(TasSharedState, rider_character),
+            offset_of!(TasSharedState, rider_stance),
         );
     }
 
     /// The two control words the wiki documents: DirectX 6/7 leave the game
     /// at 24-bit, OpenGL/Software2 at 53-bit. The stamp must tell them apart
     /// and stay `None` until the game thread has been sampled.
+    /// The rider stamp: character by id, stance appended when known. A Keith
+    /// recording under Vincent must compare unequal; an unresolved rider
+    /// (fresh DLL, no player yet) is `None`, not a bogus "unknown" stamp.
+    #[test]
+    fn rider_stamp_distinguishes_characters_and_stances() {
+        assert_eq!(rider_label(TAS_CHARACTER_VINCENT, 0).as_deref(), Some("Vincent · stance 0"));
+        assert_eq!(rider_label(TAS_CHARACTER_KEITH, 1).as_deref(), Some("Keith · stance 1"));
+        assert_ne!(rider_label(TAS_CHARACTER_KEITH, 0), rider_label(TAS_CHARACTER_VINCENT, 0));
+        assert_ne!(rider_label(TAS_CHARACTER_KEITH, 0), rider_label(TAS_CHARACTER_KEITH, 1));
+        assert_eq!(rider_label(TAS_CHARACTER_KEITH, u32::MAX).as_deref(), Some("Keith"));
+        assert_eq!(rider_label(TAS_CHARACTER_UNKNOWN, 0), None);
+        assert_eq!(rider_label(TAS_CHARACTER_OTHER, 0).as_deref(), Some("other · stance 0"));
+        assert_eq!(character_name(TAS_CHARACTER_ULRIKA), "Ulrika");
+        assert_eq!(character_name(99), "unknown");
+        let mut s = zeroed_boxed();
+        s.rider_character = TAS_CHARACTER_VINCENT;
+        s.rider_stance = 0;
+        assert_eq!(
+            rider_label(s.rider_character, s.rider_stance).as_deref(),
+            Some("Vincent · stance 0")
+        );
+    }
+
     #[test]
     fn physics_mode_stamp_distinguishes_renderers() {
         assert_eq!(fpu_precision_bits(0x007F), 24);

@@ -576,9 +576,29 @@ pub struct RecordingMetadata {
     /// differently, so a replay under the other mode diverges.
     #[serde(default)]
     pub fpu_control_word: Option<u32>,
+    /// Character the take was recorded as (`Keith`, `Vincent`, ...). The
+    /// physics differ per character, so a replay as someone else diverges.
+    #[serde(default)]
+    pub character: Option<String>,
+    /// The loadout's stance word at save time (0 / 1); the stance changes
+    /// the trajectory too. `None` = unknown / pre-stamp file.
+    #[serde(default)]
+    pub stance: Option<u32>,
 }
 
 impl RecordingMetadata {
+    /// Canonical rider stamp (see `tas_shared::rider_label`), `None` for
+    /// files saved before the stamp existed.
+    pub fn rider_label(&self) -> Option<String> {
+        let character = self.character.as_deref()?;
+        let stance = self.stance.unwrap_or(u32::MAX);
+        let id = tas_shared::character_id_from_name(character);
+        if id == tas_shared::TAS_CHARACTER_UNKNOWN {
+            return None;
+        }
+        tas_shared::rider_label(id, stance)
+    }
+
     /// Canonical physics-mode stamp (see `tas_shared::physics_mode_label`);
     /// `None` for files saved before the stamp existed.
     pub fn physics_label(&self) -> Option<String> {
@@ -627,6 +647,9 @@ impl RecordingFile {
             renderer: (state.renderer_id != tas_shared::TAS_RENDERER_UNKNOWN)
                 .then(|| tas_shared::renderer_name(state.renderer_id).to_string()),
             fpu_control_word: (state.fpu_control_word != 0).then_some(state.fpu_control_word),
+            character: (state.rider_character != tas_shared::TAS_CHARACTER_UNKNOWN)
+                .then(|| tas_shared::character_name(state.rider_character).to_string()),
+            stance: (state.rider_stance != u32::MAX).then_some(state.rider_stance),
         };
 
         let meta_json = serde_json::to_string_pretty(&meta).map_err(|e| format!("{}", e))?;
@@ -937,6 +960,11 @@ pub struct HistoryEntry {
     /// e.g. `OpenGL/53-bit`). None = unknown / pre-stamp entry. Restoring an
     /// entry under a different mode replays different physics.
     pub physics: Option<String>,
+    /// Rider stamp at push time (`tas_shared::rider_label`, e.g.
+    /// `Vincent · stance 0`). None = unknown / pre-stamp entry. Restoring an
+    /// entry recorded as another character or stance replays different
+    /// physics.
+    pub rider: Option<String>,
     snapshot: SnapshotSlot,
 }
 
@@ -962,6 +990,7 @@ impl HistoryEntry {
             finish_time_exact: false,
             level: None, // stamped from live_level by RecordingHistory on push
             physics: None, // stamped from live_physics by RecordingHistory on push
+            rider: None,   // stamped from live_rider by RecordingHistory on push
             snapshot: SnapshotSlot::Loaded {
                 snapshot,
                 on_disk: None,
@@ -986,6 +1015,7 @@ impl HistoryEntry {
             finish_time_exact: false,
             level: None, // stamped from live_level by RecordingHistory on push
             physics: None, // stamped from live_physics by RecordingHistory on push
+            rider: None,   // stamped from live_rider by RecordingHistory on push
             snapshot: SnapshotSlot::Marker,
         }
     }
@@ -1110,6 +1140,8 @@ pub struct RecordingHistory {
     /// Live physics-mode stamp from the DLL (renderer + x87 precision),
     /// refreshed by the app every frame; stamped onto pushed entries.
     live_physics: Option<String>,
+    /// Live rider stamp (character · stance), see `set_live_rider`.
+    live_rider: Option<String>,
 }
 
 impl RecordingHistory {
@@ -1125,6 +1157,7 @@ impl RecordingHistory {
             blob_dir: None,
             warnings: Vec::new(),
             live_physics: None,
+            live_rider: None,
         }
     }
 
@@ -1137,6 +1170,18 @@ impl RecordingHistory {
 
     pub fn live_physics(&self) -> Option<&str> {
         self.live_physics.as_deref()
+    }
+
+    /// Live rider stamp (character · stance). Like the physics stamp, an
+    /// unknown live value never erases a known one.
+    pub fn set_live_rider(&mut self, label: Option<String>) {
+        if label.is_some() && self.live_rider != label {
+            self.live_rider = label;
+        }
+    }
+
+    pub fn live_rider(&self) -> Option<&str> {
+        self.live_rider.as_deref()
     }
 
     /// Where lazily-loaded entries read their blobs from. Set before
@@ -1541,6 +1586,7 @@ impl RecordingHistory {
                 finish_time_exact: e.finish_time_exact,
                 level: e.level.clone(),
                 physics: e.physics.clone(),
+                rider: e.rider.clone(),
                 created_at_iso: e.created_at.to_rfc3339(),
                 // Bytes travel only for snapshots the store does not have
                 // yet. On-disk and durable entries send `None`; the store
@@ -1681,6 +1727,7 @@ impl RecordingHistory {
                 finish_time_exact: le.finish_time_exact,
                 level: le.level,
                 physics: le.physics,
+                rider: le.rider,
                 snapshot,
             });
         }
@@ -1829,6 +1876,7 @@ impl RecordingHistory {
                 finish_time_exact: entry.finish_time_exact,
                 level: entry.level,
                 physics: None,
+                rider: None,
                 snapshot,
             });
         }
@@ -1917,6 +1965,7 @@ impl RecordingHistory {
         entry.entry_id = self.alloc_id();
         entry.level = self.live_level.clone();
         entry.physics = self.live_physics.clone();
+        entry.rider = self.live_rider.clone();
         entry.finish_time_cs = finish.map(|f| f.cs);
         entry.finish_time_exact = finish.is_some_and(|f| f.exact);
         if let Some((start_tick, end_tick)) = session {
@@ -2124,6 +2173,19 @@ pub fn load_recording_path(
                         log.push(format!(
                             "[{}] WARNING: recording was made under {} but the game is running {}: \
                              the physics round differently, this replay will not be bit-exact",
+                            ts, stamp, live
+                        ));
+                    }
+                }
+                // Same for who is riding: a Keith take does not line up under
+                // Vincent, and the stance changes the trajectory as well.
+                let live_rider = tas_shared::rider_label(state.rider_character, state.rider_stance);
+                if let (Some(stamp), Some(live)) = (meta.rider_label(), live_rider) {
+                    if stamp != live {
+                        log.push(format!(
+                            "[{}] WARNING: recording was made as {} but the rider is {}: \
+                             a different character or stance has different physics, \
+                             this replay will not line up",
                             ts, stamp, live
                         ));
                     }
@@ -2998,6 +3060,7 @@ mod tests {
                 finish_time_exact: false,
                 level: None,
                 physics: None,
+                rider: None,
                 created_at_iso: "2026-09-02T00:00:00+10:00".to_string(),
                 snapshot: Some(PersistedSnapshot {
                     recorded_count: count,
@@ -3083,6 +3146,95 @@ mod tests {
         assert!(matches!(history.entries()[2].snapshot, SnapshotSlot::OnDisk(_)));
         assert!(history.to_stored_entries()[2].snapshot.is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The rider stamp travels with the file: a Keith take loaded while
+    /// Vincent is on the board warns (the physics differ per character), so
+    /// does the other stance; the same rider stays quiet; an unstamped file
+    /// has no opinion.
+    #[test]
+    fn recording_file_stamps_and_checks_the_rider() {
+        let path = unique_temp_path("rec_rider", "tasrec");
+        let mut state = zeroed_state();
+        state.recorded_count = 2;
+        state.rider_character = tas_shared::TAS_CHARACTER_KEITH;
+        state.rider_stance = 0;
+        RecordingFile::save(&state, &path).unwrap();
+        let meta = RecordingFile::read_metadata(&path).unwrap();
+        assert_eq!(meta.character.as_deref(), Some("Keith"));
+        assert_eq!(meta.stance, Some(0));
+        assert_eq!(meta.rider_label().as_deref(), Some("Keith · stance 0"));
+
+        let mut tracker = SegmentTracker::new();
+        let mut live = zeroed_state();
+        live.rider_character = tas_shared::TAS_CHARACTER_VINCENT;
+        live.rider_stance = 0;
+        let mut log = Vec::new();
+        assert!(load_recording_path(&mut live, &mut tracker, &mut log, &path));
+        assert!(
+            log.iter().any(|l| l.contains("WARNING")
+                && l.contains("Keith · stance 0")
+                && l.contains("Vincent · stance 0")),
+            "{:?}",
+            log
+        );
+        let mut other_stance = zeroed_state();
+        other_stance.rider_character = tas_shared::TAS_CHARACTER_KEITH;
+        other_stance.rider_stance = 1;
+        let mut log2 = Vec::new();
+        assert!(load_recording_path(&mut other_stance, &mut tracker, &mut log2, &path));
+        assert!(log2.iter().any(|l| l.contains("WARNING") && l.contains("Keith · stance 1")), "{:?}", log2);
+        let mut same = zeroed_state();
+        same.rider_character = tas_shared::TAS_CHARACTER_KEITH;
+        same.rider_stance = 0;
+        let mut quiet = Vec::new();
+        assert!(load_recording_path(&mut same, &mut tracker, &mut quiet, &path));
+        assert!(!quiet.iter().any(|l| l.contains("WARNING")), "{:?}", quiet);
+
+        let mut unstamped = zeroed_state();
+        unstamped.recorded_count = 1;
+        RecordingFile::save(&unstamped, &path).unwrap();
+        assert_eq!(RecordingFile::read_metadata(&path).unwrap().rider_label(), None);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn history_entries_carry_the_rider_stamp_through_the_store() {
+        let mut history = RecordingHistory::new(8);
+        history.set_live_rider(Some("Vincent · stance 0".to_string()));
+        let mut state = zeroed_state();
+        state.recorded_count = 3;
+        assert!(history.push_snapshot_data_with_session(
+            RecordingSnapshot::from_state(&state),
+            "take".to_string(),
+            0,
+            3
+        ));
+        assert_eq!(history.entries()[0].rider.as_deref(), Some("Vincent · stance 0"));
+        history.set_live_rider(None);
+        assert_eq!(history.live_rider(), Some("Vincent · stance 0"), "unknown never erases known");
+
+        let stored = history.to_stored_entries();
+        assert_eq!(stored[0].rider.as_deref(), Some("Vincent · stance 0"));
+        let dir = std::env::temp_dir().join(format!(
+            "tas_ui_rider_{}_{}",
+            std::process::id(),
+            chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let (mut store, _) =
+            crate::history_store_v2::HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store
+            .persist(&stored, history.current_entry_id(), history.next_entry_id())
+            .unwrap();
+        drop(store);
+        let (_s, load) =
+            crate::history_store_v2::HistoryStoreV2::open_in_lazy(dir.clone()).unwrap();
+        assert_eq!(load.entries[0].rider.as_deref(), Some("Vincent · stance 0"));
+        let mut reloaded = RecordingHistory::new(8);
+        reloaded.set_blob_dir(dir.clone());
+        reloaded.apply_loaded(load.entries, load.current_entry_id, load.next_entry_id);
+        assert_eq!(reloaded.entries()[0].rider.as_deref(), Some("Vincent · stance 0"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

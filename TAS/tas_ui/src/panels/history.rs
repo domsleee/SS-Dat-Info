@@ -202,6 +202,7 @@ pub fn show(
                     &mut edit,
                     &mut actions,
                     history.live_physics(),
+                    history.live_rider(),
                 );
             }
 
@@ -310,6 +311,7 @@ fn render_row(
     edit: &mut Option<(u64, String)>,
     actions: &mut Vec<HistoryAction>,
     live_physics: Option<&str>,
+    live_rider: Option<&str>,
 ) {
     let parts = parse_entry(entry);
     let restorable = entry.can_restore();
@@ -419,6 +421,23 @@ fn render_row(
                             .on_hover_text(format!(
                                 "Recorded under {}; the game is running {}. Different x87 \
                                  precision, so this take will not replay bit-exact.",
+                                stamp, live
+                            ));
+                        }
+                    }
+                    // Recorded as another character / stance than the one on
+                    // the board now: the physics differ, the take will not
+                    // line up.
+                    if let (Some(stamp), Some(live)) = (entry.rider.as_deref(), live_rider) {
+                        if stamp != live {
+                            ui.label(
+                                egui::RichText::new("\u{26A0}")
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(255, 140, 60)),
+                            )
+                            .on_hover_text(format!(
+                                "Recorded as {}; the rider is {}. A different character or \
+                                 stance has different physics, so this take will not line up.",
                                 stamp, live
                             ));
                         }

@@ -6,6 +6,7 @@
 #include "shared_state.hpp"
 #include "caves/cave2.hpp"
 #include "renderer_info.hpp"
+#include "rider_identity.hpp"
 #include "level_path_parse.hpp"
 #include <cstring>
 
@@ -510,6 +511,7 @@ static DWORD WINAPI threadProc(LPVOID param) {
             pollLevelContext(s);
             if (cycleFrozen()) TryProcessStopCommand(s, false);
             renderer::Refresh(s);
+            rider::Refresh(s);
         }
     }
     return 0;

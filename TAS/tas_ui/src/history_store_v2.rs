@@ -70,6 +70,8 @@ pub struct StoredEntry {
     pub level: Option<String>,
     /// Physics-mode stamp (`tas_shared::physics_mode_label`); None = unknown.
     pub physics: Option<String>,
+    /// Rider stamp (`tas_shared::rider_label`); None = unknown / pre-stamp.
+    pub rider: Option<String>,
     pub created_at_iso: String,
     pub snapshot: Option<PersistedSnapshot>,
 }
@@ -93,6 +95,8 @@ pub struct LoadedEntry {
     /// Level code (e.g. "FE"); None on manifests written before this field.
     pub level: Option<String>,
     pub physics: Option<String>,
+    /// Rider stamp (`tas_shared::rider_label`); None = unknown / pre-stamp.
+    pub rider: Option<String>,
     pub created_at_iso: String,
     /// Inline bytes. Always `Some` for available snapshot entries under
     /// `LoadMode::Eager`; `None` under `LoadMode::Lazy` (see `blob`).
@@ -142,6 +146,9 @@ struct ManifestEntry {
     /// manifests → None.
     #[serde(default)]
     physics: Option<String>,
+    /// Rider stamp (character · stance). Absent on older manifests → None.
+    #[serde(default)]
+    rider: Option<String>,
     created_at_iso: String,
     /// `None` for marker entries with no blob.
     size: Option<u64>,
@@ -301,6 +308,7 @@ impl HistoryStoreV2 {
                     finish_time_exact: me.finish_time_exact,
                     level: me.level.clone(),
                     physics: me.physics.clone(),
+                    rider: me.rider.clone(),
                     created_at_iso: me.created_at_iso.clone(),
                     snapshot,
                     blob,
@@ -415,6 +423,7 @@ impl HistoryStoreV2 {
                 finish_time_exact: e.finish_time_exact,
                 level: e.level.clone(),
                 physics: e.physics.clone(),
+                rider: e.rider.clone(),
                 created_at_iso: e.created_at_iso.clone(),
                 size,
                 checksum,
@@ -1039,6 +1048,7 @@ mod tests {
             finish_time_exact: false,
             level: None,
             physics: None,
+            rider: None,
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
             snapshot: Some(snap(count, id as u8)),
         }
@@ -1058,6 +1068,7 @@ mod tests {
             finish_time_exact: false,
             level: None,
             physics: None,
+            rider: None,
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
             snapshot: None,
         }
@@ -1657,6 +1668,7 @@ mod tests {
                 finish_time_exact: false,
                 level: None,
                 physics: None,
+                rider: None,
                 created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
                 size: size.or(Some(bytes.len() as u64)),
                 checksum: Some(crc32fast::hash(bytes)),
@@ -1696,6 +1708,7 @@ mod tests {
             finish_time_exact: false,
             level: None,
             physics: None,
+            rider: None,
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
             snapshot: res.entries[0].snapshot.clone(),
         };
