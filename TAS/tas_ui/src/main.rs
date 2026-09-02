@@ -506,6 +506,64 @@ fn stop_is_acknowledged(mode: u32, command_idle: bool) -> bool {
 /// `stop_pending` = a STOP is already published or being consumed. Any OTHER
 /// pending command (e.g. a tick-scheduled arm that never fired because the
 /// level was left) must not suppress the auto-stop: STOP overwrites it.
+/// Incremental max-drift scan behind the DRIFT banner: compares
+/// play[play_base+i] with rec[rec_base+i] for the pairs not scanned yet and
+/// keeps the running maxima in `max_dx` / `max_dz`. Returns (pairs, reset).
+///
+/// Gate-aligned replays are correct when play[live_gate+k] == rec[rec_gate+k],
+/// so the bases come from the DLL's gate fields while both are set - and stay
+/// LATCHED in `bases` after that: the DLL clears both fields the moment
+/// playback completes (ClearGateAlign / the stop path), and re-scanning raw
+/// indices at that point reported the alignment shift itself as drift - a
+/// false "DRIFT" line at the end of every bit-exact replay whose gate landed
+/// elsewhere (Time Attack ghosts move it ~11 ticks earlier; measured
+/// 2026-09-02, 1035/1035 aligned pairs exact, banner said Z=2.5). The latch
+/// drops when the position falls back below the latched gate (a new session)
+/// or while recording. The cache resets whenever the pair count shrinks, which
+/// also covers the moment the gate fires mid-replay and the indexing switches
+/// over.
+fn scan_drift(
+    state: &tas_shared::TasSharedState,
+    max_dx: &mut f32,
+    max_dz: &mut f32,
+    last_count: &mut usize,
+    bases: &mut Option<(usize, usize)>,
+) -> (usize, bool) {
+    let live_gate = state.gate_index as usize;
+    let rec_gate = state.gate_align_rec as usize;
+    if live_gate > 0 && rec_gate > 0 {
+        *bases = Some((live_gate, rec_gate));
+    } else if let Some((play_base, _)) = *bases {
+        if (state.playback_pos as usize) <= play_base || state.mode == TasMode::Rec as u32 {
+            *bases = None;
+        }
+    }
+    let (play_base, rec_base) = bases.unwrap_or((0, 0));
+    let count = (state.playback_pos as usize)
+        .saturating_sub(play_base)
+        .min((state.recorded_count as usize).saturating_sub(rec_base))
+        .min(state.play_coords.len().saturating_sub(play_base))
+        .min(state.rec_coords.len().saturating_sub(rec_base));
+    let reset = count < *last_count;
+    if reset {
+        *max_dx = 0.0;
+        *max_dz = 0.0;
+        *last_count = 0;
+    }
+    for i in *last_count..count {
+        let d = (state.play_coords[play_base + i][0] - state.rec_coords[rec_base + i][0]).abs();
+        if d > *max_dx {
+            *max_dx = d;
+        }
+        let d = (state.play_coords[play_base + i][2] - state.rec_coords[rec_base + i][2]).abs();
+        if d > *max_dz {
+            *max_dz = d;
+        }
+    }
+    *last_count = count;
+    (count, reset)
+}
+
 fn should_request_auto_stop(
     racing: bool,
     cycle_frozen: bool,
@@ -609,6 +667,8 @@ struct TasApp {
     cached_max_drift_x: f32,
     cached_max_drift_z: f32,
     last_drift_scan_count: usize,
+    /// Gate-aligned (play_base, rec_base) latched by `scan_drift`.
+    drift_aligned_bases: Option<(usize, usize)>,
     last_logged_drift_level: u8, // 0=none, 1=any, 2=>=1.0, 3=>=5.0
 
     // Cached plot data (avoid per-frame Vec allocation)
@@ -863,6 +923,7 @@ impl TasApp {
             cached_max_drift_x: 0.0,
             cached_max_drift_z: 0.0,
             last_drift_scan_count: 0,
+            drift_aligned_bases: None,
             last_logged_drift_level: 0,
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
@@ -3537,42 +3598,19 @@ impl eframe::App for TasApp {
                     // otherwise. The cache resets whenever the pair count
                     // shrinks, which also covers the moment the gate fires
                     // mid-replay and the indexing switches over.
-                    let live_gate = state.gate_index as usize;
-                    let rec_gate = state.gate_align_rec as usize;
-                    let aligned = rec_gate > 0 && live_gate > 0;
-                    let (play_base, rec_base) = if aligned {
-                        (live_gate, rec_gate)
-                    } else {
-                        (0, 0)
-                    };
-                    let count = (state.playback_pos as usize)
-                        .saturating_sub(play_base)
-                        .min((state.recorded_count as usize).saturating_sub(rec_base))
-                        .min(state.play_coords.len().saturating_sub(play_base))
-                        .min(state.rec_coords.len().saturating_sub(rec_base));
-                    if count < self.last_drift_scan_count {
-                        self.cached_max_drift_x = 0.0;
-                        self.cached_max_drift_z = 0.0;
-                        self.last_drift_scan_count = 0;
-                        self.last_logged_drift_level = 0;
-                    }
                     let prev_dx = self.cached_max_drift_x;
                     let prev_dz = self.cached_max_drift_z;
-                    for i in self.last_drift_scan_count..count {
-                        let d = (state.play_coords[play_base + i][0]
-                            - state.rec_coords[rec_base + i][0])
-                            .abs();
-                        if d > self.cached_max_drift_x {
-                            self.cached_max_drift_x = d;
-                        }
-                        let d = (state.play_coords[play_base + i][2]
-                            - state.rec_coords[rec_base + i][2])
-                            .abs();
-                        if d > self.cached_max_drift_z {
-                            self.cached_max_drift_z = d;
-                        }
+                    let (count, reset) = scan_drift(
+                        state,
+                        &mut self.cached_max_drift_x,
+                        &mut self.cached_max_drift_z,
+                        &mut self.last_drift_scan_count,
+                        &mut self.drift_aligned_bases,
+                    );
+                    if reset {
+                        self.last_logged_drift_level = 0;
                     }
-                    self.last_drift_scan_count = count;
+                    let (prev_dx, prev_dz) = if reset { (0.0, 0.0) } else { (prev_dx, prev_dz) };
 
                     let max_d = self.cached_max_drift_x.max(self.cached_max_drift_z);
                     let new_level = if max_d >= 5.0 {
@@ -3904,6 +3942,7 @@ mod tests {
             cached_max_drift_x: 0.0,
             cached_max_drift_z: 0.0,
             last_drift_scan_count: 0,
+            drift_aligned_bases: None,
             last_logged_drift_level: 0,
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
@@ -4632,6 +4671,73 @@ mod tests {
         assert_eq!(app.cached_max_drift_x, 0.0);
         assert_eq!(app.cached_max_drift_z, 0.0);
         assert_eq!(app.last_drift_scan_count, 0);
+    }
+
+    #[test]
+    fn drift_scan_keeps_gate_alignment_after_the_dll_clears_it() {
+        // Forest Easy, 2026-09-02: a no-ghost recording (gate 299) replayed
+        // with three Time Attack ghosts loaded (gate 287) was bit-exact pair
+        // for pair, but the DLL zeroes gate_index / gate_align_rec when the
+        // replay completes and the raw re-scan then logged "DRIFT Z=2.5".
+        let mut app = test_app();
+        let mut state: Box<TasSharedState> = unsafe {
+            Box::from_raw(Box::into_raw(
+                vec![0u8; std::mem::size_of::<TasSharedState>()].into_boxed_slice(),
+            ) as *mut TasSharedState)
+        };
+        state.recorded_count = 400;
+        for i in 0..400usize {
+            state.rec_coords[i] = [0.0, 0.0, i.saturating_sub(299) as f32];
+        }
+        for i in 0..400usize {
+            state.play_coords[i] = [0.0, 0.0, i.saturating_sub(287) as f32];
+        }
+        let scan = |app: &mut TasApp, state: &TasSharedState| {
+            scan_drift(
+                state,
+                &mut app.cached_max_drift_x,
+                &mut app.cached_max_drift_z,
+                &mut app.last_drift_scan_count,
+                &mut app.drift_aligned_bases,
+            )
+        };
+
+        // Mid-replay, aligned: no drift.
+        state.mode = TasMode::Play as u32;
+        state.playback_pos = 380;
+        state.gate_index = 287;
+        state.gate_align_rec = 299;
+        scan(&mut app, &state);
+        assert_eq!(app.drift_aligned_bases, Some((287, 299)));
+        assert_eq!(app.cached_max_drift_z, 0.0, "aligned replay is drift-free");
+
+        // Playback completes: the DLL clears both gate fields.
+        state.mode = TasMode::Off as u32;
+        state.playback_pos = 388;
+        state.gate_index = 0;
+        state.gate_align_rec = 0;
+        let (_, reset) = scan(&mut app, &state);
+        assert!(!reset, "completion must not restart the scan from raw indices");
+        assert_eq!(app.drift_aligned_bases, Some((287, 299)));
+        assert_eq!(
+            app.cached_max_drift_z, 0.0,
+            "the latched alignment survives completion (this was the false DRIFT banner)"
+        );
+
+        // A fresh session (position back below the latched gate) drops the latch.
+        state.playback_pos = 100;
+        let (count, reset) = scan(&mut app, &state);
+        assert!(app.drift_aligned_bases.is_none());
+        assert!(reset);
+        assert_eq!(count, 100);
+        assert_eq!(app.cached_max_drift_z, 0.0, "both still at the spawn before the gate");
+
+        // Recording drops it too.
+        app.drift_aligned_bases = Some((287, 299));
+        state.mode = TasMode::Rec as u32;
+        state.playback_pos = 388;
+        scan(&mut app, &state);
+        assert!(app.drift_aligned_bases.is_none());
     }
 
     #[test]
