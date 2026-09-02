@@ -262,15 +262,46 @@ static void TickCb(SafetyHookContext&) {
 
 inline bool Install(GameAddresses& addr, TasSharedState* state) {
     if (!addr.sg) { Log("Race timer: no SG base"); return false; }
+    auto sg = (uint8_t*)addr.sg;
+    HMODULE uit = GetModuleHandleA("SR_UIT.dll");
+    static constexpr GameAddresses::ModuleIdentity kUitIdentity{
+        "SR_UIT.dll v1.035", 0x381DA317u, 0x00022000u
+    };
+    // On-disk bytes. Both sites embed an absolute address the loader rebases
+    // (these DLLs never load at their preferred 0x10000000), so the imm32 at +3
+    // is compared after rebasing - see GameAddresses::ValidateCodeAbs.
+    static constexpr uint8_t kRaceTick[] =                    // inc word [SG+0x1D5334]; ret
+        { 0x66, 0xFF, 0x05, 0x34, 0x53, 0x1D, 0x10, 0xC3 };
+    static constexpr uint8_t kAppendText[] =                  // push -1; push UIT+0x12E87
+        { 0x6A, 0xFF, 0x68, 0x87, 0x2E, 0x01, 0x10 };
+    // Validate every site BEFORE installing anything. The race timer is optional
+    // (TAS_NO_RACETIMER), so a mismatch here makes it unavailable rather than
+    // failing TAS_Initialize.
+    bool sitesOk =
+        GameAddresses::ValidateCodeAbs<3>("Supreme_Game.dll+0xB4B80", sg + 0xB4B80,
+                                          kRaceTick, sg, 0x1D5334) &&
+        GameAddresses::ValidateModule(uit, kUitIdentity) &&
+        GameAddresses::ValidateCodeAbs<3>("SR_UIT.dll+0xED40", (uint8_t*)uit + 0xED40,
+                                          kAppendText, (uint8_t*)uit, 0x12E87);
+    if (!sitesOk) {
+        Log(std::format("Race timer: unavailable - site validation failed (SR_UIT {:p})", (void*)uit));
+        return false;
+    }
+
     g_state = state;
     char buf[8] = {};
     g_diag = (GetEnvironmentVariableA("TAS_RACE_DIAG", buf, sizeof(buf)) > 0 && buf[0] == '1');
     ResetEpoch();
-    auto sg = (uint8_t*)addr.sg;
     g_clock = sg + 0x1D5334;
     g_tickHook = safetyhook::create_mid(sg + 0xB4B80, TickCb);  // clock tick (100/sec)
-    HMODULE uit = GetModuleHandleA("SR_UIT.dll");
-    if (uit) g_aptHook = safetyhook::create_mid((uint8_t*)uit + 0xED40, AptCb);
+    g_aptHook = safetyhook::create_mid((uint8_t*)uit + 0xED40, AptCb);
+    if (!g_tickHook || !g_aptHook) {
+        // Installation is all-or-none: a failed UI hook must not leave the
+        // per-tick callback running against a feature reported as unavailable.
+        g_tickHook = {};
+        g_aptHook = {};
+        g_state = nullptr;
+    }
     Log(std::format("Race timer: tick={} append={} diag={} (SR_UIT {:p})",
         (bool)g_tickHook, (bool)g_aptHook, g_diag, (void*)uit));
     return (bool)g_tickHook && (bool)g_aptHook;
@@ -279,6 +310,7 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
 inline void Stop() {
     g_tickHook = {};
     g_aptHook = {};
+    g_state = nullptr;
 }
 
 } // namespace racetimer

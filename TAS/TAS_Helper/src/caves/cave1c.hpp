@@ -9,7 +9,7 @@
 // Cave 1C: Handler gate hooks at HMG+3940 (keyDown) and HMG+3980 (keyUp).
 //
 // During REC (mode=1) and PLAY (mode=2): blocks external handler calls
-//   UNLESS cave2_injecting=1 (Cave 2 direct call passthrough).
+//   unless the current thread is inside a Cave 2 injection scope.
 //   Symmetric blocking ensures +3940 never writes the buffer outside Cave 2,
 //   eliminating the one-frame timing difference between REC and PLAY.
 // During IDLE (mode=0): passes through.
@@ -23,6 +23,13 @@ inline TasSharedState* g_cave1cState = nullptr;
 // Inline hooks for keyDown (+3940) and keyUp (+3980)
 static SafetyHookInline cave1cDownInline{};
 static SafetyHookInline cave1cUpInline{};
+
+inline void UninstallCave1C() {
+    cave1cUpInline = {};
+    cave1cDownInline = {};
+    if (g_cave1cState) g_cave1cState->cave1c_hooked = 0;
+    g_cave1cState = nullptr;
+}
 
 // Handler signature emulated via __fastcall:
 //   ecx = this, edx = unused, stack: arg1, arg2, arg3
@@ -38,14 +45,13 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
     auto* s = g_cave1cState;
     // Block external handler during REC and PLAY (symmetric).
     // Cave 2 writes the buffer and calls BB3B10 directly in both modes.
-    // Only pass through when cave2_injecting=1 (Cave 2's own BB3B10 calls)
-    // or when mode is IDLE.
+    // Only pass through on Cave 2's injection thread or when mode is IDLE.
     // Fallback calibration: a3 is the hi dword of the Kernel::Time the event
     // was stamped with (the handler forwards its Time args verbatim to
     // BB3B10). Injection normally stamps with Kernel::Time::Current() and
     // never reads this; the observed value only backs up injection if that
     // export ever fails to resolve.
-    if (s && !s->cave2_injecting && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
+    if (s && !IsTasInjectionThread() && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
         g_bb3b10Arg4 = a3;
     }
     // ESC passthrough: cave1c's REC/PLAY block exists to keep GAMEPLAY input
@@ -59,7 +65,7 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
     if (s && ShouldBlockRealInput({
             s->mode,
             s->cont_suppress_input != 0,
-            s->cave2_injecting != 0,
+            IsTasInjectionThread(),
             (GetTickCount() - g_lastCycleMs) > 250,
             a1 == VK_ESCAPE,
         })) {
@@ -73,7 +79,7 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
     // carries (cave1d log) — the handler forwards one of its own args as arg4,
     // and identifying which one lets us calibrate the injected arg4 even from
     // BLOCKED keypresses during REC (the handler detour still sees the args).
-    if (s && s->mode == MODE_OFF && !s->cave2_injecting) {
+    if (s && s->mode == MODE_OFF && !IsTasInjectionThread()) {
         uint32_t cur = ((uint32_t)(uintptr_t)ecx) ^ (a1 << 1);
         if (cur != g_lastRealHandlerThis) {
             g_lastRealHandlerThis = cur;
@@ -105,7 +111,7 @@ void __fastcall Cave1C_UpDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, 
     uint64_t t0 = __rdtsc();
     auto* s = g_cave1cState;
     // Keep the fallback arg4 fresh from real keyUp calls too (see DownDetour).
-    if (s && !s->cave2_injecting && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
+    if (s && !IsTasInjectionThread() && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
         g_bb3b10Arg4 = a3;
     }
     // Keep down/up symmetric (see DownDetour) — same gate policy. A key
@@ -114,7 +120,7 @@ void __fastcall Cave1C_UpDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, 
     if (s && ShouldBlockRealInput({
             s->mode,
             s->cont_suppress_input != 0,
-            s->cave2_injecting != 0,
+            IsTasInjectionThread(),
             (GetTickCount() - g_lastCycleMs) > 250,
             a1 == VK_ESCAPE,
         })) {
@@ -141,12 +147,16 @@ bool InstallCave1C(GameAddresses& addr, TasSharedState* state) {
     cave1cDownInline = safetyhook::create_inline(addr.cave1c_down, Cave1C_DownDetour);
     if (!cave1cDownInline) {
         Log("Cave 1C: SafetyHook create_inline FAILED on keyDown (+3940)");
+        g_cave1cState = nullptr;
         return false;
     }
 
     cave1cUpInline = safetyhook::create_inline(addr.cave1c_up, Cave1C_UpDetour);
     if (!cave1cUpInline) {
         Log("Cave 1C: SafetyHook create_inline FAILED on keyUp (+3980)");
+        // All-or-none: leaving keyDown intercepted without the matching keyUp
+        // path creates stuck/asymmetric input while cave1c_hooked still says no.
+        UninstallCave1C();
         return false;
     }
 

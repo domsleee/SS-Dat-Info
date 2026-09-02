@@ -105,7 +105,7 @@ struct TasSharedState {
     uint32_t recorded_count;        // ticks recorded
     uint32_t playback_pos;          // current playback tick
     uint32_t prev_mask;             // last input bitmask
-    uint32_t cave2_injecting;       // playback injection active (Cave 1C/1D gate flag)
+    uint32_t cave2_injecting;       // best-effort diagnostic; gates use a thread-local scope
     float    player_x, player_y, player_z;
     float    max_drift_x, max_drift_z;
 

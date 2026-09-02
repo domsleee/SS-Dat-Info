@@ -16,6 +16,12 @@
 inline TasSharedState* g_replayState = nullptr;
 static SafetyHookMid replayCaptureHook{};
 
+inline void UninstallReplayCapture() {
+    replayCaptureHook = {};
+    if (g_replayState) g_replayState->replay_capture_hooked = 0;
+    g_replayState = nullptr;
+}
+
 bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
     if (!addr.replay_capture_site) {
         Log("Replay capture: hook site not resolved");
@@ -44,6 +50,7 @@ bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
 
     if (!replayCaptureHook) {
         Log("Replay capture: SafetyHook create_mid FAILED");
+        g_replayState = nullptr;
         return false;
     }
 

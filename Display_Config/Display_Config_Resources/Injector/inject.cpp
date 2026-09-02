@@ -3,6 +3,7 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <cstring>
 
 static std::ofstream g_log;
 
@@ -37,43 +38,118 @@ DWORD FindProcess(const wchar_t* name) {
     return processId;
 }
 
-void Inject(DWORD pid, std::string dll) {
+bool Inject(DWORD pid, const std::string& dll) {
     HANDLE hProc = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD, 0, pid);
     if (!hProc) {
         Log("Failed to open process " + std::to_string(pid) + " (error " + std::to_string(GetLastError()) + ")");
-        return;
+        return false;
     }
     Log("OpenProcess OK (handle=" + std::to_string(reinterpret_cast<uintptr_t>(hProc)) + ")");
 
-    LPVOID mem = VirtualAllocEx(hProc, 0, MAX_PATH, MEM_COMMIT, PAGE_READWRITE);
+    const SIZE_T pathBytes = dll.size() + 1;
+    LPVOID mem = VirtualAllocEx(
+        hProc, nullptr, pathBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!mem) {
         Log("VirtualAllocEx failed (error " + std::to_string(GetLastError()) + ")");
         CloseHandle(hProc);
-        return;
+        return false;
     }
     Log("VirtualAllocEx OK (addr=" + std::to_string(reinterpret_cast<uintptr_t>(mem)) + ")");
 
-    BOOL wrote = WriteProcessMemory(hProc, mem, dll.c_str(), dll.length() + 1, 0);
-    Log("WriteProcessMemory: " + std::string(wrote ? "OK" : "FAILED"));
-
-    HANDLE hThread = CreateRemoteThread(hProc, 0, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, mem, 0, 0);
-    if (hThread) {
-        Log("CreateRemoteThread OK, waiting...");
-        DWORD wait = WaitForSingleObject(hThread, 5000);
-        DWORD exitCode = 0;
-        GetExitCodeThread(hThread, &exitCode);
-        Log("Thread finished (wait=" + std::to_string(wait) + " exitCode=0x" +
-            ([](DWORD v) { char buf[16]; snprintf(buf, sizeof(buf), "%08X", v); return std::string(buf); })(exitCode) + ")");
-        if (exitCode == 0) {
-            Log("WARNING: LoadLibraryA returned NULL — DLL failed to load!");
-        }
-        CloseHandle(hThread);
-    } else {
-        Log("CreateRemoteThread FAILED (error " + std::to_string(GetLastError()) + ")");
+    SIZE_T bytesWritten = 0;
+    BOOL wrote = WriteProcessMemory(
+        hProc, mem, dll.c_str(), pathBytes, &bytesWritten);
+    bool pathWritten = wrote && bytesWritten == pathBytes;
+    Log("WriteProcessMemory: " + std::string(pathWritten ? "OK" : "FAILED") +
+        " (" + std::to_string(bytesWritten) + "/" + std::to_string(pathBytes) + " bytes)");
+    if (!pathWritten) {
+        VirtualFreeEx(hProc, mem, 0, MEM_RELEASE);
+        CloseHandle(hProc);
+        return false;
     }
 
+    HANDLE hThread = CreateRemoteThread(hProc, 0, 0, (LPTHREAD_START_ROUTINE)LoadLibraryA, mem, 0, 0);
+    if (!hThread) {
+        Log("CreateRemoteThread FAILED (error " + std::to_string(GetLastError()) + ")");
+        VirtualFreeEx(hProc, mem, 0, MEM_RELEASE);
+        CloseHandle(hProc);
+        return false;
+    }
+
+    Log("CreateRemoteThread OK, waiting...");
+    DWORD wait = WaitForSingleObject(hThread, 5000);
+    if (wait != WAIT_OBJECT_0) {
+        Log("LoadLibraryA remote thread timed out/failed (wait=" + std::to_string(wait) + ")");
+        // The remote thread may still be reading the path. Do not free it out
+        // from underneath that thread on timeout.
+        CloseHandle(hThread);
+        CloseHandle(hProc);
+        return false;
+    }
+
+    DWORD remoteModule = 0;
+    if (!GetExitCodeThread(hThread, &remoteModule) || remoteModule == 0) {
+        Log("LoadLibraryA returned NULL — DLL failed to load");
+        CloseHandle(hThread);
+        VirtualFreeEx(hProc, mem, 0, MEM_RELEASE);
+        CloseHandle(hProc);
+        return false;
+    }
+    CloseHandle(hThread);
     VirtualFreeEx(hProc, mem, 0, MEM_RELEASE);
+
+    // TAS_Helper keeps DllMain loader-lock-safe. If the loaded DLL exports an
+    // explicit initializer, resolve its RVA without running local DllMain and
+    // invoke it only after the target's LoadLibrary call has returned.
+    bool requiresExplicitInit = _stricmp(
+        std::filesystem::path(dll).filename().string().c_str(), "TAS_Helper.dll") == 0;
+    HMODULE localModule = LoadLibraryExA(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+    if (!localModule && requiresExplicitInit) {
+        Log("Could not inspect TAS_Helper.dll exports (error " +
+            std::to_string(GetLastError()) + ")");
+        CloseHandle(hProc);
+        return false;
+    }
+    if (localModule) {
+        FARPROC localInit = GetProcAddress(localModule, "TAS_Initialize");
+        if (localInit) {
+            uintptr_t initRva = reinterpret_cast<uintptr_t>(localInit)
+                - reinterpret_cast<uintptr_t>(localModule);
+            auto remoteInit = reinterpret_cast<LPTHREAD_START_ROUTINE>(
+                static_cast<uintptr_t>(remoteModule) + initRva);
+            HANDLE initThread = CreateRemoteThread(hProc, nullptr, 0, remoteInit, nullptr, 0, nullptr);
+            if (!initThread) {
+                Log("TAS_Initialize CreateRemoteThread failed (error " +
+                    std::to_string(GetLastError()) + ")");
+                FreeLibrary(localModule);
+                CloseHandle(hProc);
+                return false;
+            }
+            DWORD initWait = WaitForSingleObject(initThread, 10000);
+            DWORD initResult = 0;
+            bool initialized = initWait == WAIT_OBJECT_0
+                && GetExitCodeThread(initThread, &initResult)
+                && initResult != 0;
+            CloseHandle(initThread);
+            if (!initialized) {
+                Log("TAS_Initialize failed/timed out (wait=" + std::to_string(initWait) +
+                    " result=" + std::to_string(initResult) + ")");
+                FreeLibrary(localModule);
+                CloseHandle(hProc);
+                return false;
+            }
+            Log("TAS_Initialize completed successfully");
+        } else if (requiresExplicitInit) {
+            Log("TAS_Helper.dll does not export TAS_Initialize");
+            FreeLibrary(localModule);
+            CloseHandle(hProc);
+            return false;
+        }
+        FreeLibrary(localModule);
+    }
+
     CloseHandle(hProc);
+    return true;
 }
 
 int main(int argc, char* argv[]) {
@@ -106,7 +182,10 @@ int main(int argc, char* argv[]) {
     }
 
     if (pid) {
-        Inject(pid, dllPath.string());
+        if (!Inject(pid, dllPath.string())) {
+            Log("Injection failed");
+            return 1;
+        }
         Log("Injection complete");
     } else {
         Log("Supreme.exe process not found");

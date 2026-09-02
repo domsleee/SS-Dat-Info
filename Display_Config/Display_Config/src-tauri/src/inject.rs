@@ -92,16 +92,20 @@ pub async fn run_tas_inject() -> Result<String, String> {
         .map_err(|err| format!("Failed to spawn Injector: {err}"))?;
 
     if !status.success() {
-        return Err("Injector.exe failed.\nIs Supreme.exe running?".to_string());
+        // Non-zero now also covers a loaded DLL whose TAS_Initialize refused
+        // the process (unsupported build, hook failure): Injector.log says
+        // which step failed and TAS_Helper.log (next to Supreme.exe) says why.
+        return Err(
+            "Injector.exe failed.\nIs Supreme.exe running? If so, see \
+             Display_Config_Resources\\Injector.log and TAS_Helper.log."
+                .to_string(),
+        );
     }
 
-    // Injector.exe currently exits 0 even when CreateRemoteThread or
-    // LoadLibraryA inside the target failed — the Inject sub-routine
-    // logs and returns rather than propagating. Verify success by
-    // waiting briefly for the TAS shared-memory section that
-    // TAS_Helper.dll creates on init (`Local\SupremeTAS`); without it
-    // we'd report "DLL injected" even when no real injection occurred,
-    // and tas_ui would silently fail to connect.
+    // Injector.exe propagates LoadLibrary/TAS_Initialize failures. Keep this
+    // independent readiness check as defense in depth: success means the DLL
+    // also created the expected protocol mapping, not merely that its entry
+    // point returned.
     if !wait_for_shared_memory("Local\\SupremeTAS", Duration::from_secs(5)) {
         return Err(
             "Injector.exe exited successfully, but TAS shared memory was not created. \

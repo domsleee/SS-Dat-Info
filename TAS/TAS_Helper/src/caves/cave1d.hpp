@@ -3,6 +3,7 @@
 #include "../log.hpp"
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
+#include "../input_gate.hpp"
 #include "../external/safetyhook.hpp"
 
 // Cave 1D: BB3B10 observer notification gate at HMG+3B10.
@@ -11,7 +12,7 @@
 // key state changes, and is REQUIRED for steering to work.
 //
 // Gate logic:
-//   - cave2_injecting=1: ALWAYS pass through (Cave 2 direct call)
+//   - current thread is in a TAS injection scope: ALWAYS pass through
 //   - MODE_REC + inject_mode=6: BLOCK (Cave 2 will call BB3B10 directly
 //     on transitions for timing symmetry with PLAY)
 //   - All other cases: pass through
@@ -24,6 +25,12 @@
 inline TasSharedState* g_cave1dState = nullptr;
 static SafetyHookInline cave1dInline{};
 
+inline void UninstallCave1D() {
+    cave1dInline = {};
+    if (g_cave1dState) g_cave1dState->cave1d_hooked = 0;
+    g_cave1dState = nullptr;
+}
+
 void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
                                      uint32_t pressed, uint32_t unk, uint32_t arg4) {
     uint64_t t0 = __rdtsc();
@@ -34,12 +41,12 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
         // Fallback calibration from real BB3B10 calls (arg4 = Time.hi of the
         // event stamp). Injection normally uses Kernel::Time::Current() and
         // never reads this; belt-and-braces alongside cave1c's calibration.
-        if (!s->cave2_injecting && !s->test_arg4_override && arg4 != g_bb3b10Arg4) {
+        if (!IsTasInjectionThread() && !s->test_arg4_override && arg4 != g_bb3b10Arg4) {
             g_bb3b10Arg4 = arg4;
         }
 
-        // Allow through if Cave 2 is actively injecting
-        if (s->cave2_injecting) {
+        // Allow through only on the thread Cave 2 is actively injecting from.
+        if (IsTasInjectionThread()) {
             cave1dInline.thiscall<void>(ecx, keyIndex, pressed, unk, arg4);
             PerfSample(s->perf_cave1d, __rdtsc() - t0);
             return;
@@ -117,6 +124,7 @@ bool InstallCave1D(GameAddresses& addr, TasSharedState* state) {
     cave1dInline = safetyhook::create_inline(addr.bb3b10, Cave1D_BB3B10Detour);
     if (!cave1dInline) {
         Log("Cave 1D: SafetyHook create_inline FAILED on BB3B10 (+3B10)");
+        g_cave1dState = nullptr;
         return false;
     }
 

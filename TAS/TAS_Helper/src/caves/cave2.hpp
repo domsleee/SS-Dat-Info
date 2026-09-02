@@ -4,6 +4,7 @@
 #include "../log.hpp"
 #include "../helper.hpp"
 #include "../gate_alignment.hpp"
+#include "../input_gate.hpp"
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
 #include "../external/safetyhook.hpp"
@@ -22,7 +23,7 @@
 // REC (inject_mode=6, source=0):
 //   1. Sample DI buffer -> build 6-bit input mask
 //   2. Write action_state from mask
-//   3. Call BB3B10 on transitions (with cave2_injecting=1)
+//   3. Call BB3B10 on transitions inside a thread-local injection scope
 //   4. Store mask in input_log[index]
 //   5. Capture player coordinates (integer-width copy)
 //   6. Increment recorded_count
@@ -31,7 +32,7 @@
 //   1. Read mask from input_log[playback_pos]
 //   2. Write DI buffer from mask
 //   3. Write action_state from mask
-//   4. Call BB3B10 on transitions (with cave2_injecting=1)
+//   4. Call BB3B10 on transitions inside a thread-local injection scope
 //   5. Capture player coordinates (integer-width copy)
 //   6. Increment playback_pos (stop at recorded_count)
 
@@ -39,6 +40,13 @@
 inline TasSharedState* g_cave2State = nullptr;
 inline GameAddresses* g_cave2Addr = nullptr;
 static SafetyHookMid cave2Hook{};
+
+inline void UninstallCave2() {
+    cave2Hook = {};
+    if (g_cave2State) g_cave2State->cave2_hooked = 0;
+    g_cave2State = nullptr;
+    g_cave2Addr = nullptr;
+}
 
 // Hand-rolled hex for hook-context RDIAG logs (no CRT/format in a hook).
 static inline void DiagHexU32(char* dst, uint32_t v) {
@@ -159,6 +167,22 @@ inline volatile uint32_t g_diagInjectLogged = 0;
 // operate the pause menu / dialogs even while a TAS mode is armed.
 inline volatile uint32_t g_lastCycleMs = 0;
 
+class ScopedTasInjection {
+public:
+    explicit ScopedTasInjection(TasSharedState* state) : state_(state) {
+        ++g_tasInjectionDepth;
+        if (state_) state_->cave2_injecting = 1;
+    }
+    ~ScopedTasInjection() {
+        if (g_tasInjectionDepth > 0) --g_tasInjectionDepth;
+        if (state_ && g_tasInjectionDepth == 0) state_->cave2_injecting = 0;
+    }
+    ScopedTasInjection(const ScopedTasInjection&) = delete;
+    ScopedTasInjection& operator=(const ScopedTasInjection&) = delete;
+private:
+    TasSharedState* state_;
+};
+
 // Helper: get the current Kernel::Time from the game's own clock.
 // SEH-protected; returns false if the export is unresolved or the call faults.
 // The callee is x87-balanced (verified by disasm) and we already run game code
@@ -217,8 +241,7 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
         LogRing(s, LOG_INFO, buf);
     }
 
-    // Set cave2_injecting so Cave 1C/1D pass through
-    s->cave2_injecting = 1;
+    ScopedTasInjection injectionScope(s);
 
     if (transitions & INPUT_LEFT) {
         bb3b10(thisPtr, GameAddresses::BB3B10_LEFT, (mask & INPUT_LEFT) ? 1 : 0,
@@ -245,7 +268,6 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
                t.lo, t.hi);
     }
 
-    s->cave2_injecting = 0;
     s->bb3b10_call_count++;
 }
 
@@ -362,19 +384,26 @@ static constexpr uint32_t RESTART_F5_HOLD_FRAMES = 10;  // Hold F5 for 10 frames
 
 
 // Helper: press or release F5 in the DI buffer + notify BB3B10
+static void SafeWriteF5Buffer(uint32_t buffer, bool pressed) {
+    __try {
+        ((uint8_t*)buffer)[GameAddresses::KEY_F5] = pressed ? 0x01 : 0x00;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, bool pressed) {
     uint32_t buffer = GetDIBuffer(kbobj);
     if (buffer) {
-        __try {
-            ((uint8_t*)buffer)[GameAddresses::KEY_F5] = pressed ? 0x01 : 0x00;
-        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        // Keep SEH in a leaf function. MSVC rejects a function that contains
+        // both __try and the ScopedTasInjection object below because the latter
+        // requires C++ unwinding (C2712).
+        SafeWriteF5Buffer(buffer, pressed);
     }
 
     // Notify BB3B10 of the F5 state change
     if (kbobj) {
         auto bb3b10 = (BB3B10Fn)(addr->bb3b10);
         void* thisPtr = (void*)(kbobj + GameAddresses::BB3B10_THIS_OFFSET);
-        s->cave2_injecting = 1;
+        ScopedTasInjection injectionScope(s);
         // Stamp F5 with the live Kernel::Time too. The restart itself is
         // driven by the DI-buffer write (the observer call is auxiliary), but
         // a wrong stamp here POISONS the observer's event-time window: the
@@ -388,8 +417,20 @@ static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, boo
         ft.lo = 0;  // floored like the steering stamp (see CallBB3B10OnTransitions)
         bb3b10(thisPtr, GameAddresses::BB3B10_F5, pressed ? 1 : 0,
                ft.lo, ft.hi);
-        s->cave2_injecting = 0;
     }
+}
+
+// Clear the raw input state and return the mask that still needs observer UP
+// notifications. The direct writes are safe from the render-hook fallback;
+// calling game code from that potentially different thread is not.
+static uint8_t ClearTasInputState(TasSharedState* s, GameAddresses* addr) {
+    uint8_t held = (uint8_t)s->prev_mask;
+    s->prev_mask = 0;
+    uint32_t kbobj = GetKeyboardObject(addr);
+    if (!kbobj) return held;
+    WriteDIBuffer(GetDIBuffer(kbobj), 0);
+    WriteActionState(kbobj, 0);
+    return held;
 }
 
 // Release every input the TAS session injected: zero the DI buffer + action
@@ -401,15 +442,33 @@ static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, boo
 // level's state — release events for keys the new observer never saw pressed
 // are no-ops, same as a real keyUp without a down.
 static void ReleaseTasInput(TasSharedState* s, GameAddresses* addr) {
-    uint8_t held = (uint8_t)s->prev_mask;
-    s->prev_mask = 0;
+    uint8_t held = ClearTasInputState(s, addr);
+    if (!held) return;
     uint32_t kbobj = GetKeyboardObject(addr);
     if (!kbobj) return;
-    WriteDIBuffer(GetDIBuffer(kbobj), 0);
-    WriteActionState(kbobj, 0);
-    if (held) {
-        CallBB3B10OnTransitions(s, addr, kbobj, 0, held);
+    CallBB3B10OnTransitions(s, addr, kbobj, 0, held);
+}
+
+// A STOP consumed out-of-cycle (level-scan worker, or the optional SwapBuffers
+// hook) clears the memory immediately, then defers observer callbacks until
+// Supreme::Cycle is running on its normal hook thread again. Multiple frozen
+// stops simply merge their held masks.
+static volatile LONG g_deferredInputReleaseMask = 0;
+
+static void DeferTasInputRelease(TasSharedState* s, GameAddresses* addr) {
+    uint8_t held = ClearTasInputState(s, addr);
+    if (held) InterlockedOr(&g_deferredInputReleaseMask, (LONG)held);
+}
+
+static void FlushDeferredTasInputRelease(TasSharedState* s, GameAddresses* addr) {
+    LONG held = InterlockedExchange(&g_deferredInputReleaseMask, 0);
+    if (!held) return;
+    uint32_t kbobj = GetKeyboardObject(addr);
+    if (!kbobj) {
+        InterlockedOr(&g_deferredInputReleaseMask, held);
+        return;
     }
+    CallBB3B10OnTransitions(s, addr, kbobj, 0, (uint8_t)held);
 }
 
 // Deferred log messages — set in callback, logged outside callback
@@ -487,11 +546,67 @@ inline volatile uint32_t g_armedRoot = 0;
 // field — external processes must not be able to set it.
 static volatile uint32_t g_cave2_contArmed = 0;
 
+// STOP also has to work while Supreme::Cycle is frozen. That is not an edge
+// case: leaving a level is detected precisely because the Cycle hook stopped
+// running. A STOP left for ProcessCommand() can therefore remain pending
+// forever, leaving MODE_PLAY/MODE_REC asserted and making tas_ui retry every
+// two seconds. The level-scan worker (level_scan.hpp; the default consumer -
+// note TAS_NO_LEVELSCAN=1 removes it) and the optional SwapBuffers hook
+// (frame_limit.hpp, TAS_FRAMELIMIT=1) call TryProcessStopCommand() while the
+// cycle is frozen, so every consumer needs an atomic claim word.
+static constexpr LONG CAVE2_CMD_CLAIMED_STOP = -1;
+
+// Apply the complete TAS -> OFF transition. No logging/formatting/float
+// arithmetic: this is called from the Cycle mid-hook and from the
+// out-of-cycle consumers above.
+static void ApplyStopTransition(TasSharedState* s, bool notifyObserverNow) {
+    static constexpr uint32_t ZERO_BITS = 0;
+    s->mode = MODE_OFF;
+    s->cave2_injecting = 0;
+    if (notifyObserverNow) {
+        ReleaseTasInput(s, g_cave2Addr);
+    } else {
+        DeferTasInputRelease(s, g_cave2Addr);
+    }
+    s->continue_from_frame = 0;
+    s->cont_suppress_input = 0;
+    g_cave2_contArmed = 0;
+    ClearSpeedHandoff(s);
+    ClearGateAlign(s);
+    memcpy((void*)&s->speed_after_handoff, &ZERO_BITS, 4);
+    g_cave2_pendingLog = 3;
+}
+
+// Atomically claim and acknowledge a pending STOP. Returning command to IDLE
+// is the completion publication and therefore happens only after every status
+// and cleanup write. Compare-exchange on the final step avoids erasing a newer
+// command if a misbehaving writer ignored the non-idle slot while cleanup ran.
+static bool TryProcessStopCommand(TasSharedState* s, bool notifyObserverNow) {
+    LONG previous = InterlockedCompareExchange(
+        (volatile LONG*)&s->command, CAVE2_CMD_CLAIMED_STOP, CMD_STOP);
+    if (previous != CMD_STOP) return false;
+
+    ApplyStopTransition(s, notifyObserverNow);
+    InterlockedCompareExchange(
+        (volatile LONG*)&s->command, CMD_IDLE, CAVE2_CMD_CLAIMED_STOP);
+    return true;
+}
+
 // Handle command transitions
 // WARNING: NO Log/format/float calls — runs inside SafetyHookMid (x87 FPU not saved).
-static void ProcessCommand(TasSharedState* s) {
-    uint32_t cmd = s->command;
-    if (cmd == CMD_IDLE) return;
+// Returns false when the out-of-cycle worker currently owns STOP cleanup. The
+// caller must skip REC/PLAY work for that cycle rather than race the cleanup.
+static bool ProcessCommand(TasSharedState* s) {
+    // Cross-process acquire for the command publication word. The Rust writer
+    // stages every payload field first and stores command with Release.
+    uint32_t cmd = (uint32_t)InterlockedCompareExchange(
+        (volatile LONG*)&s->command, CMD_IDLE, CMD_IDLE);
+    if (cmd == CMD_IDLE) return true;
+    if ((LONG)cmd == CAVE2_CMD_CLAIMED_STOP) return false;
+    if (cmd == CMD_STOP) {
+        TryProcessStopCommand(s, true);
+        return true;
+    }
 
     // Deterministic arm scheduling. If the caller asked for a specific tick,
     // leave the command PENDING until the counter reaches it — do not consume,
@@ -505,7 +620,7 @@ static void ProcessCommand(TasSharedState* s) {
         (cmd == CMD_ARM_REC || cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE)) {
         // Unsigned wrap-safe "have we reached it yet".
         if ((s->tick_count - s->arm_at_tick) >= 0x80000000u) {
-            return;
+            return true;
         }
         s->arm_consumed_tick = s->tick_count;
         s->arm_at_tick = 0;
@@ -640,29 +755,6 @@ static void ProcessCommand(TasSharedState* s) {
             g_cave2_pendingLog = 5;
             break;
 
-        case CMD_STOP:
-            s->mode = MODE_OFF;
-            s->cave2_injecting = 0;
-            ReleaseTasInput(s, g_cave2Addr);  // un-stick keys held by the session
-            // Defense-in-depth: a CONT that was stopped before its splice fired
-            // must not leave a live splice marker behind. Every armer re-writes
-            // the marker immediately before CMD_ARM_CONTINUE, so clearing here
-            // can't break a legitimate cycle.
-            s->continue_from_frame = 0;
-            g_cave2_contArmed = 0;
-            // Same for a PLAY speed handover. Without this, a judged PLAY that
-            // is stopped before it reaches first_moving leaves the request armed
-            // - and the NEXT replay, which may be a plain PLAY the user set to
-            // 4x on purpose, gets silently dropped to the stale resume speed
-            // when its position happens to pass that number. Every armer stages
-            // its own handover immediately before the arm command, so clearing
-            // here cannot break a legitimate cycle.
-            ClearSpeedHandoff(s);
-            ClearGateAlign(s);
-            memcpy((void*)&s->speed_after_handoff, &ZERO_BITS, 4);
-            g_cave2_pendingLog = 3;
-            break;
-
         case CMD_RESTART:
             // Begin in-process F5 restart sequence
             s->trace_count = 0;   // trace from HERE, so the reset is inside it
@@ -766,7 +858,9 @@ static void ProcessCommand(TasSharedState* s) {
         s->arm_generation++;
     }
 
-    s->command = CMD_IDLE;
+    // Publish command completion after all resulting mode/status writes.
+    InterlockedExchange((volatile LONG*)&s->command, CMD_IDLE);
+    return true;
 }
 
 // Flush deferred log (call from OUTSIDE the SafetyHookMid callback)
@@ -796,6 +890,11 @@ static void __declspec(noinline) Cave2_Logic() {
     auto* s = g_cave2State;
     auto* addr = g_cave2Addr;
     if (!s || !addr) return;
+
+    // Finish any observer notifications deferred by a frozen-cycle STOP. Raw
+    // buffers were already cleared in SwapBuffers; this only publishes key-up
+    // transitions from the game thread once it exists again.
+    FlushDeferredTasInputRelease(s, addr);
 
     s->frame_count++;
     g_lastCycleMs = GetTickCount();  // pause detector heartbeat (see cave1c)
@@ -907,7 +1006,7 @@ static void __declspec(noinline) Cave2_Logic() {
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    ProcessCommand(s);
+    if (!ProcessCommand(s)) return;
 
     // PROTOTYPE: record the post-snapshot / post-restore player trajectory for
     // the frame-exact determinism check (no-op unless a snapshot/restore armed it).
@@ -1253,6 +1352,8 @@ bool InstallCave2(GameAddresses& addr, TasSharedState* state) {
 
     if (!cave2Hook) {
         Log("Cave 2: SafetyHook create_mid FAILED");
+        g_cave2State = nullptr;
+        g_cave2Addr = nullptr;
         return false;
     }
 

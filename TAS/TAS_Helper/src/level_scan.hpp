@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 #include "shared_state.hpp"
-#include "caves/frame_limit.hpp"
+#include "caves/cave2.hpp"
 #include "level_path_parse.hpp"
 #include <cstring>
 
@@ -380,6 +380,11 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // "confirm" the track we just left and immediately undo this.
         bool frozen = cycleFrozen();
         if (frozen) {
+            // STOP must have an out-of-cycle consumer: leaving a level freezes
+            // Supreme::Cycle, so waiting for cave2 to consume the command is a
+            // deadlock. This worker remains alive at menus and applies only
+            // raw/shared cleanup; observer callbacks are deferred to cave2.
+            TryProcessStopCommand(s, false);
             if (s->level_scan_epoch == s->level_epoch) {
                 publishContext(s, [&] {
                     s->level_id = 0xFFFFFFFFu;
@@ -469,11 +474,6 @@ static DWORD WINAPI threadProc(LPVOID param) {
                     s->level_id = (uint32_t)id;
                     s->level_scan_epoch = epochAtScan;
                 });
-                // A level has been identified: from here the menu video becomes
-                // present-locked, so the present cap starts earning its cost.
-                // Installing it LAZILY keeps the fresh menu at native speed —
-                // the hook costs ~12ms/frame there merely by existing.
-                EnsureFrameLimitInstalled(s);
             }
         } else if (epochAtScan != s->level_scan_epoch) {
             // A context we have not identified yet — stay explicitly unknown.
@@ -507,15 +507,16 @@ static DWORD WINAPI threadProc(LPVOID param) {
         for (int i = 0; i < slices && !g_stop.load(std::memory_order_relaxed); i++) {
             Sleep(100);
             pollLevelContext(s);
+            if (cycleFrozen()) TryProcessStopCommand(s, false);
         }
     }
     return 0;
 }
 
 // Spawn the detection thread. Safe to call once during DLL init.
-// `cycleMs` is cave2's engine-cycle heartbeat (`&g_lastCycleMs`). Passed in
-// rather than included so this header keeps its light dependency set; pass
-// nullptr and the freeze detection simply never fires.
+// `cycleMs` is cave2's engine-cycle heartbeat (`&g_lastCycleMs`). Pass nullptr
+// only in a diagnostic build; freeze detection and out-of-cycle STOP handling
+// then cannot run.
 inline void Start(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readPtr)(uint32_t),
                   volatile uint32_t* cycleMs) {
     g_levelPathPtrAddr = levelPathPtrAddr;
@@ -554,14 +555,22 @@ inline void Start(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readP
 // Signal the worker and JOIN it before the caller tears down shared memory.
 // Without the join the worker could write s->level_id through a pointer that
 // DLL_PROCESS_DETACH has already unmapped (use-after-free), or resume into the
-// unloading DLL's code. Bounded wait so a wedged scan can't hang detach.
-inline void Stop() {
+// unloading DLL's code. A timeout is a failed stop, not permission to discard
+// the only handle that can prove the worker is gone.
+inline bool Stop(DWORD timeoutMs = 3000) {
     g_stop.store(true, std::memory_order_relaxed);
     if (g_thread) {
-        WaitForSingleObject(g_thread, 3000);
+        DWORD wait = WaitForSingleObject(g_thread, timeoutMs);
+        if (wait != WAIT_OBJECT_0) {
+            Log(std::format("Level scan: worker did not stop (wait={}, error={}); "
+                            "retaining thread handle and shared state",
+                            wait, wait == WAIT_FAILED ? GetLastError() : 0));
+            return false;
+        }
         CloseHandle(g_thread);
         g_thread = nullptr;
     }
+    return true;
 }
 
 } // namespace levelscan
