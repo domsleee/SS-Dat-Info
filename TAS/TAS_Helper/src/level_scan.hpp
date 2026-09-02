@@ -9,6 +9,7 @@
 #include "rider_identity.hpp"
 #include "level_path_parse.hpp"
 #include <cstring>
+#include <climits>
 
 // In-process level detection.
 //
@@ -310,16 +311,22 @@ static bool confidentEnough(int best, int second) {
 // = game thread 1.6% (the scan-off baseline is 1.5%), worker 1.3%. Each
 // scan is ~165 ms wall. Level changes are still caught fast: the epoch /
 // root change drops to the 200 ms cadence until resolved.
+// Every way into a level (a load) and out of one (the menu, the pause menu)
+// freezes Supreme::Cycle, and the worker already unresolves on the freeze and
+// rescans on the resume - so in steady state the heap walk is only a safety
+// net against a wrong or missed edge. 0 = edge-only (never rescan while
+// resolved); default 60 s.
 static uint32_t steadyPeriodMs() {
-    static uint32_t s_period = 0;
-    if (!s_period) {
+    static uint32_t s_period = 0xFFFFFFFFu;
+    if (s_period == 0xFFFFFFFFu) {
         char buf[16] = {};
-        uint32_t v = 10000;
+        uint32_t v = 60000;
         if (GetEnvironmentVariableA("TAS_LEVELSCAN_PERIOD_MS", buf, sizeof buf) > 0) v = (uint32_t)atoi(buf);
-        if (v < 500) v = 500;
-        if (v > 60000) v = 60000;
+        if (v != 0 && v < 500) v = 500;
+        if (v > 600000) v = 600000;
         s_period = v;
-        Log(std::format("Level scan: steady-state period {} ms", s_period));
+        if (v) Log(std::format("Level scan: steady-state safety-net period {} ms (rescans also on every cycle freeze/resume edge)", v));
+        else   Log("Level scan: edge-only (TAS_LEVELSCAN_PERIOD_MS=0) - rescans only on a cycle freeze/resume edge");
     }
     return s_period;
 }
@@ -439,6 +446,14 @@ static DWORD WINAPI threadProc(LPVOID param) {
             g_awaitingCycleTick = true;
             g_frameAtEpochBump = s->frame_count;
         }
+        // EDGE: the cycle resuming after a freeze (a level load, a menu trip)
+        // is what triggers the rescan - the periodic rescan is only a safety net.
+        static bool s_wasFrozen = false;
+        static ULONGLONG s_frozenSinceMs = 0;
+        if (frozen && !s_wasFrozen) s_frozenSinceMs = GetTickCount64();
+        static bool s_rescanOnResume = false;
+        if (s_wasFrozen && !frozen) s_rescanOnResume = true;
+        s_wasFrozen = frozen;
 
         bool mayScan = s->game_in_game && !g_noLevelPath && !g_awaitingCycleTick && !frozen;
         int scanBest = 0, scanSecond = 0;
@@ -448,6 +463,11 @@ static DWORD WINAPI threadProc(LPVOID param) {
         int32_t id = mayScan ? scanLevelId(&scanBest, &scanSecond, areaHint) : -1;
         QueryPerformanceCounter(&scanT1);
         if (mayScan) noteScanCost(scanT0, scanT1);
+        if (mayScan && s_rescanOnResume) {
+            s_rescanOnResume = false;
+            Log(std::format("Level scan: cycle resumed after a {} ms freeze - rescanned (id {}, hits {}/{})",
+                            GetTickCount64() - s_frozenSinceMs, id, scanBest, scanSecond));
+        }
         // Deliberately OUTSIDE the seqlock. These are diagnostics — how strong
         // the last scan's evidence was — not part of the identity group, and no
         // decision is made from them. Putting them in the window would widen it
@@ -549,13 +569,21 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // happens only when a level is actually there to identify — precisely
         // when the latency matters.
         bool resolved = (s->level_scan_epoch == s->level_epoch);
-        int slices = resolved ? (int)(steadyPeriodMs() / 100u) : 2;   // steady cadence (env TAS_LEVELSCAN_PERIOD_MS, default 10000), 200ms while resolving
+        // Steady cadence = the safety-net period (0 = sleep until an edge);
+        // 200 ms while unresolved. The sleep is EDGE-AWARE: a context change
+        // (new level path) or a cycle freeze (load / menu) ends it at once, so
+        // the period bounds only the safety-net rescan, never the latency of a
+        // real level change.
+        const uint32_t period = steadyPeriodMs();
+        const int slices = resolved ? (period ? (int)(period / 100u) : INT_MAX) : 2;
+        const uint32_t epochAtSleep = s->level_epoch;
         for (int i = 0; i < slices && !g_stop.load(std::memory_order_relaxed); i++) {
             Sleep(100);
             pollLevelContext(s);
-            if (cycleFrozen()) TryProcessStopCommand(s, false);
             renderer::Refresh(s);
             rider::Refresh(s);
+            if (cycleFrozen()) { TryProcessStopCommand(s, false); break; }
+            if (s->level_epoch != epochAtSleep) break;
         }
     }
     return 0;
