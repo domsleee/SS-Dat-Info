@@ -4577,7 +4577,8 @@ mod tests {
         use std::mem::offset_of;
         println!(
             "offsets: version={} command={} mode={} frame_count={} recorded_count={} playback_pos={} \
-             replay_ptr={} player_ptr={} player_x={} rec_coords={} play_coords={} fpu_control_word={} renderer_id={}",
+             replay_ptr={} player_ptr={} player_x={} input_log={} rec_coords={} play_coords={} \
+             gate_tick={} gate_index={} gate_align_rec={} fpu_control_word={} renderer_id={}",
             offset_of!(TasSharedState, version),
             offset_of!(TasSharedState, command),
             offset_of!(TasSharedState, mode),
@@ -4587,8 +4588,12 @@ mod tests {
             offset_of!(TasSharedState, replay_ptr),
             offset_of!(TasSharedState, player_ptr),
             offset_of!(TasSharedState, player_x),
+            offset_of!(TasSharedState, input_log),
             offset_of!(TasSharedState, rec_coords),
             offset_of!(TasSharedState, play_coords),
+            offset_of!(TasSharedState, gate_tick),
+            offset_of!(TasSharedState, gate_index),
+            offset_of!(TasSharedState, gate_align_rec),
             offset_of!(TasSharedState, fpu_control_word),
             offset_of!(TasSharedState, renderer_id),
         );
