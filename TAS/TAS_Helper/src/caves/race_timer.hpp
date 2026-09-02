@@ -4,6 +4,7 @@
 #include "../game_addresses.hpp"
 #include "../external/safetyhook.hpp"
 #include "../shared_state.hpp"
+#include "../race_timer_table.hpp"
 
 // ============================================================================
 // Race timer — reads the EXACT on-screen player race time, map-agnostically.
@@ -18,62 +19,34 @@
 //             +0x08 int length).
 // SafetyHook (all threads) intercepts every time-like ("MM:SS:CC") append,
 // keyed by the LINE object, and classifies/publishes RIGHT THERE (on the same
-// fresh sample). The PLAYER line is identified by a CLOCK-INDEPENDENT signal:
-// its parsed cs actually ADVANCES (a running timer), while an opponent par/
-// record has a CONSTANT cs. (The earlier "stable (clock-cs)" test only holds
-// in a LIVE race — during a REPLAY the HUD time is replay-data-driven and
-// decoupled from the live clock, so (clock-cs) drifts and that test could
-// never lock => the chip flickered. Advancing-cs works in both.) We still
-// track (clock-cs) separately, but only to decide whether start_ts is
-// trustworthy (a real live gate value) vs unknown (replay). We publish:
+// fresh sample) - the table logic lives in race_timer_table.hpp (pure,
+// unit-tested): the PLAYER line is the one whose parsed cs ADVANCES, it is
+// LATCHED once locked, and lines that stop being sampled are evicted (a menu
+// trip rebuilds the HUD; game_in_game never drops at the menu, so the old
+// epoch-reset never fired and dead lines made every later race "ambiguous").
+// We publish:
 //   race_time_cs  = exact on-screen race time, centiseconds (u32::MAX = idle)
 //   race_start_ts = 16-bit gate-cross clock value (F5 spawn-lottery metric)
 //   clock         = SG + 0x1D5334 (16-bit centiseconds, wraps at 65536)
 //
-// LATCH MODEL (2026-06-09, fixes chip flicker): the HUD cs and the raw clock
-// are not perfectly phase-locked — (clock - cs) occasionally lands +/-1 off
-// (sub-tick rounding; the same wobble you see as start_ts 477<->478). The old
-// "publish only while >= N consecutive identical (clock-cs)" gate blanked the
-// chip for a few frames on every wobble => flicker. Now: once a line LOCKS as
-// the player, we LATCH it and keep publishing its live cs through the +/-1
-// wobble and through the finish freeze. We blank only when nothing is locked
-// yet, an advancing ghost makes the pick ambiguous, or the epoch resets (menu).
-// The cached start_ts is refreshed only when (clock-cs) has settled, so the
-// wobble never moves it.
-//
 // DIAGNOSTICS: set the env var TAS_RACE_DIAG=1 before launch to log every
-// blank<->show transition and a periodic line dump to TAS_Helper.log (used to
-// understand why replays flicker — replay HUD time is replay-data-driven, not
-// clock-start_ts, so (clock-cs) may never settle).
+// blank<->show transition, slot claims and a periodic line dump to
+// TAS_Helper.log.
 // ============================================================================
 
 namespace racetimer {
 
-constexpr int      SLOTS = 8;
-constexpr int      LOCK_FRAMES = 8;     // advancing-cs samples to LOCK a line as the player
-constexpr int      SETTLE_FRAMES = 3;   // distinct ticks (clock-cs) constant before start_ts is trusted
-constexpr uint32_t MAXU = 0xFFFFFFFFu;
-
 inline uint8_t* g_clock = nullptr;
 inline TasSharedState* g_state = nullptr;
-
-// Fixed slot table (g_lines[i] == 0 means free). Single realistic writer is the
-// render thread via AptCb, but the insert is interlocked to be safe.
-inline volatile LONG g_lines[SLOTS] = {};   // text-line object ptrs (0 = free)
-inline int      g_lineCs[SLOTS] = {};        // latest parsed centiseconds
-inline int      g_lineAdv[SLOTS] = {};       // consecutive samples where cs ADVANCED (player signal)
-inline int      g_lineStart[SLOTS] = {};     // last (clock - cs) & 0xFFFF (= start_ts candidate)
-inline int      g_lineStable[SLOTS] = {};    // consecutive distinct-tick (clock-cs)-constant samples
-inline uint32_t g_lineLastClk[SLOTS] = {};   // clock at last sample (sentinel = MAXU)
-
-inline uint32_t g_playerLine = 0;     // locked player-line object once identified
-inline uint32_t g_playerStartTs = MAXU; // cached good start_ts (survives wobble/finish)
+inline Table g_table{};
+inline uint32_t g_tickNow = 0;        // monotonic clock ticks since install (staleness)
 inline int      g_wasInGame = -1;     // game_in_game edge tracker for epoch reset
 
 // Diagnostics (TAS_RACE_DIAG=1)
 inline bool     g_diag = false;
 inline uint32_t g_diagTick = 0;
 inline uint32_t g_lastPub = MAXU;     // last published cs (MAXU = blanked)
+inline int      g_lastUsed = 0;
 
 static SafetyHookMid g_tickHook{};
 static SafetyHookMid g_aptHook{};
@@ -96,16 +69,7 @@ static void Publish(uint32_t cs, uint32_t start, const char* reason) {
 }
 
 static void ResetEpoch() {
-    for (int i = 0; i < SLOTS; i++) {
-        g_lines[i] = 0;
-        g_lineCs[i] = 0;
-        g_lineAdv[i] = 0;
-        g_lineStart[i] = -1;
-        g_lineStable[i] = 0;
-        g_lineLastClk[i] = MAXU;
-    }
-    g_playerLine = 0;
-    g_playerStartTs = MAXU;
+    g_table.Reset();
     Publish(MAXU, MAXU, "epoch-reset");
 }
 
@@ -137,109 +101,28 @@ static bool ReadText(uint32_t textObj, char out[24], int& len) {
     }
 }
 
-// Find the slot for `line`, or claim a free one (interlocked). -1 if full.
-static int SlotFor(uint32_t line) {
-    for (int i = 0; i < SLOTS; i++)
-        if ((uint32_t)g_lines[i] == line) return i;
-    for (int i = 0; i < SLOTS; i++) {
-        if (g_lines[i] == 0 &&
-            InterlockedCompareExchange(&g_lines[i], (LONG)line, 0) == 0) {
-            g_lineCs[i] = 0;
-            g_lineAdv[i] = 0;
-            g_lineStart[i] = -1;
-            g_lineStable[i] = 0;
-            g_lineLastClk[i] = MAXU;
-            if (g_diag) Log(std::format("[racetimer] slot {} claimed line={:#x}", i, line));
-            return i;
-        }
-    }
-    return -1;
-}
-
-// Classify against all current lines and (re)publish. The player line is the
-// one whose cs ADVANCES (g_lineAdv >= LOCK_FRAMES) — clock-independent, so it
-// works in a replay too. Latch model: once locked we keep publishing its live
-// cs even when (clock-cs) wobbles +/-1 or freezes at the finish — blanking only
-// when no advancing line is locked yet, a 2nd advancing line (ghost/racer)
-// makes the pick ambiguous, or the epoch resets (menu). start_ts is published
-// only when (clock-cs) has settled (live race); in a replay it stays unknown.
-static void ClassifyAndPublish() {
-    int advCount = 0, best = -1, bestAdv = 0;
-    for (int i = 0; i < SLOTS; i++) {
-        if (g_lines[i] == 0) continue;
-        if (g_lineAdv[i] >= LOCK_FRAMES) {
-            advCount++;
-            if (g_lineAdv[i] > bestAdv) { bestAdv = g_lineAdv[i]; best = i; }
-        }
-    }
-
-    // Acquire / refresh the lock only when exactly one line is advancing.
-    if (advCount == 1 && best >= 0) g_playerLine = (uint32_t)g_lines[best];
-
-    int pi = -1;
-    if (g_playerLine != 0)
-        for (int i = 0; i < SLOTS; i++)
-            if ((uint32_t)g_lines[i] == g_playerLine) { pi = i; break; }
-
-    if (pi < 0) { Publish(MAXU, MAXU, "acquiring"); return; }
-
-    if (advCount >= 2) {                          // advancing ghost / 2nd racer
-        g_playerLine = 0; g_playerStartTs = MAXU;
-        Publish(MAXU, MAXU, "ambiguous");
-        return;
-    }
-
-    // Latched: publish the live displayed time. Refresh the cached start_ts only
-    // once (clock-cs) has settled (live race); never recompute it from a
-    // drifting replay clock or the post-finish freeze.
-    if (g_lineStable[pi] >= SETTLE_FRAMES)
-        g_playerStartTs = (uint32_t)(g_lineStart[pi] & 0xFFFF);
-    Publish((uint32_t)g_lineCs[pi], g_playerStartTs, "latched");
-}
-
 // Hook of SR_UIT Append_Text: classify on each fresh time-like sample.
 static void AptCb(SafetyHookContext& ctx) {
     char buf[24]; int len;
     if (!ReadText((uint32_t)ctx.edx, buf, len)) return;
     int cs = ParseCs(buf, len);
     if (cs < 0) return;
-    uint32_t line = (uint32_t)ctx.ecx;
-    int i = SlotFor(line);
-    if (i < 0) return;
-
-    uint32_t clk = ReadClk();
-    int prevCs = g_lineCs[i];
-    bool first = (g_lineLastClk[i] == MAXU);
-
-    // Player signal: cs advances (a running timer). A small forward step bumps
-    // the counter; a backward jump (F5 / new race) resets it; an equal cs
-    // (opponent par, or a frozen finish) leaves it unchanged.
-    if (!first) {
-        int d = cs - prevCs;
-        if (d > 0 && d < 30000) { if (g_lineAdv[i] < 1000000) g_lineAdv[i]++; }
-        else if (d < 0)         { g_lineAdv[i] = 0; }
-    }
-
-    // start_ts trust: is (clock - cs) constant across distinct clock ticks?
-    bool clkMoved = (g_lineLastClk[i] != clk);
-    int sg = (clk - cs) & 0xFFFF;
-    if (clkMoved) {
-        if (sg == g_lineStart[i]) {
-            if (g_lineStable[i] < 1000000) g_lineStable[i]++;
-        } else {
-            g_lineStart[i] = sg;
-            g_lineStable[i] = 0;
+    Verdict v = g_table.Sample((uint32_t)ctx.ecx, cs, ReadClk(), g_tickNow);
+    if (g_diag) {
+        int used = g_table.Used();
+        if (used != g_lastUsed) {
+            Log(std::format("[racetimer] table now holds {} line(s) (was {})", used, g_lastUsed));
+            g_lastUsed = used;
         }
-        g_lineLastClk[i] = clk;
     }
-    g_lineCs[i] = cs;
-
-    ClassifyAndPublish();
+    Publish(v.cs, v.start, v.reason);
 }
 
-// Once per clock tick: menu epoch reset (game_in_game 1 -> 0) + periodic diag.
+// Once per clock tick: staleness clock, menu epoch reset (game_in_game
+// 1 -> 0) + periodic diag.
 static void TickCb(SafetyHookContext&) {
     if (!g_state) return;
+    g_tickNow++;
     int inGame = g_state->game_in_game ? 1 : 0;
     if (inGame == 0) {
         if (g_wasInGame != 0) ResetEpoch();
@@ -249,12 +132,13 @@ static void TickCb(SafetyHookContext&) {
 
     if (g_diag && inGame && (++g_diagTick % 128) == 0) {
         int clk = ReadClk();
-        std::string s = std::format("[racetimer] clk={} player={:#x} pub={}",
-            clk, g_playerLine, g_lastPub == MAXU ? -1 : (int)g_lastPub);
+        std::string s = std::format("[racetimer] clk={} tick={} player={:#x} pub={}",
+            clk, g_tickNow, g_table.playerLine, g_lastPub == MAXU ? -1 : (int)g_lastPub);
         for (int i = 0; i < SLOTS; i++) {
-            if (g_lines[i] == 0) continue;
-            s += std::format(" | L{:#x} cs={} adv={} sg={} stbl={}", (uint32_t)g_lines[i],
-                g_lineCs[i], g_lineAdv[i], g_lineStart[i], g_lineStable[i]);
+            if (g_table.line[i] == 0) continue;
+            s += std::format(" | L{:#x} cs={} adv={} sg={} stbl={} age={}", g_table.line[i],
+                g_table.cs[i], g_table.adv[i], g_table.start[i], g_table.stable[i],
+                g_tickNow - g_table.seen[i]);
         }
         Log(s);
     }
@@ -291,6 +175,7 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
     g_state = state;
     char buf[8] = {};
     g_diag = (GetEnvironmentVariableA("TAS_RACE_DIAG", buf, sizeof(buf)) > 0 && buf[0] == '1');
+    g_tickNow = STALE_TICKS + 1;  // so a brand-new table never looks "just sampled"
     ResetEpoch();
     g_clock = sg + 0x1D5334;
     g_tickHook = safetyhook::create_mid(sg + 0xB4B80, TickCb);  // clock tick (100/sec)
@@ -302,8 +187,8 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
         g_aptHook = {};
         g_state = nullptr;
     }
-    Log(std::format("Race timer: tick={} append={} diag={} (SR_UIT {:p})",
-        (bool)g_tickHook, (bool)g_aptHook, g_diag, (void*)uit));
+    Log(std::format("Race timer: tick={} append={} diag={} stale={} ticks (SR_UIT {:p})",
+        (bool)g_tickHook, (bool)g_aptHook, g_diag, STALE_TICKS, (void*)uit));
     return (bool)g_tickHook && (bool)g_aptHook;
 }
 

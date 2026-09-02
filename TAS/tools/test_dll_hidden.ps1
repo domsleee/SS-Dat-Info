@@ -45,7 +45,8 @@ if (-not $vsPath) { throw 'vswhere returned no installation path' }
 $suites = @(
     @{ Src = '.\TAS\TAS_Helper\src\tests\test_input_gate.cpp'; Exe = 'tas_test_input_gate.exe'; Name = 'input_gate' },
     @{ Src = '.\TAS\TAS_Helper\src\tests\test_level_path.cpp'; Exe = 'tas_test_level_path.exe'; Name = 'level_path' },
-    @{ Src = '.\TAS\TAS_Helper\src\tests\test_replay_capture.cpp'; Exe = 'tas_test_replay_capture.exe'; Name = 'replay_capture' }
+    @{ Src = '.\TAS\TAS_Helper\src\tests\test_replay_capture.cpp'; Exe = 'tas_test_replay_capture.exe'; Name = 'replay_capture' },
+    @{ Src = '.\TAS\TAS_Helper\src\tests\test_race_timer.cpp'; Exe = 'tas_test_race_timer.exe'; Name = 'race_timer' }
 )
 foreach ($t in $suites) {
     $exe = Join-Path $env:TEMP $t.Exe
