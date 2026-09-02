@@ -73,8 +73,10 @@ static bool SetupValid(uint32_t setup, const char* name) {
 
 // Heap scan for the setup object (see the header comment). Cheap dword
 // filters first, the string reads only on survivors. Returns 0 if not found.
-static uint32_t FindSetup(const char* name) {
+static uint32_t FindSetup(const char* name, uint64_t* bytesScanned, uint32_t* regionsScanned) {
     MEMORY_BASIC_INFORMATION mbi{};
+    *bytesScanned = 0;
+    *regionsScanned = 0;
     uintptr_t addr = 0x10000;
     while (addr < 0x7FFF0000u && VirtualQuery((void*)addr, &mbi, sizeof mbi) == sizeof mbi) {
         const uintptr_t base = (uintptr_t)mbi.BaseAddress;
@@ -83,6 +85,8 @@ static uint32_t FindSetup(const char* name) {
                             (mbi.Protect & PAGE_GUARD) == 0 &&
                             (mbi.Protect == PAGE_READWRITE || mbi.Protect == PAGE_EXECUTE_READWRITE);
         if (heapRw && size >= 0x300 && size <= 64u * 1024 * 1024) {
+            *bytesScanned += size;
+            (*regionsScanned)++;
             __try {
                 const uint8_t* p = (const uint8_t*)base;
                 const uintptr_t end = size - 0x2A0;
@@ -135,8 +139,19 @@ inline void Refresh(TasSharedState* s) {
         const ULONGLONG now = GetTickCount64();
         if (now - s_lastScanMs >= 2000) {
             s_lastScanMs = now;
-            s_setup = FindSetup(name);
-            if (s_setup) Log(std::format("Rider: game-setup object found at {:#010x} (rider {})", s_setup, name));
+            LARGE_INTEGER f, t0, t1;
+            QueryPerformanceFrequency(&f);
+            QueryPerformanceCounter(&t0);
+            uint64_t bytes = 0;
+            uint32_t regions = 0;
+            s_setup = FindSetup(name, &bytes, &regions);
+            QueryPerformanceCounter(&t1);
+            const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
+            static uint32_t s_scans = 0;
+            s_scans++;
+            Log(std::format("Rider: game-setup scan #{} {} - {:.1f} ms over {} regions / {:.1f} MB (rider {}, worker thread)",
+                            s_scans, s_setup ? std::format("found {:#010x}", s_setup) : "not found", ms, regions,
+                            (double)bytes / (1024.0 * 1024.0), name));
         }
     }
     const uint32_t stance = s_setup ? SafeU32(s_setup + GameAddresses::SETUP_STANCE) : 0xFFFFFFFFu;

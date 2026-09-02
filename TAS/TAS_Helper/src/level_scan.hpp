@@ -302,6 +302,46 @@ static bool confidentEnough(int best, int second) {
 // nine ids, so the path's reliable half was being thrown away — and a residue
 // winner from a DIFFERENT AREA could beat the real track. Restricting the tally
 // to the known area makes that impossible by construction.
+// Steady-state scan period (ms). The heap walk touches tens of MiB; on the
+// 2026-09-02 measurement the game thread used ~6x more CPU while this worker
+// walked the heap every 1.5 s (cache thrash), so the cadence is tunable:
+// TAS_LEVELSCAN_PERIOD_MS (clamped 500..60000). Measured 2026-09-02 on a 60 s
+// coast: 1.5 s cadence = game thread 9.0% of a core, worker 1.5%; 10 s cadence
+// = game thread 1.6% (the scan-off baseline is 1.5%), worker 1.3%. Each
+// scan is ~165 ms wall. Level changes are still caught fast: the epoch /
+// root change drops to the 200 ms cadence until resolved.
+static uint32_t steadyPeriodMs() {
+    static uint32_t s_period = 0;
+    if (!s_period) {
+        char buf[16] = {};
+        uint32_t v = 10000;
+        if (GetEnvironmentVariableA("TAS_LEVELSCAN_PERIOD_MS", buf, sizeof buf) > 0) v = (uint32_t)atoi(buf);
+        if (v < 500) v = 500;
+        if (v > 60000) v = 60000;
+        s_period = v;
+        Log(std::format("Level scan: steady-state period {} ms", s_period));
+    }
+    return s_period;
+}
+
+// Cumulative scan cost, logged about once a minute.
+static void noteScanCost(LARGE_INTEGER t0, LARGE_INTEGER t1) {
+    static LARGE_INTEGER freq = {};
+    static double totalMs = 0, maxMs = 0;
+    static uint32_t scans = 0;
+    static ULONGLONG lastLog = 0;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    totalMs += ms;
+    if (ms > maxMs) maxMs = ms;
+    scans++;
+    const ULONGLONG now = GetTickCount64();
+    if (now - lastLog >= 60000) {
+        lastLog = now;
+        Log(std::format("Level scan: {} scans so far, avg {:.1f} ms, max {:.1f} ms each (worker thread)", scans, totalMs / scans, maxMs));
+    }
+}
+
 static int32_t scanLevelId(int* outBest, int* outSecond, int areaHint) {
     int tally[12] = { 0 };  // 3 areas x 3 diffs + practice (only 9 occurs)
     uint8_t* addr = nullptr;
@@ -403,7 +443,11 @@ static DWORD WINAPI threadProc(LPVOID param) {
         bool mayScan = s->game_in_game && !g_noLevelPath && !g_awaitingCycleTick && !frozen;
         int scanBest = 0, scanSecond = 0;
         int areaHint = g_lastPath[0] ? areaFromPath(g_lastPath) : -1;
+        LARGE_INTEGER scanT0, scanT1;
+        QueryPerformanceCounter(&scanT0);
         int32_t id = mayScan ? scanLevelId(&scanBest, &scanSecond, areaHint) : -1;
+        QueryPerformanceCounter(&scanT1);
+        if (mayScan) noteScanCost(scanT0, scanT1);
         // Deliberately OUTSIDE the seqlock. These are diagnostics — how strong
         // the last scan's evidence was — not part of the identity group, and no
         // decision is made from them. Putting them in the window would widen it
@@ -505,7 +549,7 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // happens only when a level is actually there to identify — precisely
         // when the latency matters.
         bool resolved = (s->level_scan_epoch == s->level_epoch);
-        int slices = resolved ? 15 : 2;   // 1.5s steady, 200ms while resolving
+        int slices = resolved ? (int)(steadyPeriodMs() / 100u) : 2;   // steady cadence (env TAS_LEVELSCAN_PERIOD_MS, default 10000), 200ms while resolving
         for (int i = 0; i < slices && !g_stop.load(std::memory_order_relaxed); i++) {
             Sleep(100);
             pollLevelContext(s);
