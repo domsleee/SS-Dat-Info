@@ -44,7 +44,8 @@ if (-not $vsPath) { throw 'vswhere returned no installation path' }
 
 $suites = @(
     @{ Src = '.\TAS\TAS_Helper\src\tests\test_input_gate.cpp'; Exe = 'tas_test_input_gate.exe'; Name = 'input_gate' },
-    @{ Src = '.\TAS\TAS_Helper\src\tests\test_level_path.cpp'; Exe = 'tas_test_level_path.exe'; Name = 'level_path' }
+    @{ Src = '.\TAS\TAS_Helper\src\tests\test_level_path.cpp'; Exe = 'tas_test_level_path.exe'; Name = 'level_path' },
+    @{ Src = '.\TAS\TAS_Helper\src\tests\test_replay_capture.cpp'; Exe = 'tas_test_replay_capture.exe'; Name = 'replay_capture' }
 )
 foreach ($t in $suites) {
     $exe = Join-Path $env:TEMP $t.Exe
@@ -63,4 +64,4 @@ foreach ($t in $suites) {
     if ($rc -ne 0) { throw "compile failed ($($t.Name))" }
     if ((Invoke-Hidden $exe @()) -ne 0) { throw "$($t.Name) tests failed" }
 }
-Write-Host 'test_dll: both C++ suites PASS (all children ran hidden)'
+Write-Host 'test_dll: all C++ suites PASS (all children ran hidden)'
