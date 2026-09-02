@@ -2143,11 +2143,53 @@ impl TasApp {
         };
 
         let _t = std::time::Instant::now();
-        let _ = self.history.push_snapshot_data_with_session(
+        // A session the finish-line watch stopped is labelled by its race
+        // time ("Finish 0:53.34", flag in the panel), not by its length. The
+        // HUD timer froze at the line; when the DLL's race-timer feed is
+        // empty, the start-line-to-finish-line tick count from the track
+        // geometry is that time (the in-game timer starts at the start
+        // trigger, ~5 s below the spawn on Forest Easy - NOT at first
+        // movement, which read 3:55.58 for a 3:50.57 run).
+        let finish = self.finished_at_tick.map(|tick| {
+            let hud = self
+                .shared
+                .as_ref()
+                .map(|s| s.state().race_time_cs)
+                .unwrap_or(u32::MAX);
+            if hud != u32::MAX {
+                recording::FinishStamp {
+                    cs: hud,
+                    exact: true,
+                }
+            } else {
+                let level_code = self
+                    .shared
+                    .as_ref()
+                    .and_then(|s| tas_shared::resolved_level_id(s.state()))
+                    .and_then(crate::level::level_code_from_id);
+                let start = crate::start_line::start_cross_tick(
+                    snapshot.rec_coords.as_ref(),
+                    end_tick,
+                    level_code,
+                );
+                let first_moving =
+                    recording::detect_first_moving(snapshot.rec_coords.as_ref(), end_tick);
+                recording::FinishStamp {
+                    cs: recording::geometry_race_time_cs(tick, start, first_moving),
+                    exact: false,
+                }
+            }
+        });
+        let label = match finish {
+            Some(f) => recording::finished_session_label(f),
+            None => session_context.label.clone(),
+        };
+        let _ = self.history.push_completed_session(
             snapshot.clone(),
-            session_context.label.clone(),
+            label,
             session_context.start_tick,
             session_context.end_tick,
+            finish,
         );
         let dt = _t.elapsed();
         if dt.as_millis() > 30 {
@@ -2789,10 +2831,19 @@ impl eframe::App for TasApp {
                     }
                     if let Some(tick) = cross {
                         self.finished_at_tick = Some(tick);
+                        let hud = self
+                            .shared
+                            .as_ref()
+                            .map(|s| s.state().race_time_cs)
+                            .filter(|&cs| cs != u32::MAX)
+                            .map(|cs| {
+                                format!(" (race time {})", recording::format_recording_duration(cs))
+                            })
+                            .unwrap_or_default();
                         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
                         self.log_lines.push(format!(
-                            "[{}] \u{1F3C1} Finish line crossed at tick {} — recording stopped",
-                            ts, tick
+                            "[{}] \u{1F3C1} Finish line crossed at tick {}{} — recording stopped",
+                            ts, tick, hud
                         ));
                         self.apply_transport_action(transport::Action::Send(TasCommand::Stop), &ts);
                     }

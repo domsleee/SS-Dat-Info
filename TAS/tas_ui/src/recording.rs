@@ -95,6 +95,46 @@ pub fn completed_session_label(
     Some(label)
 }
 
+/// The race time of a session that ended at the finish line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinishStamp {
+    /// Centiseconds (= game ticks at 100 Hz).
+    pub cs: u32,
+    /// `true` = the HUD timer's value; `false` = derived from the recording's
+    /// start-line / finish-line crossings (within ~0.05 s of the game's timer).
+    pub exact: bool,
+}
+
+/// Display form of a finish time: "3:50.57" when exact, "~3:50.62" when
+/// geometry-derived, so the label never overstates its precision.
+pub fn format_finish_time(cs: u32, exact: bool) -> String {
+    if exact {
+        format_recording_duration(cs)
+    } else {
+        format!("~{}", format_recording_duration(cs))
+    }
+}
+
+/// Label for a session that ended by crossing the finish line, so the entry
+/// reads "Finish 0:53.34" rather than by its length.
+pub fn finished_session_label(finish: FinishStamp) -> String {
+    format!("Finish {}", format_finish_time(finish.cs, finish.exact))
+}
+
+/// Race time (centiseconds) of a finished run from the recording alone, for
+/// when the DLL's HUD race-timer feed is empty: the in-game timer runs from
+/// the START-LINE trigger to the finish line, so use the geometric start
+/// crossing when the track has one; a recording that never crossed a start
+/// line (unknown track) falls back to first movement, then to tick 0.
+pub fn geometry_race_time_cs(
+    finish_tick: u32,
+    start_cross_tick: Option<u32>,
+    first_moving: Option<u32>,
+) -> u32 {
+    let start = start_cross_tick.or(first_moving).unwrap_or(0);
+    finish_tick.saturating_sub(start)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoverySessionContext {
     pub kind: RecordingSessionKind,
@@ -880,6 +920,15 @@ pub struct HistoryEntry {
     /// — the "race-start" landmark. `None` for legacy entries, markers,
     /// and snapshots with no detected movement.
     pub first_moving: Option<u32>,
+    /// Race time in centiseconds when the session ended by crossing the
+    /// finish line (the HUD timer the finish-line watch auto-stopped at).
+    /// `None` = the session was stopped by hand / legacy entry. Drives the
+    /// "Finish m:ss.cc" label and the flag in the panel.
+    pub finish_time_cs: Option<u32>,
+    /// `true` when `finish_time_cs` came from the HUD timer (exact); `false`
+    /// when it was derived from the recording's start-line / finish-line
+    /// crossings (within ~0.05 s of the game's timer - shown with a "~").
+    pub finish_time_exact: bool,
     /// Level code (e.g. "FE") the entry was created on, from the DLL's live
     /// level_id at push time. `None` for legacy entries or when the level was
     /// unknown (menu). Used by the panel's per-level filter.
@@ -909,6 +958,8 @@ impl HistoryEntry {
             start_tick: 0,
             end_tick,
             first_moving,
+            finish_time_cs: None, // set by push_completed_session for finished runs
+            finish_time_exact: false,
             level: None, // stamped from live_level by RecordingHistory on push
             physics: None, // stamped from live_physics by RecordingHistory on push
             snapshot: SnapshotSlot::Loaded {
@@ -931,6 +982,8 @@ impl HistoryEntry {
             start_tick: 0,
             end_tick: 0,
             first_moving: None,
+            finish_time_cs: None,
+            finish_time_exact: false,
             level: None, // stamped from live_level by RecordingHistory on push
             physics: None, // stamped from live_physics by RecordingHistory on push
             snapshot: SnapshotSlot::Marker,
@@ -1013,6 +1066,12 @@ pub struct PersistedHistoryEntry {
     /// from rec_coords[0]. Legacy entries default to None.
     #[serde(default)]
     pub first_moving: Option<u32>,
+    /// Race time (centiseconds) of a session that ended at the finish line.
+    #[serde(default)]
+    pub finish_time_cs: Option<u32>,
+    /// Whether that time is the HUD timer's (exact) or geometry-derived.
+    #[serde(default)]
+    pub finish_time_exact: bool,
     /// Level code (e.g. "FE") the entry was created on. Legacy entries
     /// default to None (always shown by the per-level filter).
     #[serde(default)]
@@ -1299,7 +1358,7 @@ impl RecordingHistory {
         snapshot: RecordingSnapshot,
         label: impl Into<String>,
     ) -> bool {
-        self.push_snapshot_entry(snapshot, label.into(), HistoryEntryKind::Snapshot, None)
+        self.push_snapshot_entry(snapshot, label.into(), HistoryEntryKind::Snapshot, None, None)
     }
 
     /// Like `push_snapshot_data` but records the session's `start_tick` /
@@ -1317,6 +1376,28 @@ impl RecordingHistory {
             label.into(),
             HistoryEntryKind::Snapshot,
             Some((start_tick, end_tick)),
+            None,
+        )
+    }
+
+    /// A REC / CONT session that just ended. `finish` is the race time when
+    /// the finish-line watch stopped it (the entry then shows the flag and
+    /// "Finish m:ss.cc", whatever it is later renamed to); `None` for a
+    /// session stopped by hand.
+    pub fn push_completed_session(
+        &mut self,
+        snapshot: RecordingSnapshot,
+        label: impl Into<String>,
+        start_tick: u32,
+        end_tick: u32,
+        finish: Option<FinishStamp>,
+    ) -> bool {
+        self.push_snapshot_entry(
+            snapshot,
+            label.into(),
+            HistoryEntryKind::Snapshot,
+            Some((start_tick, end_tick)),
+            finish,
         )
     }
 
@@ -1326,6 +1407,7 @@ impl RecordingHistory {
             RecordingSnapshot::from_state(state),
             label,
             HistoryEntryKind::LoadSnapshot,
+            None,
             None,
         )
     }
@@ -1455,6 +1537,8 @@ impl RecordingHistory {
                 start_tick: e.start_tick,
                 end_tick: e.end_tick,
                 first_moving: e.first_moving,
+                finish_time_cs: e.finish_time_cs,
+                finish_time_exact: e.finish_time_exact,
                 level: e.level.clone(),
                 physics: e.physics.clone(),
                 created_at_iso: e.created_at.to_rfc3339(),
@@ -1593,6 +1677,8 @@ impl RecordingHistory {
                 start_tick: le.start_tick,
                 end_tick: le.end_tick,
                 first_moving: le.first_moving,
+                finish_time_cs: le.finish_time_cs,
+                finish_time_exact: le.finish_time_exact,
                 level: le.level,
                 physics: le.physics,
                 snapshot,
@@ -1671,6 +1757,8 @@ impl RecordingHistory {
                 start_tick: entry.start_tick,
                 end_tick: entry.end_tick,
                 first_moving: entry.first_moving,
+                finish_time_cs: entry.finish_time_cs,
+                finish_time_exact: entry.finish_time_exact,
                 level: entry.level.clone(),
             })
             .collect();
@@ -1737,6 +1825,8 @@ impl RecordingHistory {
                 start_tick: entry.start_tick,
                 end_tick,
                 first_moving: entry.first_moving,
+                finish_time_cs: entry.finish_time_cs,
+                finish_time_exact: entry.finish_time_exact,
                 level: entry.level,
                 physics: None,
                 snapshot,
@@ -1817,6 +1907,7 @@ impl RecordingHistory {
         label: String,
         kind: HistoryEntryKind,
         session: Option<(u32, u32)>,
+        finish: Option<FinishStamp>,
     ) -> bool {
         if snapshot.recorded_count == 0 {
             return false;
@@ -1826,6 +1917,8 @@ impl RecordingHistory {
         entry.entry_id = self.alloc_id();
         entry.level = self.live_level.clone();
         entry.physics = self.live_physics.clone();
+        entry.finish_time_cs = finish.map(|f| f.cs);
+        entry.finish_time_exact = finish.is_some_and(|f| f.exact);
         if let Some((start_tick, end_tick)) = session {
             entry = entry.with_session(start_tick, end_tick);
         }
@@ -2393,6 +2486,8 @@ mod tests {
                 start_tick: 0,
                 end_tick: 2,
                 first_moving: None,
+                finish_time_cs: None,
+                finish_time_exact: false,
                 level: None,
             }],
         };
@@ -2899,6 +2994,8 @@ mod tests {
                 start_tick: 0,
                 end_tick: count,
                 first_moving: None,
+                finish_time_cs: None,
+                finish_time_exact: false,
                 level: None,
                 physics: None,
                 created_at_iso: "2026-09-02T00:00:00+10:00".to_string(),
@@ -3032,6 +3129,82 @@ mod tests {
             None
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn finished_session_label_is_the_race_time() {
+        let exact = |cs| FinishStamp { cs, exact: true };
+        let approx = |cs| FinishStamp { cs, exact: false };
+        assert_eq!(finished_session_label(exact(5334)), "Finish 0:53.34");
+        assert_eq!(finished_session_label(exact(23_546)), "Finish 3:55.46");
+        // Geometry-derived times are marked: the planes sit ~5 cs from the
+        // engine's triggers (3:50.62 measured vs the game's 3:50.57).
+        assert_eq!(finished_session_label(approx(23_062)), "Finish ~3:50.62");
+        assert_eq!(format_finish_time(23_057, true), "3:50.57");
+        assert_eq!(format_finish_time(23_062, false), "~3:50.62");
+    }
+
+    #[test]
+    fn geometry_race_time_runs_from_the_start_line_not_first_movement() {
+        // Forest Easy coast, 2026-09-02: first moved at 288, crossed the start
+        // line at ~789, finish watch fired at 23846; the game said 3:50.57.
+        assert_eq!(geometry_race_time_cs(23_846, Some(789), Some(288)), 23_057);
+        // No start line known for the track: first movement is the best guess.
+        assert_eq!(geometry_race_time_cs(23_846, None, Some(288)), 23_558);
+        assert_eq!(geometry_race_time_cs(100, None, None), 100);
+        assert_eq!(geometry_race_time_cs(50, Some(80), None), 0, "never negative");
+    }
+
+    #[test]
+    fn finished_sessions_keep_their_race_time_through_the_store() {
+        let mut history = RecordingHistory::new(8);
+        let mut state = zeroed_state();
+        state.recorded_count = 3;
+        let stamp = FinishStamp {
+            cs: 5334,
+            exact: true,
+        };
+        assert!(history.push_completed_session(
+            RecordingSnapshot::from_state(&state),
+            finished_session_label(stamp),
+            0,
+            3,
+            Some(stamp)
+        ));
+        assert!(history.push_snapshot_data_with_session(
+            RecordingSnapshot::from_state(&state),
+            "Recorded 0:00.03".to_string(),
+            0,
+            3
+        ));
+        assert_eq!(history.entries()[0].finish_time_cs, Some(5334));
+        assert!(history.entries()[0].finish_time_exact);
+        assert_eq!(history.entries()[0].label, "Finish 0:53.34");
+        assert_eq!(history.entries()[1].finish_time_cs, None, "a hand-stopped take is not a finish");
+
+        let stored = history.to_stored_entries();
+        assert_eq!(stored[0].finish_time_cs, Some(5334));
+        let dir = std::env::temp_dir().join(format!(
+            "tas_ui_finish_{}_{}",
+            std::process::id(),
+            chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let (mut store, _) =
+            crate::history_store_v2::HistoryStoreV2::open_in(dir.clone()).unwrap();
+        store
+            .persist(&stored, history.current_entry_id(), history.next_entry_id())
+            .unwrap();
+        drop(store);
+        let (_s, load) =
+            crate::history_store_v2::HistoryStoreV2::open_in_lazy(dir.clone()).unwrap();
+        assert_eq!(load.entries[0].finish_time_cs, Some(5334));
+        assert_eq!(load.entries[1].finish_time_cs, None);
+        let mut reloaded = RecordingHistory::new(8);
+        reloaded.set_blob_dir(dir.clone());
+        reloaded.apply_loaded(load.entries, load.current_entry_id, load.next_entry_id);
+        assert_eq!(reloaded.entries()[0].finish_time_cs, Some(5334));
+        assert!(reloaded.entries()[0].finish_time_exact);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
