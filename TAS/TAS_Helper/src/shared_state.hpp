@@ -512,7 +512,13 @@ struct TasSharedState {
     // live loadout differs. Read by the level-scan worker from the human
     // Player's Player_Config name / loadout object - see rider_identity.hpp.
     // rider_character: TasCharacterId (0 = not resolved yet);
-    // rider_stance: the loadout's stance word (0xFFFFFFFF = unknown).
+    // rider_stance: 0 = regular (left-foot icon, the game's default),
+    //   1 = goofy (right-foot icon), 0xFFFFFFFF = unknown. Read from the
+    //   menu's game-setup object (found by layout, see rider_identity.hpp),
+    //   the value the game builds the Player from on every (re)start.
+    //   (The stance cannot be switched in-process: writing that dword and
+    //   restarting keeps the rider's stance-baked config - the game applies
+    //   it only when a level is entered from the menu. Measured 2026-09-02.)
     volatile uint32_t rider_character;
     volatile uint32_t rider_stance;
 };
@@ -604,6 +610,7 @@ public:
         state->playback_speed = 1.0f;  // normal speed
         state->level_id = 0xFFFFFFFFu;  // unknown until the scan thread runs
         state->race_time_cs = 0xFFFFFFFFu;
+        state->rider_stance = 0xFFFFFFFFu;         // unknown until the setup object is read
         state->race_start_ts = 0xFFFFFFFFu;
         // Clock-phase pin OFF by default. The v1 pin froze the game during
         // level reloads; v2 (passthrough when behind) still coincided with an

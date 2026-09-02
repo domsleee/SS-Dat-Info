@@ -961,7 +961,7 @@ pub struct HistoryEntry {
     /// entry under a different mode replays different physics.
     pub physics: Option<String>,
     /// Rider stamp at push time (`tas_shared::rider_label`, e.g.
-    /// `Vincent · stance 0`). None = unknown / pre-stamp entry. Restoring an
+    /// `Vincent · goofy`). None = unknown / pre-stamp entry. Restoring an
     /// entry recorded as another character or stance replays different
     /// physics.
     pub rider: Option<String>,
@@ -3163,7 +3163,7 @@ mod tests {
         let meta = RecordingFile::read_metadata(&path).unwrap();
         assert_eq!(meta.character.as_deref(), Some("Keith"));
         assert_eq!(meta.stance, Some(0));
-        assert_eq!(meta.rider_label().as_deref(), Some("Keith · stance 0"));
+        assert_eq!(meta.rider_label().as_deref(), Some("Keith · regular"));
 
         let mut tracker = SegmentTracker::new();
         let mut live = zeroed_state();
@@ -3173,8 +3173,8 @@ mod tests {
         assert!(load_recording_path(&mut live, &mut tracker, &mut log, &path));
         assert!(
             log.iter().any(|l| l.contains("WARNING")
-                && l.contains("Keith · stance 0")
-                && l.contains("Vincent · stance 0")),
+                && l.contains("Keith · regular")
+                && l.contains("Vincent · regular")),
             "{:?}",
             log
         );
@@ -3183,7 +3183,7 @@ mod tests {
         other_stance.rider_stance = 1;
         let mut log2 = Vec::new();
         assert!(load_recording_path(&mut other_stance, &mut tracker, &mut log2, &path));
-        assert!(log2.iter().any(|l| l.contains("WARNING") && l.contains("Keith · stance 1")), "{:?}", log2);
+        assert!(log2.iter().any(|l| l.contains("WARNING") && l.contains("Keith · goofy")), "{:?}", log2);
         let mut same = zeroed_state();
         same.rider_character = tas_shared::TAS_CHARACTER_KEITH;
         same.rider_stance = 0;
@@ -3201,7 +3201,7 @@ mod tests {
     #[test]
     fn history_entries_carry_the_rider_stamp_through_the_store() {
         let mut history = RecordingHistory::new(8);
-        history.set_live_rider(Some("Vincent · stance 0".to_string()));
+        history.set_live_rider(Some("Vincent · regular".to_string()));
         let mut state = zeroed_state();
         state.recorded_count = 3;
         assert!(history.push_snapshot_data_with_session(
@@ -3210,12 +3210,12 @@ mod tests {
             0,
             3
         ));
-        assert_eq!(history.entries()[0].rider.as_deref(), Some("Vincent · stance 0"));
+        assert_eq!(history.entries()[0].rider.as_deref(), Some("Vincent · regular"));
         history.set_live_rider(None);
-        assert_eq!(history.live_rider(), Some("Vincent · stance 0"), "unknown never erases known");
+        assert_eq!(history.live_rider(), Some("Vincent · regular"), "unknown never erases known");
 
         let stored = history.to_stored_entries();
-        assert_eq!(stored[0].rider.as_deref(), Some("Vincent · stance 0"));
+        assert_eq!(stored[0].rider.as_deref(), Some("Vincent · regular"));
         let dir = std::env::temp_dir().join(format!(
             "tas_ui_rider_{}_{}",
             std::process::id(),
@@ -3229,11 +3229,11 @@ mod tests {
         drop(store);
         let (_s, load) =
             crate::history_store_v2::HistoryStoreV2::open_in_lazy(dir.clone()).unwrap();
-        assert_eq!(load.entries[0].rider.as_deref(), Some("Vincent · stance 0"));
+        assert_eq!(load.entries[0].rider.as_deref(), Some("Vincent · regular"));
         let mut reloaded = RecordingHistory::new(8);
         reloaded.set_blob_dir(dir.clone());
         reloaded.apply_loaded(load.entries, load.current_entry_id, load.next_entry_id);
-        assert_eq!(reloaded.entries()[0].rider.as_deref(), Some("Vincent · stance 0"));
+        assert_eq!(reloaded.entries()[0].rider.as_deref(), Some("Vincent · regular"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

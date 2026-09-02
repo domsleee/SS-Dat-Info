@@ -116,9 +116,22 @@ pub fn character_name(id: u32) -> &'static str {
     }
 }
 
-/// Canonical rider stamp, e.g. `Vincent · stance 0`. The physics depend on
-/// the character (a Keith recording does not line up under Vincent) and on
-/// the stance (it changed the trajectory in the 2026-09-02 measurements; the
+/// Stances (`TasSharedState::rider_stance`): the value the game's menu keeps
+/// in its setup object and builds every rider from.
+pub const TAS_STANCE_REGULAR: u32 = 0; // left-foot icon, the game's default
+pub const TAS_STANCE_GOOFY: u32 = 1; // right-foot icon
+
+pub fn stance_name(stance: u32) -> &'static str {
+    match stance {
+        TAS_STANCE_REGULAR => "regular",
+        TAS_STANCE_GOOFY => "goofy",
+        _ => "unknown",
+    }
+}
+
+/// Canonical rider stamp, e.g. `Vincent · goofy`. The physics depend on the
+/// character (a Keith recording does not line up under Vincent) and on the
+/// stance (it changed the trajectory in the 2026-09-02 measurements; the
 /// board does not), so this travels with recordings and history entries and
 /// is compared against the live loadout. `None` until the character is
 /// known; the stance is omitted when unknown so an older stamp still
@@ -129,9 +142,38 @@ pub fn rider_label(character: u32, stance: u32) -> Option<String> {
     }
     let mut label = character_name(character).to_string();
     if stance != u32::MAX {
-        label.push_str(&format!(" · stance {}", stance));
+        label.push_str(" · ");
+        label.push_str(stance_name(stance));
     }
     Some(label)
+}
+
+/// The advice a replay arm should print when the take in the buffer was
+/// recorded as a different rider than the one on the board now: which menu
+/// screen fixes it. The game bakes the character and the stance into the
+/// rider when a level is entered from the menu; no in-process restart
+/// re-reads them (measured 2026-09-02: writing the setup's stance dword and
+/// restarting kept the goofy rider), so the fix is always a menu trip.
+/// `None` = same rider, or either side unknown.
+pub fn rider_mismatch_advice(loaded_rider: Option<&str>, live_rider: Option<&str>) -> Option<String> {
+    let want = loaded_rider?;
+    let have = live_rider?;
+    if want == have {
+        return None;
+    }
+    let want_char = want.split(" · ").next().unwrap_or(want);
+    let have_char = have.split(" · ").next().unwrap_or(have);
+    let screen = if want_char != have_char {
+        "Select Character (and Select Board for the stance)"
+    } else {
+        "Select Board (Stance)"
+    };
+    Some(format!(
+        "this take was recorded as {} but the rider is {}: the physics differ, it will not \
+         line up. Return to the menu, set it on the {} screen and re-enter the track - a \
+         restart does not change it",
+        want, have, screen
+    ))
 }
 
 pub fn physics_mode_label(renderer_id: u32, fpu_control_word: u32) -> Option<String> {
@@ -779,7 +821,8 @@ pub struct TasSharedState {
     /// v42: the human rider's character, see `TAS_CHARACTER_*` (0 until the
     /// DLL has resolved the live loadout).
     pub rider_character: u32,
-    /// v42: the loadout's stance word (0 / 1; `u32::MAX` = unknown).
+    /// v42: stance the game builds the rider with: 0 = regular (left-foot
+    /// icon, the default), 1 = goofy (right-foot icon); `u32::MAX` = unknown.
     pub rider_stance: u32,
 }
 
@@ -4685,13 +4728,14 @@ mod tests {
     /// (fresh DLL, no player yet) is `None`, not a bogus "unknown" stamp.
     #[test]
     fn rider_stamp_distinguishes_characters_and_stances() {
-        assert_eq!(rider_label(TAS_CHARACTER_VINCENT, 0).as_deref(), Some("Vincent · stance 0"));
-        assert_eq!(rider_label(TAS_CHARACTER_KEITH, 1).as_deref(), Some("Keith · stance 1"));
+        assert_eq!(rider_label(TAS_CHARACTER_VINCENT, TAS_STANCE_REGULAR).as_deref(), Some("Vincent · regular"));
+        assert_eq!(rider_label(TAS_CHARACTER_KEITH, TAS_STANCE_GOOFY).as_deref(), Some("Keith · goofy"));
         assert_ne!(rider_label(TAS_CHARACTER_KEITH, 0), rider_label(TAS_CHARACTER_VINCENT, 0));
         assert_ne!(rider_label(TAS_CHARACTER_KEITH, 0), rider_label(TAS_CHARACTER_KEITH, 1));
         assert_eq!(rider_label(TAS_CHARACTER_KEITH, u32::MAX).as_deref(), Some("Keith"));
         assert_eq!(rider_label(TAS_CHARACTER_UNKNOWN, 0), None);
-        assert_eq!(rider_label(TAS_CHARACTER_OTHER, 0).as_deref(), Some("other · stance 0"));
+        assert_eq!(rider_label(TAS_CHARACTER_OTHER, 0).as_deref(), Some("other · regular"));
+        assert_eq!(rider_label(TAS_CHARACTER_KEITH, 7).as_deref(), Some("Keith · unknown"));
         assert_eq!(character_name(TAS_CHARACTER_ULRIKA), "Ulrika");
         assert_eq!(character_name(99), "unknown");
         let mut s = zeroed_boxed();
@@ -4699,8 +4743,23 @@ mod tests {
         s.rider_stance = 0;
         assert_eq!(
             rider_label(s.rider_character, s.rider_stance).as_deref(),
-            Some("Vincent · stance 0")
+            Some("Vincent · regular")
         );
+    }
+
+    /// A replay armed on a take recorded as a different rider gets told
+    /// which menu screen fixes it; same rider or an unknown side says nothing.
+    #[test]
+    fn rider_mismatch_advice_names_the_menu_screen() {
+        let stance = rider_mismatch_advice(Some("Keith · goofy"), Some("Keith · regular")).unwrap();
+        assert!(stance.contains("Keith · goofy") && stance.contains("Keith · regular"), "{}", stance);
+        assert!(stance.contains("Select Board (Stance)") && !stance.contains("Select Character"), "{}", stance);
+        assert!(stance.contains("restart does not change it"), "{}", stance);
+        let character = rider_mismatch_advice(Some("Keith · regular"), Some("Vincent · regular")).unwrap();
+        assert!(character.contains("Select Character"), "{}", character);
+        assert_eq!(rider_mismatch_advice(Some("Keith · goofy"), Some("Keith · goofy")), None);
+        assert_eq!(rider_mismatch_advice(Some("Keith · goofy"), None), None);
+        assert_eq!(rider_mismatch_advice(None, Some("Keith · goofy")), None);
     }
 
     #[test]
