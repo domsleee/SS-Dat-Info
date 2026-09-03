@@ -11,8 +11,26 @@ constexpr size_t TRACE_FRAMES = 384;
 constexpr size_t OBJSNAP_PLAYER_DWORDS = 128;
 constexpr size_t OBJSNAP_PHYSICS_DWORDS = 512;
 
-constexpr uint32_t TAS_SHARED_VERSION = 46; // +menu_doc/menu_seq; v45 menu_selector; v44 menu_screen; v43 seqlocks
+constexpr uint32_t TAS_SHARED_VERSION = 47; // +menu command channel; v46 menu_doc; v45 menu_selector; v44 menu_screen
 constexpr uint32_t TAS_MENU_DOC_MAX = 4096;  // v46 menu document buffer (JSON, NUL-terminated)
+constexpr uint32_t TAS_MENU_CMD_TARGET_MAX = 64;  // v47 menu command target (id or label, NUL-terminated)
+// v47 menu_cmd_kind
+constexpr uint32_t TAS_MENU_CMD_NONE = 0;
+constexpr uint32_t TAS_MENU_CMD_ACTIVATE = 1;   // focus the target, then Enter on it
+constexpr uint32_t TAS_MENU_CMD_FOCUS = 2;      // just move the cursor to the target
+constexpr uint32_t TAS_MENU_CMD_UP = 3;
+constexpr uint32_t TAS_MENU_CMD_DOWN = 4;
+constexpr uint32_t TAS_MENU_CMD_LEFT = 5;
+constexpr uint32_t TAS_MENU_CMD_RIGHT = 6;
+constexpr uint32_t TAS_MENU_CMD_TRIGGER = 7;    // Enter on whatever is focused
+// v47 menu_cmd_result
+constexpr uint32_t TAS_MENU_RESULT_OK = 0;
+constexpr uint32_t TAS_MENU_RESULT_NO_MENU = 1;
+constexpr uint32_t TAS_MENU_RESULT_NOT_FOUND = 2;
+constexpr uint32_t TAS_MENU_RESULT_DISABLED = 3;
+constexpr uint32_t TAS_MENU_RESULT_BAD_KIND = 4;
+constexpr uint32_t TAS_MENU_RESULT_FAULT = 5;
+constexpr uint32_t TAS_MENU_RESULT_NOT_FOCUSABLE = 6;   // the focus did not land on the target; nothing triggered
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MENU_SCREEN_MAX = 32;   // v44: menu-screen title buffer
 constexpr uint32_t TAS_MAX_TICKS = 65536;
@@ -562,6 +580,19 @@ struct TasSharedState {
     // so a reader never sees a half-written document.
     volatile uint32_t menu_seq;
     char menu_doc[TAS_MENU_DOC_MAX];
+
+    // v47: the MENU COMMAND channel (agent -> DLL). The agent writes kind +
+    // target, then bumps menu_cmd_seq. The DLL consumes it on the MENU THREAD
+    // (a mid-hook at UI_Menu::Execute, per frame while a menu is shown) and
+    // executes it through the game's own entry points (Request_Focus, then
+    // UI_Menu::Trigger / Up / Down / ...), writes menu_cmd_result, and sets
+    // menu_cmd_ack = menu_cmd_seq (result first, ack last). One agent at a
+    // time; the reader polls menu_cmd_ack. See caves/menu_state.hpp.
+    volatile uint32_t menu_cmd_seq;
+    volatile uint32_t menu_cmd_kind;      // TAS_MENU_CMD_*
+    char menu_cmd_target[TAS_MENU_CMD_TARGET_MAX];
+    volatile uint32_t menu_cmd_ack;
+    volatile uint32_t menu_cmd_result;    // TAS_MENU_RESULT_*
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -570,7 +601,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1667664,
+static_assert(sizeof(TasSharedState) == 1667744,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 
@@ -655,6 +686,11 @@ public:
         state->menu_selector = 0xFFFFFFFFu;        // no menu selection until the menu publishes one
         state->menu_seq = 0;
         state->menu_doc[0] = 0;                    // no menu document until the menu publishes one
+        state->menu_cmd_seq = 0;                   // v47: nothing pending (a command from a previous
+        state->menu_cmd_kind = 0;                  //      DLL life is never replayed)
+        state->menu_cmd_target[0] = 0;
+        state->menu_cmd_ack = 0;
+        state->menu_cmd_result = 0;
         state->race_start_ts = 0xFFFFFFFFu;
         // Clock-phase pin OFF by default. The v1 pin froze the game during
         // level reloads; v2 (passthrough when behind) still coincided with an

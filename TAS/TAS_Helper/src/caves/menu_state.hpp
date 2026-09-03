@@ -3,6 +3,7 @@
 #include "../log.hpp"
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
+#include "../menu_model.hpp"
 #include "../external/safetyhook.hpp"
 #include <format>
 #include <string>
@@ -106,22 +107,9 @@ static ImageRange ImageRangeOf(const char* mod) {
     return r;
 }
 
-static constexpr uint32_t kMaxItems = 24;
-static constexpr uint32_t kNameMax = 32;
-static constexpr uint32_t kLabelMax = 40;
-
-struct MenuItem {
-    uint32_t comp = 0;              // the UI_Component (for the write side later)
-    char name[kNameMax] = {};       // UI_Component name (+0x10)
-    char label[kLabelMax] = {};     // the button's text line text
-    uint8_t enabled = 0, visible = 0, focused = 0;
-};
-
-struct MenuSnapshot {
-    uint32_t selector = 0xFFFFFFFFu;  // index into items of the focused one
-    uint32_t count = 0;
-    MenuItem items[kMaxItems];
-};
+using menumodel::MenuItem;
+using menumodel::MenuSnapshot;
+using menumodel::kMaxItems;
 
 // A Button-family component's label: [comp+0x44] -> Sr_Plane_Text_Line -> +4 string.
 // The text line's vtable must be SR_UIT's; a Label (text line at +0x28, +0x44
@@ -131,11 +119,29 @@ static bool ReadItem(uint32_t child, uint32_t focusedComp, MenuItem& it) {
         if (child < 0x10000) return false;
         const uint32_t vt = *(uint32_t*)child;
         if (!g_imgMainMenu.Has(vt) && !g_imgUit.Has(vt)) return false;   // not a UIT component
+        // The label: a Button-family component's text line. Image buttons (the
+        // page arrows) have none, and a non-Button's +0x44 is off its end, so
+        // the line is trusted only if its vtable is SR_UIT's.
         const uint32_t tl = *(uint32_t*)(child + 0x44);
-        if (tl < 0x10000 || !g_imgSrUit.Has(*(uint32_t*)tl)) return false;  // no text line: not a button
-        if (!ReadMenuString(tl + 4, it.label, sizeof it.label)) return false;
-        it.comp = child;
+        const bool hasLabel = tl >= 0x10000 && g_imgSrUit.Has(*(uint32_t*)tl) &&
+                              ReadMenuString(tl + 4, it.label, sizeof it.label);
+        if (!hasLabel) it.label[0] = 0;
         if (!ReadMenuString(child + 0x10, it.name, sizeof it.name)) it.name[0] = 0;
+        // An item is a control with visible text, or an id-bearing control
+        // without any (the image arrows carry an ID_* name and no text line).
+        // Labels, showers and decorations have neither and are skipped.
+        const bool hasId = it.name[0] == 'I' && it.name[1] == 'D' && it.name[2] == '_';
+        if (!hasLabel && !hasId) return false;
+        // Only a control the cursor can land on is an item: Want_Focus (vtable
+        // slot 0x2C, the one Request_Focus itself consults; a Label overrides
+        // it to false). Headline labels carry ID_* names too, and activating
+        // one would fire Enter on whatever was focused before. The slot must
+        // point into the UI images before it is called.
+        using WantFocusFn = uint8_t(__fastcall*)(uint32_t);
+        const uint32_t wantFocus = *(uint32_t*)(vt + 0x2C);
+        if (!g_imgMainMenu.Has(wantFocus) && !g_imgUit.Has(wantFocus)) return false;
+        if (!(((WantFocusFn)(uintptr_t)wantFocus)(child) & 1)) return false;
+        it.comp = child;
         it.enabled = *(uint8_t*)(child + 0x24);
         it.visible = *(uint8_t*)(child + 0x25);
         it.focused = (child == focusedComp);
@@ -209,43 +215,8 @@ static void DumpIfChanged(const MenuSnapshot& s) {
 }
 
 // ---- the document (shm v46) ----
-// Labels and names are printable ASCII (ReadMenuString enforces it), so only
-// the two JSON metacharacters need escaping.
-static void AppendJsonString(std::string& out, const char* s) {
-    out += '"';
-    for (; *s; s++) {
-        if (*s == '"' || *s == '\\') out += '\\';
-        out += *s;
-    }
-    out += '"';
-}
-
-// {"screen":..,"sel":N|null,"items":[{"label":..,"id":..,"en":b,"vis":b},..]}
-// Empty string = no menu.
 static std::string BuildDoc(const MenuSnapshot& s) {
-    if (!g_state || !g_state->menu_screen[0]) return {};
-    std::string d;
-    d.reserve(512);
-    d += "{\"screen\":";
-    AppendJsonString(d, g_state->menu_screen);
-    d += ",\"sel\":";
-    d += (s.selector == 0xFFFFFFFFu) ? std::string("null") : std::to_string(s.selector);
-    d += ",\"items\":[";
-    for (uint32_t i = 0; i < s.count; i++) {
-        const auto& it = s.items[i];
-        if (i) d += ',';
-        d += "{\"label\":";
-        AppendJsonString(d, it.label);
-        d += ",\"id\":";
-        AppendJsonString(d, it.name);
-        d += ",\"en\":";
-        d += it.enabled ? "true" : "false";
-        d += ",\"vis\":";
-        d += it.visible ? "true" : "false";
-        d += '}';
-    }
-    d += "]}";
-    return d;
+    return g_state ? menumodel::BuildDoc(s, g_state->menu_screen) : std::string();
 }
 
 inline std::string g_lastDoc;   // what shm holds (worker thread only)
@@ -273,6 +244,126 @@ inline void RefreshMenu() {
     if (g_state->menu_selector != snap.selector) g_state->menu_selector = snap.selector;
     PublishDoc(BuildDoc(snap));
     DumpIfChanged(snap);
+}
+
+// ---------------------------------------------------------------------------
+// The COMMAND channel (shm v47): the agent writes kind + target and bumps
+// menu_cmd_seq; this side executes it on the MENU THREAD - a mid-hook at the
+// entry of UI_Menu::Execute(float), called every frame from Menu::Paint while
+// a menu is shown with ECX = the UI_Menu - through the game's own entry points:
+//   UIT::UI_Component::Request_Focus(bool)       UIT.dll+0x196D0, ECX=comp, DL=1
+//   UI_Menu::Trigger / Up / Down / Left / Right  Main_Menu.dll+0x19F50 / 0x19ED0 /
+//     0x19EF0 / 0x19F10 / 0x19F30, ECX=UI_Menu - exactly what KB_Action calls
+//     for Enter and the arrow keys (main_menu.c).
+// "activate X" = Request_Focus(X, true) then Trigger: the Enter path on the
+// target, so listeners, sounds and page transitions run as if a human did it.
+// Nothing is poked into the game's objects by hand.
+// ---------------------------------------------------------------------------
+using MenuAction = void(__fastcall*)(uint32_t);
+using RequestFocusFn = void(__fastcall*)(uint32_t, uint32_t);
+inline MenuAction g_trigger = nullptr, g_up = nullptr, g_down = nullptr, g_left = nullptr, g_right = nullptr;
+inline RequestFocusFn g_requestFocus = nullptr;
+inline SafetyHookMid g_executeHook{};
+inline bool g_cmdInstalled = false;
+
+// UI_Menu::Execute: push esi; push edi; mov edi,[esp+0xC]; push edi; mov esi,ecx
+static constexpr uint8_t kExecuteSig[] = { 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C, 0x57, 0x8B, 0xF1 };
+// UI_Menu::Trigger/Up/Down/Left/Right all open identically: mov eax,[ecx+0x10C]
+// (the page); test eax,eax; jz; lea edx,[eax+4] (its listener) / xor edx,edx;
+// add ecx,0x18 (the Input_Event_Generator) - then a jmp through an import
+// thunk, an absolute address the pattern stops before.
+static constexpr uint8_t kMenuActionSig[] = { 0x8B, 0x81, 0x0C, 0x01, 0x00, 0x00, 0x85, 0xC0, 0x74, 0x05,
+                                              0x8D, 0x50, 0x04, 0xEB, 0x02, 0x33, 0xD2, 0x83, 0xC1, 0x18 };
+// UI_Component::Request_Focus: push ebx; push esi; mov esi,ecx; mov ecx,[esi+0xC]
+// (the parent); test ecx,ecx; mov ebx,edx; jz; test bl,bl; jz; mov eax,[esi];
+// mov ecx,esi; call [eax+0x2C] (Want_Focus)
+static constexpr uint8_t kRequestFocusSig[] = { 0x53, 0x56, 0x8B, 0xF1, 0x8B, 0x4E, 0x0C, 0x85, 0xC9, 0x8B, 0xDA, 0x74, 0x24,
+                                                0x84, 0xDB, 0x74, 0x18, 0x8B, 0x06, 0x8B, 0xCE, 0xFF, 0x50, 0x2C };
+
+static uint32_t RunCommand(uint32_t uiMenu, uint32_t kind, const char* target) {
+    if (!g_state->menu_screen[0]) return TAS_MENU_RESULT_NO_MENU;
+    switch (kind) {
+    case TAS_MENU_CMD_UP: g_up(uiMenu); return TAS_MENU_RESULT_OK;
+    case TAS_MENU_CMD_DOWN: g_down(uiMenu); return TAS_MENU_RESULT_OK;
+    case TAS_MENU_CMD_LEFT: g_left(uiMenu); return TAS_MENU_RESULT_OK;
+    case TAS_MENU_CMD_RIGHT: g_right(uiMenu); return TAS_MENU_RESULT_OK;
+    case TAS_MENU_CMD_TRIGGER: g_trigger(uiMenu); return TAS_MENU_RESULT_OK;
+    case TAS_MENU_CMD_ACTIVATE:
+    case TAS_MENU_CMD_FOCUS: {
+        MenuSnapshot snap;
+        if (!ReadMenu(snap)) return TAS_MENU_RESULT_NO_MENU;
+        const int i = menumodel::FindTarget(snap, target);
+        if (i < 0) return TAS_MENU_RESULT_NOT_FOUND;
+        if (!snap.items[i].enabled) return TAS_MENU_RESULT_DISABLED;
+        g_requestFocus(snap.items[i].comp, 1);
+        // Never press Enter blind: if the focus did not land on the target
+        // (a control that refuses it), Trigger would fire on the PREVIOUS item.
+        auto active = (GetActiveComponent)(uintptr_t)(g_mainMenuBase + 0x1A6B0);
+        if (active(uiMenu) != snap.items[i].comp) return TAS_MENU_RESULT_NOT_FOCUSABLE;
+        if (kind == TAS_MENU_CMD_ACTIVATE) g_trigger(uiMenu);
+        return TAS_MENU_RESULT_OK;
+    }
+    default:
+        return TAS_MENU_RESULT_BAD_KIND;
+    }
+}
+
+// SEH around the whole execution: a page torn down between the agent's read
+// and this frame faults here, and the agent gets FAULT instead of a crash.
+static uint32_t RunCommandGuarded(uint32_t uiMenu, uint32_t kind, const char* target) {
+    __try {
+        return RunCommand(uiMenu, kind, target);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return TAS_MENU_RESULT_FAULT;
+    }
+}
+
+static void ExecuteCb(SafetyHookContext& ctx) {
+    if (!g_state) return;
+    const uint32_t seq = g_state->menu_cmd_seq;
+    if (seq == g_state->menu_cmd_ack) return;   // nothing pending: one compare per frame
+    g_uiMenu = (uint32_t)ctx.ecx;               // the live UI_Menu
+    char target[TAS_MENU_CMD_TARGET_MAX];
+    for (uint32_t i = 0; i < TAS_MENU_CMD_TARGET_MAX; i++) target[i] = g_state->menu_cmd_target[i];
+    target[TAS_MENU_CMD_TARGET_MAX - 1] = 0;
+    const uint32_t kind = g_state->menu_cmd_kind;
+    const uint32_t result = RunCommandGuarded((uint32_t)ctx.ecx, kind, target);
+    g_state->menu_cmd_result = result;
+    InterlockedExchange((volatile LONG*)&g_state->menu_cmd_ack, (LONG)seq);   // result is visible first
+    Log(std::format("Menu cmd #{}: kind={} target='{}' -> {}", seq, kind, target, result));
+}
+
+static void InstallCommands(uint8_t* base) {
+    auto uit = (uint8_t*)GetModuleHandleA("UIT.dll");
+    if (!uit) {
+        Log("Menu cmd: UIT.dll not loaded - commands unavailable");
+        return;
+    }
+    using GA = GameAddresses;
+    const bool ok =
+        GA::ValidateCode("Main_Menu.dll+0x1A680 (UI_Menu::Execute)", base + 0x1A680, kExecuteSig) &&
+        GA::ValidateCode("Main_Menu.dll+0x19F50 (UI_Menu::Trigger)", base + 0x19F50, kMenuActionSig) &&
+        GA::ValidateCode("Main_Menu.dll+0x19ED0 (UI_Menu::Up)", base + 0x19ED0, kMenuActionSig) &&
+        GA::ValidateCode("Main_Menu.dll+0x19EF0 (UI_Menu::Down)", base + 0x19EF0, kMenuActionSig) &&
+        GA::ValidateCode("Main_Menu.dll+0x19F10 (UI_Menu::Left)", base + 0x19F10, kMenuActionSig) &&
+        GA::ValidateCode("Main_Menu.dll+0x19F30 (UI_Menu::Right)", base + 0x19F30, kMenuActionSig) &&
+        GA::ValidateCode("UIT.dll+0x196D0 (UI_Component::Request_Focus)", uit + 0x196D0, kRequestFocusSig);
+    if (!ok) {
+        Log("Menu cmd: a site did not validate - commands unavailable");
+        return;
+    }
+    g_trigger = (MenuAction)(uintptr_t)(base + 0x19F50);
+    g_up = (MenuAction)(uintptr_t)(base + 0x19ED0);
+    g_down = (MenuAction)(uintptr_t)(base + 0x19EF0);
+    g_left = (MenuAction)(uintptr_t)(base + 0x19F10);
+    g_right = (MenuAction)(uintptr_t)(base + 0x19F30);
+    g_requestFocus = (RequestFocusFn)(uintptr_t)(uit + 0x196D0);
+    g_executeHook = safetyhook::create_mid(base + 0x1A680, ExecuteCb);
+    g_cmdInstalled = (bool)g_executeHook;
+    Log(g_cmdInstalled
+            ? std::format("Menu cmd: hooked UI_Menu::Execute at {:p} (Request_Focus {:p})",
+                          (void*)(base + 0x1A680), (void*)(uit + 0x196D0))
+            : "Menu cmd: create_mid on Execute FAILED");
 }
 
 static DWORD WINAPI InstallThread(LPVOID) {
@@ -307,6 +398,7 @@ static DWORD WINAPI InstallThread(LPVOID) {
             ? std::format("Menu state: hooked UI_Menu::Change_Page at {:p} (Main_Menu.dll {:p})",
                           (void*)(base + 0x1A7C0), (void*)base)
             : "Menu state: create_mid on Change_Page FAILED");
+    if (g_changePageHook) InstallCommands(base);
     return 0;
 }
 
