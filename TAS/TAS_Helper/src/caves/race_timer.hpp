@@ -58,8 +58,14 @@ static inline uint16_t ReadClk() {
 // Publish, recording blank<->show transitions for diagnosis.
 static void Publish(uint32_t cs, uint32_t start, const char* reason) {
     if (!g_state) return;
-    g_state->race_time_cs = cs;
-    g_state->race_start_ts = start;
+    // The pair goes out under race_seq so a reader never sees a new time with
+    // the previous start stamp (codex review 2026-09-03). Game thread only.
+    if (g_state->race_time_cs != cs || g_state->race_start_ts != start) {
+        InterlockedIncrement((volatile LONG*)&g_state->race_seq);   // odd: writing
+        g_state->race_time_cs = cs;
+        g_state->race_start_ts = start;
+        InterlockedIncrement((volatile LONG*)&g_state->race_seq);   // even: stable
+    }
     if (g_diag && (g_lastPub == MAXU) != (cs == MAXU)) {
         Log(std::format("[racetimer] {} ({}) clk={} cs={} start={}",
             cs == MAXU ? "BLANK" : "SHOW", reason, (int)ReadClk(),
@@ -130,6 +136,16 @@ static void TickCb(SafetyHookContext&) {
     }
     g_wasInGame = inGame;
 
+    // Staleness is tick-driven, not sample-driven: the HUD line of a finished
+    // race keeps its frozen time published for as long as the line is still
+    // appended, but once the HUD is torn down nothing samples any more - and
+    // game_in_game does NOT drop at the menu, so without this the last time
+    // stayed published forever (codex review 2026-09-03). Eight compares per
+    // tick; eviction unlatches the player line, which blanks the feed.
+    if (inGame && g_table.Evict(g_tickNow) > 0 && g_table.playerLine == 0 && g_lastPub != MAXU) {
+        Publish(MAXU, MAXU, "stale");
+    }
+
     if (g_diag && inGame && (++g_diagTick % 128) == 0) {
         int clk = ReadClk();
         std::string s = std::format("[racetimer] clk={} tick={} player={:#x} pub={}",
@@ -176,6 +192,9 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
     char buf[8] = {};
     g_diag = (GetEnvironmentVariableA("TAS_RACE_DIAG", buf, sizeof(buf)) > 0 && buf[0] == '1');
     g_tickNow = STALE_TICKS + 1;  // so a brand-new table never looks "just sampled"
+    // Shared memory survives reinjection: an ODD race_seq from a DLL killed
+    // mid-publish would make every reader reject the pair forever.
+    if (g_state->race_seq & 1) InterlockedIncrement((volatile LONG*)&g_state->race_seq);
     ResetEpoch();
     g_clock = sg + 0x1D5334;
     g_tickHook = safetyhook::create_mid(sg + 0xB4B80, TickCb);  // clock tick (100/sec)

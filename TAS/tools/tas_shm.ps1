@@ -3,7 +3,7 @@
 # Always prints version/command/mode/game_in_game.
 param([int]$Cmd = -1)
 $mmf = [System.IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting("Local\SupremeTAS")
-$acc = $mmf.CreateViewAccessor(0, 1663600)
+$acc = $mmf.CreateViewAccessor(0, 0)
 if ($Cmd -ge 0) { $acc.Write(4, [uint32]$Cmd) }
 $ver = $acc.ReadUInt32(0)
 $cmd2 = $acc.ReadUInt32(4)

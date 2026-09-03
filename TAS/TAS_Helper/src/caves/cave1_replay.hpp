@@ -51,6 +51,10 @@ static char* ReplayPut(char* p, const char* s) {
     return p;
 }
 
+// The recorder the DLL follows. File scope so a reinstall starts clean
+// instead of trusting a pointer from a previous process life.
+static ReplayCaptureState g_capture;
+
 bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
     if (!addr.replay_capture_site) {
         Log("Replay capture: hook site not resolved");
@@ -63,6 +67,9 @@ bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
 
     g_replayState = state;
     g_replayAddr = &addr;
+    g_capture = ReplayCaptureState{};
+    state->replay_ptr = 0;
+    state->player_ptr = 0;
     Log(std::format("Replay capture: hooking at {:p} (SG+0x9E8F0), human = Player vtable {:#010x}",
                     (void*)addr.replay_capture_site, addr.player_vtable));
 
@@ -75,24 +82,42 @@ bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
         // ECX holds the recorder object at this hook site.
         auto newPtr = (uint32_t)ctx.ecx;
 
-        static ReplayCaptureState s_capture;
         static uint32_t s_logged = 0;
-        if (newPtr != s_capture.cached) {
-            ReplayIdentityEnv env{};
-            env.player_vtable = addr->player_vtable;
-            env.ghost_vtable = addr->ghost_vtable;
+        ReplayIdentityEnv env{};
+        env.player_vtable = addr->player_vtable;
+        env.ghost_vtable = addr->ghost_vtable;
+        if (newPtr != 0 && newPtr == g_capture.cached) {
+            // Same address as the recorder we follow: prove it is STILL the
+            // human's on every push (three guarded reads). An F5 can free it
+            // and the allocator can hand the address to a ghost.
+            const ReplayOwnerKind kind = ClassifyRecorderOwner(newPtr, env, ReplaySafeReadU32, nullptr);
+            if (ReplayCaptureRevalidate(kind == OWNER_HUMAN, g_capture)) {
+                s->replay_ptr = 0;
+                s->player_ptr = 0;
+                if (++s_logged <= 60) {
+                    char msg[96];
+                    char* p = ReplayPut(msg, "replay-capture ecx=");
+                    ReplayHexU32(p, newPtr);
+                    p = ReplayPut(p + 8, " now ");
+                    p = ReplayPut(p, ReplayOwnerKindName(kind));
+                    p = ReplayPut(p, " - DROPPED (address reused)");
+                    *p = 0;
+                    LogRing(s, LOG_DEBUG, msg);
+                }
+            }
+        } else if (newPtr != g_capture.cached) {
             ReplayIdentityTrace trace{};
             const ReplayOwnerKind kind = ClassifyRecorderOwner(newPtr, env, ReplaySafeReadU32, &trace);
             const bool human = kind == OWNER_HUMAN;
-            const uint32_t rejectedBefore = s_capture.rejected;
-            const bool adopted = ReplayCaptureAdopt(s->mode == MODE_OFF, newPtr, human, s_capture);
+            const uint32_t rejectedBefore = g_capture.rejected;
+            const bool adopted = ReplayCaptureAdopt(s->mode == MODE_OFF, newPtr, human, g_capture);
             if (adopted) {
                 s->replay_ptr = newPtr;
             }
             // Ring-log adoptions and rejections (rate-limited) with the owner
             // and its class: this is how the ghost/AI behaviour around
             // restarts was established, keep it visible.
-            if ((adopted || s_capture.rejected != rejectedBefore) && ++s_logged <= 60) {
+            if ((adopted || g_capture.rejected != rejectedBefore) && ++s_logged <= 60) {
                 char msg[128];
                 char* p = ReplayPut(msg, "replay-capture ecx=");
                 ReplayHexU32(p, newPtr);

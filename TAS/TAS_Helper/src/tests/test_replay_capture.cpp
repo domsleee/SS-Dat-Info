@@ -56,6 +56,26 @@ int main() {
                        GARBAGE_OWNER_REC = 0x0C460630;
 
     {
+        // same_address_reuse_is_caught (codex 2026-09-03): F5 frees the human's
+        // recorder and the allocator hands the SAME address to a ghost. The
+        // address-change gate never re-classified it; revalidation on every
+        // push of the cached address does.
+        ReplayCaptureState st;
+        check(ReplayCaptureAdopt(OFF, HUMAN_A, HUMAN, st) && st.cached == HUMAN_A, "reuse: human adopted");
+        check(!ReplayCaptureRevalidate(true, st) && st.cached == HUMAN_A && st.dropped == 0,
+              "reuse: still human on the next push - nothing happens");
+        check(ReplayCaptureRevalidate(false, st) && st.cached == 0 && st.dropped == 1,
+              "reuse: the same address now owned by a ghost is DROPPED");
+        check(!ReplayCaptureRevalidate(false, st) && st.dropped == 1,
+              "reuse: nothing cached - a further non-human push is a no-op (not counted twice)");
+        check(!ReplayCaptureAdopt(ACTIVE, HUMAN_A, OTHER, st) && st.cached == 0,
+              "reuse: the ghost at the old address is never adopted");
+        check(ReplayCaptureAdopt(ACTIVE, HUMAN_A, HUMAN, st) && st.cached == HUMAN_A,
+              "reuse: the human re-created at that address is adopted again (mid-run)");
+        check(st.changes_while_active == 0, "reuse: re-adoption from empty is not a mid-run change");
+    }
+
+    {
         ReplayCaptureState st;
         check(ReplayCaptureAdopt(OFF, HUMAN_A, HUMAN, st) && st.cached == HUMAN_A,
               "idle: the human's recorder is adopted on its first push");

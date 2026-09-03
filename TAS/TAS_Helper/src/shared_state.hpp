@@ -11,7 +11,7 @@ constexpr size_t TRACE_FRAMES = 384;
 constexpr size_t OBJSNAP_PLAYER_DWORDS = 128;
 constexpr size_t OBJSNAP_PHYSICS_DWORDS = 512;
 
-constexpr uint32_t TAS_SHARED_VERSION = 42; // +rider_character, rider_stance (character / stance awareness)
+constexpr uint32_t TAS_SHARED_VERSION = 43; // +rider_seq / race_seq (seqlocked pairs); v42: +rider_character, rider_stance (character / stance awareness)
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
@@ -521,6 +521,19 @@ struct TasSharedState {
     //   it only when a level is entered from the menu. Measured 2026-09-02.)
     volatile uint32_t rider_character;
     volatile uint32_t rider_stance;
+
+    // v43: seqlocks for the two published PAIRS (same protocol as
+    // level_ctx_seq: odd = writer mid-update, even = stable; the reader
+    // re-reads until the sequence is even and unchanged).
+    //   rider_seq - (rider_character, rider_stance), written by the level-scan
+    //               worker in rider::Refresh.
+    //   race_seq  - (race_time_cs, race_start_ts), written on the game thread
+    //               in the race timer's Publish.
+    // Without them a reader could pair a new character with the previous
+    // stance, or a new time with the previous start stamp (codex review
+    // 2026-09-03).
+    volatile uint32_t rider_seq;
+    volatile uint32_t race_seq;
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -529,7 +542,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1663520,
+static_assert(sizeof(TasSharedState) == 1663528,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 
@@ -643,6 +656,8 @@ public:
         state->level_path[0] = 0;
         state->level_path_gen = 0;
         state->level_ctx_seq = 0;
+        state->rider_seq = 0;
+        state->race_seq = 0;
         return true;
     }
 
