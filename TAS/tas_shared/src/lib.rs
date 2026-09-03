@@ -4878,9 +4878,6 @@ mod tests {
         );
     }
 
-    /// A replay armed on a take recorded as a different rider gets told
-    /// which menu screen fixes it; same rider or an unknown side says nothing.
-    #[test]
     #[test]
     fn menu_id_prettifies() {
         assert_eq!(prettify_menu_id("ID_ARCADE_CHOOSE_TRACK"), "Arcade Choose Track");
@@ -4890,6 +4887,9 @@ mod tests {
         assert_eq!(prettify_menu_id("ID_"), "ID_");
     }
 
+    /// A replay armed on a take recorded as a different rider gets told
+    /// which menu screen fixes it; same rider or an unknown side says nothing.
+    #[test]
     fn rider_mismatch_advice_names_the_menu_screen() {
         let stance = rider_mismatch_advice(Some("Keith · goofy"), Some("Keith · regular")).unwrap();
         assert!(stance.contains("Keith · goofy") && stance.contains("Keith · regular"), "{}", stance);
