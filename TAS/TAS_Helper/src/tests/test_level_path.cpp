@@ -87,6 +87,24 @@ int main() {
     check(MatchOne("fore", 4, AREAS, 3) == -1, "MatchOne rejects prefix");
     check(MatchOne("", 0, AREAS, 3) == -1, "MatchOne rejects empty");
 
+    // LevelIdFrom: path area (reliable) + setup object difficulty. Practice is
+    // the regression that prompted these (2026-09-03): it skips the menu screen
+    // that writes the setup object, so the object holds a STALE Arcade
+    // selection; the id must still come out 9 from the path alone.
+    check(LevelIdFrom(3, "Village", "Hard") == 9, "Practice resolves to 9 despite a stale Village/Hard setup");
+    check(LevelIdFrom(3, "", "") == 9, "Practice resolves to 9 with an unreadable setup");
+    check(LevelIdFrom(0, "Forest", "Easy") == 0, "Forest Easy");
+    check(LevelIdFrom(0, "Forest", "Medium") == 1, "Forest Medium (path can't give difficulty; setup does)");
+    check(LevelIdFrom(0, "Forest", "Hard") == 2, "Forest Hard");
+    check(LevelIdFrom(2, "Village", "Easy") == 6, "Village Easy");
+    check(LevelIdFrom(2, "Village", "Hard") == 8, "Village Hard (path says easy; setup says Hard)");
+    check(LevelIdFrom(2, "village", "hard") == 8, "case-folded setup strings");
+    check(LevelIdFrom(2, "Forest", "Easy") == -1, "stale setup: its area disagrees with the path area");
+    check(LevelIdFrom(0, "", "") == -1, "non-practice with an unreadable setup is unresolved");
+    check(LevelIdFrom(0, "Forest", "Xyz") == -1, "unknown difficulty string is unresolved");
+    check(LevelIdFrom(-1, "Forest", "Easy") == -1, "no path area => unresolved");
+    check(LevelIdFrom(4, "Forest", "Easy") == -1, "out-of-range path area => unresolved");
+
     if (g_fail == 0) {
         std::printf("ALL PASS\n");
         return 0;
