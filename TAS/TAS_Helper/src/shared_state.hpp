@@ -11,8 +11,9 @@ constexpr size_t TRACE_FRAMES = 384;
 constexpr size_t OBJSNAP_PLAYER_DWORDS = 128;
 constexpr size_t OBJSNAP_PHYSICS_DWORDS = 512;
 
-constexpr uint32_t TAS_SHARED_VERSION = 43; // +rider_seq / race_seq (seqlocked pairs); v42: +rider_character, rider_stance (character / stance awareness)
+constexpr uint32_t TAS_SHARED_VERSION = 44; // +menu_screen; v43 rider_seq/race_seq
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
+constexpr uint32_t TAS_MENU_SCREEN_MAX = 32;   // v44: menu-screen title buffer
 constexpr uint32_t TAS_MAX_TICKS = 65536;
 constexpr uint32_t TAS_MAX_SEGMENTS = 32;      // Max segment boundaries
 constexpr uint32_t TAS_LOG_RING_SIZE = 64;     // Number of log entries
@@ -534,6 +535,15 @@ struct TasSharedState {
     // 2026-09-03).
     volatile uint32_t rider_seq;
     volatile uint32_t race_seq;
+
+    // v44: which menu screen the game is showing, as its on-screen title
+    // ("Main Menu", "Select Character", "Select Board", "TOP5 Attack Settings",
+    // "Arcade", ...); empty while a level is running. Captured by the race
+    // timer's SR_UIT text hook (no memory scan) and cleared by the in-game
+    // clock tick (which is frozen at menus, so the last title stays put there).
+    // A plain buffer, not seqlocked: a torn read is a one-frame cosmetic blip
+    // in a display string, and it self-heals on the next poll.
+    char menu_screen[TAS_MENU_SCREEN_MAX];
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -542,7 +552,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1663528,
+static_assert(sizeof(TasSharedState) == 1663560,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 

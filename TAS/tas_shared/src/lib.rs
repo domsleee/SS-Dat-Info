@@ -13,8 +13,9 @@ pub const OBJSNAP_PLAYER_DWORDS: usize = 128;
 /// at 0x1B4 so the object is at least 0x1D8, and this leaves headroom).
 pub const OBJSNAP_PHYSICS_DWORDS: usize = 512;
 
-pub const TAS_SHARED_VERSION: u32 = 43; // +rider_seq / race_seq (seqlocked pairs); v42: +rider_character, rider_stance (character / stance awareness)
+pub const TAS_SHARED_VERSION: u32 = 44; // +menu_screen; v43 rider_seq / race_seq; v42 rider_character / rider_stance (character / stance awareness)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
+pub const TAS_MENU_SCREEN_MAX: usize = 32;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
@@ -841,6 +842,11 @@ pub struct TasSharedState {
     /// v43: seqlock over the (race_time_cs, race_start_ts) pair, written on
     /// the game thread by the race timer. Read through [`race_pair`].
     pub race_seq: AtomicU32,
+
+    /// v44: the current menu screen's on-screen title ("Main Menu", "Select
+    /// Character", "Arcade", ...); all-zero while a level is running. Captured
+    /// by the DLL's SR_UIT text hook (no memory scan). Read via `menu_screen`.
+    pub menu_screen: [u8; TAS_MENU_SCREEN_MAX],
 }
 
 /// How many times to retry a torn level-context read before giving up.
@@ -1018,6 +1024,50 @@ pub fn level_context(state: &TasSharedState) -> Option<(u32, String)> {
     let (id, path) = snapshot?;
     let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
     Some((id, String::from_utf8_lossy(&path[..end]).into_owned()))
+}
+
+/// The menu screen the game is showing, by its on-screen title ("Main Menu",
+/// "Select Character", "Arcade", ...), or `None` while a level is running (the
+/// buffer is empty then). Plain read - the DLL writes a short title on change
+/// and clears it in-game; a torn read is a one-frame cosmetic blip.
+pub fn menu_screen(state: &TasSharedState) -> Option<String> {
+    let mut buf = [0u8; TAS_MENU_SCREEN_MAX];
+    for (i, b) in buf.iter_mut().enumerate() {
+        // SAFETY: shared mapping written by the DLL's game thread.
+        *b = unsafe { std::ptr::read_volatile(&state.menu_screen[i]) };
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    if end == 0 {
+        return None;
+    }
+    // Reject a non-printable torn read rather than show garbage.
+    if buf[..end].iter().any(|&c| !(0x20..0x7f).contains(&c)) {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&buf[..end]).into_owned();
+    Some(prettify_menu_id(&raw))
+}
+
+/// The DLL publishes the menu's internal page id ("ID_ARCADE_CHOOSE_TRACK").
+/// Turn it into a human label ("Arcade Choose Track"): drop the `ID_` prefix
+/// and title-case the underscore-separated words. Anything not in that shape is
+/// returned unchanged.
+fn prettify_menu_id(id: &str) -> String {
+    let body = id.strip_prefix("ID_").unwrap_or(id);
+    if body.is_empty() {
+        return id.to_string();
+    }
+    body.split('_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_ascii_uppercase().to_string() + &c.as_str().to_ascii_lowercase(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Whether the current track is known. Prefer [`resolved_level_id`] when you
@@ -1214,6 +1264,11 @@ mod platform {
             rider_label(character, stance)
         }
 
+        /// The current menu screen title (v44), `None` in a level.
+        pub fn menu_screen(&self) -> Option<String> {
+            menu_screen(self.state())
+        }
+
         /// Volatile read of mode (poll-hot field written by DLL).
         pub fn mode_volatile(&self) -> u32 {
             unsafe {
@@ -1361,6 +1416,10 @@ mod platform {
         pub fn rider(&self) -> Option<String> {
             let (character, stance) = rider_pair(&self.state);
             rider_label(character, stance)
+        }
+
+        pub fn menu_screen(&self) -> Option<String> {
+            menu_screen(&self.state)
         }
 
         pub fn restart_state(&self) -> u32 {
@@ -4745,7 +4804,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_528);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_560);
     }
 
     /// Prints field offsets for the out-of-process probes (tools/tas_shm.ps1).
@@ -4756,7 +4815,7 @@ mod tests {
         println!(
             "offsets: version={} command={} mode={} frame_count={} recorded_count={} playback_pos={} \
              replay_ptr={} player_ptr={} player_x={} input_log={} rec_coords={} play_coords={} \
-             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} rider_seq={} race_seq={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
+             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} rider_seq={} race_seq={} menu_screen={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
             offset_of!(TasSharedState, version),
             offset_of!(TasSharedState, command),
             offset_of!(TasSharedState, mode),
@@ -4778,6 +4837,7 @@ mod tests {
             offset_of!(TasSharedState, game_in_game),
             offset_of!(TasSharedState, rider_seq),
             offset_of!(TasSharedState, race_seq),
+            offset_of!(TasSharedState, menu_screen),
             offset_of!(TasSharedState, fpu_control_word),
             offset_of!(TasSharedState, renderer_id),
             offset_of!(TasSharedState, rider_character),
@@ -4821,6 +4881,15 @@ mod tests {
     /// A replay armed on a take recorded as a different rider gets told
     /// which menu screen fixes it; same rider or an unknown side says nothing.
     #[test]
+    #[test]
+    fn menu_id_prettifies() {
+        assert_eq!(prettify_menu_id("ID_ARCADE_CHOOSE_TRACK"), "Arcade Choose Track");
+        assert_eq!(prettify_menu_id("ID_MAIN_MENU"), "Main Menu");
+        assert_eq!(prettify_menu_id("ID_ARCADE_CHOOSE_BOARD"), "Arcade Choose Board");
+        assert_eq!(prettify_menu_id("Weird"), "Weird");
+        assert_eq!(prettify_menu_id("ID_"), "ID_");
+    }
+
     fn rider_mismatch_advice_names_the_menu_screen() {
         let stance = rider_mismatch_advice(Some("Keith · goofy"), Some("Keith · regular")).unwrap();
         assert!(stance.contains("Keith · goofy") && stance.contains("Keith · regular"), "{}", stance);

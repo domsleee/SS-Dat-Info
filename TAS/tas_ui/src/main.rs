@@ -3473,14 +3473,21 @@ impl eframe::App for TasApp {
                             )
                         } else if state.game_in_game != 0 {
                             // Flag set but cycle frozen = paused / dialog / a
-                            // static menu reached by quitting mid-level.
+                            // static menu reached by quitting mid-level. If the
+                            // DLL captured the menu screen title (v44), name it.
                             (
-                                "\u{2630} Menu / Paused".to_string(),
+                                match tas_shared::menu_screen(state) {
+                                    Some(s) => format!("\u{2630} {}", s),
+                                    None => "\u{2630} Menu / Paused".to_string(),
+                                },
                                 egui::Color32::from_gray(150),
                             )
                         } else {
                             (
-                                "\u{2630} In Menu".to_string(),
+                                match tas_shared::menu_screen(state) {
+                                    Some(s) => format!("\u{2630} {}", s),
+                                    None => "\u{2630} In Menu".to_string(),
+                                },
                                 egui::Color32::from_gray(150),
                             )
                         };

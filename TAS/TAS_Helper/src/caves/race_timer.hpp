@@ -5,6 +5,7 @@
 #include "../external/safetyhook.hpp"
 #include "../shared_state.hpp"
 #include "../race_timer_table.hpp"
+#include "menu_state.hpp"
 
 // ============================================================================
 // Race timer — reads the EXACT on-screen player race time, map-agnostically.
@@ -107,10 +108,13 @@ static bool ReadText(uint32_t textObj, char out[24], int& len) {
     }
 }
 
-// Hook of SR_UIT Append_Text: classify on each fresh time-like sample.
+// Hook of SR_UIT Append_Text: classify on each fresh time-like sample. (Menu
+// screen detection moved to menu_state.hpp - it reads the menu OBJECT, not the
+// render text.)
 static void AptCb(SafetyHookContext& ctx) {
     char buf[24]; int len;
     if (!ReadText((uint32_t)ctx.edx, buf, len)) return;
+
     int cs = ParseCs(buf, len);
     if (cs < 0) return;
     Verdict v = g_table.Sample((uint32_t)ctx.ecx, cs, ReadClk(), g_tickNow);
@@ -129,6 +133,11 @@ static void AptCb(SafetyHookContext& ctx) {
 static void TickCb(SafetyHookContext&) {
     if (!g_state) return;
     g_tickNow++;
+    // A running level clears the menu title. TickCb runs only in-game (the
+    // engine cycle - and this clock tick with it - is frozen at menus), so a
+    // menu title published by AptCb persists at the menu and is wiped the
+    // moment a level's clock starts ticking.
+    if (g_state->game_in_game && g_state->menu_screen[0]) menustate::PublishMenuScreen("");
     int inGame = g_state->game_in_game ? 1 : 0;
     if (inGame == 0) {
         if (g_wasInGame != 0) ResetEpoch();
