@@ -13,7 +13,7 @@ pub const OBJSNAP_PLAYER_DWORDS: usize = 128;
 /// at 0x1B4 so the object is at least 0x1D8, and this leaves headroom).
 pub const OBJSNAP_PHYSICS_DWORDS: usize = 512;
 
-pub const TAS_SHARED_VERSION: u32 = 44; // +menu_screen; v43 rider_seq / race_seq; v42 rider_character / rider_stance (character / stance awareness)
+pub const TAS_SHARED_VERSION: u32 = 45; // +menu_selector; v44 menu_screen; v43 seqlocks; v42 rider (character / stance awareness)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MENU_SCREEN_MAX: usize = 32;
 pub const TAS_MAX_TICKS: usize = 65536;
