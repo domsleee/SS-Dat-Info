@@ -847,6 +847,13 @@ pub struct TasSharedState {
     /// Character", "Arcade", ...); all-zero while a level is running. Captured
     /// by the DLL's SR_UIT text hook (no memory scan). Read via `menu_screen`.
     pub menu_screen: [u8; TAS_MENU_SCREEN_MAX],
+
+    /// v45: which menu item is focused, as its index among the same-kind items
+    /// in the page (`u32::MAX` = no menu / unreadable). Read from the menu
+    /// object. It is a STABLE per-item id, not the top-to-bottom visual row -
+    /// the game stores the children in creation order, not display order - so
+    /// map it per screen rather than assuming 0 = topmost.
+    pub menu_selector: u32,
 }
 
 /// How many times to retry a torn level-context read before giving up.
@@ -4804,7 +4811,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_560);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_568);
     }
 
     /// Prints field offsets for the out-of-process probes (tools/tas_shm.ps1).
@@ -4815,7 +4822,7 @@ mod tests {
         println!(
             "offsets: version={} command={} mode={} frame_count={} recorded_count={} playback_pos={} \
              replay_ptr={} player_ptr={} player_x={} input_log={} rec_coords={} play_coords={} \
-             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} rider_seq={} race_seq={} menu_screen={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
+             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} rider_seq={} race_seq={} menu_screen={} menu_selector={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
             offset_of!(TasSharedState, version),
             offset_of!(TasSharedState, command),
             offset_of!(TasSharedState, mode),
@@ -4838,6 +4845,7 @@ mod tests {
             offset_of!(TasSharedState, rider_seq),
             offset_of!(TasSharedState, race_seq),
             offset_of!(TasSharedState, menu_screen),
+            offset_of!(TasSharedState, menu_selector),
             offset_of!(TasSharedState, fpu_control_word),
             offset_of!(TasSharedState, renderer_id),
             offset_of!(TasSharedState, rider_character),

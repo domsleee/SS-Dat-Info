@@ -6,6 +6,7 @@
 #include "shared_state.hpp"
 #include "caves/cave2.hpp"
 #include "renderer_info.hpp"
+#include "caves/menu_state.hpp"
 #include "setup_object.hpp"
 #include "rider_identity.hpp"
 #include "level_path_parse.hpp"
@@ -542,6 +543,7 @@ static DWORD WINAPI threadProc(LPVOID param) {
             pollLevelContext(s);
             renderer::Refresh(s);
             rider::Refresh(s, g_playerBaseAddr);
+            menustate::RefreshSelector();   // menu cursor (no-op unless at a menu)
             if (cycleFrozen()) { TryProcessStopCommand(s, false); break; }
             if (s->level_epoch != epochAtSleep) break;
         }
