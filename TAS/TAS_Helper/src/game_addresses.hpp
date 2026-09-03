@@ -181,6 +181,16 @@ struct GameAddresses {
     static constexpr uint32_t ROOT_PTR_OFFSET = 0x1D5450;
     static constexpr uint32_t LEVEL_PATH_PTR_OFFSET = 0x1D3304;
     static constexpr uint32_t KEYBOARD_OBJ_OFFSET = 0x530;
+    // The GAME-SETUP object (the menu's track / rider / controller selection)
+    // is the NEXT slot of the same Supreme_Keyboard root: [root+0x540] (also
+    // mirrored at +0x648). It is NOT the keyboard object: [root+0x530] is
+    // Cetsup::Win32_Keyboard (RTTI, probed 2026-09-04), whose +0x190.. bytes
+    // are input state, not strings - reading the setup through 0x530 fails
+    // every string check and left the rider stance and the level id unknown
+    // on every race since accf7a7. Probed 2026-09-04 by layout: the object
+    // whose +0x190/+0x1B0/+0x1D0/+0x290 strings read Forest/Hard/Keith/Keyboard
+    // is held at root+0x540 and root+0x648, nowhere else in the root.
+    static constexpr uint32_t SETUP_OBJ_OFFSET = 0x540;
     static constexpr uint32_t DI_BUFFER_PTR_OFFSET = 0x30;
 
     // Action state byte offsets from keyboard object (kbobj = [root+0x530])

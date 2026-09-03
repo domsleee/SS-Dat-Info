@@ -6,19 +6,23 @@
 // The game-setup object: one stable object that names the whole menu
 // selection, reachable WITHOUT a heap scan.
 //
-// The DLL already resolves it for input injection - cave2 calls it the
-// "keyboard object" and reaches it as [[SG+0x1D5450]+0x530] (GameAddresses::
-// player_base then KEYBOARD_OBJ_OFFSET). The SAME object carries the menu's
-// track/rider selection as MSVC6 std::strings:
+// It hangs off the same root cave2 resolves for input injection
+// ([SG+0x1D5450], a Supreme_Keyboard), but in the NEXT slot: [root+0x540]
+// (GameAddresses::SETUP_OBJ_OFFSET). [root+0x530] is the Cetsup::Win32_Keyboard
+// cave2 injects into - a different object whose bytes at these offsets are
+// input state; reading the setup through it fails every string check (that
+// was the bug from 2026-09-03 to 09-04: stance and level unknown on every
+// race). The setup object carries the menu's selection as MSVC6 std::strings:
 //   +0x190 area        ("Forest" / "Alpine" / "Village" / "Practice")
 //   +0x1B0 difficulty  ("Easy" / "Medium" / "Hard")
 //   +0x1D0 character    ("Keith", ...)
 //   +0x220 stance dword (0 = regular, 1 = goofy)
 //   +0x290 controller  ("Keyboard")
-// (Verified live 2026-09-03: the same address the old layout heap scan found,
-// and it reads "Village"/"Hard" for Village Hard where the shared path asset
-// reads ".../village/Tracks/easy" - so it also settles the one level pair the
-// path string cannot.)
+// (Verified live 2026-09-04 by a layout probe: root+0x540 is the only root
+// slot holding the object whose strings read Forest/Hard/Keith/Keyboard, and
+// it reads "Village"/"Hard" for Village Hard where the shared path asset reads
+// ".../village/Tracks/easy" - so it also settles the one level pair the path
+// string cannot.)
 //
 // This replaces two heap scans (rider_identity's setup search and level_scan's
 // difficulty tally) with three pointer reads. Every access is SEH-guarded: the
@@ -65,7 +69,7 @@ static bool ReadStr(uint32_t obj, char* out, uint32_t cap) {
     return riderparse::IsPrintableAscii(out, len);
 }
 
-// Resolve [[playerBaseAddr]+0x530] and read the fields. Returns false when the
+// Resolve [[playerBaseAddr]+0x540] and read the fields. Returns false when the
 // chain or any of area/difficulty/character/controller is unreadable - the
 // safe direction (the caller then keeps its last value / stays unresolved).
 // The controller string is a structural proof this is the setup object and not
@@ -75,7 +79,7 @@ inline bool Read(uint32_t playerBaseAddr, Setup* out) {
     *out = Setup{};
     const uint32_t root = SafeU32(playerBaseAddr);
     if (root < 0x10000) return false;
-    const uint32_t kb = SafeU32(root + GameAddresses::KEYBOARD_OBJ_OFFSET);
+    const uint32_t kb = SafeU32(root + GameAddresses::SETUP_OBJ_OFFSET);
     if (kb < 0x10000) return false;
 
     char ctrl[32];
