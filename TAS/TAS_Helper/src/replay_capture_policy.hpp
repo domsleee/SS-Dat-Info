@@ -34,7 +34,21 @@ struct ReplayCaptureState {
     uint32_t cached = 0;                 // recorder the DLL currently follows
     uint32_t changes_while_active = 0;   // re-creations adopted during REC/PLAY (diagnostic)
     uint32_t rejected = 0;               // non-human pushers ignored (diagnostic)
+    uint32_t dropped = 0;                // cached recorder that stopped being the human's (diagnostic)
 };
+
+// The cached recorder pushed again: is it STILL the human's? The identity
+// check used to run only when the pushing address CHANGED, so if an F5 freed
+// the human's recorder and the allocator handed the same address to a ghost,
+// the ghost was recorded as the human (codex review 2026-09-03). Returns true
+// when the cached recorder was dropped; the caller clears the published
+// pointers and the next human push re-adopts through ReplayCaptureAdopt.
+inline bool ReplayCaptureRevalidate(bool still_human, ReplayCaptureState& st) {
+    if (st.cached == 0 || still_human) return false;
+    st.cached = 0;
+    st.dropped++;
+    return true;
+}
 
 // Feed one hook invocation. `incoming_is_human` is the identity check above.
 // Returns true when `incoming` replaced the cached recorder.

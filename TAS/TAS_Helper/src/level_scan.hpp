@@ -306,7 +306,7 @@ static bool confidentEnough(int best, int second) {
 // Steady-state scan period (ms). The heap walk touches tens of MiB; on the
 // 2026-09-02 measurement the game thread used ~6x more CPU while this worker
 // walked the heap every 1.5 s (cache thrash), so the cadence is tunable:
-// TAS_LEVELSCAN_PERIOD_MS (clamped 500..60000). Measured 2026-09-02 on a 60 s
+// TAS_LEVELSCAN_PERIOD_MS (0 = edge-only, else clamped 500..600000). Measured 2026-09-02 on a 60 s
 // coast: 1.5 s cadence = game thread 9.0% of a core, worker 1.5%; 10 s cadence
 // = game thread 1.6% (the scan-off baseline is 1.5%), worker 1.3%. Each
 // scan is ~165 ms wall. Level changes are still caught fast: the epoch /
@@ -319,9 +319,18 @@ static bool confidentEnough(int best, int second) {
 static uint32_t steadyPeriodMs() {
     static uint32_t s_period = 0xFFFFFFFFu;
     if (s_period == 0xFFFFFFFFu) {
+        // Parse strictly: digits only, else the default. A too-long value
+        // leaves `buf` empty (GetEnvironmentVariable returns the needed size)
+        // and a negative one used to wrap to the maximum - both now fall back.
         char buf[16] = {};
         uint32_t v = 60000;
-        if (GetEnvironmentVariableA("TAS_LEVELSCAN_PERIOD_MS", buf, sizeof buf) > 0) v = (uint32_t)atoi(buf);
+        const DWORD n = GetEnvironmentVariableA("TAS_LEVELSCAN_PERIOD_MS", buf, sizeof buf);
+        if (n > 0 && n < sizeof buf) {
+            char* end = nullptr;
+            const unsigned long parsed = strtoul(buf, &end, 10);
+            if (end && end != buf && *end == 0 && parsed <= 0xFFFFFFFFul) v = (uint32_t)parsed;
+            else Log("Level scan: TAS_LEVELSCAN_PERIOD_MS is not a number - using the default");
+        }
         if (v != 0 && v < 500) v = 500;
         if (v > 600000) v = 600000;
         s_period = v;

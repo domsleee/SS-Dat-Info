@@ -50,11 +50,21 @@ static uint32_t SafeU32(uint32_t addr) {
     return SafeCopy(addr, &v, sizeof v) ? v : 0;
 }
 
-// MSVC6 std::string at `obj`: {allocator, char* ptr, size, capacity}.
+static bool TryReadU32(uint32_t addr, uint32_t* v) {
+    return SafeCopy(addr, v, sizeof *v);
+}
+
+// MSVC6 std::string at `obj`: {allocator, char* ptr, size, capacity}. The
+// header is copied in ONE guarded read and bounds-checked without arithmetic
+// on the length (riderparse::StringHeaderUsable): a dead object can report
+// any size, and `len + 1` wrapped for 0xFFFFFFFF.
 static bool ReadStdString(uint32_t obj, char* out, uint32_t cap) {
-    const uint32_t ptr = SafeU32(obj + GameAddresses::MSVC6_STRING_PTR);
-    const uint32_t len = SafeU32(obj + GameAddresses::MSVC6_STRING_SIZE);
-    if (!ptr || len == 0 || len + 1 > cap) return false;
+    uint32_t hdr[4] = {};
+    if (!SafeCopy(obj, hdr, sizeof hdr)) return false;
+    const uint32_t ptr = hdr[GameAddresses::MSVC6_STRING_PTR / 4];
+    const uint32_t len = hdr[GameAddresses::MSVC6_STRING_SIZE / 4];
+    const uint32_t capacity = hdr[3];
+    if (!riderparse::StringHeaderUsable(ptr, len, capacity, cap)) return false;
     if (!SafeCopy(ptr, out, len)) return false;
     out[len] = 0;
     return riderparse::IsPrintableAscii(out, len);
@@ -66,7 +76,11 @@ static bool SetupValid(uint32_t setup, const char* name) {
     char s[32];
     if (!ReadStdString(setup + GameAddresses::SETUP_CHARACTER_STRING, s, sizeof s)) return false;
     if (!riderparse::EqualsIgnoreCase(s, name)) return false;
-    if (SafeU32(setup + GameAddresses::SETUP_STANCE) > 1) return false;
+    uint32_t st = 0;
+    if (!TryReadU32(setup + GameAddresses::SETUP_STANCE, &st) || st > 1) return false;
+    // The controller string is a structural check only (a readable, printable
+    // MSVC6 string at +0x290). It is deliberately NOT compared to "Keyboard":
+    // a gamepad player's setup object must still be found.
     if (!ReadStdString(setup + GameAddresses::SETUP_CONTROLLER_STRING, s, sizeof s)) return false;
     return true;
 }
@@ -89,8 +103,8 @@ static uint32_t FindSetup(const char* name, uint64_t* bytesScanned, uint32_t* re
             (*regionsScanned)++;
             __try {
                 const uint8_t* p = (const uint8_t*)base;
-                const uintptr_t end = size - 0x2A0;
-                for (uintptr_t off = 0; off < end; off += 4) {
+                // Every field read below is < 0x2A0 past `off`; size >= 0x300 here.
+                for (uintptr_t off = 0; off + 0x2A0 <= size; off += 4) {
                     const uint32_t* d = (const uint32_t*)(p + off);
                     // +0x220 stance in {0,1}; +0x1D0 string: marker, ptr, len 1..31, cap 31;
                     // +0x290 controller string: marker, ptr, len 1..31, cap 31.
@@ -154,10 +168,28 @@ inline void Refresh(TasSharedState* s) {
                             (double)bytes / (1024.0 * 1024.0), name));
         }
     }
-    const uint32_t stance = s_setup ? SafeU32(s_setup + GameAddresses::SETUP_STANCE) : 0xFFFFFFFFu;
+    uint32_t stance = 0xFFFFFFFFu;
+    if (s_setup && !(TryReadU32(s_setup + GameAddresses::SETUP_STANCE, &stance) && stance <= 1)) {
+        stance = 0xFFFFFFFFu;   // a faulted read is UNKNOWN, never "regular"
+    }
 
-    s->rider_character = character;
-    s->rider_stance = stance;
+    // The pair is published under rider_seq so a reader never pairs a new
+    // character with the previous stance (codex review 2026-09-03: a REC armed
+    // in that window would stamp the mixed identity into the file). Bumped
+    // only when the value changes, so steady state costs readers nothing.
+    static bool s_seqChecked = false;
+    if (!s_seqChecked) {
+        s_seqChecked = true;
+        // Shared memory survives reinjection: a previous DLL killed mid-write
+        // leaves the sequence ODD and every reader rejecting forever.
+        if (s->rider_seq & 1) InterlockedIncrement((volatile LONG*)&s->rider_seq);
+    }
+    if (s->rider_character != character || s->rider_stance != stance) {
+        InterlockedIncrement((volatile LONG*)&s->rider_seq);   // odd: writing
+        s->rider_character = character;
+        s->rider_stance = stance;
+        InterlockedIncrement((volatile LONG*)&s->rider_seq);   // even: stable
+    }
 
     if (character != lastCharacter || stance != lastStance) {
         lastCharacter = character;

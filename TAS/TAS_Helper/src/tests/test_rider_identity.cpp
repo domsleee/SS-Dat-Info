@@ -20,6 +20,17 @@ int main() {
     std::printf("rider_identity tests:\n");
     using namespace riderparse;
 
+    // StringHeaderUsable (codex 2026-09-03: `len + 1 > cap` wrapped for a dead string)
+    check(StringHeaderUsable(0x02000000, 5, 31, 32), "a normal 5-char string fits a 32-byte buffer");
+    check(StringHeaderUsable(0x02000000, 31, 31, 32), "len 31 into cap 32 is the largest that fits");
+    check(!StringHeaderUsable(0x02000000, 32, 32, 32), "len 32 into cap 32 leaves no room for the NUL");
+    check(!StringHeaderUsable(0x02000000, 0xFFFFFFFFu, 0xFFFFFFFFu, 32), "len 0xFFFFFFFF (dead object) is rejected, no wrap");
+    check(!StringHeaderUsable(0x02000000, 0xFFFFFFFEu, 0xFFFFFFFFu, 32), "len 0xFFFFFFFE is rejected too");
+    check(!StringHeaderUsable(0x02000000, 0, 31, 32), "empty string is not a name");
+    check(!StringHeaderUsable(0x02000000, 5, 3, 32), "capacity smaller than size = torn header");
+    check(!StringHeaderUsable(0x0000FFFF, 5, 31, 32), "pointer below 64K is not a heap address");
+    check(!StringHeaderUsable(0x02000000, 5, 31, 0), "zero-size destination");
+
     check(CharacterFromName("Vincent") == CHARACTER_VINCENT, "display name (Player_Config) maps to the id");
     check(CharacterFromName("vincent") == CHARACTER_VINCENT, "data folder name (loadout) maps to the same id");
     check(CharacterFromName("Keith") == CHARACTER_KEITH && CharacterFromName("KEITH") == CHARACTER_KEITH,
