@@ -925,14 +925,38 @@ fn main() {
                 eprintln!("Usage: tas_test menu {} <id|label>", sub);
                 std::process::exit(2);
             }
-            let before = tas_shared::menu_doc(client.state());
+            // The document can be momentarily unavailable while the DLL is
+            // writing it or the page is in transition: retry briefly before
+            // calling it "no menu" (codex review 2026-09-04).
+            let read_doc = |c: &tas_shared::TasSharedMemoryClient| -> Option<String> {
+                let t = std::time::Instant::now();
+                loop {
+                    if let Some(d) = tas_shared::menu_doc(c.state()) {
+                        return Some(d);
+                    }
+                    if t.elapsed() > std::time::Duration::from_millis(400) {
+                        return None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            };
+            let before = read_doc(&client);
+            let screen = tas_shared::menu_screen_id(client.state()).unwrap_or_default();
             if before.is_none() {
                 // Nobody consumes commands outside a menu (the hook runs from
                 // the menu's own per-frame update), so say so at once.
                 println!("{{\"result\":\"no menu\",\"doc\":null}}");
                 std::process::exit(1);
             }
-            let seq = tas_shared::menu_command_submit(client.state_mut(), kind, &target);
+            // The command names the page it was read from, so it is refused
+            // rather than executed if the menu moves on first.
+            let seq = match tas_shared::menu_command_submit(client.state_mut(), kind, &target, &screen) {
+                Ok(seq) => seq,
+                Err(tas_shared::MenuSubmitError::Busy) => {
+                    println!("{{\"result\":\"busy\",\"doc\":{}}}", before.as_deref().unwrap_or("null"));
+                    std::process::exit(1);
+                }
+            };
             let t0 = std::time::Instant::now();
             let result = loop {
                 if let Some(r) = tas_shared::menu_command_result(client.state(), seq) {
@@ -974,7 +998,7 @@ fn main() {
                     }
                 }
             }
-            let doc = tas_shared::menu_doc(client.state()).unwrap_or_else(|| "null".to_string());
+            let doc = read_doc(&client).unwrap_or_else(|| "null".to_string());
             println!("{{\"result\":\"{}\",\"doc\":{}}}", name, doc);
             std::process::exit(if result == Some(tas_shared::TAS_MENU_RESULT_OK) { 0 } else { 1 });
         }

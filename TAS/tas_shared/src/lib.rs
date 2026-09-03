@@ -13,7 +13,7 @@ pub const OBJSNAP_PLAYER_DWORDS: usize = 128;
 /// at 0x1B4 so the object is at least 0x1D8, and this leaves headroom).
 pub const OBJSNAP_PHYSICS_DWORDS: usize = 512;
 
-pub const TAS_SHARED_VERSION: u32 = 47; // +menu command channel; v46 menu_doc; v45 menu_selector; v44 menu_screen
+pub const TAS_SHARED_VERSION: u32 = 48; // +menu_cmd_screen; v47 menu command channel; v46 menu_doc; v45 menu_selector
 /// v46: size of the menu document buffer (JSON, NUL-terminated).
 pub const TAS_MENU_DOC_MAX: usize = 4096;
 /// v47: size of the menu command target (id or label, NUL-terminated).
@@ -34,6 +34,8 @@ pub const TAS_MENU_RESULT_DISABLED: u32 = 3;
 pub const TAS_MENU_RESULT_BAD_KIND: u32 = 4;
 pub const TAS_MENU_RESULT_FAULT: u32 = 5;
 pub const TAS_MENU_RESULT_NOT_FOCUSABLE: u32 = 6;
+pub const TAS_MENU_RESULT_STALE_PAGE: u32 = 7;
+pub const TAS_MENU_RESULT_EXPIRED: u32 = 8;
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MENU_SCREEN_MAX: usize = 32;
 pub const TAS_MAX_TICKS: usize = 65536;
@@ -894,6 +896,9 @@ pub struct TasSharedState {
     pub menu_cmd_seq: AtomicU32,
     pub menu_cmd_kind: u32,
     pub menu_cmd_target: [u8; TAS_MENU_CMD_TARGET_MAX],
+    /// v48: the page id the command was read from; refused as STALE_PAGE if
+    /// the menu moved on. Empty = unchecked.
+    pub menu_cmd_screen: [u8; TAS_MENU_SCREEN_MAX],
     pub menu_cmd_ack: AtomicU32,
     pub menu_cmd_result: u32,
 }
@@ -1075,26 +1080,33 @@ pub fn level_context(state: &TasSharedState) -> Option<(u32, String)> {
     Some((id, String::from_utf8_lossy(&path[..end]).into_owned()))
 }
 
-/// The menu screen the game is showing, by its on-screen title ("Main Menu",
-/// "Select Character", "Arcade", ...), or `None` while a level is running (the
-/// buffer is empty then). Plain read - the DLL writes a short title on change
-/// and clears it in-game; a torn read is a one-frame cosmetic blip.
+/// The current menu page id exactly as the DLL publishes it
+/// ("ID_ARCADE_MENU"), or `None` while a level runs (the buffer is empty
+/// then) or the writer kept it busy. Read under `menu_seq`, together with
+/// which the DLL writes it (v48), so it never names another page's items.
+pub fn menu_screen_id(state: &TasSharedState) -> Option<String> {
+    let bytes = with_seqlock(&state.menu_seq, || {
+        let mut v = Vec::new();
+        for i in 0..TAS_MENU_SCREEN_MAX {
+            // SAFETY: shared mapping written by the DLL's menu thread.
+            let b = unsafe { std::ptr::read_volatile(&state.menu_screen[i]) };
+            if b == 0 {
+                break;
+            }
+            v.push(b);
+        }
+        v
+    })?;
+    if bytes.is_empty() || bytes.iter().any(|&c| !(0x20..0x7f).contains(&c)) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The menu screen the game is showing as a human label ("Main Menu",
+/// "Arcade Choose Track"), or `None` while a level runs. See [`menu_screen_id`].
 pub fn menu_screen(state: &TasSharedState) -> Option<String> {
-    let mut buf = [0u8; TAS_MENU_SCREEN_MAX];
-    for (i, b) in buf.iter_mut().enumerate() {
-        // SAFETY: shared mapping written by the DLL's game thread.
-        *b = unsafe { std::ptr::read_volatile(&state.menu_screen[i]) };
-    }
-    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    if end == 0 {
-        return None;
-    }
-    // Reject a non-printable torn read rather than show garbage.
-    if buf[..end].iter().any(|&c| !(0x20..0x7f).contains(&c)) {
-        return None;
-    }
-    let raw = String::from_utf8_lossy(&buf[..end]).into_owned();
-    Some(prettify_menu_id(&raw))
+    menu_screen_id(state).map(|raw| prettify_menu_id(&raw))
 }
 
 /// The menu document (v46): the current page's items with labels and stable
@@ -1150,25 +1162,51 @@ pub fn menu_result_name(result: u32) -> &'static str {
         TAS_MENU_RESULT_BAD_KIND => "bad kind",
         TAS_MENU_RESULT_FAULT => "fault",
         TAS_MENU_RESULT_NOT_FOCUSABLE => "not focusable",
+        TAS_MENU_RESULT_STALE_PAGE => "stale page",
+        TAS_MENU_RESULT_EXPIRED => "expired",
         _ => "unknown",
     }
 }
 
-/// Submit a menu command (v47): write the target (cut to the buffer, always
-/// NUL-terminated) and the kind, then bump the sequence. Returns the sequence
-/// to wait for with [`menu_command_result`]. One agent at a time.
-pub fn menu_command_submit(state: &mut TasSharedState, kind: u32, target: &str) -> u32 {
-    let mut buf = [0u8; TAS_MENU_CMD_TARGET_MAX];
+/// Why a submission was refused.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum MenuSubmitError {
+    /// A previous command has not been answered yet (`menu_cmd_seq !=
+    /// menu_cmd_ack`). Submitting now would let the DLL pair the old sequence
+    /// with the new payload and run it twice. Wait for the ack (the DLL
+    /// expires an unconsumable command after 3 s).
+    Busy,
+}
+
+/// Submit a menu command (v47/v48): write the target and the page id it was
+/// read from (both cut to their buffers, always NUL-terminated) and the kind,
+/// then bump the sequence. Returns the sequence to wait for with
+/// [`menu_command_result`]. One command is outstanding at a time.
+pub fn menu_command_submit(
+    state: &mut TasSharedState,
+    kind: u32,
+    target: &str,
+    screen: &str,
+) -> Result<u32, MenuSubmitError> {
+    let cur = state.menu_cmd_seq.load(Ordering::Acquire);
+    if state.menu_cmd_ack.load(Ordering::Acquire) != cur {
+        return Err(MenuSubmitError::Busy);
+    }
+    let mut tbuf = [0u8; TAS_MENU_CMD_TARGET_MAX];
     let n = target.len().min(TAS_MENU_CMD_TARGET_MAX - 1);
-    buf[..n].copy_from_slice(&target.as_bytes()[..n]);
+    tbuf[..n].copy_from_slice(&target.as_bytes()[..n]);
+    let mut sbuf = [0u8; TAS_MENU_SCREEN_MAX];
+    let m = screen.len().min(TAS_MENU_SCREEN_MAX - 1);
+    sbuf[..m].copy_from_slice(&screen.as_bytes()[..m]);
     // SAFETY: shared mapping; the DLL reads these after it sees the new sequence.
     unsafe {
-        std::ptr::write_volatile(&mut state.menu_cmd_target as *mut [u8; TAS_MENU_CMD_TARGET_MAX], buf);
+        std::ptr::write_volatile(&mut state.menu_cmd_target as *mut [u8; TAS_MENU_CMD_TARGET_MAX], tbuf);
+        std::ptr::write_volatile(&mut state.menu_cmd_screen as *mut [u8; TAS_MENU_SCREEN_MAX], sbuf);
         std::ptr::write_volatile(&mut state.menu_cmd_kind as *mut u32, kind);
     }
-    let seq = state.menu_cmd_seq.load(Ordering::Acquire).wrapping_add(1);
+    let seq = cur.wrapping_add(1);
     state.menu_cmd_seq.store(seq, Ordering::Release);
-    seq
+    Ok(seq)
 }
 
 /// The result of a submitted command once the DLL has executed it; `None`
@@ -4937,7 +4975,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_667_744);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_667_776);
     }
 
     /// Prints field offsets for the out-of-process probes (tools/tas_shm.ps1).
@@ -4948,7 +4986,7 @@ mod tests {
         println!(
             "offsets: version={} command={} mode={} frame_count={} recorded_count={} playback_pos={} \
              replay_ptr={} player_ptr={} player_x={} input_log={} rec_coords={} play_coords={} \
-             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} rider_seq={} race_seq={} menu_screen={} menu_selector={} menu_seq={} menu_doc={} menu_cmd_seq={} menu_cmd_kind={} menu_cmd_target={} menu_cmd_ack={} menu_cmd_result={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
+             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} rider_seq={} race_seq={} menu_screen={} menu_selector={} menu_seq={} menu_doc={} menu_cmd_seq={} menu_cmd_kind={} menu_cmd_target={} menu_cmd_screen={} menu_cmd_ack={} menu_cmd_result={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
             offset_of!(TasSharedState, version),
             offset_of!(TasSharedState, command),
             offset_of!(TasSharedState, mode),
@@ -4977,6 +5015,7 @@ mod tests {
             offset_of!(TasSharedState, menu_cmd_seq),
             offset_of!(TasSharedState, menu_cmd_kind),
             offset_of!(TasSharedState, menu_cmd_target),
+            offset_of!(TasSharedState, menu_cmd_screen),
             offset_of!(TasSharedState, menu_cmd_ack),
             offset_of!(TasSharedState, menu_cmd_result),
             offset_of!(TasSharedState, fpu_control_word),
@@ -5072,24 +5111,46 @@ mod tests {
         assert_eq!(menu_doc(&s), None);
     }
 
-    /// Submitting a command writes the target and kind, then bumps the
-    /// sequence; the result stays pending until the DLL acks that sequence.
+    /// Submitting a command writes the target, the page id and the kind, then
+    /// bumps the sequence; the result stays pending until the DLL acks that
+    /// sequence; a second submission is refused while the first is pending.
     #[test]
     fn menu_command_round_trip() {
         let mut s = zeroed_state();
-        let seq = menu_command_submit(&mut s, TAS_MENU_CMD_ACTIVATE, "ID_ARCADE_MENU");
+        let seq = menu_command_submit(&mut s, TAS_MENU_CMD_ACTIVATE, "ID_ARCADE_MENU", "ID_MAIN_MENU").unwrap();
         assert_eq!(seq, 1);
         assert_eq!(s.menu_cmd_kind, TAS_MENU_CMD_ACTIVATE);
         assert_eq!(&s.menu_cmd_target[..15], b"ID_ARCADE_MENU\0");
+        assert_eq!(&s.menu_cmd_screen[..13], b"ID_MAIN_MENU\0");
         assert_eq!(menu_command_result(&s, seq), None, "pending until acked");
+        assert_eq!(
+            menu_command_submit(&mut s, TAS_MENU_CMD_DOWN, "", ""),
+            Err(MenuSubmitError::Busy),
+            "one outstanding command at a time"
+        );
+        assert_eq!(s.menu_cmd_kind, TAS_MENU_CMD_ACTIVATE, "a refused submission writes nothing");
         s.menu_cmd_result = TAS_MENU_RESULT_NOT_FOUND;
         s.menu_cmd_ack.store(seq, Ordering::Release);
         assert_eq!(menu_command_result(&s, seq), Some(TAS_MENU_RESULT_NOT_FOUND));
-        // the next command gets the next sequence and is pending again
-        let seq2 = menu_command_submit(&mut s, TAS_MENU_CMD_DOWN, "");
+        // acked: the next command gets the next sequence and is pending again
+        let seq2 = menu_command_submit(&mut s, TAS_MENU_CMD_DOWN, "", "").unwrap();
         assert_eq!(seq2, 2);
         assert_eq!(menu_command_result(&s, seq2), None);
         assert_eq!(s.menu_cmd_target[0], 0, "an empty target clears the buffer");
+        assert_eq!(s.menu_cmd_screen[0], 0, "an empty page id clears the buffer (= unchecked)");
+    }
+
+    /// The raw page id and the pretty label come from the same seqlocked read.
+    #[test]
+    fn menu_screen_id_and_label() {
+        let mut s = zeroed_state();
+        assert_eq!(menu_screen_id(&s), None);
+        s.menu_screen[..14].copy_from_slice(b"ID_ARCADE_MENU");
+        s.menu_seq.store(2, Ordering::Relaxed);
+        assert_eq!(menu_screen_id(&s).as_deref(), Some("ID_ARCADE_MENU"));
+        assert_eq!(menu_screen(&s).as_deref(), Some("Arcade Menu"));
+        s.menu_seq.store(3, Ordering::Relaxed); // writer mid-update
+        assert_eq!(menu_screen_id(&s), None);
     }
 
     /// A target longer than the buffer is cut, never overrun, and stays NUL-terminated.
@@ -5097,7 +5158,8 @@ mod tests {
     fn menu_command_target_is_bounded() {
         let mut s = zeroed_state();
         let long = "X".repeat(200);
-        menu_command_submit(&mut s, TAS_MENU_CMD_FOCUS, &long);
+        menu_command_submit(&mut s, TAS_MENU_CMD_FOCUS, &long, &long).unwrap();
+        assert_eq!(s.menu_cmd_screen[TAS_MENU_SCREEN_MAX - 1], 0);
         assert_eq!(s.menu_cmd_target[TAS_MENU_CMD_TARGET_MAX - 1], 0);
         assert!(s.menu_cmd_target[..TAS_MENU_CMD_TARGET_MAX - 1].iter().all(|&b| b == b'X'));
     }
@@ -5113,6 +5175,8 @@ mod tests {
         assert_eq!(menu_result_name(TAS_MENU_RESULT_OK), "ok");
         assert_eq!(menu_result_name(TAS_MENU_RESULT_NOT_FOUND), "not found");
         assert_eq!(menu_result_name(TAS_MENU_RESULT_NOT_FOCUSABLE), "not focusable");
+        assert_eq!(menu_result_name(TAS_MENU_RESULT_STALE_PAGE), "stale page");
+        assert_eq!(menu_result_name(TAS_MENU_RESULT_EXPIRED), "expired");
         assert_eq!(menu_result_name(99), "unknown");
     }
 
