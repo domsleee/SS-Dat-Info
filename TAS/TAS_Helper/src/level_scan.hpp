@@ -329,22 +329,26 @@ static void noteScanCost(LARGE_INTEGER t0, LARGE_INTEGER t1) {
 // cross-check: if the object disagrees with it we are mid-switch, so report
 // nothing rather than a torn answer.
 //
-// Keeps scanLevelId's contract: returns area*3+diff (Practice = 9) or -1, and
-// sets *outBest/*outSecond so confidentEnough() passes on a clean read
-// (best = MIN_TRACK_HITS, second = 0) and rejects a miss.
+// The AREA comes from the path (areaHint, reliable); the game-setup object
+// supplies the DIFFICULTY, which the path cannot (it points at the shared
+// easy/ shadow asset). Practice resolves from the path alone - it skips the
+// menu screen that writes the setup object, so the object holds a stale Arcade
+// selection there (this is the case the pure LevelIdFrom guards; see it and
+// its unit tests). Keeps scanLevelId's contract: returns area*3+diff
+// (Practice = 9) or -1, with *outBest set so confidentEnough() passes.
 static int32_t scanLevelId(int* outBest, int* outSecond, int areaHint) {
     if (outBest) *outBest = 0;
     if (outSecond) *outSecond = 0;
+    if (areaHint < 0) return -1;   // no area from the path => nothing to identify
     gamesetup::Setup setup;
-    if (!gamesetup::Read(g_playerBaseAddr, &setup)) return -1;
-    const int area = levelpath::MatchOne(setup.area, std::strlen(setup.area), levelpath::AREAS, 4);
-    const int diff = levelpath::MatchOne(setup.difficulty, std::strlen(setup.difficulty), levelpath::DIFFS, 3);
-    if (area < 0 || diff < 0) return -1;
-    // Practice has only Easy on disk; a non-Easy practice reading is spurious.
-    if (area == 3 && diff != 0) return -1;
-    if (areaHint >= 0 && area != areaHint) return -1;  // mid-switch: path and object disagree
-    if (outBest) *outBest = MIN_TRACK_HITS;            // a clean read is fully confident
-    return area * 3 + diff;
+    // Practice (area 3) needs no setup object; every other area needs its
+    // difficulty. A failed read leaves empty strings, which LevelIdFrom rejects
+    // for the non-practice areas and ignores for practice.
+    gamesetup::Read(g_playerBaseAddr, &setup);
+    const int id = levelpath::LevelIdFrom(areaHint, setup.area, setup.difficulty);
+    if (id < 0) return -1;
+    if (outBest) *outBest = MIN_TRACK_HITS;  // a clean read is fully confident
+    return id;
 }
 
 static DWORD WINAPI threadProc(LPVOID param) {

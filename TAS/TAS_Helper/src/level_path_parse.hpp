@@ -113,4 +113,29 @@ inline int AreaFrom(const char* path) {
     return -1;
 }
 
+// Combine the two reliable identity halves into a level id 0..9, or -1.
+//
+//   pathArea  - AreaFrom(level_path). The path names the AREA reliably (even
+//               though it points at the shared easy/ shadow.qua, the area
+//               segment is correct); it does NOT name the difficulty.
+//   setupArea/setupDifficulty - the game-setup object's strings (authoritative
+//               for difficulty). But PRACTICE never writes them - it skips the
+//               "Select Environment" screen - so they can be a STALE Arcade
+//               selection. Trust the setup difficulty only when its area
+//               confirms the SAME area the path reports.
+//
+// Practice (area 3) has only Easy on disk, so it resolves from the path alone -
+// exactly the case a stale setup object would otherwise misidentify.
+inline int LevelIdFrom(int pathArea, const char* setupArea, const char* setupDifficulty) {
+    if (pathArea < 0 || pathArea > 3) return -1;
+    if (pathArea == 3) return 9;  // Practice: Tracks/Easy is the only one on disk
+    if (!setupArea || !setupDifficulty) return -1;
+    size_t an = 0; while (setupArea[an]) an++;
+    size_t dn = 0; while (setupDifficulty[dn]) dn++;
+    const int sa = MatchOne(setupArea, an, AREAS, 4);
+    const int sd = MatchOne(setupDifficulty, dn, DIFFS, 3);
+    if (sa != pathArea || sd < 0) return -1;  // setup is stale / mismatched / unreadable
+    return pathArea * 3 + sd;
+}
+
 } // namespace levelpath
