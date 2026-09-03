@@ -4,92 +4,45 @@
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
 #include "../menu_model.hpp"
+#include "../rider_identity_parse.hpp"
 #include "../external/safetyhook.hpp"
 #include <format>
 #include <string>
 
-// Menu state, read from the MENU OBJECT (not the render text).
+// Menu state, read from the MENU OBJECTS - and ONLY on the menu thread.
 //
-// The menus are a UI toolkit (UIT) driven by Main_Menu.dll. The page manager
-// UI_Menu::Change_Page(name) is called with a fresh page whenever the screen
-// changes - RVA 0x1A7C0, __fastcall(ECX = the UI_Menu, EDX = the page-name
-// std::string). Hooking it (SafetyHook mid) captures the page name straight
-// from the object and caches the UI_Menu instance for reading the selector.
-// (Verified: the byte at +0x1A7C0 is a MSVC SEH prologue whose handler rebases
-// to Main_Menu.dll+0x41169, matching the decompiled Change_Page.)
+// The menus are a UI toolkit (UIT) driven by Main_Menu.dll. Two hooks:
 //
-// This replaces the earlier approach of scraping the SR_UIT text renderer for
-// menu titles - the object is the authoritative source and does not touch the
-// per-frame HUD render path.
+//   UI_Menu::Change_Page(name)  RVA 0x1A7C0, __fastcall(ECX = UI_Menu, EDX =
+//     the page-name std::string). Records the page id the game is switching to
+//     (menu thread). Nothing is published from here: at entry the OLD page is
+//     still installed, so a snapshot taken now would pair the new name with
+//     the old items (codex review 2026-09-04).
+//   UI_Menu::Execute(float)     RVA 0x1A680, called every frame from Menu::Paint
+//     while a menu is shown, ECX = UI_Menu. THE producer: it walks the current
+//     page's items (field reads + the game's own Get_Active_Component /
+//     Want_Focus), publishes screen + selector + document together under
+//     menu_seq, and executes pending agent commands through the game's own
+//     entry points. Everything that touches a UI object happens here, on the
+//     thread that owns those objects, never on the worker (codex review
+//     2026-09-04: a worker-side traversal raced page teardown; a vtable inside
+//     a UI image proves nothing about liveness).
+//
+// The level-scan worker only does housekeeping: it clears the document when
+// Execute stops heartbeating (a level, a load, the in-game pause menu - none
+// of which run UI_Menu::Execute) and expires commands nobody can consume.
+// Both writers share a lock, so the odd/even seqlock always has one writer.
 namespace menustate {
 
 inline TasSharedState* g_state = nullptr;
-inline uint32_t g_uiMenu = 0;   // cached UI_Menu (ECX at Change_Page); 0 until first change
+inline uint32_t g_mainMenuBase = 0;
 inline SafetyHookMid g_changePageHook{};
-inline uint32_t g_mainMenuBase = 0;   // Main_Menu.dll base, for calling Get_Active_Component
-
-// Change_Page's page-name string is an MSVC6 std::string ({alloc, char* ptr,
-// size, capacity}); the pointer is at +4, the length at +8.
-static bool ReadMenuString(uint32_t obj, char* out, uint32_t cap) {
-    if (obj < 0x10000) return false;
-    __try {
-        const uint32_t ptr = *(uint32_t*)(obj + 4);
-        const uint32_t len = *(uint32_t*)(obj + 8);
-        if (ptr < 0x10000 || len == 0 || len + 1 > cap) return false;
-        const char* s = (const char*)ptr;
-        for (uint32_t i = 0; i < len; i++) {
-            const char c = s[i];
-            if (c < 0x20 || c > 0x7E) return false;   // not a plain page name
-            out[i] = c;
-        }
-        out[len] = 0;
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-// Publish menu_screen on change (a display aid, not seqlocked: a torn read is a
-// one-frame blip that self-heals). Also called with "" to clear it in a level.
-inline void PublishMenuScreen(const char* title) {
-    if (!g_state) return;
-    if (strncmp(g_state->menu_screen, title, TAS_MENU_SCREEN_MAX) == 0) return;
-    uint32_t i = 0;
-    for (; title[i] && i < TAS_MENU_SCREEN_MAX - 1; i++) g_state->menu_screen[i] = title[i];
-    g_state->menu_screen[i] = 0;
-}
-
-static void ChangePageCb(SafetyHookContext& ctx) {
-    g_uiMenu = (uint32_t)ctx.ecx;   // the UI_Menu instance, for the selector
-    char name[TAS_MENU_SCREEN_MAX];
-    if (ReadMenuString((uint32_t)ctx.edx, name, sizeof name)) PublishMenuScreen(name);
-}
-
-// ---------------------------------------------------------------------------
-// The MENU MODEL: the focused item plus every item on the current page, with
-// its label - read by FIELD from the UIT objects (UIT.c / main_menu.c / SR_UIT.c):
-//
-//   UI_Menu::Get_Active_Component (RVA 0x1A6B0, __fastcall(ECX = UI_Menu)) ->
-//     the focused UI_Component.
-//   UI_Component: +0xC parent, +0x10 std::string name (Get_Name), +0x24 enabled,
-//     +0x25 visible, +0x27 focused.  UI_Container: children vector at
-//     +0x2C..+0x30 of UI_Component*.
-//   UIT::Button (the menu items are Main_Menu::Menu_Button / Action_Button
-//     subclasses): +0x44 Text_Line* (Set_Text_Line).  Labels keep theirs at
-//     +0x28 and are not focusable (Label::Want_Focus = false) - not items.
-//   SR_UIT::Sr_Plane_Text_Line: +4 std::string text (Get_Text returns this+4).
-//
-// An MSVC6 std::string object is {allocator, char* ptr, size, capacity}.
-//
-// Get_Active_Component does an indirect call, so it must run against a live
-// UI_Menu: only while a menu screen is published (cleared in a level), under
-// SEH - worst case a page torn down mid-call faults and this poll publishes
-// nothing. Called from the level-scan worker (~10 Hz), never the game thread.
-// ---------------------------------------------------------------------------
+inline SafetyHookMid g_executeHook{};
+inline bool g_cmdInstalled = false;
+inline bool g_menuDiag = false;   // TAS_MENU_DIAG=1: log the item list on change
 
 // Image ranges of the UI modules: a component's vtable must lie in
-// Main_Menu.dll or UIT.dll and a text line's in SR_UIT.dll. That is the class
-// test - by field, no virtual calls on children.
+// Main_Menu.dll or UIT.dll and a text line's in SR_UIT.dll.
 struct ImageRange {
     uint32_t lo = 0, hi = 0;
     bool Has(uint32_t p) const { return lo && p >= lo && p < hi; }
@@ -111,9 +64,83 @@ using menumodel::MenuItem;
 using menumodel::MenuSnapshot;
 using menumodel::kMaxItems;
 
-// A Button-family component's label: [comp+0x44] -> Sr_Plane_Text_Line -> +4 string.
-// The text line's vtable must be SR_UIT's; a Label (text line at +0x28, +0x44
-// off the end of the object) fails this and is not an item.
+// An MSVC6 std::string object at `obj` ({allocator, char* ptr, size,
+// capacity}). The whole header is read first and bounds-checked WITHOUT
+// arithmetic on the length (riderparse::StringHeaderUsable: len < cap and
+// capacity >= len) - a torn header with size 0xFFFFFFFF used to pass a
+// `len + 1 > cap` test by wrapping and would have run off the output buffer
+// (codex review 2026-09-04). Printable ASCII only.
+static bool ReadMenuString(uint32_t obj, char* out, uint32_t cap) {
+    if (obj < 0x10000 || cap == 0) return false;
+    __try {
+        uint32_t hdr[4];
+        for (int i = 0; i < 4; i++) hdr[i] = *(uint32_t*)(obj + 4 * i);
+        const uint32_t ptr = hdr[1], len = hdr[2], capacity = hdr[3];
+        if (!riderparse::StringHeaderUsable(ptr, len, capacity, cap)) return false;
+        const char* s = (const char*)ptr;
+        for (uint32_t i = 0; i < len; i++) {
+            const char c = s[i];
+            if (c < 0x20 || c > 0x7E) return false;
+            out[i] = c;
+        }
+        out[len] = 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static bool IsIdLike(const char* s) { return s[0] == 'I' && s[1] == 'D' && s[2] == '_'; }
+
+// ---------------------------------------------------------------------------
+// PUBLISHING: screen + selector + document go out TOGETHER under menu_seq.
+// Two writers exist (the menu thread's snapshot, the worker's clear), so the
+// section is serialized by g_pubLock and the seqlock never sees two writers.
+// ---------------------------------------------------------------------------
+inline SRWLOCK g_pubLock = SRWLOCK_INIT;
+inline std::string g_lastDoc;   // what shm holds (under g_pubLock)
+
+static void Publish(const char* screen, uint32_t selector, const std::string& doc) {
+    if (!g_state) return;
+    if (doc.size() + 1 > TAS_MENU_DOC_MAX) {
+        Log(std::format("Menu state: document too large ({} bytes) - not published", doc.size()));
+        return;
+    }
+    AcquireSRWLockExclusive(&g_pubLock);
+    const bool changed = doc != g_lastDoc || strncmp(g_state->menu_screen, screen, TAS_MENU_SCREEN_MAX) != 0 ||
+                         g_state->menu_selector != selector;
+    if (changed) {
+        InterlockedIncrement((volatile LONG*)&g_state->menu_seq);   // odd: writing
+        uint32_t i = 0;
+        for (; screen[i] && i < TAS_MENU_SCREEN_MAX - 1; i++) g_state->menu_screen[i] = screen[i];
+        g_state->menu_screen[i] = 0;
+        g_state->menu_selector = selector;
+        memcpy(g_state->menu_doc, doc.c_str(), doc.size() + 1);
+        InterlockedIncrement((volatile LONG*)&g_state->menu_seq);   // even: stable
+        g_lastDoc = doc;
+    }
+    ReleaseSRWLockExclusive(&g_pubLock);
+}
+
+// No menu on screen: nothing published at all.
+inline void Clear() { Publish("", 0xFFFFFFFFu, std::string()); }
+
+// ---------------------------------------------------------------------------
+// The MENU MODEL - field reads of the UIT objects (UIT.c / main_menu.c /
+// SR_UIT.c), menu thread only:
+//   UI_Menu +0x10C = the current Menu_Page.
+//   UI_Menu::Get_Active_Component (RVA 0x1A6B0, __fastcall(ECX)) -> the
+//     focused UI_Component.
+//   UI_Component: +0xC parent, +0x10 std::string name (Get_Name), +0x24
+//     enabled, +0x25 visible. UI_Container: children vector +0x2C..+0x30.
+//   UIT::Button (Menu_Button / Action_Button): +0x44 Text_Line*; Labels keep
+//     theirs at +0x28 and refuse focus.
+//   SR_UIT::Sr_Plane_Text_Line: +4 std::string text (Get_Text = this+4).
+//   Want_Focus: vtable slot 0x2C - the test Request_Focus itself makes.
+// ---------------------------------------------------------------------------
+using GetActiveComponent = uint32_t(__fastcall*)(uint32_t);
+using WantFocusFn = uint8_t(__fastcall*)(uint32_t);
+
 static bool ReadItem(uint32_t child, uint32_t focusedComp, MenuItem& it) {
     __try {
         if (child < 0x10000) return false;
@@ -129,15 +156,11 @@ static bool ReadItem(uint32_t child, uint32_t focusedComp, MenuItem& it) {
         if (!ReadMenuString(child + 0x10, it.name, sizeof it.name)) it.name[0] = 0;
         // An item is a control with visible text, or an id-bearing control
         // without any (the image arrows carry an ID_* name and no text line).
-        // Labels, showers and decorations have neither and are skipped.
-        const bool hasId = it.name[0] == 'I' && it.name[1] == 'D' && it.name[2] == '_';
-        if (!hasLabel && !hasId) return false;
-        // Only a control the cursor can land on is an item: Want_Focus (vtable
-        // slot 0x2C, the one Request_Focus itself consults; a Label overrides
-        // it to false). Headline labels carry ID_* names too, and activating
-        // one would fire Enter on whatever was focused before. The slot must
-        // point into the UI images before it is called.
-        using WantFocusFn = uint8_t(__fastcall*)(uint32_t);
+        if (!hasLabel && !IsIdLike(it.name)) return false;
+        // ...and only if the cursor can land on it: Want_Focus (a Label
+        // overrides it to false; headline labels carry ID_* names too, and
+        // activating one would fire Enter on whatever was focused before).
+        // The slot must point into the UI images before it is called.
         const uint32_t wantFocus = *(uint32_t*)(vt + 0x2C);
         if (!g_imgMainMenu.Has(wantFocus) && !g_imgUit.Has(wantFocus)) return false;
         if (!(((WantFocusFn)(uintptr_t)wantFocus)(child) & 1)) return false;
@@ -151,17 +174,15 @@ static bool ReadItem(uint32_t child, uint32_t focusedComp, MenuItem& it) {
     }
 }
 
-using GetActiveComponent = uint32_t(__fastcall*)(uint32_t);
-
-// One Get_Active_Component call, then field reads of the focused item's
-// container. Returns false (empty snapshot) when there is no live menu.
-static bool ReadMenu(MenuSnapshot& out) {
+// The focused item's container, enumerated. False = nothing capturable now
+// (no focused component - a transition - or an unreadable container).
+static bool ReadMenu(uint32_t uiMenu, MenuSnapshot& out) {
     out = MenuSnapshot{};
-    if (!g_uiMenu || !g_mainMenuBase || !g_state || !g_state->menu_screen[0]) return false;
+    if (!uiMenu || !g_mainMenuBase) return false;
     uint32_t comp = 0, begin = 0, end = 0;
     __try {
         auto fn = (GetActiveComponent)(uintptr_t)(g_mainMenuBase + 0x1A6B0);
-        comp = fn(g_uiMenu);
+        comp = fn(uiMenu);
         if (comp < 0x10000) return false;
         const uint32_t parent = *(uint32_t*)(comp + 0xC);
         if (parent < 0x10000) return false;
@@ -171,6 +192,7 @@ static bool ReadMenu(MenuSnapshot& out) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+    out.container = *(uint32_t*)(comp + 0xC);
     const uint32_t n = (end - begin) / 4;
     for (uint32_t i = 0; i < n && out.count < kMaxItems; i++) {
         uint32_t child = 0;
@@ -183,14 +205,29 @@ static bool ReadMenu(MenuSnapshot& out) {
     return true;
 }
 
-// Diagnostic: TAS_MENU_DIAG=1 logs the item list whenever it changes.
-inline bool g_menuDiag = false;
+// ---------------------------------------------------------------------------
+// The SNAPSHOT (menu thread, from the Execute hook).
+// ---------------------------------------------------------------------------
+inline char g_changedName[TAS_MENU_SCREEN_MAX] = {};   // from the last Change_Page
+inline volatile uint32_t g_pageGen = 0;                 // bumped by every Change_Page
+inline uint32_t g_snapGen = 0;                          // the generation the snapshot has adopted
+inline char g_screen[TAS_MENU_SCREEN_MAX] = {};         // the current page id
+inline volatile uint64_t g_lastExecuteMs = 0;           // heartbeat: a menu is executing
+inline uint64_t g_lastSnapMs = 0;
 inline uint32_t g_lastDumpHash = 0;
+
+static void ChangePageCb(SafetyHookContext& ctx) {
+    char name[TAS_MENU_SCREEN_MAX];
+    if (ReadMenuString((uint32_t)ctx.edx, name, sizeof name)) {
+        memcpy(g_changedName, name, sizeof name);
+        g_pageGen++;   // adopted by the next Execute on this same thread, i.e. after the swap
+    }
+}
 
 static uint32_t SnapshotHash(const MenuSnapshot& s) {
     uint32_t h = 2166136261u;
     auto mix = [&](const char* p) { for (; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u; };
-    mix(g_state ? g_state->menu_screen : "");
+    mix(g_screen);
     h = (h ^ s.selector) * 16777619u;
     for (uint32_t i = 0; i < s.count; i++) {
         mix(s.items[i].name);
@@ -205,8 +242,10 @@ static void DumpIfChanged(const MenuSnapshot& s) {
     const uint32_t h = SnapshotHash(s);
     if (h == g_lastDumpHash) return;
     g_lastDumpHash = h;
-    Log(std::format("Menu diag: screen='{}' selector={} items={}", g_state->menu_screen,
-                    s.selector == 0xFFFFFFFFu ? -1 : (int)s.selector, s.count));
+    char cname[TAS_MENU_SCREEN_MAX] = {};
+    ReadMenuString(s.container + 0x10, cname, sizeof cname);
+    Log(std::format("Menu diag: screen='{}' selector={} items={} container={:#x} '{}'", g_screen,
+                    s.selector == 0xFFFFFFFFu ? -1 : (int)s.selector, s.count, s.container, cname));
     for (uint32_t i = 0; i < s.count; i++) {
         const auto& it = s.items[i];
         Log(std::format("  [{}] {}'{}' name='{}' comp={:#x} en={} vis={}", i, it.focused ? "* " : "",
@@ -214,57 +253,90 @@ static void DumpIfChanged(const MenuSnapshot& s) {
     }
 }
 
-// ---- the document (shm v46) ----
-static std::string BuildDoc(const MenuSnapshot& s) {
-    return g_state ? menumodel::BuildDoc(s, g_state->menu_screen) : std::string();
+// [UI_Menu+0x10C] = the current Menu_Page (0 during a swap). Its own SEH
+// scope: the caller builds std::strings, which cannot share a frame with __try.
+static uint32_t ReadPage(uint32_t uiMenu) {
+    __try {
+        return *(uint32_t*)(uiMenu + 0x10C);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
 }
 
-inline std::string g_lastDoc;   // what shm holds (worker thread only)
-
-// Publish under menu_seq, only on change. The bound cannot be hit (24 items
-// of bounded strings stay well under the buffer) but is guarded, not assumed.
-static void PublishDoc(const std::string& doc) {
-    if (!g_state || doc == g_lastDoc) return;
-    if (doc.size() + 1 > TAS_MENU_DOC_MAX) {
-        Log(std::format("Menu state: document too large ({} bytes) - not published", doc.size()));
+// Every ~50 ms (or at once after a page swap / a command): read the page and
+// publish. The game keeps ONE Menu_Page object and reconfigures it on every
+// Change_Page (UI_Menu::Change_Page calls Menu_Page::Change_Page on
+// [this+0x10C]; the pointer never moves), so the screen id is keyed on the
+// Change_Page EVENT: its name is adopted by the next Execute on the same
+// thread, after the swap completed, so screen and items always describe the
+// same page. Injected after the last Change_Page? The page's own name (if it
+// carries one) bootstraps it; otherwise the id arrives with the next change.
+static void Snapshot(uint32_t uiMenu, bool force) {
+    const uint64_t now = GetTickCount64();
+    if (!force && now - g_lastSnapMs < 50) return;
+    g_lastSnapMs = now;
+    const uint32_t page = ReadPage(uiMenu);
+    const uint32_t gen = g_pageGen;
+    if (gen != g_snapGen) {
+        g_snapGen = gen;
+        memcpy(g_screen, g_changedName, sizeof g_screen);
+        if (g_menuDiag) Log(std::format("Menu diag: page change #{} -> screen '{}' (page {:#x})", gen, g_screen, page));
+    } else if (!g_screen[0] && page) {
+        // No Change_Page seen since injection: take the page's own name if it
+        // reads as an id (bootstrap), else wait for the next page change.
+        char own[TAS_MENU_SCREEN_MAX];
+        if (ReadMenuString(page + 0x10, own, sizeof own) && IsIdLike(own)) {
+            memcpy(g_screen, own, sizeof own);
+            if (g_menuDiag) Log(std::format("Menu diag: bootstrapped screen '{}' from the page object", g_screen));
+        }
+    }
+    if (!page || !g_screen[0]) {
+        Clear();
         return;
     }
-    InterlockedIncrement((volatile LONG*)&g_state->menu_seq);   // odd: writing
-    memcpy(g_state->menu_doc, doc.c_str(), doc.size() + 1);
-    InterlockedIncrement((volatile LONG*)&g_state->menu_seq);   // even: stable
-    g_lastDoc = doc;
-}
-
-// Publish the current menu model (selector + document). Call from the
-// level-scan worker.
-inline void RefreshMenu() {
-    if (!g_state) return;
     MenuSnapshot snap;
-    ReadMenu(snap);
-    if (g_state->menu_selector != snap.selector) g_state->menu_selector = snap.selector;
-    PublishDoc(BuildDoc(snap));
+    if (!ReadMenu(uiMenu, snap)) {
+        // The page is known but its items are not capturable right now (a
+        // transition, nothing focused): publish the screen and NO document -
+        // never a valid-looking empty page (codex review 2026-09-04).
+        Publish(g_screen, 0xFFFFFFFFu, std::string());
+        return;
+    }
+    // The items' parent container carries the PAGE ID as its name (verified
+    // live: 'ID_ARCADE_CHOOSE_BOARD', 'ID_ARCADE_IN_GAME_MENU', ...) - the very
+    // object the items came from, so screen and items agree by construction
+    // and no Change_Page is needed to know the page. The announced name stays
+    // the fallback for a layout whose items sit in an unnamed sub-container.
+    char cname[TAS_MENU_SCREEN_MAX];
+    if (ReadMenuString(snap.container + 0x10, cname, sizeof cname) && IsIdLike(cname)) memcpy(g_screen, cname, sizeof cname);
+    Publish(g_screen, snap.selector, menumodel::BuildDoc(snap, g_screen));
     DumpIfChanged(snap);
 }
 
 // ---------------------------------------------------------------------------
-// The COMMAND channel (shm v47): the agent writes kind + target and bumps
-// menu_cmd_seq; this side executes it on the MENU THREAD - a mid-hook at the
-// entry of UI_Menu::Execute(float), called every frame from Menu::Paint while
-// a menu is shown with ECX = the UI_Menu - through the game's own entry points:
+// The COMMAND channel (shm v47/v48): the agent writes kind + target + the page
+// id it read, and bumps menu_cmd_seq; the menu thread executes it from the
+// Execute hook through the game's own entry points:
 //   UIT::UI_Component::Request_Focus(bool)       UIT.dll+0x196D0, ECX=comp, DL=1
 //   UI_Menu::Trigger / Up / Down / Left / Right  Main_Menu.dll+0x19F50 / 0x19ED0 /
 //     0x19EF0 / 0x19F10 / 0x19F30, ECX=UI_Menu - exactly what KB_Action calls
 //     for Enter and the arrow keys (main_menu.c).
-// "activate X" = Request_Focus(X, true) then Trigger: the Enter path on the
-// target, so listeners, sounds and page transitions run as if a human did it.
-// Nothing is poked into the game's objects by hand.
+// "activate X" = Request_Focus(X, true), verify the focus landed, Trigger.
+// A command names the page it was read from and is refused (STALE_PAGE) if
+// the page moved on; one command is outstanding at a time (the agent side
+// refuses to submit while seq != ack); a command nobody can consume - no
+// menu executing - is EXPIRED by the worker after 3 s, so nothing stays armed
+// to fire on a later page (codex review 2026-09-04).
 // ---------------------------------------------------------------------------
 using MenuAction = void(__fastcall*)(uint32_t);
 using RequestFocusFn = void(__fastcall*)(uint32_t, uint32_t);
 inline MenuAction g_trigger = nullptr, g_up = nullptr, g_down = nullptr, g_left = nullptr, g_right = nullptr;
 inline RequestFocusFn g_requestFocus = nullptr;
-inline SafetyHookMid g_executeHook{};
-inline bool g_cmdInstalled = false;
+inline SRWLOCK g_cmdLock = SRWLOCK_INIT;   // one handler per command: menu thread executes, worker expires
+inline uint32_t g_pendingSeq = 0;          // worker: the sequence it is timing
+inline uint64_t g_pendingSinceMs = 0;
+static constexpr uint64_t kExpireMs = 3000;
+static constexpr uint64_t kExecuteIdleMs = 1500;   // no Execute for this long = no menu on screen
 
 // UI_Menu::Execute: push esi; push edi; mov edi,[esp+0xC]; push edi; mov esi,ecx
 static constexpr uint8_t kExecuteSig[] = { 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C, 0x57, 0x8B, 0xF1 };
@@ -280,8 +352,9 @@ static constexpr uint8_t kMenuActionSig[] = { 0x8B, 0x81, 0x0C, 0x01, 0x00, 0x00
 static constexpr uint8_t kRequestFocusSig[] = { 0x53, 0x56, 0x8B, 0xF1, 0x8B, 0x4E, 0x0C, 0x85, 0xC9, 0x8B, 0xDA, 0x74, 0x24,
                                                 0x84, 0xDB, 0x74, 0x18, 0x8B, 0x06, 0x8B, 0xCE, 0xFF, 0x50, 0x2C };
 
-static uint32_t RunCommand(uint32_t uiMenu, uint32_t kind, const char* target) {
-    if (!g_state->menu_screen[0]) return TAS_MENU_RESULT_NO_MENU;
+static uint32_t RunCommand(uint32_t uiMenu, uint32_t kind, const char* target, const char* screen) {
+    if (!g_screen[0]) return TAS_MENU_RESULT_NO_MENU;
+    if (screen[0] && strncmp(screen, g_screen, TAS_MENU_SCREEN_MAX) != 0) return TAS_MENU_RESULT_STALE_PAGE;
     switch (kind) {
     case TAS_MENU_CMD_UP: g_up(uiMenu); return TAS_MENU_RESULT_OK;
     case TAS_MENU_CMD_DOWN: g_down(uiMenu); return TAS_MENU_RESULT_OK;
@@ -291,7 +364,7 @@ static uint32_t RunCommand(uint32_t uiMenu, uint32_t kind, const char* target) {
     case TAS_MENU_CMD_ACTIVATE:
     case TAS_MENU_CMD_FOCUS: {
         MenuSnapshot snap;
-        if (!ReadMenu(snap)) return TAS_MENU_RESULT_NO_MENU;
+        if (!ReadMenu(uiMenu, snap)) return TAS_MENU_RESULT_NO_MENU;
         const int i = menumodel::FindTarget(snap, target);
         if (i < 0) return TAS_MENU_RESULT_NOT_FOUND;
         if (!snap.items[i].enabled) return TAS_MENU_RESULT_DISABLED;
@@ -310,27 +383,81 @@ static uint32_t RunCommand(uint32_t uiMenu, uint32_t kind, const char* target) {
 
 // SEH around the whole execution: a page torn down between the agent's read
 // and this frame faults here, and the agent gets FAULT instead of a crash.
-static uint32_t RunCommandGuarded(uint32_t uiMenu, uint32_t kind, const char* target) {
+static uint32_t RunCommandGuarded(uint32_t uiMenu, uint32_t kind, const char* target, const char* screen) {
     __try {
-        return RunCommand(uiMenu, kind, target);
+        return RunCommand(uiMenu, kind, target, screen);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return TAS_MENU_RESULT_FAULT;
     }
 }
 
-static void ExecuteCb(SafetyHookContext& ctx) {
-    if (!g_state) return;
-    const uint32_t seq = g_state->menu_cmd_seq;
-    if (seq == g_state->menu_cmd_ack) return;   // nothing pending: one compare per frame
-    g_uiMenu = (uint32_t)ctx.ecx;               // the live UI_Menu
-    char target[TAS_MENU_CMD_TARGET_MAX];
-    for (uint32_t i = 0; i < TAS_MENU_CMD_TARGET_MAX; i++) target[i] = g_state->menu_cmd_target[i];
-    target[TAS_MENU_CMD_TARGET_MAX - 1] = 0;
-    const uint32_t kind = g_state->menu_cmd_kind;
-    const uint32_t result = RunCommandGuarded((uint32_t)ctx.ecx, kind, target);
+static void Answer(uint32_t seq, uint32_t result) {
     g_state->menu_cmd_result = result;
     InterlockedExchange((volatile LONG*)&g_state->menu_cmd_ack, (LONG)seq);   // result is visible first
-    Log(std::format("Menu cmd #{}: kind={} target='{}' -> {}", seq, kind, target, result));
+}
+
+// Menu thread: execute a pending command, then re-snapshot at once.
+static bool ConsumeCommand(uint32_t uiMenu) {
+    const uint32_t seq = g_state->menu_cmd_seq;
+    if (seq == g_state->menu_cmd_ack) return false;   // nothing pending: one compare per frame
+    AcquireSRWLockExclusive(&g_cmdLock);
+    bool ran = false;
+    if (seq != g_state->menu_cmd_ack) {   // the worker did not expire it meanwhile
+        char target[TAS_MENU_CMD_TARGET_MAX], screen[TAS_MENU_SCREEN_MAX];
+        for (uint32_t i = 0; i < TAS_MENU_CMD_TARGET_MAX; i++) target[i] = g_state->menu_cmd_target[i];
+        for (uint32_t i = 0; i < TAS_MENU_SCREEN_MAX; i++) screen[i] = g_state->menu_cmd_screen[i];
+        target[TAS_MENU_CMD_TARGET_MAX - 1] = 0;
+        screen[TAS_MENU_SCREEN_MAX - 1] = 0;
+        const uint32_t kind = g_state->menu_cmd_kind;
+        const uint32_t result = RunCommandGuarded(uiMenu, kind, target, screen);
+        Answer(seq, result);
+        Log(std::format("Menu cmd #{}: kind={} target='{}' page='{}' -> {}", seq, kind, target, screen, result));
+        ran = true;
+    }
+    ReleaseSRWLockExclusive(&g_cmdLock);
+    return ran;
+}
+
+static void ExecuteCb(SafetyHookContext& ctx) {
+    if (!g_state) return;
+    const uint32_t uiMenu = (uint32_t)ctx.ecx;
+    g_lastExecuteMs = GetTickCount64();
+    const bool ran = ConsumeCommand(uiMenu);
+    Snapshot(uiMenu, ran);
+}
+
+// Worker thread (level scan, ~10 Hz): housekeeping only - no UI object is
+// touched here. Clears the document once Execute stops (a level, a load, the
+// in-game pause menu), and answers EXPIRED for a command nobody can consume,
+// so it never lingers to fire on a later page.
+inline void Housekeeping() {
+    if (!g_state) return;
+    const uint64_t now = GetTickCount64();
+    const uint64_t last = g_lastExecuteMs;
+    const bool executing = last && now - last < kExecuteIdleMs;
+    if (!executing && g_state->menu_screen[0]) Clear();
+    const uint32_t seq = g_state->menu_cmd_seq;
+    if (seq == g_state->menu_cmd_ack) {
+        g_pendingSeq = 0;
+        return;
+    }
+    if (g_pendingSeq != seq) {
+        g_pendingSeq = seq;
+        g_pendingSinceMs = now;
+        return;
+    }
+    if (executing || now - g_pendingSinceMs < kExpireMs) return;
+    AcquireSRWLockExclusive(&g_cmdLock);
+    if (seq != g_state->menu_cmd_ack) {
+        Answer(seq, TAS_MENU_RESULT_EXPIRED);
+        Log(std::format("Menu cmd #{}: expired - no menu executing for {} ms", seq, now - last));
+    }
+    ReleaseSRWLockExclusive(&g_cmdLock);
+}
+
+// Game thread, in a level (race timer tick): the menu is definitely gone.
+inline void ClearForLevel() {
+    if (g_state && g_state->menu_screen[0]) Clear();
 }
 
 static void InstallCommands(uint8_t* base) {
@@ -349,7 +476,7 @@ static void InstallCommands(uint8_t* base) {
         GA::ValidateCode("Main_Menu.dll+0x19F30 (UI_Menu::Right)", base + 0x19F30, kMenuActionSig) &&
         GA::ValidateCode("UIT.dll+0x196D0 (UI_Component::Request_Focus)", uit + 0x196D0, kRequestFocusSig);
     if (!ok) {
-        Log("Menu cmd: a site did not validate - commands unavailable");
+        Log("Menu cmd: a site did not validate - the menu document and commands are unavailable");
         return;
     }
     g_trigger = (MenuAction)(uintptr_t)(base + 0x19F50);

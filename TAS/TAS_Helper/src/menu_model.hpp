@@ -23,6 +23,7 @@ struct MenuItem {
 struct MenuSnapshot {
     uint32_t selector = 0xFFFFFFFFu;  // index into items of the focused one; none = 0xFFFFFFFF
     uint32_t count = 0;
+    uint32_t container = 0;           // the items' parent UI_Container (diagnostics)
     MenuItem items[kMaxItems];
 };
 

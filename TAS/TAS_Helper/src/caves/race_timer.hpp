@@ -137,7 +137,7 @@ static void TickCb(SafetyHookContext&) {
     // engine cycle - and this clock tick with it - is frozen at menus), so a
     // menu title published by AptCb persists at the menu and is wiped the
     // moment a level's clock starts ticking.
-    if (g_state->game_in_game && g_state->menu_screen[0]) menustate::PublishMenuScreen("");
+    if (g_state->game_in_game) menustate::ClearForLevel();
     int inGame = g_state->game_in_game ? 1 : 0;
     if (inGame == 0) {
         if (g_wasInGame != 0) ResetEpoch();

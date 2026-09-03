@@ -11,7 +11,7 @@ constexpr size_t TRACE_FRAMES = 384;
 constexpr size_t OBJSNAP_PLAYER_DWORDS = 128;
 constexpr size_t OBJSNAP_PHYSICS_DWORDS = 512;
 
-constexpr uint32_t TAS_SHARED_VERSION = 47; // +menu command channel; v46 menu_doc; v45 menu_selector; v44 menu_screen
+constexpr uint32_t TAS_SHARED_VERSION = 48; // +menu_cmd_screen; v47 menu command channel; v46 menu_doc; v45 menu_selector
 constexpr uint32_t TAS_MENU_DOC_MAX = 4096;  // v46 menu document buffer (JSON, NUL-terminated)
 constexpr uint32_t TAS_MENU_CMD_TARGET_MAX = 64;  // v47 menu command target (id or label, NUL-terminated)
 // v47 menu_cmd_kind
@@ -31,6 +31,8 @@ constexpr uint32_t TAS_MENU_RESULT_DISABLED = 3;
 constexpr uint32_t TAS_MENU_RESULT_BAD_KIND = 4;
 constexpr uint32_t TAS_MENU_RESULT_FAULT = 5;
 constexpr uint32_t TAS_MENU_RESULT_NOT_FOCUSABLE = 6;   // the focus did not land on the target; nothing triggered
+constexpr uint32_t TAS_MENU_RESULT_STALE_PAGE = 7;      // v48: the page moved on since the agent read it; nothing done
+constexpr uint32_t TAS_MENU_RESULT_EXPIRED = 8;         // v48: no menu was executing for 3 s; nothing done
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MENU_SCREEN_MAX = 32;   // v44: menu-screen title buffer
 constexpr uint32_t TAS_MAX_TICKS = 65536;
@@ -591,6 +593,10 @@ struct TasSharedState {
     volatile uint32_t menu_cmd_seq;
     volatile uint32_t menu_cmd_kind;      // TAS_MENU_CMD_*
     char menu_cmd_target[TAS_MENU_CMD_TARGET_MAX];
+    // v48: the page id the agent read the target from ("ID_ARCADE_MENU");
+    // the command is refused with STALE_PAGE if the page moved on. Empty =
+    // no check. Written before menu_cmd_seq is bumped.
+    char menu_cmd_screen[TAS_MENU_SCREEN_MAX];
     volatile uint32_t menu_cmd_ack;
     volatile uint32_t menu_cmd_result;    // TAS_MENU_RESULT_*
 };
@@ -601,7 +607,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1667744,
+static_assert(sizeof(TasSharedState) == 1667776,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 
@@ -689,6 +695,7 @@ public:
         state->menu_cmd_seq = 0;                   // v47: nothing pending (a command from a previous
         state->menu_cmd_kind = 0;                  //      DLL life is never replayed)
         state->menu_cmd_target[0] = 0;
+        state->menu_cmd_screen[0] = 0;
         state->menu_cmd_ack = 0;
         state->menu_cmd_result = 0;
         state->race_start_ts = 0xFFFFFFFFu;
