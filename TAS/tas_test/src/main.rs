@@ -892,11 +892,32 @@ fn main() {
             let ok = cont_splice_frame::run(splice, catchup, record_speed);
             std::process::exit(if ok { 0 } else { 1 });
         }
+        "menu" => {
+            // The MENU DOCUMENT for agents (shm v46): the current page's items
+            // with their visible labels and stable ids, as one JSON line -
+            //   {"screen":"ID_ARCADE_MENU","sel":2,"items":[{"label":"Pipe",
+            //    "id":"ID_ARCADE_HALF_PIPE_SEQUENCE","en":true,"vis":true},..]}
+            // or {"screen":null,...} while a level runs. Read-only; safe at any
+            // time. Drive the cursor with the label: read, press UP/DOWN, re-read.
+            let client = match tas_shared::TasSharedMemoryClient::open() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("ERROR: no TAS shared memory ({})", e);
+                    std::process::exit(1);
+                }
+            };
+            match tas_shared::menu_doc(client.state()) {
+                Some(doc) => println!("{}", doc),
+                None => println!("{{\"screen\":null,\"sel\":null,\"items\":[]}}"),
+            }
+            std::process::exit(0);
+        }
         _ => {
             println!("Usage: tas_test <mode>");
             println!();
             println!("Modes:");
             println!("  smoke       Basic REC/PLAY without F5 alignment");
+            println!("  menu        Print the menu document (current page items, labels, ids) as JSON");
             println!("  f5          F5-aligned straight-line zero-drift check");
             println!("  segment     Multi-segment CONT zero-drift test (requires Pico HID)");
             println!("  regression  15-case regression suite (requires Pico HID)");

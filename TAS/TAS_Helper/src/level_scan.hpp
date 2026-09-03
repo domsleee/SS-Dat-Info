@@ -543,7 +543,7 @@ static DWORD WINAPI threadProc(LPVOID param) {
             pollLevelContext(s);
             renderer::Refresh(s);
             rider::Refresh(s, g_playerBaseAddr);
-            menustate::RefreshSelector();   // menu cursor (no-op unless at a menu)
+            menustate::RefreshMenu();   // menu cursor + item document (no-op unless at a menu)
             if (cycleFrozen()) { TryProcessStopCommand(s, false); break; }
             if (s->level_epoch != epochAtSleep) break;
         }
