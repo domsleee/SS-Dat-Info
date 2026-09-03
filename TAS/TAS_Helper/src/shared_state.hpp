@@ -11,7 +11,7 @@ constexpr size_t TRACE_FRAMES = 384;
 constexpr size_t OBJSNAP_PLAYER_DWORDS = 128;
 constexpr size_t OBJSNAP_PHYSICS_DWORDS = 512;
 
-constexpr uint32_t TAS_SHARED_VERSION = 44; // +menu_screen; v43 rider_seq/race_seq
+constexpr uint32_t TAS_SHARED_VERSION = 45; // +menu_selector; v44 menu_screen; v43 seqlocks
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MENU_SCREEN_MAX = 32;   // v44: menu-screen title buffer
 constexpr uint32_t TAS_MAX_TICKS = 65536;
@@ -544,6 +544,11 @@ struct TasSharedState {
     // A plain buffer, not seqlocked: a torn read is a one-frame cosmetic blip
     // in a display string, and it self-heals on the next poll.
     char menu_screen[TAS_MENU_SCREEN_MAX];
+
+    // v45: the focused menu item's index within the current page container
+    // (0xFFFFFFFF = no menu / unreadable). Read from the menu object by the
+    // level-scan worker via UI_Menu::Get_Active_Component; see menu_state.hpp.
+    volatile uint32_t menu_selector;
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -552,7 +557,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1663560,
+static_assert(sizeof(TasSharedState) == 1663568,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 
@@ -634,6 +639,7 @@ public:
         state->level_id = 0xFFFFFFFFu;  // unknown until the scan thread runs
         state->race_time_cs = 0xFFFFFFFFu;
         state->rider_stance = 0xFFFFFFFFu;         // unknown until the setup object is read
+        state->menu_selector = 0xFFFFFFFFu;        // no menu selection until the menu publishes one
         state->race_start_ts = 0xFFFFFFFFu;
         // Clock-phase pin OFF by default. The v1 pin froze the game during
         // level reloads; v2 (passthrough when behind) still coincided with an

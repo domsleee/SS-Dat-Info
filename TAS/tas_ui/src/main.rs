@@ -15,6 +15,16 @@ use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 /// Map the DLL's `level_id` (area*3 + difficulty, or u32::MAX = unknown) to a
 /// display name for the game-state chip. The DLL detects the track in-process
 /// (see TAS_Helper `level_scan.hpp`) so the UI just reads the index.
+/// " · item N" for the focused menu item (v45), or "" when there is no
+/// selection. The index is a stable per-item id, not the visual row.
+fn menu_item_suffix(state: &tas_shared::TasSharedState) -> String {
+    if state.menu_selector == u32::MAX {
+        String::new()
+    } else {
+        format!(" \u{00B7} item {}", state.menu_selector)
+    }
+}
+
 fn level_name_from_id(id: u32) -> Option<&'static str> {
     const NAMES: [&str; 10] = [
         "Forest Easy",
@@ -3477,7 +3487,7 @@ impl eframe::App for TasApp {
                             // DLL captured the menu screen title (v44), name it.
                             (
                                 match tas_shared::menu_screen(state) {
-                                    Some(s) => format!("\u{2630} {}", s),
+                                    Some(s) => format!("\u{2630} {}{}", s, menu_item_suffix(state)),
                                     None => "\u{2630} Menu / Paused".to_string(),
                                 },
                                 egui::Color32::from_gray(150),
@@ -3485,7 +3495,7 @@ impl eframe::App for TasApp {
                         } else {
                             (
                                 match tas_shared::menu_screen(state) {
-                                    Some(s) => format!("\u{2630} {}", s),
+                                    Some(s) => format!("\u{2630} {}{}", s, menu_item_suffix(state)),
                                     None => "\u{2630} In Menu".to_string(),
                                 },
                                 egui::Color32::from_gray(150),
