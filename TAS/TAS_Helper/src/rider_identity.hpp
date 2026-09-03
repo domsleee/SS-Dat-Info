@@ -20,7 +20,7 @@
 //               std::string at +0x48, "Vincent"; the loadout folder at
 //               [[player+0x20]+0x10] as the fallback).
 //   stance    - the game-setup object read through the stable
-//               [[player_base]+0x530] chain (setup_object.hpp), the value the
+//               [[player_base]+0x540] chain (setup_object.hpp), the value the
 //               game builds every rider from when a level is entered. It used
 //               to be found by a layout heap scan; the chain cave2 already
 //               uses for input reaches the SAME object directly. Validated by
