@@ -13,9 +13,27 @@ pub const OBJSNAP_PLAYER_DWORDS: usize = 128;
 /// at 0x1B4 so the object is at least 0x1D8, and this leaves headroom).
 pub const OBJSNAP_PHYSICS_DWORDS: usize = 512;
 
-pub const TAS_SHARED_VERSION: u32 = 46; // +menu_doc/menu_seq; v45 menu_selector; v44 menu_screen; v43 seqlocks; v42 rider
+pub const TAS_SHARED_VERSION: u32 = 47; // +menu command channel; v46 menu_doc; v45 menu_selector; v44 menu_screen
 /// v46: size of the menu document buffer (JSON, NUL-terminated).
 pub const TAS_MENU_DOC_MAX: usize = 4096;
+/// v47: size of the menu command target (id or label, NUL-terminated).
+pub const TAS_MENU_CMD_TARGET_MAX: usize = 64;
+/// v47 menu command kinds (`menu_cmd_kind`).
+pub const TAS_MENU_CMD_ACTIVATE: u32 = 1;
+pub const TAS_MENU_CMD_FOCUS: u32 = 2;
+pub const TAS_MENU_CMD_UP: u32 = 3;
+pub const TAS_MENU_CMD_DOWN: u32 = 4;
+pub const TAS_MENU_CMD_LEFT: u32 = 5;
+pub const TAS_MENU_CMD_RIGHT: u32 = 6;
+pub const TAS_MENU_CMD_TRIGGER: u32 = 7;
+/// v47 menu command results (`menu_cmd_result`).
+pub const TAS_MENU_RESULT_OK: u32 = 0;
+pub const TAS_MENU_RESULT_NO_MENU: u32 = 1;
+pub const TAS_MENU_RESULT_NOT_FOUND: u32 = 2;
+pub const TAS_MENU_RESULT_DISABLED: u32 = 3;
+pub const TAS_MENU_RESULT_BAD_KIND: u32 = 4;
+pub const TAS_MENU_RESULT_FAULT: u32 = 5;
+pub const TAS_MENU_RESULT_NOT_FOCUSABLE: u32 = 6;
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MENU_SCREEN_MAX: usize = 32;
 pub const TAS_MAX_TICKS: usize = 65536;
@@ -867,6 +885,17 @@ pub struct TasSharedState {
     /// `sel` indexes `items` (null = nothing focused) and equals
     /// `menu_selector`. Empty while a level runs. Read via [`menu_doc`].
     pub menu_doc: [u8; TAS_MENU_DOC_MAX],
+
+    /// v47: the menu COMMAND channel (agent -> DLL). Submit through
+    /// [`menu_command_submit`] (writes kind + target, then bumps this
+    /// sequence); the DLL executes it on the menu thread through the game's
+    /// own entry points and acks the sequence in `menu_cmd_ack` after writing
+    /// `menu_cmd_result`. Poll with [`menu_command_result`].
+    pub menu_cmd_seq: AtomicU32,
+    pub menu_cmd_kind: u32,
+    pub menu_cmd_target: [u8; TAS_MENU_CMD_TARGET_MAX],
+    pub menu_cmd_ack: AtomicU32,
+    pub menu_cmd_result: u32,
 }
 
 /// How many times to retry a torn level-context read before giving up.
@@ -1088,6 +1117,68 @@ pub fn menu_doc(state: &TasSharedState) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The menu command kind for a CLI word ("activate", "focus", "up", "down",
+/// "left", "right", "trigger").
+pub fn menu_command_kind(name: &str) -> Option<u32> {
+    match name {
+        "activate" => Some(TAS_MENU_CMD_ACTIVATE),
+        "focus" => Some(TAS_MENU_CMD_FOCUS),
+        "up" => Some(TAS_MENU_CMD_UP),
+        "down" => Some(TAS_MENU_CMD_DOWN),
+        "left" => Some(TAS_MENU_CMD_LEFT),
+        "right" => Some(TAS_MENU_CMD_RIGHT),
+        "trigger" => Some(TAS_MENU_CMD_TRIGGER),
+        _ => None,
+    }
+}
+
+/// Whether a command kind names an item (activate / focus) or acts on the
+/// cursor as it is.
+pub fn menu_command_needs_target(kind: u32) -> bool {
+    kind == TAS_MENU_CMD_ACTIVATE || kind == TAS_MENU_CMD_FOCUS
+}
+
+/// A menu command result as a word.
+pub fn menu_result_name(result: u32) -> &'static str {
+    match result {
+        TAS_MENU_RESULT_OK => "ok",
+        TAS_MENU_RESULT_NO_MENU => "no menu",
+        TAS_MENU_RESULT_NOT_FOUND => "not found",
+        TAS_MENU_RESULT_DISABLED => "disabled",
+        TAS_MENU_RESULT_BAD_KIND => "bad kind",
+        TAS_MENU_RESULT_FAULT => "fault",
+        TAS_MENU_RESULT_NOT_FOCUSABLE => "not focusable",
+        _ => "unknown",
+    }
+}
+
+/// Submit a menu command (v47): write the target (cut to the buffer, always
+/// NUL-terminated) and the kind, then bump the sequence. Returns the sequence
+/// to wait for with [`menu_command_result`]. One agent at a time.
+pub fn menu_command_submit(state: &mut TasSharedState, kind: u32, target: &str) -> u32 {
+    let mut buf = [0u8; TAS_MENU_CMD_TARGET_MAX];
+    let n = target.len().min(TAS_MENU_CMD_TARGET_MAX - 1);
+    buf[..n].copy_from_slice(&target.as_bytes()[..n]);
+    // SAFETY: shared mapping; the DLL reads these after it sees the new sequence.
+    unsafe {
+        std::ptr::write_volatile(&mut state.menu_cmd_target as *mut [u8; TAS_MENU_CMD_TARGET_MAX], buf);
+        std::ptr::write_volatile(&mut state.menu_cmd_kind as *mut u32, kind);
+    }
+    let seq = state.menu_cmd_seq.load(Ordering::Acquire).wrapping_add(1);
+    state.menu_cmd_seq.store(seq, Ordering::Release);
+    seq
+}
+
+/// The result of a submitted command once the DLL has executed it; `None`
+/// while it is still pending (or nobody is consuming: no menu on screen).
+pub fn menu_command_result(state: &TasSharedState, seq: u32) -> Option<u32> {
+    if state.menu_cmd_ack.load(Ordering::Acquire) != seq {
+        return None;
+    }
+    // SAFETY: shared mapping; written by the DLL before it stored the ack.
+    Some(unsafe { std::ptr::read_volatile(&state.menu_cmd_result) })
 }
 
 /// The DLL publishes the menu's internal page id ("ID_ARCADE_CHOOSE_TRACK").
@@ -4846,7 +4937,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_667_664);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_667_744);
     }
 
     /// Prints field offsets for the out-of-process probes (tools/tas_shm.ps1).
@@ -4857,7 +4948,7 @@ mod tests {
         println!(
             "offsets: version={} command={} mode={} frame_count={} recorded_count={} playback_pos={} \
              replay_ptr={} player_ptr={} player_x={} input_log={} rec_coords={} play_coords={} \
-             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} rider_seq={} race_seq={} menu_screen={} menu_selector={} menu_seq={} menu_doc={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
+             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} rider_seq={} race_seq={} menu_screen={} menu_selector={} menu_seq={} menu_doc={} menu_cmd_seq={} menu_cmd_kind={} menu_cmd_target={} menu_cmd_ack={} menu_cmd_result={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
             offset_of!(TasSharedState, version),
             offset_of!(TasSharedState, command),
             offset_of!(TasSharedState, mode),
@@ -4883,6 +4974,11 @@ mod tests {
             offset_of!(TasSharedState, menu_selector),
             offset_of!(TasSharedState, menu_seq),
             offset_of!(TasSharedState, menu_doc),
+            offset_of!(TasSharedState, menu_cmd_seq),
+            offset_of!(TasSharedState, menu_cmd_kind),
+            offset_of!(TasSharedState, menu_cmd_target),
+            offset_of!(TasSharedState, menu_cmd_ack),
+            offset_of!(TasSharedState, menu_cmd_result),
             offset_of!(TasSharedState, fpu_control_word),
             offset_of!(TasSharedState, renderer_id),
             offset_of!(TasSharedState, rider_character),
@@ -4974,6 +5070,50 @@ mod tests {
         let mut s = zeroed_state();
         put_menu_doc(&mut s, b"{\"screen\":\"ID_MAIN\x01MENU\"}", 2);
         assert_eq!(menu_doc(&s), None);
+    }
+
+    /// Submitting a command writes the target and kind, then bumps the
+    /// sequence; the result stays pending until the DLL acks that sequence.
+    #[test]
+    fn menu_command_round_trip() {
+        let mut s = zeroed_state();
+        let seq = menu_command_submit(&mut s, TAS_MENU_CMD_ACTIVATE, "ID_ARCADE_MENU");
+        assert_eq!(seq, 1);
+        assert_eq!(s.menu_cmd_kind, TAS_MENU_CMD_ACTIVATE);
+        assert_eq!(&s.menu_cmd_target[..15], b"ID_ARCADE_MENU\0");
+        assert_eq!(menu_command_result(&s, seq), None, "pending until acked");
+        s.menu_cmd_result = TAS_MENU_RESULT_NOT_FOUND;
+        s.menu_cmd_ack.store(seq, Ordering::Release);
+        assert_eq!(menu_command_result(&s, seq), Some(TAS_MENU_RESULT_NOT_FOUND));
+        // the next command gets the next sequence and is pending again
+        let seq2 = menu_command_submit(&mut s, TAS_MENU_CMD_DOWN, "");
+        assert_eq!(seq2, 2);
+        assert_eq!(menu_command_result(&s, seq2), None);
+        assert_eq!(s.menu_cmd_target[0], 0, "an empty target clears the buffer");
+    }
+
+    /// A target longer than the buffer is cut, never overrun, and stays NUL-terminated.
+    #[test]
+    fn menu_command_target_is_bounded() {
+        let mut s = zeroed_state();
+        let long = "X".repeat(200);
+        menu_command_submit(&mut s, TAS_MENU_CMD_FOCUS, &long);
+        assert_eq!(s.menu_cmd_target[TAS_MENU_CMD_TARGET_MAX - 1], 0);
+        assert!(s.menu_cmd_target[..TAS_MENU_CMD_TARGET_MAX - 1].iter().all(|&b| b == b'X'));
+    }
+
+    #[test]
+    fn menu_command_kinds_and_names() {
+        assert_eq!(menu_command_kind("activate"), Some(TAS_MENU_CMD_ACTIVATE));
+        assert_eq!(menu_command_kind("down"), Some(TAS_MENU_CMD_DOWN));
+        assert_eq!(menu_command_kind("jump"), None);
+        assert!(menu_command_needs_target(TAS_MENU_CMD_ACTIVATE));
+        assert!(menu_command_needs_target(TAS_MENU_CMD_FOCUS));
+        assert!(!menu_command_needs_target(TAS_MENU_CMD_UP));
+        assert_eq!(menu_result_name(TAS_MENU_RESULT_OK), "ok");
+        assert_eq!(menu_result_name(TAS_MENU_RESULT_NOT_FOUND), "not found");
+        assert_eq!(menu_result_name(TAS_MENU_RESULT_NOT_FOCUSABLE), "not focusable");
+        assert_eq!(menu_result_name(99), "unknown");
     }
 
     /// A replay armed on a take recorded as a different rider gets told
