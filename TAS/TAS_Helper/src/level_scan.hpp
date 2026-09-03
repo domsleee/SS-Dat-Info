@@ -6,6 +6,7 @@
 #include "shared_state.hpp"
 #include "caves/cave2.hpp"
 #include "renderer_info.hpp"
+#include "setup_object.hpp"
 #include "rider_identity.hpp"
 #include "level_path_parse.hpp"
 #include <cstring>
@@ -13,17 +14,16 @@
 
 // In-process level detection.
 //
-// There is no stable fixed-address anchor for the current track (the engine's
-// level identity is heap-only and the obvious pointers are transient/reused —
-// see the long RE notes). What IS reliable: while a level is loaded, the heap
-// holds resource path strings ".../<Area>/Tracks/<Difficulty>/..." with the
-// correct area AND difficulty. So we scan the heap and majority-vote, which
-// shrugs off outliers like the shared shadow.qua that always lives under easy/.
-//
-// Unlike the tas_ui version, this runs INSIDE the game process, so reads are
-// direct (no ReadProcessMemory) — much cheaper. It runs on a background thread
-// (the scan walks tens of MiB; must not block the game's main thread) and only
-// while game_in_game == 1, publishing the result into s->level_id:
+// The level identity is read from the GAME-SETUP OBJECT (setup_object.hpp): the
+// menu's selection, reached through the stable [[player_base]+0x530] chain
+// cave2 already uses for input. It names the area AND the difficulty as plain
+// strings, so there is NO heap scan any more (it used to walk tens of MiB per
+// scan, about 165 ms, and only ever answered the difficulty; the object
+// answers both in ~0 ms and settles Village Easy vs Village Hard, which the
+// shared path asset cannot). The level-path string below is still the
+// level-CHANGE event and an area cross-check. Runs on a background thread,
+// publishing into s->level_id only while a level is running (game_in_game +
+// cycle heartbeat):
 //   0..9 = area*3 + difficulty  (area 0=Forest,1=Alpine,2=Village,3=Practice;
 //          Practice has only Easy on disk, so of the practice ids only 9 can
 //          ever tally - 10/11 have no strings to match;
@@ -52,9 +52,9 @@ inline HANDLE g_thread = nullptr;
 //
 // The path is RELIABLE FOR AREA but NOT FOR DIFFICULTY — some tracks share the
 // easy/ shadow asset, so Village Hard reads ".../Tracks/easy/...". So:
-//   the PATH gives the change event AND CONSTRAINS THE AREA (areaFromPath),
-//   the majority-voted heap scan picks the DIFFICULTY within that area.
-// Both halves are used; the area constraint is not advisory.
+//   the PATH gives the change event and an area cross-check (areaFromPath),
+//   the game-setup object gives the AUTHORITATIVE area + difficulty.
+// If the two areas disagree we are mid-switch, so nothing is published.
 //
 // KNOWN LIMIT: because some tracks share a path, switching BETWEEN two such
 // tracks (e.g. Village Easy <-> Village Hard, both ".../village/Tracks/easy/")
@@ -63,6 +63,10 @@ inline HANDLE g_thread = nullptr;
 // for that transition. Detecting it needs a per-track signal the path cannot
 // give.
 inline uint32_t g_levelPathPtrAddr = 0;
+// GameAddresses::player_base (SG+0x1D5450): head of the setup-object chain
+// [[player_base]+0x530]. Set by Start(); the difficulty and the rider stance
+// are read from that object instead of scanning the heap.
+inline uint32_t g_playerBaseAddr = 0;
 inline uint32_t (*g_readPtr)(uint32_t) = nullptr;
 
 // frame_count at the last context change. Supreme::Cycle is FROZEN for the whole
@@ -109,14 +113,6 @@ static bool cycleFrozen() {
 }
 
 
-
-// Parsing lives in level_path_parse.hpp so it can be unit-tested WITHOUT the
-// game. Aliased so the shipped code and the tested code are the same code.
-using levelpath::AREAS;
-using levelpath::DIFFS;
-static int matchOne(const char* p, size_t n, const char* const* table, int count) {
-    return levelpath::MatchOne(p, n, table, count);
-}
 
 // Read the current level path into `out`. Returns false when unavailable OR not
 // a plausible level path.
@@ -231,39 +227,6 @@ static void pollLevelContext(TasSharedState* s) {
     g_awaitingCycleTick = true;
 }
 
-// Tally "<area>/Tracks/<diff>" occurrences. Anchors on "racks/" (the always-
-// lowercase core of Tracks/tracks), then case-folds the short area/diff segments.
-static void scanRegion(const uint8_t* p, size_t n, int tally[12]) {
-    if (n < 8) return;
-    for (size_t i = 0; i + 6 < n; i++) {
-        if (p[i] == 'r' && p[i + 1] == 'a' && p[i + 2] == 'c' &&
-            p[i + 3] == 'k' && p[i + 4] == 's' && p[i + 5] == '/') {
-            if (i < 2) continue;
-            char tc = (char)p[i - 1];
-            if (tc != 'T' && tc != 't') continue;
-            if (p[i - 2] != '/' && p[i - 2] != '\\') continue;
-            size_t aend = i - 2;
-            size_t astart = 0;
-            for (size_t j = aend; j > 0; j--) {
-                if (p[j - 1] == '/' || p[j - 1] == '\\') { astart = j; break; }
-            }
-            size_t dstart = i + 6;
-            size_t dend = n;
-            for (size_t j = dstart; j < n; j++) {
-                if (p[j] == '/' || p[j] == '\\') { dend = j; break; }
-            }
-            int ai = matchOne((const char*)(p + astart), aend - astart, AREAS, 4);
-            int di = matchOne((const char*)(p + dstart), dend - dstart, DIFFS, 3);
-            // Practice has exactly ONE difficulty on disk (Tracks/Easy), so
-            // ids 10/11 do not exist. Stock data has no such strings, but a
-            // stray match must not be able to tally an id the Rust side
-            // (CODES has 10 entries, 9 = PE) would treat as unknown.
-            if (ai == 3 && di != 0) continue;
-            if (ai >= 0 && di >= 0) tally[ai * 3 + di]++;
-        }
-    }
-}
-
 // Walk private committed regions <=4 MiB (path strings live in the small-block
 // heap; the big texture/geometry buffers hold no paths), SEH-guarded. Returns
 // the majority track index 0..8, or -1 if nothing found.
@@ -358,46 +321,30 @@ static void noteScanCost(LARGE_INTEGER t0, LARGE_INTEGER t1) {
     }
 }
 
+// Identify the level from the game-setup object (setup_object.hpp) - the
+// authoritative menu selection, read through the stable [[player_base]+0x530]
+// chain with NO heap walk. It names the area AND the difficulty, so it settles
+// the one pair the path asset cannot (Village Easy vs Village Hard both load
+// ".../village/Tracks/easy/"). `areaHint` (from the reliable path) is a
+// cross-check: if the object disagrees with it we are mid-switch, so report
+// nothing rather than a torn answer.
+//
+// Keeps scanLevelId's contract: returns area*3+diff (Practice = 9) or -1, and
+// sets *outBest/*outSecond so confidentEnough() passes on a clean read
+// (best = MIN_TRACK_HITS, second = 0) and rejects a miss.
 static int32_t scanLevelId(int* outBest, int* outSecond, int areaHint) {
-    int tally[12] = { 0 };  // 3 areas x 3 diffs + practice (only 9 occurs)
-    uint8_t* addr = nullptr;
-    const uint8_t* MAXADDR = (const uint8_t*)0x7FFF0000u;
-    MEMORY_BASIC_INFORMATION mbi;
-    while (addr < MAXADDR) {
-        if (VirtualQuery(addr, &mbi, sizeof(mbi)) == 0) break;
-        uint8_t* next = (uint8_t*)mbi.BaseAddress + mbi.RegionSize;
-        bool readable = mbi.State == MEM_COMMIT
-            && mbi.Type == MEM_PRIVATE
-            && mbi.RegionSize <= (4u << 20)
-            && !(mbi.Protect & PAGE_GUARD)
-            && !(mbi.Protect & PAGE_NOACCESS);
-        if (readable && mbi.RegionSize > 0) {
-            __try {
-                scanRegion((const uint8_t*)mbi.BaseAddress, mbi.RegionSize, tally);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        }
-        if (next <= addr) break;
-        addr = next;
-    }
-    // Confidence, not just a winner. The old code took the largest tally with
-    // NO minimum and NO margin, so a SINGLE residual string from a level we had
-    // already left could win and be published as the current track — "fresh but
-    // wrong", which the epoch cannot detect because the epoch only certifies
-    // WHEN a scan ran, never WHETHER it was right.
-    //
-    // A genuinely loaded level references its resource paths pervasively; heap
-    // residue from a previous one is sparse. So report the top two counts and
-    // let the caller apply the thresholds.
-    int best = -1, bestc = 0, secondc = 0;
-    for (int i = 0; i < 12; i++) {
-        // Outside the known area? Cannot be the current track.
-        if (areaHint >= 0 && i / 3 != areaHint) continue;
-        if (tally[i] > bestc) { secondc = bestc; bestc = tally[i]; best = i; }
-        else if (tally[i] > secondc) { secondc = tally[i]; }
-    }
-    if (outBest) *outBest = bestc;
-    if (outSecond) *outSecond = secondc;
-    return (bestc > 0) ? best : -1;
+    if (outBest) *outBest = 0;
+    if (outSecond) *outSecond = 0;
+    gamesetup::Setup setup;
+    if (!gamesetup::Read(g_playerBaseAddr, &setup)) return -1;
+    const int area = levelpath::MatchOne(setup.area, std::strlen(setup.area), levelpath::AREAS, 4);
+    const int diff = levelpath::MatchOne(setup.difficulty, std::strlen(setup.difficulty), levelpath::DIFFS, 3);
+    if (area < 0 || diff < 0) return -1;
+    // Practice has only Easy on disk; a non-Easy practice reading is spurious.
+    if (area == 3 && diff != 0) return -1;
+    if (areaHint >= 0 && area != areaHint) return -1;  // mid-switch: path and object disagree
+    if (outBest) *outBest = MIN_TRACK_HITS;            // a clean read is fully confident
+    return area * 3 + diff;
 }
 
 static DWORD WINAPI threadProc(LPVOID param) {
@@ -590,7 +537,7 @@ static DWORD WINAPI threadProc(LPVOID param) {
             Sleep(100);
             pollLevelContext(s);
             renderer::Refresh(s);
-            rider::Refresh(s);
+            rider::Refresh(s, g_playerBaseAddr);
             if (cycleFrozen()) { TryProcessStopCommand(s, false); break; }
             if (s->level_epoch != epochAtSleep) break;
         }
@@ -603,10 +550,11 @@ static DWORD WINAPI threadProc(LPVOID param) {
 // only in a diagnostic build; freeze detection and out-of-cycle STOP handling
 // then cannot run.
 inline void Start(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readPtr)(uint32_t),
-                  volatile uint32_t* cycleMs) {
+                  volatile uint32_t* cycleMs, uint32_t playerBaseAddr) {
     g_levelPathPtrAddr = levelPathPtrAddr;
     g_readPtr = readPtr;
     g_cycleMs = cycleMs;
+    g_playerBaseAddr = playerBaseAddr;
     g_lastPath[0] = 0;
     if (!s) return;
     // Shared memory SURVIVES reinjection, so a previous DLL instance killed

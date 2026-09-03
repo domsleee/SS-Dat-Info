@@ -236,6 +236,13 @@ struct GameAddresses {
     // stance only when a level is entered from the menu (a goofy rider
     // "switched" to regular that way still coasted like goofy, 3.8e-6 off
     // at gate+32, reroll forever).
+    // The game-setup object also names the AREA and DIFFICULTY of the selected
+    // track as MSVC6 strings ("Village", "Hard"): the authoritative menu
+    // selection, which - unlike the shared path asset - distinguishes Village
+    // Easy from Village Hard. Read via the same [[player_base]+0x530] chain
+    // cave2 uses for input (setup_object.hpp), so NO heap scan is needed.
+    static constexpr uint32_t SETUP_AREA_STRING = 0x190;
+    static constexpr uint32_t SETUP_DIFFICULTY_STRING = 0x1B0;
     static constexpr uint32_t SETUP_CHARACTER_STRING = 0x1D0;
     static constexpr uint32_t SETUP_STANCE = 0x220;
     static constexpr uint32_t SETUP_CONTROLLER_STRING = 0x290;
