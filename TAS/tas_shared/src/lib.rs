@@ -13,7 +13,9 @@ pub const OBJSNAP_PLAYER_DWORDS: usize = 128;
 /// at 0x1B4 so the object is at least 0x1D8, and this leaves headroom).
 pub const OBJSNAP_PHYSICS_DWORDS: usize = 512;
 
-pub const TAS_SHARED_VERSION: u32 = 45; // +menu_selector; v44 menu_screen; v43 seqlocks; v42 rider (character / stance awareness)
+pub const TAS_SHARED_VERSION: u32 = 46; // +menu_doc/menu_seq; v45 menu_selector; v44 menu_screen; v43 seqlocks; v42 rider
+/// v46: size of the menu document buffer (JSON, NUL-terminated).
+pub const TAS_MENU_DOC_MAX: usize = 4096;
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MENU_SCREEN_MAX: usize = 32;
 pub const TAS_MAX_TICKS: usize = 65536;
@@ -854,6 +856,17 @@ pub struct TasSharedState {
     /// the game stores the children in creation order, not display order - so
     /// map it per screen rather than assuming 0 = topmost.
     pub menu_selector: u32,
+
+    /// v46: seqlock over `menu_doc` - odd while the DLL's worker is writing
+    /// it. Read the document through [`menu_doc`], never as a plain copy.
+    pub menu_seq: AtomicU32,
+    /// v46: the MENU DOCUMENT - the current page's items with their visible
+    /// labels and stable ids, as compact JSON:
+    /// `{"screen":"ID_ARCADE_MENU","sel":0,"items":[{"label":"Time Attack",
+    /// "id":"ID_ARCADE_TIME_ATTACK_SEQUENCE","en":true,"vis":true},..]}`.
+    /// `sel` indexes `items` (null = nothing focused) and equals
+    /// `menu_selector`. Empty while a level runs. Read via [`menu_doc`].
+    pub menu_doc: [u8; TAS_MENU_DOC_MAX],
 }
 
 /// How many times to retry a torn level-context read before giving up.
@@ -1053,6 +1066,28 @@ pub fn menu_screen(state: &TasSharedState) -> Option<String> {
     }
     let raw = String::from_utf8_lossy(&buf[..end]).into_owned();
     Some(prettify_menu_id(&raw))
+}
+
+/// The menu document (v46): the current page's items with labels and stable
+/// ids as a JSON string (see the field doc), or `None` while a level runs or
+/// while the writer kept it busy. One coherent read under `menu_seq`.
+pub fn menu_doc(state: &TasSharedState) -> Option<String> {
+    let bytes = with_seqlock(&state.menu_seq, || {
+        let mut v = Vec::new();
+        for i in 0..TAS_MENU_DOC_MAX {
+            // SAFETY: shared mapping written by the DLL's worker thread.
+            let b = unsafe { std::ptr::read_volatile(&state.menu_doc[i]) };
+            if b == 0 {
+                break;
+            }
+            v.push(b);
+        }
+        v
+    })?;
+    if bytes.is_empty() || bytes.iter().any(|&c| !(0x20..0x7f).contains(&c)) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// The DLL publishes the menu's internal page id ("ID_ARCADE_CHOOSE_TRACK").
@@ -4811,7 +4846,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_568);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_667_664);
     }
 
     /// Prints field offsets for the out-of-process probes (tools/tas_shm.ps1).
@@ -4822,7 +4857,7 @@ mod tests {
         println!(
             "offsets: version={} command={} mode={} frame_count={} recorded_count={} playback_pos={} \
              replay_ptr={} player_ptr={} player_x={} input_log={} rec_coords={} play_coords={} \
-             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} rider_seq={} race_seq={} menu_screen={} menu_selector={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
+             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} rider_seq={} race_seq={} menu_screen={} menu_selector={} menu_seq={} menu_doc={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
             offset_of!(TasSharedState, version),
             offset_of!(TasSharedState, command),
             offset_of!(TasSharedState, mode),
@@ -4846,6 +4881,8 @@ mod tests {
             offset_of!(TasSharedState, race_seq),
             offset_of!(TasSharedState, menu_screen),
             offset_of!(TasSharedState, menu_selector),
+            offset_of!(TasSharedState, menu_seq),
+            offset_of!(TasSharedState, menu_doc),
             offset_of!(TasSharedState, fpu_control_word),
             offset_of!(TasSharedState, renderer_id),
             offset_of!(TasSharedState, rider_character),
@@ -4893,6 +4930,50 @@ mod tests {
         assert_eq!(prettify_menu_id("ID_ARCADE_CHOOSE_BOARD"), "Arcade Choose Board");
         assert_eq!(prettify_menu_id("Weird"), "Weird");
         assert_eq!(prettify_menu_id("ID_"), "ID_");
+    }
+
+    fn put_menu_doc(s: &mut TasSharedState, doc: &[u8], seq: u32) {
+        s.menu_doc = [0u8; TAS_MENU_DOC_MAX];
+        s.menu_doc[..doc.len()].copy_from_slice(doc);
+        s.menu_seq.store(seq, Ordering::Relaxed);
+    }
+
+    /// The menu document (v46) comes back verbatim from a stable buffer.
+    #[test]
+    fn menu_doc_reads_the_published_json() {
+        let mut s = zeroed_state();
+        let sample = concat!(
+            r#"{"screen":"ID_ARCADE_MENU","sel":2,"items":["#,
+            r#"{"label":"Time Attack","id":"ID_ARCADE_TIME_ATTACK_SEQUENCE","en":true,"vis":true},"#,
+            r#"{"label":"Pipe","id":"ID_ARCADE_HALF_PIPE_SEQUENCE","en":true,"vis":true}]}"#
+        );
+        put_menu_doc(&mut s, sample.as_bytes(), 2);
+        assert_eq!(menu_doc(&s).as_deref(), Some(sample));
+    }
+
+    /// No document (a level running, or nothing published yet) is `None`,
+    /// not an empty string the caller has to special-case.
+    #[test]
+    fn menu_doc_empty_is_none() {
+        let s = zeroed_state();
+        assert_eq!(menu_doc(&s), None);
+    }
+
+    /// A writer mid-update (odd sequence) never yields a half-written document.
+    #[test]
+    fn menu_doc_odd_seq_is_none() {
+        let mut s = zeroed_state();
+        put_menu_doc(&mut s, br#"{"screen":"ID_MAIN_MENU","sel":0,"items":[]}"#, 3);
+        assert_eq!(menu_doc(&s), None);
+    }
+
+    /// A buffer with a non-printable byte (garbage, or a torn write that
+    /// slipped past the seqlock) is rejected rather than handed to a parser.
+    #[test]
+    fn menu_doc_rejects_non_printable() {
+        let mut s = zeroed_state();
+        put_menu_doc(&mut s, b"{\"screen\":\"ID_MAIN\x01MENU\"}", 2);
+        assert_eq!(menu_doc(&s), None);
     }
 
     /// A replay armed on a take recorded as a different rider gets told

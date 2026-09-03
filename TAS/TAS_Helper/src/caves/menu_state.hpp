@@ -5,6 +5,7 @@
 #include "../game_addresses.hpp"
 #include "../external/safetyhook.hpp"
 #include <format>
+#include <string>
 
 // Menu state, read from the MENU OBJECT (not the render text).
 //
@@ -63,55 +64,215 @@ static void ChangePageCb(SafetyHookContext& ctx) {
     if (ReadMenuString((uint32_t)ctx.edx, name, sizeof name)) PublishMenuScreen(name);
 }
 
-// The SELECTOR: the index of the focused menu item within its container.
+// ---------------------------------------------------------------------------
+// The MENU MODEL: the focused item plus every item on the current page, with
+// its label - read by FIELD from the UIT objects (UIT.c / main_menu.c / SR_UIT.c):
 //
-// UI_Menu::Get_Active_Component (RVA 0x1A6B0, __fastcall(ECX = UI_Menu)) walks
-// the page hierarchy to the focused UI_Component. Then, by FIELD reads (UIT.c):
-// the component's parent is [comp+0xC], and the parent container holds its
-// children as a vector [parent+0x2C .. parent+0x30] of UI_Component* - the
-// focused component's position in it is the selector index.
+//   UI_Menu::Get_Active_Component (RVA 0x1A6B0, __fastcall(ECX = UI_Menu)) ->
+//     the focused UI_Component.
+//   UI_Component: +0xC parent, +0x10 std::string name (Get_Name), +0x24 enabled,
+//     +0x25 visible, +0x27 focused.  UI_Container: children vector at
+//     +0x2C..+0x30 of UI_Component*.
+//   UIT::Button (the menu items are Main_Menu::Menu_Button / Action_Button
+//     subclasses): +0x44 Text_Line* (Set_Text_Line).  Labels keep theirs at
+//     +0x28 and are not focusable (Label::Want_Focus = false) - not items.
+//   SR_UIT::Sr_Plane_Text_Line: +4 std::string text (Get_Text returns this+4).
+//
+// An MSVC6 std::string object is {allocator, char* ptr, size, capacity}.
 //
 // Get_Active_Component does an indirect call, so it must run against a live
-// UI_Menu. We only call it while a menu screen is published (menu_screen set;
-// cleared in a level), and under SEH: worst case a page torn down mid-call
-// faults and we publish "no selection" for a poll. Called from the level-scan
-// worker (~10 Hz), never from the game thread.
-static uint32_t ReadSelectorIndex() {
-    if (!g_uiMenu || !g_mainMenuBase || !g_state || !g_state->menu_screen[0]) return 0xFFFFFFFFu;
+// UI_Menu: only while a menu screen is published (cleared in a level), under
+// SEH - worst case a page torn down mid-call faults and this poll publishes
+// nothing. Called from the level-scan worker (~10 Hz), never the game thread.
+// ---------------------------------------------------------------------------
+
+// Image ranges of the UI modules: a component's vtable must lie in
+// Main_Menu.dll or UIT.dll and a text line's in SR_UIT.dll. That is the class
+// test - by field, no virtual calls on children.
+struct ImageRange {
+    uint32_t lo = 0, hi = 0;
+    bool Has(uint32_t p) const { return lo && p >= lo && p < hi; }
+};
+inline ImageRange g_imgMainMenu, g_imgUit, g_imgSrUit;
+
+static ImageRange ImageRangeOf(const char* mod) {
+    ImageRange r{};
+    HMODULE h = GetModuleHandleA(mod);
+    if (!h) return r;
+    auto dos = (IMAGE_DOS_HEADER*)h;
+    auto nt = (IMAGE_NT_HEADERS32*)((uint8_t*)h + dos->e_lfanew);
+    r.lo = (uint32_t)(uintptr_t)h;
+    r.hi = r.lo + nt->OptionalHeader.SizeOfImage;
+    return r;
+}
+
+static constexpr uint32_t kMaxItems = 24;
+static constexpr uint32_t kNameMax = 32;
+static constexpr uint32_t kLabelMax = 40;
+
+struct MenuItem {
+    uint32_t comp = 0;              // the UI_Component (for the write side later)
+    char name[kNameMax] = {};       // UI_Component name (+0x10)
+    char label[kLabelMax] = {};     // the button's text line text
+    uint8_t enabled = 0, visible = 0, focused = 0;
+};
+
+struct MenuSnapshot {
+    uint32_t selector = 0xFFFFFFFFu;  // index into items of the focused one
+    uint32_t count = 0;
+    MenuItem items[kMaxItems];
+};
+
+// A Button-family component's label: [comp+0x44] -> Sr_Plane_Text_Line -> +4 string.
+// The text line's vtable must be SR_UIT's; a Label (text line at +0x28, +0x44
+// off the end of the object) fails this and is not an item.
+static bool ReadItem(uint32_t child, uint32_t focusedComp, MenuItem& it) {
     __try {
-        using GetActiveComponent = uint32_t(__fastcall*)(uint32_t);
-        auto fn = (GetActiveComponent)(uintptr_t)(g_mainMenuBase + 0x1A6B0);
-        const uint32_t comp = fn(g_uiMenu);
-        if (comp < 0x10000) return 0xFFFFFFFFu;
-        const uint32_t parent = *(uint32_t*)(comp + 0xC);
-        if (parent < 0x10000) return 0xFFFFFFFFu;
-        const uint32_t begin = *(uint32_t*)(parent + 0x2C);
-        const uint32_t end = *(uint32_t*)(parent + 0x30);
-        if (begin < 0x10000 || end < begin || (end - begin) > 0x1000) return 0xFFFFFFFFu;
-        const uint32_t count = (end - begin) / 4;
-        // The container's children mix menu items with labels/decorations, so a
-        // raw position jumps around. Count only PEERS of the focused item - the
-        // children with the same vtable (widget class) - to get the clean visual
-        // ordinal (0 = first item of this kind). Field reads only.
-        const uint32_t compVtable = *(uint32_t*)comp;
-        uint32_t ordinal = 0;
-        for (uint32_t i = 0; i < count; i++) {
-            const uint32_t child = *(uint32_t*)(begin + i * 4);
-            if (child == comp) return ordinal;
-            if (child >= 0x10000 && *(uint32_t*)child == compVtable) ordinal++;
-        }
-        return 0xFFFFFFFFu;
+        if (child < 0x10000) return false;
+        const uint32_t vt = *(uint32_t*)child;
+        if (!g_imgMainMenu.Has(vt) && !g_imgUit.Has(vt)) return false;   // not a UIT component
+        const uint32_t tl = *(uint32_t*)(child + 0x44);
+        if (tl < 0x10000 || !g_imgSrUit.Has(*(uint32_t*)tl)) return false;  // no text line: not a button
+        if (!ReadMenuString(tl + 4, it.label, sizeof it.label)) return false;
+        it.comp = child;
+        if (!ReadMenuString(child + 0x10, it.name, sizeof it.name)) it.name[0] = 0;
+        it.enabled = *(uint8_t*)(child + 0x24);
+        it.visible = *(uint8_t*)(child + 0x25);
+        it.focused = (child == focusedComp);
+        return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0xFFFFFFFFu;
+        return false;
     }
 }
 
-// Publish the current selector index (0xFFFFFFFF = no menu / unreadable).
-// Call from the level-scan worker.
-inline void RefreshSelector() {
+using GetActiveComponent = uint32_t(__fastcall*)(uint32_t);
+
+// One Get_Active_Component call, then field reads of the focused item's
+// container. Returns false (empty snapshot) when there is no live menu.
+static bool ReadMenu(MenuSnapshot& out) {
+    out = MenuSnapshot{};
+    if (!g_uiMenu || !g_mainMenuBase || !g_state || !g_state->menu_screen[0]) return false;
+    uint32_t comp = 0, begin = 0, end = 0;
+    __try {
+        auto fn = (GetActiveComponent)(uintptr_t)(g_mainMenuBase + 0x1A6B0);
+        comp = fn(g_uiMenu);
+        if (comp < 0x10000) return false;
+        const uint32_t parent = *(uint32_t*)(comp + 0xC);
+        if (parent < 0x10000) return false;
+        begin = *(uint32_t*)(parent + 0x2C);
+        end = *(uint32_t*)(parent + 0x30);
+        if (begin < 0x10000 || end < begin || (end - begin) > 0x1000) return false;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    const uint32_t n = (end - begin) / 4;
+    for (uint32_t i = 0; i < n && out.count < kMaxItems; i++) {
+        uint32_t child = 0;
+        __try { child = *(uint32_t*)(begin + i * 4); } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+        MenuItem it;
+        if (!ReadItem(child, comp, it)) continue;
+        if (it.focused) out.selector = out.count;
+        out.items[out.count++] = it;
+    }
+    return true;
+}
+
+// Diagnostic: TAS_MENU_DIAG=1 logs the item list whenever it changes.
+inline bool g_menuDiag = false;
+inline uint32_t g_lastDumpHash = 0;
+
+static uint32_t SnapshotHash(const MenuSnapshot& s) {
+    uint32_t h = 2166136261u;
+    auto mix = [&](const char* p) { for (; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u; };
+    mix(g_state ? g_state->menu_screen : "");
+    h = (h ^ s.selector) * 16777619u;
+    for (uint32_t i = 0; i < s.count; i++) {
+        mix(s.items[i].name);
+        mix(s.items[i].label);
+        h = (h ^ s.items[i].enabled) * 16777619u;
+    }
+    return h;
+}
+
+static void DumpIfChanged(const MenuSnapshot& s) {
+    if (!g_menuDiag) return;
+    const uint32_t h = SnapshotHash(s);
+    if (h == g_lastDumpHash) return;
+    g_lastDumpHash = h;
+    Log(std::format("Menu diag: screen='{}' selector={} items={}", g_state->menu_screen,
+                    s.selector == 0xFFFFFFFFu ? -1 : (int)s.selector, s.count));
+    for (uint32_t i = 0; i < s.count; i++) {
+        const auto& it = s.items[i];
+        Log(std::format("  [{}] {}'{}' name='{}' comp={:#x} en={} vis={}", i, it.focused ? "* " : "",
+                        it.label, it.name, it.comp, it.enabled, it.visible));
+    }
+}
+
+// ---- the document (shm v46) ----
+// Labels and names are printable ASCII (ReadMenuString enforces it), so only
+// the two JSON metacharacters need escaping.
+static void AppendJsonString(std::string& out, const char* s) {
+    out += '"';
+    for (; *s; s++) {
+        if (*s == '"' || *s == '\\') out += '\\';
+        out += *s;
+    }
+    out += '"';
+}
+
+// {"screen":..,"sel":N|null,"items":[{"label":..,"id":..,"en":b,"vis":b},..]}
+// Empty string = no menu.
+static std::string BuildDoc(const MenuSnapshot& s) {
+    if (!g_state || !g_state->menu_screen[0]) return {};
+    std::string d;
+    d.reserve(512);
+    d += "{\"screen\":";
+    AppendJsonString(d, g_state->menu_screen);
+    d += ",\"sel\":";
+    d += (s.selector == 0xFFFFFFFFu) ? std::string("null") : std::to_string(s.selector);
+    d += ",\"items\":[";
+    for (uint32_t i = 0; i < s.count; i++) {
+        const auto& it = s.items[i];
+        if (i) d += ',';
+        d += "{\"label\":";
+        AppendJsonString(d, it.label);
+        d += ",\"id\":";
+        AppendJsonString(d, it.name);
+        d += ",\"en\":";
+        d += it.enabled ? "true" : "false";
+        d += ",\"vis\":";
+        d += it.visible ? "true" : "false";
+        d += '}';
+    }
+    d += "]}";
+    return d;
+}
+
+inline std::string g_lastDoc;   // what shm holds (worker thread only)
+
+// Publish under menu_seq, only on change. The bound cannot be hit (24 items
+// of bounded strings stay well under the buffer) but is guarded, not assumed.
+static void PublishDoc(const std::string& doc) {
+    if (!g_state || doc == g_lastDoc) return;
+    if (doc.size() + 1 > TAS_MENU_DOC_MAX) {
+        Log(std::format("Menu state: document too large ({} bytes) - not published", doc.size()));
+        return;
+    }
+    InterlockedIncrement((volatile LONG*)&g_state->menu_seq);   // odd: writing
+    memcpy(g_state->menu_doc, doc.c_str(), doc.size() + 1);
+    InterlockedIncrement((volatile LONG*)&g_state->menu_seq);   // even: stable
+    g_lastDoc = doc;
+}
+
+// Publish the current menu model (selector + document). Call from the
+// level-scan worker.
+inline void RefreshMenu() {
     if (!g_state) return;
-    const uint32_t idx = ReadSelectorIndex();
-    if (g_state->menu_selector != idx) g_state->menu_selector = idx;
+    MenuSnapshot snap;
+    ReadMenu(snap);
+    if (g_state->menu_selector != snap.selector) g_state->menu_selector = snap.selector;
+    PublishDoc(BuildDoc(snap));
+    DumpIfChanged(snap);
 }
 
 static DWORD WINAPI InstallThread(LPVOID) {
@@ -133,6 +294,14 @@ static DWORD WINAPI InstallThread(LPVOID) {
         return 0;
     }
     g_mainMenuBase = (uint32_t)(uintptr_t)base;
+    g_imgMainMenu = ImageRangeOf("Main_Menu.dll");
+    g_imgUit = ImageRangeOf("UIT.dll");
+    g_imgSrUit = ImageRangeOf("SR_UIT.dll");
+    char diag[8] = {};
+    g_menuDiag = GetEnvironmentVariableA("TAS_MENU_DIAG", diag, sizeof diag) && diag[0] == '1';
+    Log(std::format("Menu state: images Main_Menu {:#x}-{:#x} UIT {:#x}-{:#x} SR_UIT {:#x}-{:#x}{}",
+                    g_imgMainMenu.lo, g_imgMainMenu.hi, g_imgUit.lo, g_imgUit.hi, g_imgSrUit.lo, g_imgSrUit.hi,
+                    g_menuDiag ? " (diag on)" : ""));
     g_changePageHook = safetyhook::create_mid(base + 0x1A7C0, ChangePageCb);
     Log(g_changePageHook
             ? std::format("Menu state: hooked UI_Menu::Change_Page at {:p} (Main_Menu.dll {:p})",

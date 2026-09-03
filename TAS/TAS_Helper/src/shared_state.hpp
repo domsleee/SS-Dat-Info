@@ -11,7 +11,8 @@ constexpr size_t TRACE_FRAMES = 384;
 constexpr size_t OBJSNAP_PLAYER_DWORDS = 128;
 constexpr size_t OBJSNAP_PHYSICS_DWORDS = 512;
 
-constexpr uint32_t TAS_SHARED_VERSION = 45; // +menu_selector; v44 menu_screen; v43 seqlocks
+constexpr uint32_t TAS_SHARED_VERSION = 46; // +menu_doc/menu_seq; v45 menu_selector; v44 menu_screen; v43 seqlocks
+constexpr uint32_t TAS_MENU_DOC_MAX = 4096;  // v46 menu document buffer (JSON, NUL-terminated)
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MENU_SCREEN_MAX = 32;   // v44: menu-screen title buffer
 constexpr uint32_t TAS_MAX_TICKS = 65536;
@@ -549,6 +550,18 @@ struct TasSharedState {
     // (0xFFFFFFFF = no menu / unreadable). Read from the menu object by the
     // level-scan worker via UI_Menu::Get_Active_Component; see menu_state.hpp.
     volatile uint32_t menu_selector;
+
+    // v46: the MENU DOCUMENT - the current page's items with their visible
+    // labels and stable ids, as compact JSON, e.g.
+    //   {"screen":"ID_ARCADE_MENU","sel":0,"items":[
+    //     {"label":"Time Attack","id":"ID_ARCADE_TIME_ATTACK_SEQUENCE","en":true,"vis":true}, ...]}
+    // "sel" is the index into "items" of the focused one (null = none) and
+    // equals menu_selector. Empty (menu_doc[0] == 0) while a level runs. Read
+    // by FIELD from the UIT objects (see menu_state.hpp), written by the
+    // level-scan worker only when it changes, under menu_seq (odd = mid-write)
+    // so a reader never sees a half-written document.
+    volatile uint32_t menu_seq;
+    char menu_doc[TAS_MENU_DOC_MAX];
 };
 
 // The C++ and Rust views of this struct MUST agree byte-for-byte — they map the
@@ -557,7 +570,7 @@ struct TasSharedState {
 // Rust side would catch a mismatch, and only if someone ran the Rust tests. Pin
 // it here too so a layout change fails the DLL build immediately.
 // Bump TAS_SHARED_VERSION whenever this number changes.
-static_assert(sizeof(TasSharedState) == 1663568,
+static_assert(sizeof(TasSharedState) == 1667664,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
 
@@ -640,6 +653,8 @@ public:
         state->race_time_cs = 0xFFFFFFFFu;
         state->rider_stance = 0xFFFFFFFFu;         // unknown until the setup object is read
         state->menu_selector = 0xFFFFFFFFu;        // no menu selection until the menu publishes one
+        state->menu_seq = 0;
+        state->menu_doc[0] = 0;                    // no menu document until the menu publishes one
         state->race_start_ts = 0xFFFFFFFFu;
         // Clock-phase pin OFF by default. The v1 pin froze the game during
         // level reloads; v2 (passthrough when behind) still coincided with an

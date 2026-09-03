@@ -17,11 +17,111 @@ use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 /// (see TAS_Helper `level_scan.hpp`) so the UI just reads the index.
 /// " · item N" for the focused menu item (v45), or "" when there is no
 /// selection. The index is a stable per-item id, not the visual row.
+/// The menu document the DLL publishes (shm v46): the current page's items
+/// with their visible labels and stable ids. See `tas_shared::menu_doc`.
+#[derive(serde::Deserialize)]
+struct MenuDoc {
+    #[allow(dead_code)]
+    screen: String,
+    sel: Option<u32>,
+    items: Vec<MenuDocItem>,
+}
+
+#[derive(serde::Deserialize)]
+struct MenuDocItem {
+    label: String,
+    #[allow(dead_code)]
+    id: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    en: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
+    vis: bool,
+}
+
+fn parse_menu_doc(state: &tas_shared::TasSharedState) -> Option<MenuDoc> {
+    tas_shared::menu_doc(state).and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// The focused item's LABEL from the menu document (" \u{203A} Time Attack");
+/// falls back to the bare selector index when the document is not available.
 fn menu_item_suffix(state: &tas_shared::TasSharedState) -> String {
+    if let Some(doc) = parse_menu_doc(state) {
+        if let Some(item) = doc.sel.and_then(|s| doc.items.get(s as usize)) {
+            return format!(" \u{203A} {}", item.label);
+        }
+    }
     if state.menu_selector == u32::MAX {
         String::new()
     } else {
         format!(" \u{00B7} item {}", state.menu_selector)
+    }
+}
+
+#[cfg(test)]
+mod menu_doc_tests {
+    use super::*;
+
+    /// A document exactly as the DLL published it on the Arcade page.
+    const SAMPLE: &str = concat!(
+        r#"{"screen":"ID_ARCADE_MENU","sel":2,"items":["#,
+        r#"{"label":"Time Attack","id":"ID_ARCADE_TIME_ATTACK_SEQUENCE","en":true,"vis":true},"#,
+        r#"{"label":"Race","id":"ID_ARCADE_RACE_SEQUENCE","en":true,"vis":true},"#,
+        r#"{"label":"Pipe","id":"ID_ARCADE_HALF_PIPE_SEQUENCE","en":true,"vis":true},"#,
+        r#"{"label":"Air","id":"ID_ARCADE_STADIUM_RAMP_SEQUENCE","en":true,"vis":true}]}"#
+    );
+
+    fn state_with_doc(doc: &str, seq: u32) -> Box<tas_shared::TasSharedState> {
+        let mut s = tas_shared::zeroed_boxed();
+        s.menu_doc[..doc.len()].copy_from_slice(doc.as_bytes());
+        s.menu_seq.store(seq, std::sync::atomic::Ordering::Relaxed);
+        s.menu_selector = u32::MAX;
+        s
+    }
+
+    /// The chip names the focused item from the document.
+    #[test]
+    fn suffix_is_the_focused_label() {
+        let s = state_with_doc(SAMPLE, 2);
+        assert_eq!(menu_item_suffix(&s), " \u{203A} Pipe");
+    }
+
+    /// The document parses fully - every item keeps its stable id.
+    #[test]
+    fn doc_parses_ids() {
+        let s = state_with_doc(SAMPLE, 2);
+        let doc = parse_menu_doc(&s).expect("parses");
+        assert_eq!(doc.screen, "ID_ARCADE_MENU");
+        let ids: Vec<&str> = doc.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "ID_ARCADE_TIME_ATTACK_SEQUENCE",
+                "ID_ARCADE_RACE_SEQUENCE",
+                "ID_ARCADE_HALF_PIPE_SEQUENCE",
+                "ID_ARCADE_STADIUM_RAMP_SEQUENCE"
+            ]
+        );
+        assert!(doc.items.iter().all(|i| i.en && i.vis));
+    }
+
+    /// Nothing focused (a page transition) shows nothing, never "item null".
+    #[test]
+    fn suffix_empty_when_nothing_focused() {
+        let s = state_with_doc(
+            r#"{"screen":"ID_OPTIONS_MENU","sel":null,"items":[{"label":"Graphics","id":"ID_OPTIONS_GRAPHICS_ADVANCED","en":true,"vis":true}]}"#,
+            2,
+        );
+        assert_eq!(menu_item_suffix(&s), "");
+    }
+
+    /// Without a document (older DLL, or a torn read) the bare index still shows.
+    #[test]
+    fn suffix_falls_back_to_the_index() {
+        let mut s = tas_shared::zeroed_boxed();
+        s.menu_selector = 3;
+        assert_eq!(menu_item_suffix(&s), " \u{00B7} item 3");
     }
 }
 
