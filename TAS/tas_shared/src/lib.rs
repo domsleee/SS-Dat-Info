@@ -13,7 +13,7 @@ pub const OBJSNAP_PLAYER_DWORDS: usize = 128;
 /// at 0x1B4 so the object is at least 0x1D8, and this leaves headroom).
 pub const OBJSNAP_PHYSICS_DWORDS: usize = 512;
 
-pub const TAS_SHARED_VERSION: u32 = 42; // +rider_character, rider_stance (character / stance awareness)
+pub const TAS_SHARED_VERSION: u32 = 43; // +rider_seq / race_seq (seqlocked pairs); v42: +rider_character, rider_stance (character / stance awareness)
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MAX_TICKS: usize = 65536;
 pub const TAS_MAX_SEGMENTS: usize = 32;
@@ -158,15 +158,24 @@ pub fn rider_label(character: u32, stance: u32) -> Option<String> {
 pub fn rider_mismatch_advice(loaded_rider: Option<&str>, live_rider: Option<&str>) -> Option<String> {
     let want = loaded_rider?;
     let have = live_rider?;
-    if want == have {
-        return None;
+    // "Keith · goofy" -> ("Keith", Some("goofy")); "Keith" -> ("Keith", None).
+    // A stamp without a stance (recorded before the setup object was found)
+    // carries no stance claim, so it can only ever disagree on the character
+    // (codex review 2026-09-03: it used to warn against any known stance).
+    fn split(label: &str) -> (&str, Option<&str>) {
+        let mut parts = label.splitn(2, " · ");
+        let character = parts.next().unwrap_or(label);
+        (character, parts.next().filter(|s| !s.is_empty()))
     }
-    let want_char = want.split(" · ").next().unwrap_or(want);
-    let have_char = have.split(" · ").next().unwrap_or(have);
+    let (want_char, want_stance) = split(want);
+    let (have_char, have_stance) = split(have);
     let screen = if want_char != have_char {
         "Select Character (and Select Board for the stance)"
     } else {
-        "Select Board (Stance)"
+        match (want_stance, have_stance) {
+            (Some(a), Some(b)) if a != b => "Select Board (Stance)",
+            _ => return None, // same character; the stances agree or one is unknown
+        }
     };
     Some(format!(
         "this take was recorded as {} but the rider is {}: the physics differ, it will not \
@@ -824,6 +833,14 @@ pub struct TasSharedState {
     /// v42: stance the game builds the rider with: 0 = regular (left-foot
     /// icon, the default), 1 = goofy (right-foot icon); `u32::MAX` = unknown.
     pub rider_stance: u32,
+    /// v43: seqlock over the (rider_character, rider_stance) pair - odd while
+    /// the DLL's worker is writing it, even and unchanged around a clean read.
+    /// Same protocol and same x86-only caveats as `level_ctx_seq`; read the
+    /// pair through [`rider_pair`], never as two plain field reads.
+    pub rider_seq: AtomicU32,
+    /// v43: seqlock over the (race_time_cs, race_start_ts) pair, written on
+    /// the game thread by the race timer. Read through [`race_pair`].
+    pub race_seq: AtomicU32,
 }
 
 /// How many times to retry a torn level-context read before giving up.
@@ -863,6 +880,51 @@ const LEVEL_CTX_RETRIES: usize = 64;
 /// was taken and can be stale by the time the caller acts on it — which is why
 /// the UI re-reads immediately before writing to the live buffer rather than
 /// trusting its frame-start snapshot (see `stop_active_session_for_load`).
+/// One clean read of a seqlocked group (see the caveats above): `None` when
+/// the writer kept it busy for all the retries.
+fn with_seqlock<T>(seq: &AtomicU32, read: impl Fn() -> T) -> Option<T> {
+    for _ in 0..LEVEL_CTX_RETRIES {
+        let s1 = seq.load(Ordering::Acquire);
+        if s1 & 1 != 0 {
+            std::hint::spin_loop();
+            continue; // writer mid-update
+        }
+        let value = read();
+        std::sync::atomic::fence(Ordering::Acquire);
+        if seq.load(Ordering::Relaxed) == s1 {
+            return Some(value);
+        }
+        std::hint::spin_loop(); // torn: the group changed under us
+    }
+    None
+}
+
+/// The live rider as ONE coherent `(character, stance)` pair (v43). Two plain
+/// field reads could pair a new character with the previous stance, and a
+/// recording armed in that window would carry the mixed identity for good.
+/// A read that never settles reports unknown, never a guess.
+pub fn rider_pair(state: &TasSharedState) -> (u32, u32) {
+    with_seqlock(&state.rider_seq, || unsafe {
+        (
+            std::ptr::read_volatile(&state.rider_character),
+            std::ptr::read_volatile(&state.rider_stance),
+        )
+    })
+    .unwrap_or((TAS_CHARACTER_UNKNOWN, u32::MAX))
+}
+
+/// The race timer as ONE coherent `(race_time_cs, race_start_ts)` pair (v43);
+/// `u32::MAX` in either half = not published / unreadable.
+pub fn race_pair(state: &TasSharedState) -> (u32, u32) {
+    with_seqlock(&state.race_seq, || unsafe {
+        (
+            std::ptr::read_volatile(&state.race_time_cs),
+            std::ptr::read_volatile(&state.race_start_ts),
+        )
+    })
+    .unwrap_or((u32::MAX, u32::MAX))
+}
+
 fn with_level_context<T>(state: &TasSharedState, read: impl Fn() -> T) -> Option<T> {
     for _ in 0..LEVEL_CTX_RETRIES {
         let s1 = state.level_ctx_seq.load(Ordering::Acquire);
@@ -1148,8 +1210,8 @@ mod platform {
         /// Live rider stamp (character · stance, v42), `None` until the DLL
         /// has resolved the human rider's loadout.
         pub fn rider(&self) -> Option<String> {
-            let s = self.state();
-            rider_label(s.rider_character, s.rider_stance)
+            let (character, stance) = rider_pair(self.state());
+            rider_label(character, stance)
         }
 
         /// Volatile read of mode (poll-hot field written by DLL).
@@ -1297,7 +1359,8 @@ mod platform {
         }
 
         pub fn rider(&self) -> Option<String> {
-            rider_label(self.state.rider_character, self.state.rider_stance)
+            let (character, stance) = rider_pair(&self.state);
+            rider_label(character, stance)
         }
 
         pub fn restart_state(&self) -> u32 {
@@ -4682,7 +4745,7 @@ mod tests {
         // arg4_source's 4-byte trailing pad, so the total is unchanged at
         // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
         // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_520);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_663_528);
     }
 
     /// Prints field offsets for the out-of-process probes (tools/tas_shm.ps1).
@@ -4693,7 +4756,7 @@ mod tests {
         println!(
             "offsets: version={} command={} mode={} frame_count={} recorded_count={} playback_pos={} \
              replay_ptr={} player_ptr={} player_x={} input_log={} rec_coords={} play_coords={} \
-             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
+             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} rider_seq={} race_seq={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
             offset_of!(TasSharedState, version),
             offset_of!(TasSharedState, command),
             offset_of!(TasSharedState, mode),
@@ -4713,6 +4776,8 @@ mod tests {
             offset_of!(TasSharedState, race_time_cs),
             offset_of!(TasSharedState, race_start_ts),
             offset_of!(TasSharedState, game_in_game),
+            offset_of!(TasSharedState, rider_seq),
+            offset_of!(TasSharedState, race_seq),
             offset_of!(TasSharedState, fpu_control_word),
             offset_of!(TasSharedState, renderer_id),
             offset_of!(TasSharedState, rider_character),
@@ -4764,6 +4829,13 @@ mod tests {
         let character = rider_mismatch_advice(Some("Keith · regular"), Some("Vincent · regular")).unwrap();
         assert!(character.contains("Select Character"), "{}", character);
         assert_eq!(rider_mismatch_advice(Some("Keith · goofy"), Some("Keith · goofy")), None);
+        // A stamp without a stance makes no stance claim: same character = no warning
+        // (codex 2026-09-03: "Keith" vs "Keith · regular" used to warn).
+        assert_eq!(rider_mismatch_advice(Some("Keith"), Some("Keith · regular")), None);
+        assert_eq!(rider_mismatch_advice(Some("Keith · regular"), Some("Keith")), None);
+        assert_eq!(rider_mismatch_advice(Some("Keith"), Some("Keith")), None);
+        let no_stance = rider_mismatch_advice(Some("Keith"), Some("Vincent · regular")).unwrap();
+        assert!(no_stance.contains("Select Character"), "{}", no_stance);
         assert_eq!(rider_mismatch_advice(Some("Keith · goofy"), None), None);
         assert_eq!(rider_mismatch_advice(None, Some("Keith · goofy")), None);
     }

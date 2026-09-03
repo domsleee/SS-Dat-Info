@@ -154,6 +154,19 @@ pub struct RecoverySessionContext {
     /// `serde(default)` so checkpoints written before this field still load.
     #[serde(default)]
     pub level: Option<String>,
+    /// Physics and rider stamps captured while RECORDING (v43 fix): the
+    /// checkpoint writer rebuilds a zeroed shared state, so without these the
+    /// recovered .tasrec and history entry carried no renderer / precision /
+    /// rider stamp and mismatch detection was silently off for them. All
+    /// `serde(default)` so older checkpoints still load.
+    #[serde(default)]
+    pub fpu_control_word: Option<u32>,
+    #[serde(default)]
+    pub renderer_id: Option<u32>,
+    #[serde(default)]
+    pub rider_character: Option<u32>,
+    #[serde(default)]
+    pub rider_stance: Option<u32>,
 }
 
 impl RecoverySessionContext {
@@ -165,7 +178,49 @@ impl RecoverySessionContext {
             end_tick,
             label,
             level: None,
+            fpu_control_word: None,
+            renderer_id: None,
+            rider_character: None,
+            rider_stance: None,
         })
+    }
+
+    /// Carry the live physics / rider stamps: `(fpu_control_word, renderer_id,
+    /// (rider_character, rider_stance))` as read coherently from the live
+    /// shared state. Unknown halves stay `None`.
+    pub fn with_stamps(mut self, live: Option<(u32, u32, (u32, u32))>) -> Self {
+        if let Some((fpu, renderer, (character, stance))) = live {
+            self.fpu_control_word = (fpu != 0).then_some(fpu);
+            self.renderer_id = (renderer != tas_shared::TAS_RENDERER_UNKNOWN).then_some(renderer);
+            self.rider_character = (character != tas_shared::TAS_CHARACTER_UNKNOWN).then_some(character);
+            self.rider_stance = (stance != u32::MAX).then_some(stance);
+        }
+        self
+    }
+
+    /// Write the carried stamps into a rebuilt shared state so a save from it
+    /// stamps the file exactly as a live save would.
+    pub fn apply_stamps(&self, state: &mut tas_shared::TasSharedState) {
+        if let Some(v) = self.fpu_control_word {
+            state.fpu_control_word = v;
+        }
+        if let Some(v) = self.renderer_id {
+            state.renderer_id = v;
+        }
+        if let Some(v) = self.rider_character {
+            state.rider_character = v;
+        }
+        if let Some(v) = self.rider_stance {
+            state.rider_stance = v;
+        }
+    }
+
+    /// The rider stamp as the history entry shows it ("Keith · goofy").
+    pub fn rider_label(&self) -> Option<String> {
+        tas_shared::rider_label(
+            self.rider_character.unwrap_or(tas_shared::TAS_CHARACTER_UNKNOWN),
+            self.rider_stance.unwrap_or(u32::MAX),
+        )
     }
 
     /// Record which track this is, for when the checkpoint comes back as a
@@ -326,6 +381,7 @@ impl RecoveryWriteJob {
     pub fn write(self) -> Result<(), String> {
         let mut state = tas_shared::zeroed_boxed();
         self.snapshot.restore_to(&mut state);
+        self.session.apply_stamps(&mut state);
 
         let tmp_recording_path = temp_path_for(&self.recording_path);
         RecordingFile::save_with_segments(&state, &tmp_recording_path, &self.segments)?;
@@ -1621,6 +1677,20 @@ impl RecordingHistory {
             return false;
         }
         e.level = level;
+        self.bump();
+        true
+    }
+
+    /// Stamp the rider a recovered entry was recorded as (the checkpoint
+    /// carries it; the live rider is unknown during startup). See set_level.
+    pub fn set_rider(&mut self, entry_id: u64, rider: Option<String>) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.rider == rider {
+            return false;
+        }
+        e.rider = rider;
         self.bump();
         true
     }
