@@ -528,7 +528,21 @@ fn scan_drift(
     max_dz: &mut f32,
     last_count: &mut usize,
     bases: &mut Option<(usize, usize)>,
+    latch_arm_generation: &mut u32,
 ) -> (usize, bool) {
+    // A new arm landed since the latch was taken: whatever bases we hold
+    // belong to the previous attempt. A fast replay that starts and finishes
+    // between two UI polls never shows the position falling back below the
+    // old gate, so without this the next run was compared at the old offsets
+    // (codex review 2026-09-03). arm_generation is the durable arm signal.
+    let mut forced_reset = false;
+    if state.arm_generation != *latch_arm_generation {
+        *latch_arm_generation = state.arm_generation;
+        if bases.is_some() {
+            *bases = None;
+            forced_reset = true;
+        }
+    }
     let live_gate = state.gate_index as usize;
     let rec_gate = state.gate_align_rec as usize;
     if live_gate > 0 && rec_gate > 0 {
@@ -544,7 +558,7 @@ fn scan_drift(
         .min((state.recorded_count as usize).saturating_sub(rec_base))
         .min(state.play_coords.len().saturating_sub(play_base))
         .min(state.rec_coords.len().saturating_sub(rec_base));
-    let reset = count < *last_count;
+    let reset = forced_reset || count < *last_count;
     if reset {
         *max_dx = 0.0;
         *max_dz = 0.0;
@@ -665,6 +679,11 @@ struct TasApp {
     /// finish (drives the auto-stop + the 🏁 marker; reset when REC starts).
     finish_scan_cursor: u32,
     finished_at_tick: Option<u32>,
+    /// The HUD race time LATCHED at the moment the crossing was detected (v43
+    /// fix): the label used to re-read the live timer at STOP, and a timer
+    /// that blanked or moved in between turned an exact time into a wrong or
+    /// approximate one.
+    finished_hud_cs: Option<u32>,
 
     // Cached max drift (incremental scan instead of per-frame O(n))
     cached_max_drift_x: f32,
@@ -672,6 +691,8 @@ struct TasApp {
     last_drift_scan_count: usize,
     /// Gate-aligned (play_base, rec_base) latched by `scan_drift`.
     drift_aligned_bases: Option<(usize, usize)>,
+    /// `arm_generation` the drift latch was taken under (see `scan_drift`).
+    drift_latch_arm_generation: u32,
     last_logged_drift_level: u8, // 0=none, 1=any, 2=>=1.0, 3=>=5.0
 
     // Cached plot data (avoid per-frame Vec allocation)
@@ -840,6 +861,7 @@ impl TasApp {
                     let session_label = cp.session.label.clone();
                     let (start, end) = (cp.session.start_tick, cp.session.end_tick);
                     let cp_level = cp.session.level.clone();
+                    let cp_rider = cp.session.rider_label();
                     if history.push_snapshot_data_with_session(
                         cp.snapshot,
                         session_label.clone(),
@@ -855,6 +877,7 @@ impl TasApp {
                             // floating at the top of every track's history. That
                             // is the "my favourited FE runs show on FM" report.
                             history.set_level(id, cp_level);
+                            history.set_rider(id, cp_rider);
                             history.set_pinned(id, true);
                             // Mark recovery with a compact ⟲ glyph and let the
                             // panel render the duration via the normal parsed
@@ -924,10 +947,12 @@ impl TasApp {
             log_read_cursor: 0,
             finish_scan_cursor: 0,
             finished_at_tick: None,
+            finished_hud_cs: None,
             cached_max_drift_x: 0.0,
             cached_max_drift_z: 0.0,
             last_drift_scan_count: 0,
             drift_aligned_bases: None,
+            drift_latch_arm_generation: 0,
             last_logged_drift_level: 0,
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
@@ -1229,6 +1254,7 @@ impl TasApp {
         self.last_mode = TasMode::Off as u32;
         // A fresh recording is about to load — clear the finish-flag marker.
         self.finished_at_tick = None;
+        self.finished_hud_cs = None;
         self.finish_scan_cursor = 0;
         // RE-READ THE LIVE LEVEL. This is the whole reason the guarantee needed
         // more than a coherent read: we just spun up to 250ms waiting for the
@@ -2143,6 +2169,10 @@ impl TasApp {
         // this checkpoint ever comes back, it comes back during startup — when
         // nothing has read the live level yet — so asking then is too late.
         let level = self.level_for_save().map(str::to_string);
+        let live_stamps = self
+            .shared
+            .as_ref()
+            .map(|s| (s.fpu_control_word(), s.renderer_id(), tas_shared::rider_pair(s.state())));
         let maybe_session = {
             let Some(session) = self.active_recording_session.as_mut() else {
                 return;
@@ -2156,7 +2186,9 @@ impl TasApp {
         };
 
         if let Some(session_context) = maybe_session {
-            let session_context = session_context.with_level(level.as_deref());
+            let session_context = session_context
+                .with_level(level.as_deref())
+                .with_stamps(live_stamps);
             self.persist_recovery_snapshot_if_needed(snapshot, &session_context, false);
         }
     }
@@ -2188,11 +2220,7 @@ impl TasApp {
         // trigger, ~5 s below the spawn on Forest Easy - NOT at first
         // movement, which read 3:55.58 for a 3:50.57 run).
         let finish = self.finished_at_tick.map(|tick| {
-            let hud = self
-                .shared
-                .as_ref()
-                .map(|s| s.state().race_time_cs)
-                .unwrap_or(u32::MAX);
+            let hud = self.finished_hud_cs.unwrap_or(u32::MAX);
             if hud != u32::MAX {
                 recording::FinishStamp {
                     cs: hud,
@@ -2815,6 +2843,7 @@ impl eframe::App for TasApp {
                     // the prefix was already checked when it was recorded.
                     self.finish_scan_cursor = continue_from.max(1);
                     self.finished_at_tick = None;
+                    self.finished_hud_cs = None;
                 }
                 // REC stopped (mode went from REC to OFF)
                 if self.last_mode == 1 && current_mode == 0 {
@@ -2871,11 +2900,15 @@ impl eframe::App for TasApp {
                     }
                     if let Some(tick) = cross {
                         self.finished_at_tick = Some(tick);
-                        let hud = self
+                        // Latch the HUD time NOW, in the same poll that saw the
+                        // crossing, as one coherent pair read.
+                        self.finished_hud_cs = self
                             .shared
                             .as_ref()
-                            .map(|s| s.state().race_time_cs)
-                            .filter(|&cs| cs != u32::MAX)
+                            .map(|s| tas_shared::race_pair(s.state()).0)
+                            .filter(|&cs| cs != u32::MAX);
+                        let hud = self
+                            .finished_hud_cs
                             .map(|cs| {
                                 format!(" (race time {})", recording::format_recording_duration(cs))
                             })
@@ -3518,8 +3551,9 @@ impl eframe::App for TasApp {
                                      recorded as another rider will not line up.",
                                 );
                         }
-                        if state.race_time_cs != u32::MAX {
-                            let cs = state.race_time_cs;
+                        let (race_cs, race_start) = tas_shared::race_pair(state);
+                        if race_cs != u32::MAX {
+                            let cs = race_cs;
                             let t = format!(
                                 "\u{23F1} {:01}:{:02}.{:02}",
                                 cs / 6000,
@@ -3534,7 +3568,7 @@ impl eframe::App for TasApp {
                             .on_hover_text(format!(
                                 "Exact race time (from the HUD). start_ts={} — the gate \
                                  clock value (F5 spawn-lottery metric)",
-                                state.race_start_ts
+                                race_start
                             ));
                         }
                     });
@@ -3727,6 +3761,7 @@ impl eframe::App for TasApp {
                         &mut self.cached_max_drift_z,
                         &mut self.last_drift_scan_count,
                         &mut self.drift_aligned_bases,
+                        &mut self.drift_latch_arm_generation,
                     );
                     if reset {
                         self.last_logged_drift_level = 0;
@@ -4039,6 +4074,7 @@ mod tests {
             log_lines_persisted: 0,
             finish_scan_cursor: 0,
             finished_at_tick: None,
+            finished_hud_cs: None,
             timeline_view: timeline::TimelineView::default(),
             timeline_edit: timeline::TimelineEdit::default(),
             pending_input_edit: None,
@@ -4065,6 +4101,7 @@ mod tests {
             cached_max_drift_z: 0.0,
             last_drift_scan_count: 0,
             drift_aligned_bases: None,
+            drift_latch_arm_generation: 0,
             last_logged_drift_level: 0,
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
@@ -4821,6 +4858,7 @@ mod tests {
                 &mut app.cached_max_drift_z,
                 &mut app.last_drift_scan_count,
                 &mut app.drift_aligned_bases,
+                &mut app.drift_latch_arm_generation,
             )
         };
 
@@ -4860,6 +4898,21 @@ mod tests {
         state.playback_pos = 388;
         scan(&mut app, &state);
         assert!(app.drift_aligned_bases.is_none());
+
+        // A new arm (arm_generation bumped) between two polls drops the latch
+        // and restarts the scan even though the position never fell back.
+        state.mode = TasMode::Play as u32;
+        state.playback_pos = 380;
+        state.gate_index = 287;
+        state.gate_align_rec = 299;
+        scan(&mut app, &state);
+        assert_eq!(app.drift_aligned_bases, Some((287, 299)));
+        state.gate_index = 0;
+        state.gate_align_rec = 0;
+        state.arm_generation += 1;
+        let (_, reset) = scan(&mut app, &state);
+        assert!(reset, "a new arm restarts the drift scan");
+        assert!(app.drift_aligned_bases.is_none(), "the previous attempt bases are gone");
     }
 
     #[test]
