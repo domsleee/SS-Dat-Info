@@ -10,6 +10,7 @@
 #include "caves/cave5.hpp"
 #include "caves/frame_limit.hpp"
 #include "caves/race_timer.hpp"
+#include "caves/menu_state.hpp"
 #include "level_scan.hpp"
 
 static TasSharedMemory g_sharedMem;
@@ -149,6 +150,11 @@ bool run() {
             Log("  Race timer: unavailable");
         }
     }
+
+    // Menu state (which screen the game is on) - reads the Main_Menu.dll menu
+    // OBJECT via a Change_Page hook, deferred until that DLL loads. Independent
+    // of the race timer; publishes into the same menu_screen field.
+    menustate::Install(g_addr, state);
 
     Log(std::format("  Renderer plugin at init: {} (x87 control word is sampled on the game thread; see level-scan log lines)",
         renderer::Name(renderer::Detect())));
