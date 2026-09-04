@@ -49,7 +49,17 @@ fn parse_menu_doc(state: &tas_shared::TasSharedState) -> Option<MenuDoc> {
 fn menu_item_suffix(state: &tas_shared::TasSharedState) -> String {
     if let Some(doc) = parse_menu_doc(state) {
         if let Some(item) = doc.sel.and_then(|s| doc.items.get(s as usize)) {
-            return format!(" \u{203A} {}", item.label);
+            // The image-only controls (the page arrows) carry an id and no
+            // text, so name those by id - a bare separator with nothing after
+            // it just looks broken.
+            let name = if item.label.is_empty() {
+                tas_shared::prettify_menu_id(&item.id)
+            } else {
+                item.label.clone()
+            };
+            if !name.is_empty() {
+                return format!(" \u{203A} {}", name);
+            }
         }
     }
     if state.menu_selector == u32::MAX {
@@ -124,6 +134,10 @@ mod menu_doc_tests {
         assert_eq!(menu_item_suffix(&s), " \u{00B7} item 3");
     }
 }
+
+/// Width of the status card ("the card with OFF in it"). Fixed so the card
+/// does not resize as the menu chip / rider / clock text changes underneath it.
+const STATUS_CARD_WIDTH: f32 = 560.0;
 
 fn level_name_from_id(id: u32) -> Option<&'static str> {
     const NAMES: [&str; 10] = [
@@ -3536,12 +3550,16 @@ impl eframe::App for TasApp {
                 let vz = state.velocity_z as f64;
                 let speed_kmh = (vx * vx + vy * vy + vz * vz).sqrt() * 360.0;
                 egui::Frame::group(ui.style()).show(ui, |ui| {
-                    // Mode headline + game context on ONE line: the game-state
-                    // chip used to sit in the transport row, where its
-                    // variable width shifted the buttons around. Here in the
-                    // status card ("the card with OFF in it") it can grow
-                    // freely.
-                    ui.horizontal(|ui| {
+                    // FIXED WIDTH. Everything on the headline row is variable
+                    // text - the menu screen and item, the rider, the physics
+                    // mode, the race clock - so letting the card size to its
+                    // content made it grow and shrink on every menu keypress.
+                    // Pin the width and let the row WRAP instead: the card
+                    // stays put while you navigate.
+                    let card_w = STATUS_CARD_WIDTH.min(ui.available_width());
+                    ui.set_min_width(card_w);
+                    ui.set_max_width(card_w);
+                    ui.horizontal_wrapped(|ui| {
                         ui.colored_label(
                             mode_color,
                             egui::RichText::new(headline.clone()).strong().size(16.0),
