@@ -181,16 +181,24 @@ struct GameAddresses {
     static constexpr uint32_t ROOT_PTR_OFFSET = 0x1D5450;
     static constexpr uint32_t LEVEL_PATH_PTR_OFFSET = 0x1D3304;
     static constexpr uint32_t KEYBOARD_OBJ_OFFSET = 0x530;
-    // The GAME-SETUP object (the menu's track / rider / controller selection)
-    // is the NEXT slot of the same Supreme_Keyboard root: [root+0x540] (also
-    // mirrored at +0x648). It is NOT the keyboard object: [root+0x530] is
-    // Cetsup::Win32_Keyboard (RTTI, probed 2026-09-04), whose +0x190.. bytes
-    // are input state, not strings - reading the setup through 0x530 fails
-    // every string check and left the rider stance and the level id unknown
-    // on every race since accf7a7. Probed 2026-09-04 by layout: the object
-    // whose +0x190/+0x1B0/+0x1D0/+0x290 strings read Forest/Hard/Keith/Keyboard
-    // is held at root+0x540 and root+0x648, nowhere else in the root.
-    static constexpr uint32_t SETUP_OBJ_OFFSET = 0x540;
+    // The GAME-SETUP strings (the menu's area / track / rider selection) do NOT
+    // live off this root at all. They are fields of the 3D ENGINE object -
+    // HMG_3DE.dll's Threedee_Engine::Engine, RTTI-confirmed - which the menu
+    // updates as you choose. That object is reachable only from the heap: a
+    // scan of EVERY module image found exactly one static pointer to it,
+    // Main_Menu.dll+0x6B9A4 (the menu's cached engine pointer; the decompile
+    // sets it once, `DAT_1006b9a4 = param_4`). That static is the anchor -
+    // verified across a relaunch at a different module base, and it tracks the
+    // menu selection live (Alpine/Easy at the menu -> Forest/Medium in the race).
+    //
+    // Two silent regressions came from guessing an offset off the keyboard
+    // root instead: +0x530 (accf7a7) is Cetsup::Win32_Keyboard, whose bytes
+    // there are input state, and +0x540 (627ff63) only *transiently* held the
+    // engine - the object's distance from that root differs every launch. Both
+    // left the rider stance and the level id unresolved on every race. The
+    // pointer is now validated by the object's own vtable before it is used.
+    static constexpr uint32_t MAIN_MENU_ENGINE_PTR_RVA = 0x6B9A4;   // in Main_Menu.dll
+    static constexpr uint32_t HMG3DE_ENGINE_VTABLE_RVA = 0x25B9C;   // in HMG_3DE.dll
     static constexpr uint32_t DI_BUFFER_PTR_OFFSET = 0x30;
 
     // Action state byte offsets from keyboard object (kbobj = [root+0x530])

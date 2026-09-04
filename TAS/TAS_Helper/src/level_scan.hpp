@@ -16,7 +16,7 @@
 // In-process level detection.
 //
 // The level identity is read from the GAME-SETUP OBJECT (setup_object.hpp): the
-// menu's selection, reached through the stable [[player_base]+0x540] chain
+// menu's selection, reached through the static Main_Menu engine pointer
 // cave2 already uses for input. It names the area AND the difficulty as plain
 // strings, so there is NO heap scan any more (it used to walk tens of MiB per
 // scan, about 165 ms, and only ever answered the difficulty; the object
@@ -65,7 +65,7 @@ inline HANDLE g_thread = nullptr;
 // give.
 inline uint32_t g_levelPathPtrAddr = 0;
 // GameAddresses::player_base (SG+0x1D5450): head of the setup-object chain
-// [[player_base]+0x540]. Set by Start(); the difficulty and the rider stance
+// the setup object. Set by Start(); the difficulty and the rider stance
 // are read from that object instead of scanning the heap.
 inline uint32_t g_playerBaseAddr = 0;
 inline uint32_t (*g_readPtr)(uint32_t) = nullptr;
@@ -323,7 +323,7 @@ static void noteScanCost(LARGE_INTEGER t0, LARGE_INTEGER t1) {
 }
 
 // Identify the level from the game-setup object (setup_object.hpp) - the
-// authoritative menu selection, read through the stable [[player_base]+0x540]
+// authoritative menu selection, read through the static engine pointer
 // chain with NO heap walk. It names the area AND the difficulty, so it settles
 // the one pair the path asset cannot (Village Easy vs Village Hard both load
 // ".../village/Tracks/easy/"). `areaHint` (from the reliable path) is a
@@ -345,7 +345,7 @@ static int32_t scanLevelId(int* outBest, int* outSecond, int areaHint) {
     // Practice (area 3) needs no setup object; every other area needs its
     // difficulty. A failed read leaves empty strings, which LevelIdFrom rejects
     // for the non-practice areas and ignores for practice.
-    gamesetup::Read(g_playerBaseAddr, &setup);
+    gamesetup::Read(&setup);
     const int id = levelpath::LevelIdFrom(areaHint, setup.area, setup.difficulty);
     if (id < 0) return -1;
     if (outBest) *outBest = MIN_TRACK_HITS;  // a clean read is fully confident

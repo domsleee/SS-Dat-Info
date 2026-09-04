@@ -1223,7 +1223,7 @@ pub fn menu_command_result(state: &TasSharedState, seq: u32) -> Option<u32> {
 /// Turn it into a human label ("Arcade Choose Track"): drop the `ID_` prefix
 /// and title-case the underscore-separated words. Anything not in that shape is
 /// returned unchanged.
-fn prettify_menu_id(id: &str) -> String {
+pub fn prettify_menu_id(id: &str) -> String {
     let body = id.strip_prefix("ID_").unwrap_or(id);
     if body.is_empty() {
         return id.to_string();
