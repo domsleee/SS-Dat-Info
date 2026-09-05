@@ -103,3 +103,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cd TAS && cargo test --release
+      - name: Build TAS native DLL
+        shell: pwsh
+        run: |
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          & "$vsPath\MSBuild\Current\Bin\MSBuild.exe" TAS/TAS_Helper/TAS_Helper.vcxproj /v:minimal /p:Configuration=Release /p:Platform=Win32 /m
+      - name: Test TAS native policies
+        shell: pwsh
+        run: ./TAS/tools/test_dll_hidden.ps1

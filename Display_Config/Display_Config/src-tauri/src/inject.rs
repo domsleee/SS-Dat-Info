@@ -95,11 +95,9 @@ pub async fn run_tas_inject() -> Result<String, String> {
         // Non-zero now also covers a loaded DLL whose TAS_Initialize refused
         // the process (unsupported build, hook failure): Injector.log says
         // which step failed and TAS_Helper.log (next to Supreme.exe) says why.
-        return Err(
-            "Injector.exe failed.\nIs Supreme.exe running? If so, see \
+        return Err("Injector.exe failed.\nIs Supreme.exe running? If so, see \
              Display_Config_Resources\\Injector.log and TAS_Helper.log."
-                .to_string(),
-        );
+            .to_string());
     }
 
     // Injector.exe propagates LoadLibrary/TAS_Initialize failures. Keep this

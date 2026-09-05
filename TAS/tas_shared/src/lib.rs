@@ -1321,6 +1321,9 @@ mod platform {
     const FILE_MAP_ALL_ACCESS: u32 = 0xF001F;
 
     extern "system" {
+        #[cfg(test)]
+        fn CreateFileMappingA(file: Handle, attrs: *const std::ffi::c_void, protect: u32,
+            size_high: u32, size_low: u32, name: *const u8) -> Handle;
         fn OpenFileMappingA(desired_access: u32, inherit_handle: i32, name: *const u8) -> Handle;
         fn MapViewOfFile(
             file_mapping: Handle,
@@ -1344,6 +1347,9 @@ mod platform {
 
     impl TasSharedMemoryClient {
         pub fn open() -> Result<Self, String> {
+            if cfg!(test) {
+                return Err("Unit tests must not open the live game mapping".into());
+            }
             let name = CString::new(TAS_SHARED_MEMORY_NAME).unwrap();
             unsafe {
                 let handle = OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, name.as_ptr() as *const u8);
@@ -1369,6 +1375,24 @@ mod platform {
                 }
 
                 Ok(Self { handle, ptr })
+            }
+        }
+
+        #[cfg(test)]
+        pub fn new_test_mapping() -> Self {
+            unsafe {
+                // Unnamed pagefile-backed mapping: same Windows client code,
+                // but no game can see or consume these test commands.
+                let handle = CreateFileMappingA((-1isize) as Handle, std::ptr::null(),
+                    0x04, 0, std::mem::size_of::<TasSharedState>() as u32, std::ptr::null());
+                assert!(!handle.is_null(), "CreateFileMappingA failed");
+                let ptr = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0) as *mut TasSharedState;
+                if ptr.is_null() {
+                    CloseHandle(handle);
+                    panic!("MapViewOfFile failed");
+                }
+                (*ptr).version = TAS_SHARED_VERSION;
+                Self { handle, ptr }
             }
         }
 
@@ -5553,20 +5577,27 @@ mod tests {
     }
 
     // ========== send_command policy: fft forced to 0 on arm ==========
-    // These tests verify the fft=0 enforcement via the platform-independent
-    // stub path (non-Windows) or live shared memory (Windows with DLL).
+    // These tests use private memory, never the live game mapping.
 
     fn make_client_or_skip() -> Option<TasSharedMemoryClient> {
-        // On non-Windows, open() always fails so we use new_stub().
-        // On Windows without game, open() fails too.
         #[cfg(not(windows))]
         {
             Some(TasSharedMemoryClient::new_stub())
         }
         #[cfg(windows)]
         {
-            TasSharedMemoryClient::open().ok()
+            Some(TasSharedMemoryClient::new_test_mapping())
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn unit_tests_cannot_open_live_game_memory() {
+        assert!(TasSharedMemoryClient::open().is_err());
+        let mut a = TasSharedMemoryClient::new_test_mapping();
+        let b = TasSharedMemoryClient::new_test_mapping();
+        a.send_command(TasCommand::ArmRec);
+        assert_eq!(b.state().command, TasCommand::Idle as u32);
     }
 
     #[test]
