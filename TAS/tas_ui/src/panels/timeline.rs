@@ -52,15 +52,9 @@ pub fn format_game_time(tick: u32, timer_anchor: u32) -> String {
 /// unidentified recordings.
 pub fn game_timer_anchor(state: &TasSharedState, remembered_level: Option<&str>) -> u32 {
     let level = crate::level::resolved_level_code(state).or(remembered_level);
-    crate::start_line::start_cross_tick(
-        &state.rec_coords,
-        state.recorded_count,
-        level,
-    )
-    .or_else(|| {
-        crate::recording::detect_first_moving(&state.rec_coords, state.recorded_count)
-    })
-    .unwrap_or(0)
+    crate::start_line::start_cross_tick(&state.rec_coords, state.recorded_count, level)
+        .or_else(|| crate::recording::detect_first_moving(&state.rec_coords, state.recorded_count))
+        .unwrap_or(0)
 }
 
 fn row_index(bit: u8) -> Option<usize> {
@@ -189,6 +183,29 @@ struct BlockDrag {
     mode: DragMode,
     /// The event as it was when the drag began — used to describe the edit.
     orig: InputEvent,
+    pointer_start_x: f32,
+}
+
+fn dragged_event(drag: &BlockDrag, pointer_x: f32, px_per_tick: f32, total: u32) -> InputEvent {
+    let dt = ((pointer_x - drag.pointer_start_x) / px_per_tick).round() as i64;
+    let mut event = drag.orig;
+    match drag.mode {
+        DragMode::Start => {
+            event.start =
+                (event.start as i64 + dt).clamp(0, event.end as i64 - MIN_LEN as i64) as u32;
+        }
+        DragMode::End => {
+            event.end = (event.end as i64 + dt)
+                .clamp(event.start as i64 + MIN_LEN as i64, total as i64)
+                as u32;
+        }
+        DragMode::Move => {
+            let len = event.end - event.start;
+            event.start = (event.start as i64 + dt).clamp(0, (total - len) as i64) as u32;
+            event.end = event.start + len;
+        }
+    }
+    event
 }
 
 /// Persistent edit state for the timeline (selection + active block drag +
@@ -217,9 +234,9 @@ pub struct TimelineOutcome {
 fn edit_action_label(mode: DragMode, orig: InputEvent, now: InputEvent) -> String {
     let k = ROW_LABELS[row_index(orig.bit).unwrap_or(0)];
     match mode {
-        DragMode::Move => format!("Moved {} {}→{}t", k, orig.start, now.start),
-        DragMode::Start => format!("Set {} start {}→{}t", k, orig.start, now.start),
-        DragMode::End => format!("Set {} end {}→{}t", k, orig.end, now.end),
+        DragMode::Move => format!("Moved {} {} to {}t", k, orig.start, now.start),
+        DragMode::Start => format!("Set {} start {} to {}t", k, orig.start, now.start),
+        DragMode::End => format!("Set {} end {} to {}t", k, orig.end, now.end),
     }
 }
 
@@ -304,7 +321,7 @@ pub fn show(
     // would otherwise suppress zoom. rect.contains works regardless of which
     // widget is topmost.
     if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
-        if rect.contains(p) {
+        if rect.contains(p) && edit.drag.is_none() {
             let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
             if scroll_y.abs() > 0.0 {
                 let frac = ((p.x - bar_left) / bar_width).clamp(0.0, 1.0);
@@ -415,7 +432,9 @@ pub fn show(
             let Some(row_idx) = row_index(ev.bit) else {
                 continue;
             };
-            if ev.end <= view.start || ev.start >= view.end {
+            if (ev.end <= view.start || ev.start >= view.end)
+                && !edit.drag.as_ref().is_some_and(|drag| drag.idx == i)
+            {
                 continue;
             }
             let color = ROW_COLORS[row_idx].1;
@@ -459,6 +478,7 @@ pub fn show(
                     idx: i,
                     mode: DragMode::Start,
                     orig: ev,
+                    pointer_start_x: ui.input(|i| i.pointer.press_origin().map_or(x0, |p| p.x)),
                 });
                 edit.selected = Some(ev);
             } else if rr.drag_started() {
@@ -466,6 +486,7 @@ pub fn show(
                     idx: i,
                     mode: DragMode::End,
                     orig: ev,
+                    pointer_start_x: ui.input(|i| i.pointer.press_origin().map_or(x1, |p| p.x)),
                 });
                 edit.selected = Some(ev);
             } else if br.drag_started() {
@@ -473,43 +494,21 @@ pub fn show(
                     idx: i,
                     mode: DragMode::Move,
                     orig: ev,
+                    pointer_start_x: ui
+                        .input(|i| i.pointer.press_origin().map_or(block.center().x, |p| p.x)),
                 });
                 edit.selected = Some(ev);
             }
 
             if let Some(drag) = &edit.drag {
                 if drag.idx == i {
-                    let delta = lr.drag_delta().x + rr.drag_delta().x + br.drag_delta().x;
-                    let dt = (delta / pxpt).round() as i64;
-                    if dt != 0 {
-                        let mut e = edit.work[i];
-                        match drag.mode {
-                            DragMode::Start => {
-                                let ns =
-                                    (e.start as i64 + dt).clamp(0, e.end as i64 - MIN_LEN as i64);
-                                e.start = ns as u32;
-                            }
-                            DragMode::End => {
-                                let ne = (e.end as i64 + dt)
-                                    .clamp(e.start as i64 + MIN_LEN as i64, total as i64);
-                                e.end = ne as u32;
-                            }
-                            DragMode::Move => {
-                                let len = e.end - e.start;
-                                let mut ns = e.start as i64 + dt;
-                                if ns < 0 {
-                                    ns = 0;
-                                }
-                                if ns + len as i64 > total as i64 {
-                                    ns = total as i64 - len as i64;
-                                }
-                                e.start = ns as u32;
-                                e.end = e.start + len;
-                            }
+                    if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
+                        let e = dragged_event(drag, pointer.x, pxpt, total);
+                        if e != edit.work[i] {
+                            edit.work[i] = e;
+                            edit.selected = Some(e);
+                            edited = true;
                         }
-                        edit.work[i] = e;
-                        edit.selected = Some(e);
-                        edited = true;
                     }
                     if lr.drag_stopped() || rr.drag_stopped() || br.drag_stopped() {
                         outcome.action_label =
@@ -877,6 +876,144 @@ fn active_timeline_tick(state: &TasSharedState) -> Option<(usize, ActiveTickMode
 mod tests {
     use super::*;
     use tas_shared::{zeroed_boxed, TasMode};
+
+    #[test]
+    fn edit_labels_use_readable_text() {
+        let orig = InputEvent {
+            bit: 1,
+            start: 20,
+            end: 60,
+        };
+        let now = InputEvent {
+            bit: 1,
+            start: 25,
+            end: 65,
+        };
+        assert_eq!(
+            edit_action_label(DragMode::Move, orig, now),
+            "Moved L 20 to 25t"
+        );
+        assert_eq!(
+            edit_action_label(DragMode::Start, orig, now),
+            "Set L start 20 to 25t"
+        );
+        assert_eq!(
+            edit_action_label(DragMode::End, orig, now),
+            "Set L end 60 to 65t"
+        );
+    }
+
+    #[test]
+    fn drag_reverses_without_sticking_after_clamping() {
+        let drag = BlockDrag {
+            idx: 0,
+            mode: DragMode::Move,
+            orig: InputEvent {
+                bit: 1,
+                start: 20,
+                end: 60,
+            },
+            pointer_start_x: 100.0,
+        };
+        assert_eq!(dragged_event(&drag, -100.0, 1.0, 100).start, 0);
+        assert_eq!(dragged_event(&drag, 100.0, 1.0, 100), drag.orig);
+        assert_eq!(dragged_event(&drag, 300.0, 1.0, 100).end, 100);
+    }
+
+    #[test]
+    fn block_drag_tracks_total_pointer_motion_and_release() {
+        for mode in [DragMode::Start, DragMode::End, DragMode::Move] {
+            for steps in [1, 40] {
+                let ctx = egui::Context::default();
+                let mut state = zeroed_boxed();
+                state.recorded_count = 100;
+                state.input_log[20..60].fill(1);
+                let mut view = TimelineView { start: 0, end: 100 };
+                let mut edit = TimelineEdit::default();
+                let mut from = 0;
+                let mut frame = |events| {
+                    let mut result = TimelineOutcome::default();
+                    let output = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(900.0, 400.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            egui::CentralPanel::default().show(ctx, |ui| {
+                                result = show(ui, &state, None, &mut view, &mut from, &mut edit);
+                            });
+                        },
+                    );
+                    if let Some(events) = &result.events {
+                        super::super::input_script::apply_events_to_log(
+                            &mut state.input_log,
+                            100,
+                            events,
+                        );
+                    }
+                    (result, output)
+                };
+                frame(vec![]);
+                let (_, output) = frame(vec![]);
+                let block = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::epaint::Shape::Rect(r)
+                            if r.fill == ROW_COLORS[0].1
+                                && (r.rect.height() - 10.0).abs() < 0.1 =>
+                        {
+                            Some(r.rect)
+                        }
+                        _ => None,
+                    })
+                    .expect("rendered LEFT block");
+                let pxpt = block.width() / 40.0;
+                let x = match mode {
+                    DragMode::Start => block.left() + 2.0,
+                    DragMode::End => block.right() - 2.0,
+                    DragMode::Move => block.center().x,
+                };
+                let press = egui::pos2(x, block.center().y);
+                let button = |pos, pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                };
+                frame(vec![egui::Event::PointerMoved(press)]);
+                frame(vec![button(press, true)]);
+                for step in 1..=steps {
+                    let pos = press + egui::vec2(20.0 * step as f32 / steps as f32, 0.0);
+                    assert!(!frame(vec![egui::Event::PointerMoved(pos)]).0.commit_undo);
+                }
+                let end = press + egui::vec2(25.0, 0.0);
+                let (result, _) = frame(vec![egui::Event::PointerMoved(end), button(end, false)]);
+                assert!(result.commit_undo, "release must commit exactly once");
+                let expected = dragged_event(
+                    &BlockDrag {
+                        idx: 0,
+                        mode,
+                        orig: InputEvent {
+                            bit: 1,
+                            start: 20,
+                            end: 60,
+                        },
+                        pointer_start_x: x,
+                    },
+                    end.x,
+                    pxpt,
+                    100,
+                );
+                assert_eq!(result.events.unwrap(), vec![expected]);
+                assert!(!frame(vec![]).0.commit_undo);
+            }
+        }
+    }
 
     #[test]
     fn timeline_time_uses_compact_clock_format() {
