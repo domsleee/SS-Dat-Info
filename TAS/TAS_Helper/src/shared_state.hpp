@@ -11,7 +11,7 @@ constexpr size_t TRACE_FRAMES = 384;
 constexpr size_t OBJSNAP_PLAYER_DWORDS = 128;
 constexpr size_t OBJSNAP_PHYSICS_DWORDS = 512;
 
-constexpr uint32_t TAS_SHARED_VERSION = 48; // +menu_cmd_screen; v47 menu command channel; v46 menu_doc; v45 menu_selector
+constexpr uint32_t TAS_SHARED_VERSION = 49; // protected internal STOP command; layout unchanged
 constexpr uint32_t TAS_MENU_DOC_MAX = 4096;  // v46 menu document buffer (JSON, NUL-terminated)
 constexpr uint32_t TAS_MENU_CMD_TARGET_MAX = 64;  // v47 menu command target (id or label, NUL-terminated)
 // v47 menu_cmd_kind
@@ -46,6 +46,7 @@ enum TasCommand : uint32_t {
     CMD_ARM_REC      = 1,
     CMD_ARM_PLAY     = 2,
     CMD_STOP         = 3,
+    CMD_STOP_FOR_RESTART = 9, // internal stop: protect live input across restart
     CMD_ARM_CONTINUE = 4,  // PLAY 0..continue_from_frame, then auto-switch to REC
     CMD_RESTART      = 5,  // In-process F5 restart (no Pico/focus needed)
     CMD_SNAPSHOT     = 6,  // PROTOTYPE: capture writable memory snapshot at this frame

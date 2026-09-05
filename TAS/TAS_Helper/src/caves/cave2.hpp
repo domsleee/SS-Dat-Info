@@ -559,8 +559,11 @@ static constexpr LONG CAVE2_CMD_CLAIMED_STOP = -1;
 // Apply the complete TAS -> OFF transition. No logging/formatting/float
 // arithmetic: this is called from the Cycle mid-hook and from the
 // out-of-cycle consumers above.
-static void ApplyStopTransition(TasSharedState* s, bool notifyObserverNow) {
+static void ApplyStopTransition(TasSharedState* s, bool notifyObserverNow, bool protectRestart) {
     static constexpr uint32_t ZERO_BITS = 0;
+    // Install protection before publishing OFF so real keys cannot enter the
+    // restart window. Ordinary STOP still releases it for menu navigation.
+    s->cont_suppress_input = protectRestart ? 1u : 0u;
     s->mode = MODE_OFF;
     s->cave2_injecting = 0;
     if (notifyObserverNow) {
@@ -569,7 +572,6 @@ static void ApplyStopTransition(TasSharedState* s, bool notifyObserverNow) {
         DeferTasInputRelease(s, g_cave2Addr);
     }
     s->continue_from_frame = 0;
-    s->cont_suppress_input = 0;
     g_cave2_contArmed = 0;
     ClearSpeedHandoff(s);
     ClearGateAlign(s);
@@ -582,11 +584,13 @@ static void ApplyStopTransition(TasSharedState* s, bool notifyObserverNow) {
 // and cleanup write. Compare-exchange on the final step avoids erasing a newer
 // command if a misbehaving writer ignored the non-idle slot while cleanup ran.
 static bool TryProcessStopCommand(TasSharedState* s, bool notifyObserverNow) {
+    LONG expected = InterlockedCompareExchange((volatile LONG*)&s->command, CMD_IDLE, CMD_IDLE);
+    if (expected != CMD_STOP && expected != CMD_STOP_FOR_RESTART) return false;
     LONG previous = InterlockedCompareExchange(
-        (volatile LONG*)&s->command, CAVE2_CMD_CLAIMED_STOP, CMD_STOP);
-    if (previous != CMD_STOP) return false;
+        (volatile LONG*)&s->command, CAVE2_CMD_CLAIMED_STOP, expected);
+    if (previous != expected) return false;
 
-    ApplyStopTransition(s, notifyObserverNow);
+    ApplyStopTransition(s, notifyObserverNow, expected == CMD_STOP_FOR_RESTART);
     InterlockedCompareExchange(
         (volatile LONG*)&s->command, CMD_IDLE, CAVE2_CMD_CLAIMED_STOP);
     return true;
@@ -603,7 +607,7 @@ static bool ProcessCommand(TasSharedState* s) {
         (volatile LONG*)&s->command, CMD_IDLE, CMD_IDLE);
     if (cmd == CMD_IDLE) return true;
     if ((LONG)cmd == CAVE2_CMD_CLAIMED_STOP) return false;
-    if (cmd == CMD_STOP) {
+    if (cmd == CMD_STOP || cmd == CMD_STOP_FOR_RESTART) {
         TryProcessStopCommand(s, true);
         return true;
     }
