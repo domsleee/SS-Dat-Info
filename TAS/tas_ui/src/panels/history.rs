@@ -757,7 +757,7 @@ fn parse_snapshot_label(label: &str) -> Parts {
     // Unrecognised label: dump it whole into context, no total.
     Parts {
         total: String::new(),
-        context: label.to_string(),
+        context: label.replace('→', " to "),
         is_marker: false,
     }
 }
@@ -765,6 +765,15 @@ fn parse_snapshot_label(label: &str) -> Parts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_timeline_edit_labels_replace_unsupported_arrow() {
+        for label in ["Moved L 20→25t", "Set L start 20→25t", "Set L end 60→65t"] {
+            let parts = parse_snapshot_label(label);
+            assert!(parts.total.is_empty());
+            assert_eq!(parts.context, label.replace('→', " to "));
+        }
+    }
 
     fn history_frame(
         ctx: &egui::Context,
