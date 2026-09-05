@@ -150,6 +150,60 @@ fn serialised_stop_then_restart(client: &mut tas_shared::TasSharedMemoryClient) 
     send_arm_continue_and_observe_outcome(client)
 }
 
+/// Exercise the actual controller and injected DLL up to the first restart
+/// boundary. No recording replacement or fabricated DLL acknowledgement.
+pub fn run_input_protection() -> bool {
+    use tas_shared::transport::{Arm, ArmConfig, StepOutcome, TransportController};
+
+    println!("CONT input protection: real controller and live DLL");
+    let mut client = harness::connect();
+    harness::stop_competing_tas_ui_writer();
+    harness::print_status(&client);
+    let original_speed = client.state().playback_speed;
+    let config = ArmConfig {
+        arm: Arm::Continue,
+        catchup_speed: original_speed,
+        continue_from_frame: 4705,
+        gate_align_rec: 299,
+        target: None,
+        max_retries: 30,
+        resume_speed: original_speed,
+        predict_bucket: false,
+    };
+    let mut controller = TransportController::new(config);
+    // Same setup as tas_ui::queue_restart_then, immediately before stepping.
+    client.state_mut().cont_suppress_input = 1;
+    let before = unsafe { std::ptr::read_volatile(&client.state().cont_suppress_input) };
+    println!("Before CONT internal STOP: cont_suppress_input={before}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut passed = false;
+    loop {
+        match controller.step(&mut client) {
+            StepOutcome::Wait { .. } => {
+                let state = client.state();
+                let mode = unsafe { std::ptr::read_volatile(&state.mode) };
+                let command = unsafe { std::ptr::read_volatile(&state.command) };
+                let protected = unsafe { std::ptr::read_volatile(&state.cont_suppress_input) };
+                println!("After DLL acknowledged STOP: mode={mode} command={command} cont_suppress_input={protected}");
+                passed = mode == TasMode::Off as u32 && command == 0 && protected == 1;
+                println!("{}: live input must remain blocked before the restart", if passed { "PASS" } else { "FAIL" });
+                break;
+            }
+            StepOutcome::InProgress if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            outcome => {
+                eprintln!("FAIL: STOP acknowledgement unavailable: {outcome:?}");
+                break;
+            }
+        }
+    }
+    // End the diagnostic before Restart/ArmContinue can alter the recording.
+    client.state_mut().cont_suppress_input = 0;
+    client.state_mut().playback_speed = original_speed;
+    passed
+}
+
 pub fn run() -> bool {
     println!("=== Stop→Restart race vs serialised, against live DLL ===\n");
 

@@ -205,6 +205,10 @@ fn main() {
             let ok = escape_speedup::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
+        "cont-input-protection" => {
+            let ok = cont_restart_race::run_input_protection();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
         "cont-restart-race" => {
             // Verifies the cave2 contract that tas_ui's Stop→Restart
             // serialisation depends on: confirms (1) sending Stop + Restart
