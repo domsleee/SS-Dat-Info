@@ -16,8 +16,8 @@
 // In-process level detection.
 //
 // The level identity is read from the GAME-SETUP OBJECT (setup_object.hpp): the
-// menu's selection, reached through the static Main_Menu engine pointer
-// cave2 already uses for input. It names the area AND the difficulty as plain
+// menu's selection, reached through the executable's own config pointer chain.
+// It names the area AND the difficulty as plain
 // strings, so there is NO heap scan any more (it used to walk tens of MiB per
 // scan, about 165 ms, and only ever answered the difficulty; the object
 // answers both in ~0 ms and settles Village Easy vs Village Hard, which the
@@ -64,10 +64,6 @@ inline HANDLE g_thread = nullptr;
 // for that transition. Detecting it needs a per-track signal the path cannot
 // give.
 inline uint32_t g_levelPathPtrAddr = 0;
-// GameAddresses::player_base (SG+0x1D5450): head of the setup-object chain
-// the setup object. Set by Start(); the difficulty and the rider stance
-// are read from that object instead of scanning the heap.
-inline uint32_t g_playerBaseAddr = 0;
 inline uint32_t (*g_readPtr)(uint32_t) = nullptr;
 
 // frame_count at the last context change. Supreme::Cycle is FROZEN for the whole
@@ -323,7 +319,7 @@ static void noteScanCost(LARGE_INTEGER t0, LARGE_INTEGER t1) {
 }
 
 // Identify the level from the game-setup object (setup_object.hpp) - the
-// authoritative menu selection, read through the static engine pointer
+// authoritative menu selection, read through the executable config pointer
 // chain with NO heap walk. It names the area AND the difficulty, so it settles
 // the one pair the path asset cannot (Village Easy vs Village Hard both load
 // ".../village/Tracks/easy/"). `areaHint` (from the reliable path) is a
@@ -542,7 +538,7 @@ static DWORD WINAPI threadProc(LPVOID param) {
             Sleep(100);
             pollLevelContext(s);
             renderer::Refresh(s);
-            rider::Refresh(s, g_playerBaseAddr);
+            rider::Refresh(s);
             menustate::Housekeeping();   // menu doc: clear when no menu executes, expire stale commands (no UI access)
             if (cycleFrozen()) { TryProcessStopCommand(s, false); break; }
             if (s->level_epoch != epochAtSleep) break;
@@ -556,11 +552,10 @@ static DWORD WINAPI threadProc(LPVOID param) {
 // only in a diagnostic build; freeze detection and out-of-cycle STOP handling
 // then cannot run.
 inline void Start(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readPtr)(uint32_t),
-                  volatile uint32_t* cycleMs, uint32_t playerBaseAddr) {
+                  volatile uint32_t* cycleMs) {
     g_levelPathPtrAddr = levelPathPtrAddr;
     g_readPtr = readPtr;
     g_cycleMs = cycleMs;
-    g_playerBaseAddr = playerBaseAddr;
     g_lastPath[0] = 0;
     if (!s) return;
     // Shared memory SURVIVES reinjection, so a previous DLL instance killed

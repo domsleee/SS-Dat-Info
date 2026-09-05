@@ -19,11 +19,9 @@
 //   character - the human Player's Player_Config name ([player+0x48] ->
 //               std::string at +0x48, "Vincent"; the loadout folder at
 //               [[player+0x20]+0x10] as the fallback).
-//   stance    - the game-setup object read through the stable
-//               static engine pointer (setup_object.hpp), the value the
-//               game builds every rider from when a level is entered. It used
-//               to be found by a layout heap scan; the chain cave2 already
-//               uses for input reaches the SAME object directly. Validated by
+//   stance    - the game-setup object read through the stable executable
+//               config pointer chain (setup_object.hpp), the value the game
+//               builds every rider from when a level is entered. Validated by
 //               comparing the setup's character string to the live rider, so a
 //               stale or mid-menu object is rejected rather than believed.
 //               Read-only: the stance cannot be switched in-process, so a
@@ -66,10 +64,7 @@ static bool ReadStdString(uint32_t obj, char* out, uint32_t cap) {
 
 // Publish rider_character / rider_stance; log on change.
 //
-// `playerBaseAddr` = GameAddresses::player_base (SG+0x1D5450), the head of the
-// setup-object chain, passed in by the level-scan worker so this header stays
-// free of the runtime module base.
-inline void Refresh(TasSharedState* s, uint32_t playerBaseAddr) {
+inline void Refresh(TasSharedState* s) {
     static uint32_t lastCharacter = 0xFFFFFFFFu;
     static uint32_t lastStance = 0xFFFFFFFFu;
 
@@ -91,11 +86,10 @@ inline void Refresh(TasSharedState* s, uint32_t playerBaseAddr) {
     // when its own character string matches the live rider - otherwise it is
     // stale or mid-menu-change, and the stance is unknown (never assumed
     // regular).
-    uint32_t stance = 0xFFFFFFFFu;
+    uint32_t stance = riderparse::STANCE_UNKNOWN;
     gamesetup::Setup setup;
-    if (gamesetup::Read(&setup) && setup.stance != 0xFFFFFFFFu &&
-        riderparse::EqualsIgnoreCase(setup.character, name)) {
-        stance = setup.stance;
+    if (gamesetup::Read(&setup)) {
+        stance = riderparse::StanceForRider(setup.stance, setup.character, name);
     }
 
     // The pair is published under rider_seq so a reader never pairs a new

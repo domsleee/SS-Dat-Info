@@ -45,6 +45,16 @@ int main() {
     check(CharacterFromName("Vince") == CHARACTER_OTHER && CharacterFromName("Vincent2") == CHARACTER_OTHER,
           "prefix / suffix are not matches");
 
+    check(StanceForRider(0, "Keith", "Keith") == 0, "regular stance accepted for the live rider");
+    check(StanceForRider(1, "keith", "KEITH") == 1, "goofy stance accepted case-insensitively");
+    check(StanceForRider(1, "Keith", "Vincent") == STANCE_UNKNOWN,
+          "stance rejected when setup and live rider differ");
+    check(StanceForRider(2, "Keith", "Keith") == STANCE_UNKNOWN,
+          "out-of-range stance is unknown, never assumed regular");
+    check(StanceForRider(0, nullptr, "Keith") == STANCE_UNKNOWN &&
+              StanceForRider(0, "Keith", nullptr) == STANCE_UNKNOWN,
+          "stance needs both character names");
+
     check(IsPrintableAscii("Vincent", 7), "printable ASCII accepted");
     check(!IsPrintableAscii("Vin\x01ent", 7), "control byte rejected (dead object garbage)");
     check(!IsPrintableAscii("\xC3\xA9", 2), "non-ASCII rejected");

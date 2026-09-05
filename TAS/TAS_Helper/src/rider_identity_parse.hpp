@@ -15,6 +15,7 @@ constexpr uint32_t CHARACTER_KARL    = 4;
 constexpr uint32_t CHARACTER_MIKE    = 5;
 constexpr uint32_t CHARACTER_ULRIKA  = 6;
 constexpr uint32_t CHARACTER_OTHER   = 7;
+constexpr uint32_t STANCE_UNKNOWN    = 0xFFFFFFFFu;
 
 inline bool IsPrintableAscii(const char* s, uint32_t n) {
     if (n == 0) return false;
@@ -61,6 +62,15 @@ inline uint32_t CharacterFromName(const char* name) {
         if (EqualsIgnoreCase(name, e.name)) return e.id;
     }
     return CHARACTER_OTHER;
+}
+
+// The selected stance belongs to the selected character. During a menu change
+// those fields can temporarily describe different riders, so publish a stance
+// only when the setup character matches the live Player.
+inline uint32_t StanceForRider(uint32_t setup_stance, const char* setup_character,
+                               const char* live_character) {
+    if (setup_stance > 1 || !setup_character || !live_character) return STANCE_UNKNOWN;
+    return EqualsIgnoreCase(setup_character, live_character) ? setup_stance : STANCE_UNKNOWN;
 }
 
 } // namespace riderparse

@@ -76,7 +76,7 @@ int main() {
     // Village Hard resolves to the SHARED easy/ shadow asset, so the difficulty
     // segment of this path is a lie. The parser must expose AREA ONLY; anything
     // that read difficulty from here would report Village EASY while the player
-    // is on Village HARD. This is why the heap scan still owns difficulty.
+    // is on Village HARD. This is why the setup config owns difficulty.
     check(AreaFrom("data/levels/village/Tracks/easy/Cloudy/shadow.qua") == 2,
           "VH path yields area Village (difficulty deliberately not exposed)");
 
