@@ -198,8 +198,16 @@ pub fn run_input_protection() -> bool {
             }
         }
     }
-    // End the diagnostic before Restart/ArmContinue can alter the recording.
-    client.state_mut().cont_suppress_input = 0;
+    // Cancelling must release protection, including while already OFF.
+    client.send_command(TasCommand::Stop);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !client.command_idle() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(1));
+    }
+    let protected = unsafe { std::ptr::read_volatile(&client.state().cont_suppress_input) };
+    let cancelled = client.command_idle() && protected == 0;
+    println!("{}: ordinary STOP releases input protection (cont_suppress_input={protected})", if cancelled { "PASS" } else { "FAIL" });
+    passed &= cancelled;
     client.state_mut().playback_speed = original_speed;
     passed
 }

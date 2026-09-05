@@ -13,7 +13,7 @@ pub const OBJSNAP_PLAYER_DWORDS: usize = 128;
 /// at 0x1B4 so the object is at least 0x1D8, and this leaves headroom).
 pub const OBJSNAP_PHYSICS_DWORDS: usize = 512;
 
-pub const TAS_SHARED_VERSION: u32 = 48; // +menu_cmd_screen; v47 menu command channel; v46 menu_doc; v45 menu_selector
+pub const TAS_SHARED_VERSION: u32 = 49; // protected internal STOP command; layout unchanged
 /// v46: size of the menu document buffer (JSON, NUL-terminated).
 pub const TAS_MENU_DOC_MAX: usize = 4096;
 /// v47: size of the menu command target (id or label, NUL-terminated).
@@ -237,6 +237,8 @@ pub enum TasCommand {
     /// PROTOTYPE: arm a snapshot at the next PLAY frame-0 (the spawn) — captures
     /// without disturbing the arm timing that selects the bucket.
     SnapshotAtSpawn = 8,
+    /// Stop for an internal restart while retaining live-input protection.
+    StopForRestart = 9,
 }
 
 #[repr(u32)]
@@ -1410,7 +1412,9 @@ mod platform {
         /// True while a STOP is published or being consumed by the DLL.
         pub fn stop_pending(&self) -> bool {
             let cmd = self.command_word();
-            cmd == TasCommand::Stop as u32 || cmd == TAS_CMD_CLAIMED_STOP
+            cmd == TasCommand::Stop as u32
+                || cmd == TasCommand::StopForRestart as u32
+                || cmd == TAS_CMD_CLAIMED_STOP
         }
 
         /// Raw x87 control word the DLL sampled on the game thread (v41).
@@ -1569,6 +1573,7 @@ mod platform {
 
         pub fn stop_pending(&self) -> bool {
             self.state.command == TasCommand::Stop as u32
+                || self.state.command == TasCommand::StopForRestart as u32
                 || self.state.command == TAS_CMD_CLAIMED_STOP
         }
 
@@ -2937,7 +2942,7 @@ pub mod transport {
                     // Always Stop then settle a FIXED delay before Restart (like
                     // the legacy loop), so the Restart fires at a consistent
                     // wall-clock phase → consistent (good) F5 bucket.
-                    port.send_command(TasCommand::Stop);
+                    port.send_command(self.restart_stop_command());
                     if port.command_idle() && port.mode() == TasMode::Off as u32 {
                         self.phase = Phase::StopSettle;
                         StepOutcome::Wait { ms: STOP_SETTLE_MS }
@@ -3319,6 +3324,14 @@ pub mod transport {
             }
         }
 
+        fn restart_stop_command(&self) -> TasCommand {
+            if self.cfg.gate_align_rec > 0 || self.cfg.target.is_some() {
+                TasCommand::StopForRestart
+            } else {
+                TasCommand::Stop
+            }
+        }
+
         fn reroll(
             &mut self,
             port: &mut impl TransportPort,
@@ -3344,7 +3357,7 @@ pub mod transport {
             port.set_continue_from_frame(self.cfg.continue_from_frame);
             port.set_gate_align_rec(0);
             port.set_playback_speed(self.cfg.catchup_speed);
-            port.send_command(TasCommand::Stop);
+            port.send_command(self.restart_stop_command());
             self.phase = Phase::StopWaitAck;
             // Jitter can elapse while Stop is in flight, but the fixed settle is
             // applied only after acknowledgement in StopWaitAck.
@@ -3628,13 +3641,13 @@ pub mod transport {
             // Even from OFF, always Stop + settle (matches the legacy loop, which
             // is what lands hard buckets reliably).
             assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: STOP_SETTLE_MS });
-            assert_eq!(p.commands, vec![TasCommand::Stop]);
+            assert_eq!(p.commands, vec![TasCommand::StopForRestart]);
             assert_eq!(
                 p.gate_align_rec, 0,
                 "stale alignment must clear before STOP"
             );
             assert_eq!(c.step(&mut p), StepOutcome::InProgress); // Restart
-            assert_eq!(p.commands, vec![TasCommand::Stop, TasCommand::Restart]);
+            assert_eq!(p.commands, vec![TasCommand::StopForRestart, TasCommand::Restart]);
             p.restart_state = 2;
             assert_eq!(
                 c.step(&mut p),
@@ -3649,7 +3662,7 @@ pub mod transport {
             assert_eq!(c.step(&mut p), StepOutcome::InProgress);
             assert_eq!(
                 p.commands,
-                vec![TasCommand::Stop, TasCommand::Restart, TasCommand::ArmPlay]
+                vec![TasCommand::StopForRestart, TasCommand::Restart, TasCommand::ArmPlay]
             );
             assert_eq!(p.continue_from_frame, 0);
             assert_eq!(p.gate_align_rec, 299, "alignment must be armed with PLAY");
@@ -4633,7 +4646,7 @@ pub mod transport {
                 other => panic!("expected Reroll, got {:?}", other),
             }
             // reroll sent Stop and is waiting for OFF again
-            assert_eq!(p.commands.last(), Some(&TasCommand::Stop));
+            assert_eq!(p.commands.last(), Some(&TasCommand::StopForRestart));
 
             // complete the reroll restart, this time reproducing the recording
             drive_reroll_to_judge(&mut c, &mut p);
@@ -5282,6 +5295,7 @@ mod tests {
             (TasCommand::Stop, 3),
             (TasCommand::ArmContinue, 4),
             (TasCommand::Restart, 5),
+            (TasCommand::StopForRestart, 9),
         ];
         for &(cmd, val) in variants {
             assert_eq!(cmd as u32, val, "{:?} should be {}", cmd, val);
