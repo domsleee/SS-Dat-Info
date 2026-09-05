@@ -672,12 +672,50 @@ pub fn run(
             // is catch-up render-bound or compute-bound?".
             client.reset_hook_perf_counters();
             let resume_t0 = std::time::Instant::now();
-            let splice_result = harness::restart_continue_and_splice_inprocess(
-                &mut client,
-                rec_start,
-                splice_frame,
-                CONT_RESTART_RETRIES,
-            );
+            let held_mask = match std::env::var("TAS_CONT_HOLD_KEYS").as_deref() {
+                Ok("LEFT+SHIFT") => Some(input_bits::LEFT | input_bits::SHIFT),
+                Ok("UP") => Some(input_bits::UP),
+                Ok(other) => panic!("unsupported TAS_CONT_HOLD_KEYS: {other}"),
+                Err(_) if std::env::var("TAS_CONT_HOLD_UP").as_deref() == Ok("1") => Some(input_bits::UP),
+                Err(_) => None,
+            };
+            let splice_result = if let Some(held_mask) = held_mask {
+                use std::sync::atomic::{AtomicBool, Ordering};
+                let mut keys = harness::PicoKeys::open().expect("held-input test requires Pico HID");
+                harness::focus_game();
+                assert!(keys.send(held_mask), "Pico held-key press failed");
+                println!("  Holding physical HID mask 0x{held_mask:02X} throughout restart and catch-up ({})", keys.port_name());
+                // Refresh before the firmware's 500ms watchdog, including retries.
+                // Scope exit joins the writer; PicoKeys::drop releases the key.
+                let finished = AtomicBool::new(false);
+                thread::scope(|scope| {
+                    struct StopKeepalive<'a>(&'a AtomicBool);
+                    impl Drop for StopKeepalive<'_> {
+                        fn drop(&mut self) { self.0.store(true, Ordering::Release); }
+                    }
+                    let writer = scope.spawn(|| {
+                        while !finished.load(Ordering::Acquire) {
+                            if !keys.send(held_mask) { return false; }
+                            thread::sleep(Duration::from_millis(50));
+                        }
+                        true
+                    });
+                    let stop_keepalive = StopKeepalive(&finished);
+                    let result = harness::restart_continue_and_splice_inprocess(
+                        &mut client, rec_start, splice_frame, CONT_RESTART_RETRIES,
+                    );
+                    drop(stop_keepalive);
+                    assert!(writer.join().expect("Pico writer panicked"), "Pico keepalive failed");
+                    result
+                })
+            } else {
+                harness::restart_continue_and_splice_inprocess(
+                    &mut client,
+                    rec_start,
+                    splice_frame,
+                    CONT_RESTART_RETRIES,
+                )
+            };
             let resume_ms = resume_t0.elapsed().as_secs_f64() * 1000.0;
             {
                 let st = client.state();
