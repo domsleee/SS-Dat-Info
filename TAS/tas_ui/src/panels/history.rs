@@ -141,6 +141,8 @@ pub fn show(
     let mut edit: Option<(u64, String)> = ui.data_mut(|d| d.get_temp(rename_key));
 
     egui::ScrollArea::vertical()
+        .id_salt("history_runs")
+        .animated(false)
         .auto_shrink([false, false])
         // Desktop: scroll with the wheel/scrollbar only. Without this, egui's
         // touch-style "drag the content to scroll" fires when you press-and-hold
@@ -175,6 +177,16 @@ pub fn show(
                     }
                 })
                 .collect();
+            // The cap can keep len() unchanged when a new take replaces an
+            // old one. Follow new stable IDs, not the count or selection, so
+            // fresh runs are visible without disturbing ordinary browsing.
+            let newest = visible.iter().map(|(_, e)| e.entry_id).max();
+            let seen_key = ui.id().with("newest_history_entry");
+            let previous: Option<u64> = ui.data(|d| d.get_temp(seen_key));
+            let reveal = newest.filter(|id| previous.is_some_and(|seen| *id > seen));
+            if let Some(id) = newest {
+                ui.data_mut(|d| d.insert_temp(seen_key, id));
+            }
             visible.sort_by(|(a_idx, a), (b_idx, b)| {
                 // Newest day first; PINNED float to the top within their day;
                 // then newest-first, with push recency as the final tiebreak.
@@ -194,7 +206,7 @@ pub fn show(
                     last_date = Some(entry_date);
                 }
                 let is_current = current == Some(idx);
-                render_row(
+                let row = render_row(
                     ui,
                     entry,
                     idx,
@@ -204,6 +216,10 @@ pub fn show(
                     history.live_physics(),
                     history.live_rider(),
                 );
+                if reveal == Some(entry.entry_id) {
+                    row.scroll_to_me(Some(egui::Align::Min));
+                    ui.ctx().request_repaint();
+                }
             }
 
             // Empty space below the last row acts as a "deselect" target:
@@ -312,7 +328,7 @@ fn render_row(
     actions: &mut Vec<HistoryAction>,
     live_physics: Option<&str>,
     live_rider: Option<&str>,
-) {
+) -> egui::Response {
     let parts = parse_entry(entry);
     let restorable = entry.can_restore();
     let time_str = entry.created_at.format("%H:%M").to_string();
@@ -598,7 +614,7 @@ fn render_row(
                 }
             }
         });
-    });
+    }).response
 }
 
 fn kind_color(kind: HistoryEntryKind) -> egui::Color32 {
@@ -749,6 +765,73 @@ fn parse_snapshot_label(label: &str) -> Parts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn history_frame(
+        ctx: &egui::Context,
+        history: &RecordingHistory,
+        offset: Option<f32>,
+    ) -> f32 {
+        let mut scroll_y = 0.0;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(340.0, 240.0),
+            )),
+            focused: false,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let id = ui.make_persistent_id(egui::Id::new("history_runs"));
+                if let Some(y) = offset {
+                    let mut state = egui::scroll_area::State::load(ctx, id).unwrap_or_default();
+                    state.offset.y = y;
+                    state.store(ctx, id);
+                }
+                assert!(show(ui, history, false, true).is_empty());
+                scroll_y = egui::scroll_area::State::load(ctx, id).unwrap().offset.y;
+            });
+        });
+        scroll_y
+    }
+
+    fn full_history() -> (RecordingHistory, crate::recording::RecordingSnapshot) {
+        let mut state = tas_shared::zeroed_boxed();
+        state.recorded_count = 10;
+        let snapshot = crate::recording::RecordingSnapshot::from_state(&state);
+        let mut history = RecordingHistory::new(20);
+        for _ in 0..20 {
+            history.push_snapshot_data(snapshot.clone(), "Recorded 0:00.10");
+        }
+        (history, snapshot)
+    }
+
+    #[test]
+    fn new_run_at_capacity_is_revealed_without_focus_or_clicks() {
+        let ctx = egui::Context::default();
+        let (mut history, snapshot) = full_history();
+        history_frame(&ctx, &history, None);
+        assert!(history_frame(&ctx, &history, Some(250.0)) > 200.0);
+        let count = history.len();
+        history.push_snapshot_data(snapshot, "Recorded 0:00.11");
+        assert_eq!(history.len(), count, "eviction keeps the count unchanged");
+        history_frame(&ctx, &history, None);
+        assert!(history_frame(&ctx, &history, None) < 50.0, "new run must be visible");
+    }
+
+    #[test]
+    fn history_refresh_and_rename_preserve_manual_scroll() {
+        let ctx = egui::Context::default();
+        let (mut history, _) = full_history();
+        history_frame(&ctx, &history, None);
+        let offset = history_frame(&ctx, &history, Some(250.0));
+        let newest = history.entries().last().unwrap().entry_id;
+        history.rename(newest, "My run");
+        history.clear_selection();
+        for _ in 0..3 {
+            assert_eq!(history_frame(&ctx, &history, None), offset);
+        }
+    }
 
     #[test]
     fn finished_run_has_one_race_time() {

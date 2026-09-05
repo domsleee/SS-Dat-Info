@@ -17,13 +17,15 @@ function Invoke-Hidden {
     $params = @{
         FilePath               = $File
         WindowStyle            = 'Hidden'
-        Wait                   = $true
         PassThru               = $true
         RedirectStandardOutput = $out
         RedirectStandardError  = $err
     }
     if ($ArgList -and $ArgList.Count -gt 0) { $params.ArgumentList = $ArgList }
     $p = Start-Process @params
+    # Wait for the compiler/test command, not unrelated descendants such as
+    # Visual Studio's vctip telemetry process, which can stay alive indefinitely.
+    $p.WaitForExit()
     # Write-Host, NOT the pipeline: everything a function emits becomes its
     # return value in PowerShell, and the caller compares that value to 0 —
     # log lines in the pipeline would turn every success into a false failure.
