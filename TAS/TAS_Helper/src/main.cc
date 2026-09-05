@@ -129,7 +129,7 @@ bool run() {
         // notices a return to the menu (nothing else changes there — see
         // level_scan.hpp's cycleFrozen).
         levelscan::Start(state, (uint32_t)g_addr.level_path_ptr, &SafeReadPtr,
-                         &g_lastCycleMs, (uint32_t)g_addr.player_base);
+                         &g_lastCycleMs);
         if (levelscan::g_thread) {
             Log("  Level scan thread: started");
         } else {

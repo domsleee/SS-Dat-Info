@@ -31,6 +31,38 @@ const MIN_LEN: u32 = 1;
 
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(120, 180, 240);
 
+/// Timeline ticks are centiseconds. Time is the primary display coordinate;
+/// ticks remain visible alongside it wherever exact editing matters.
+pub fn format_time(ticks: u32) -> String {
+    crate::recording::format_recording_duration(ticks)
+}
+
+/// Format a recording tick on the in-game race clock. Inputs recorded before
+/// the start-line trigger deliberately have a negative clock value.
+pub fn format_game_time(tick: u32, timer_anchor: u32) -> String {
+    if tick < timer_anchor {
+        format!("-{}", format_time(timer_anchor - tick))
+    } else {
+        format_time(tick - timer_anchor)
+    }
+}
+
+/// Recording tick where the game's race timer reads zero. Track geometry is
+/// authoritative; first movement is retained as a useful fallback for old or
+/// unidentified recordings.
+pub fn game_timer_anchor(state: &TasSharedState, remembered_level: Option<&str>) -> u32 {
+    let level = crate::level::resolved_level_code(state).or(remembered_level);
+    crate::start_line::start_cross_tick(
+        &state.rec_coords,
+        state.recorded_count,
+        level,
+    )
+    .or_else(|| {
+        crate::recording::detect_first_moving(&state.rec_coords, state.recorded_count)
+    })
+    .unwrap_or(0)
+}
+
 fn row_index(bit: u8) -> Option<usize> {
     ROW_COLORS.iter().position(|(b, _)| *b == bit)
 }
@@ -194,6 +226,7 @@ fn edit_action_label(mode: DragMode, orig: InputEvent, now: InputEvent) -> Strin
 pub fn show(
     ui: &mut egui::Ui,
     state: &TasSharedState,
+    remembered_level: Option<&str>,
     view: &mut TimelineView,
     continue_from: &mut u32,
     edit: &mut TimelineEdit,
@@ -208,6 +241,7 @@ pub fn show(
         return outcome;
     }
     view.clamp(total);
+    let timer_anchor = game_timer_anchor(state, remembered_level);
 
     let active_tick = active_timeline_tick(state);
     if let Some((pos, _)) = active_tick {
@@ -230,8 +264,11 @@ pub fn show(
         }
         let zoom = total as f32 / view.span().max(1) as f32;
         ui.label(format!(
-            "Showing ticks {}–{} of {}  ({:.2}×)",
-            view.start, view.end, total, zoom
+            "Showing {} to {} of {}  ({:.2}×)",
+            format_game_time(view.start, timer_anchor),
+            format_game_time(view.end.saturating_sub(1), timer_anchor),
+            format_game_time(total, timer_anchor),
+            zoom
         ));
         ui.weak("·  scroll to zoom · drag the bar below to pan");
     });
@@ -240,7 +277,7 @@ pub fn show(
     let row_height = 12.0;
     let num_rows = ROW_LABELS.len();
     let header_height = 14.0;
-    let axis_height = 16.0;
+    let axis_height = 27.0;
     let total_height = header_height + row_height * num_rows as f32 + axis_height + 6.0;
     let left_margin = 8.0;
     let right_padding = 20.0;
@@ -291,8 +328,20 @@ pub fn show(
 
     // Status text (left) + visible range (right).
     let marker_status = match active_tick {
-        Some((tick, ActiveTickMode::Rec)) => format!("REC @ frame {}", tick),
-        Some((tick, ActiveTickMode::Play)) => format!("PLAY @ frame {}", tick),
+        Some((tick, ActiveTickMode::Rec)) => {
+            format!(
+                "REC {} · {}t",
+                format_game_time(tick as u32, timer_anchor),
+                tick
+            )
+        }
+        Some((tick, ActiveTickMode::Play)) => {
+            format!(
+                "PLAY {} · {}t",
+                format_game_time(tick as u32, timer_anchor),
+                tick
+            )
+        }
         None if editable => "OFF · editable".to_string(),
         None => "OFF".to_string(),
     };
@@ -311,7 +360,13 @@ pub fn show(
     painter.text(
         egui::pos2(rect.right() - 4.0, rect.top() + 1.0),
         egui::Align2::RIGHT_TOP,
-        format!("{}..{}", view.start, view.end.saturating_sub(1)),
+        format!(
+            "{} · {}t  to  {} · {}t",
+            format_game_time(view.start, timer_anchor),
+            view.start,
+            format_game_time(view.end.saturating_sub(1), timer_anchor),
+            view.end.saturating_sub(1)
+        ),
         egui::FontId::monospace(9.0),
         egui::Color32::from_rgb(150, 150, 150),
     );
@@ -517,9 +572,16 @@ pub fn show(
         painter.text(
             egui::pos2(px, axis_y + 5.0),
             align,
-            tick.to_string(),
+            format_game_time(tick, timer_anchor),
             egui::FontId::monospace(9.0),
             egui::Color32::from_rgb(165, 165, 180),
+        );
+        painter.text(
+            egui::pos2(px, axis_y + 15.0),
+            align,
+            format!("{}t", tick),
+            egui::FontId::monospace(8.0),
+            egui::Color32::from_rgb(105, 105, 120),
         );
     }
 
@@ -565,7 +627,7 @@ pub fn show(
 
     // Edit controls row (Start/End/Delete) for the selected input.
     if editable {
-        edit_controls(ui, edit, total, &mut outcome);
+        edit_controls(ui, edit, total, timer_anchor, &mut outcome);
     } else {
         ui.weak("Stop playback/record (mode OFF) to edit inputs.");
     }
@@ -578,6 +640,7 @@ fn edit_controls(
     ui: &mut egui::Ui,
     edit: &mut TimelineEdit,
     total: u32,
+    timer_anchor: u32,
     outcome: &mut TimelineOutcome,
 ) {
     let Some(sel) = edit.selected else {
@@ -601,15 +664,16 @@ fn edit_controls(
         changed |= ui
             .add(egui::DragValue::new(&mut ev.start).speed(1.0))
             .changed();
+        ui.weak("t");
+        ui.monospace(format_game_time(ev.start, timer_anchor));
         ui.label("End");
         changed |= ui
             .add(egui::DragValue::new(&mut ev.end).speed(1.0))
             .changed();
-        ui.weak(format!(
-            "({:.2}s – {:.2}s)",
-            ev.start as f32 / 100.0,
-            ev.end as f32 / 100.0
-        ));
+        ui.weak("t");
+        ui.monospace(format_game_time(ev.end, timer_anchor));
+        let length = ev.end.saturating_sub(ev.start);
+        ui.weak(format!("Length {}t · {}", length, format_time(length)));
         if ui.button("Delete").clicked() {
             delete = true;
         }
@@ -813,6 +877,34 @@ fn active_timeline_tick(state: &TasSharedState) -> Option<(usize, ActiveTickMode
 mod tests {
     use super::*;
     use tas_shared::{zeroed_boxed, TasMode};
+
+    #[test]
+    fn timeline_time_uses_compact_clock_format() {
+        assert_eq!(format_time(0), "0:00.00");
+        assert_eq!(format_time(99), "0:00.99");
+        assert_eq!(format_time(100), "0:01.00");
+        assert_eq!(format_time(6_123), "1:01.23");
+        assert_eq!(format_time(366_123), "1:01:01.23");
+    }
+
+    #[test]
+    fn game_timer_time_is_relative_to_start_line() {
+        assert_eq!(format_game_time(250, 300), "-0:00.50");
+        assert_eq!(format_game_time(300, 300), "0:00.00");
+        assert_eq!(format_game_time(6_423, 300), "1:01.23");
+    }
+
+    #[test]
+    fn game_timer_keeps_track_anchor_when_live_level_is_unknown() {
+        let mut state = zeroed_boxed();
+        state.level_id = u32::MAX;
+        state.recorded_count = 3;
+        state.rec_coords[0] = [519.2, -1401.6, 53.6];
+        state.rec_coords[1] = [519.2, -1401.1, 99.0];
+        state.rec_coords[2] = [519.2, -1400.6, 100.0];
+
+        assert_eq!(game_timer_anchor(&state, Some("FE")), 2);
+    }
 
     #[test]
     fn auto_scroll_stays_when_visible() {

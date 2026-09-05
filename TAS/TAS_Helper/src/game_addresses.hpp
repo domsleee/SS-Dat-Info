@@ -143,8 +143,8 @@ struct GameAddresses {
     // tracks. The pointed-to string changes the instant a level loads, which is
     // the level-change event. RELIABLE FOR AREA, NOT FOR DIFFICULTY: some tracks
     // share the easy/ shadow asset, so Village Hard reads ".../Tracks/easy/...".
-    // Difficulty still comes from the majority-voted heap scan, which exists
-    // precisely to survive that outlier.
+    // Difficulty comes from the executable's selected-track config object;
+    // see setup_config_parse.hpp. That survives the shared-path outlier.
     std::uint8_t* level_path_ptr = nullptr;
     std::uint8_t* vk_table = nullptr;       // SG+0x9AD8: VK -> keyIndex lookup
 
@@ -181,24 +181,6 @@ struct GameAddresses {
     static constexpr uint32_t ROOT_PTR_OFFSET = 0x1D5450;
     static constexpr uint32_t LEVEL_PATH_PTR_OFFSET = 0x1D3304;
     static constexpr uint32_t KEYBOARD_OBJ_OFFSET = 0x530;
-    // The GAME-SETUP strings (the menu's area / track / rider selection) do NOT
-    // live off this root at all. They are fields of the 3D ENGINE object -
-    // HMG_3DE.dll's Threedee_Engine::Engine, RTTI-confirmed - which the menu
-    // updates as you choose. That object is reachable only from the heap: a
-    // scan of EVERY module image found exactly one static pointer to it,
-    // Main_Menu.dll+0x6B9A4 (the menu's cached engine pointer; the decompile
-    // sets it once, `DAT_1006b9a4 = param_4`). That static is the anchor -
-    // verified across a relaunch at a different module base, and it tracks the
-    // menu selection live (Alpine/Easy at the menu -> Forest/Medium in the race).
-    //
-    // Two silent regressions came from guessing an offset off the keyboard
-    // root instead: +0x530 (accf7a7) is Cetsup::Win32_Keyboard, whose bytes
-    // there are input state, and +0x540 (627ff63) only *transiently* held the
-    // engine - the object's distance from that root differs every launch. Both
-    // left the rider stance and the level id unresolved on every race. The
-    // pointer is now validated by the object's own vtable before it is used.
-    static constexpr uint32_t MAIN_MENU_ENGINE_PTR_RVA = 0x6B9A4;   // in Main_Menu.dll
-    static constexpr uint32_t HMG3DE_ENGINE_VTABLE_RVA = 0x25B9C;   // in HMG_3DE.dll
     static constexpr uint32_t DI_BUFFER_PTR_OFFSET = 0x30;
 
     // Action state byte offsets from keyboard object (kbobj = [root+0x530])
@@ -240,30 +222,9 @@ struct GameAddresses {
     static constexpr uint32_t PLAYER_CONFIG_NAME_STRING = 0x48;
     static constexpr uint32_t MSVC6_STRING_PTR = 0x4;
     static constexpr uint32_t MSVC6_STRING_SIZE = 0x8;
-    // The STANCE is not on the Player at all. The menu keeps a game-setup
-    // object (3-state heap differential, 2026-09-02) that the game builds
-    // every rider from on each (re)start: MSVC6 std::strings for the area /
-    // difficulty / weather / character 1 (+0x1D0) / character 2 / board 1 /
-    // board 2, then the stance dword at +0x220 (0 = regular = left-foot
-    // icon, the default; 1 = goofy = right-foot icon), the player name at
-    // +0x224 and the controller ("Keyboard") at +0x290. Nothing static points
-    // at it reliably (Main_Menu.dll+0x6B9A4 did on one launch and not the
-    // next), so rider_identity.hpp finds it by this layout. The dword is
-    // READ-ONLY for us: writing it and restarting (in-process or the game's
-    // F5) keeps the rider's stance-baked config - the game applies the
-    // stance only when a level is entered from the menu (a goofy rider
-    // "switched" to regular that way still coasted like goofy, 3.8e-6 off
-    // at gate+32, reroll forever).
-    // The game-setup object also names the AREA and DIFFICULTY of the selected
-    // track as MSVC6 strings ("Village", "Hard"): the authoritative menu
-    // selection, which - unlike the shared path asset - distinguishes Village
-    // Easy from Village Hard. Read via the same [[player_base]+0x530] chain
-    // cave2 uses for input (setup_object.hpp), so NO heap scan is needed.
-    static constexpr uint32_t SETUP_AREA_STRING = 0x190;
-    static constexpr uint32_t SETUP_DIFFICULTY_STRING = 0x1B0;
-    static constexpr uint32_t SETUP_CHARACTER_STRING = 0x1D0;
-    static constexpr uint32_t SETUP_STANCE = 0x220;
-    static constexpr uint32_t SETUP_CONTROLLER_STRING = 0x290;
+    // Stance and the authoritative selected area/difficulty live in the game
+    // config object read by setup_object.hpp. Its independently testable chain
+    // and field offsets are kept in setup_config_parse.hpp.
     static constexpr uint32_t PLAYER_VTABLE_RVA = 0x169E10;        // .?AVPlayer@Supreme_Snowboarding@Housemarque@@
     static constexpr uint32_t GHOST_PLAYER_VTABLE_RVA = 0x169B74;  // .?AVGhost_Player@...
     // Player position offsets

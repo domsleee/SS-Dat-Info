@@ -20,6 +20,7 @@ use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 /// The menu document the DLL publishes (shm v46): the current page's items
 /// with their visible labels and stable ids. See `tas_shared::menu_doc`.
 #[derive(serde::Deserialize)]
+#[cfg(test)]
 struct MenuDoc {
     #[allow(dead_code)]
     screen: String,
@@ -28,6 +29,7 @@ struct MenuDoc {
 }
 
 #[derive(serde::Deserialize)]
+#[cfg(test)]
 struct MenuDocItem {
     label: String,
     #[allow(dead_code)]
@@ -40,12 +42,14 @@ struct MenuDocItem {
     vis: bool,
 }
 
+#[cfg(test)]
 fn parse_menu_doc(state: &tas_shared::TasSharedState) -> Option<MenuDoc> {
     tas_shared::menu_doc(state).and_then(|s| serde_json::from_str(&s).ok())
 }
 
 /// The focused item's LABEL from the menu document (" \u{203A} Time Attack");
 /// falls back to the bare selector index when the document is not available.
+#[cfg(test)]
 fn menu_item_suffix(state: &tas_shared::TasSharedState) -> String {
     if let Some(doc) = parse_menu_doc(state) {
         if let Some(item) = doc.sel.and_then(|s| doc.items.get(s as usize)) {
@@ -136,7 +140,7 @@ mod menu_doc_tests {
 }
 
 /// Width of the status card ("the card with OFF in it"). Fixed so the card
-/// does not resize as the menu chip / rider / clock text changes underneath it.
+/// does not resize as the level / rider / clock text changes underneath it.
 const STATUS_CARD_WIDTH: f32 = 560.0;
 
 fn level_name_from_id(id: u32) -> Option<&'static str> {
@@ -322,6 +326,7 @@ impl eframe::App for TimelinePreview {
             let _ = timeline::show(
                 ui,
                 &self.state,
+                None,
                 &mut self.view,
                 &mut self.continue_from,
                 &mut self.edit,
@@ -641,11 +646,10 @@ fn stop_is_acknowledged(mode: u32, command_idle: bool) -> bool {
 /// indices at that point reported the alignment shift itself as drift - a
 /// false "DRIFT" line at the end of every bit-exact replay whose gate landed
 /// elsewhere (Time Attack ghosts move it ~11 ticks earlier; measured
-/// 2026-09-02, 1035/1035 aligned pairs exact, banner said Z=2.5). The latch
-/// drops when the position falls back below the latched gate (a new session)
-/// or while recording. The cache resets whenever the pair count shrinks, which
-/// also covers the moment the gate fires mid-replay and the indexing switches
-/// over.
+/// 2026-09-02, 1035/1035 aligned pairs exact, banner said Z=2.5). The completed
+/// result freezes outside PLAY, and a new `arm_generation` drops the latch and
+/// cache. The cache also resets whenever the aligned bases change or the pair
+/// count shrinks.
 fn scan_drift(
     state: &tas_shared::TasSharedState,
     max_dx: &mut f32,
@@ -653,6 +657,7 @@ fn scan_drift(
     last_count: &mut usize,
     bases: &mut Option<(usize, usize)>,
     latch_arm_generation: &mut u32,
+    first_drift_tick: &mut Option<usize>,
 ) -> (usize, bool) {
     // A new arm landed since the latch was taken: whatever bases we hold
     // belong to the previous attempt. A fast replay that starts and finishes
@@ -662,19 +667,40 @@ fn scan_drift(
     let mut forced_reset = false;
     if state.arm_generation != *latch_arm_generation {
         *latch_arm_generation = state.arm_generation;
-        if bases.is_some() {
-            *bases = None;
-            forced_reset = true;
-        }
+        *bases = None;
+        *max_dx = 0.0;
+        *max_dz = 0.0;
+        *last_count = 0;
+        *first_drift_tick = None;
+        forced_reset = true;
     }
+
+    // OFF can retain the previous playback position and coordinate buffer,
+    // while history restore replaces the recording underneath it. Comparing
+    // those unrelated sessions produced huge drift lines without any replay.
+    // REC is also not a playback verdict. Freeze the completed result until a
+    // new PLAY arm generation resets it.
+    if state.mode != TasMode::Play as u32 {
+        return (*last_count, forced_reset);
+    }
+
     let live_gate = state.gate_index as usize;
     let rec_gate = state.gate_align_rec as usize;
     if live_gate > 0 && rec_gate > 0 {
-        *bases = Some((live_gate, rec_gate));
-    } else if let Some((play_base, _)) = *bases {
-        if (state.playback_pos as usize) <= play_base || state.mode == TasMode::Rec as u32 {
-            *bases = None;
+        let next = Some((live_gate, rec_gate));
+        if *bases != next {
+            *bases = next;
+            *max_dx = 0.0;
+            *max_dz = 0.0;
+            *last_count = 0;
+            *first_drift_tick = None;
+            forced_reset = true;
         }
+    } else if rec_gate > 0 && bases.is_none() {
+        // This arm expects gate alignment, but the live gate has not fired yet.
+        // Raw-index comparisons during the variable spawn countdown are not a
+        // statement about replay determinism.
+        return (0, forced_reset);
     }
     let (play_base, rec_base) = bases.unwrap_or((0, 0));
     let count = (state.playback_pos as usize)
@@ -687,19 +713,39 @@ fn scan_drift(
         *max_dx = 0.0;
         *max_dz = 0.0;
         *last_count = 0;
+        *first_drift_tick = None;
     }
     for i in *last_count..count {
-        let d = (state.play_coords[play_base + i][0] - state.rec_coords[rec_base + i][0]).abs();
+        let rec_tick = rec_base + i;
+        let d = (state.play_coords[play_base + i][0] - state.rec_coords[rec_tick][0]).abs();
+        if d > 0.0 && first_drift_tick.is_none() {
+            *first_drift_tick = Some(rec_tick);
+        }
         if d > *max_dx {
             *max_dx = d;
         }
-        let d = (state.play_coords[play_base + i][2] - state.rec_coords[rec_base + i][2]).abs();
+        let d = (state.play_coords[play_base + i][2] - state.rec_coords[rec_tick][2]).abs();
+        if d > 0.0 && first_drift_tick.is_none() {
+            *first_drift_tick = Some(rec_tick);
+        }
         if d > *max_dz {
             *max_dz = d;
         }
     }
     *last_count = count;
     (count, reset)
+}
+
+fn should_show_drift_banner(
+    state: &tas_shared::TasSharedState,
+    latch_arm_generation: u32,
+    first_drift_tick: Option<usize>,
+    max_drift: f32,
+) -> bool {
+    state.mode == TasMode::Play as u32
+        && state.arm_generation == latch_arm_generation
+        && first_drift_tick.is_some()
+        && max_drift > 0.0
 }
 
 fn should_request_auto_stop(
@@ -817,6 +863,8 @@ struct TasApp {
     drift_aligned_bases: Option<(usize, usize)>,
     /// `arm_generation` the drift latch was taken under (see `scan_drift`).
     drift_latch_arm_generation: u32,
+    /// First recording tick with a non-zero X/Z difference in this PLAY.
+    drift_first_tick: Option<usize>,
     last_logged_drift_level: u8, // 0=none, 1=any, 2=>=1.0, 3=>=5.0
 
     // Cached plot data (avoid per-frame Vec allocation)
@@ -1077,6 +1125,7 @@ impl TasApp {
             last_drift_scan_count: 0,
             drift_aligned_bases: None,
             drift_latch_arm_generation: 0,
+            drift_first_tick: None,
             last_logged_drift_level: 0,
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
@@ -3550,16 +3599,31 @@ impl eframe::App for TasApp {
                 let vz = state.velocity_z as f64;
                 let speed_kmh = (vx * vx + vy * vy + vz * vz).sqrt() * 360.0;
                 egui::Frame::group(ui.style()).show(ui, |ui| {
-                    // FIXED WIDTH. Everything on the headline row is variable
-                    // text - the menu screen and item, the rider, the physics
-                    // mode, the race clock - so letting the card size to its
-                    // content made it grow and shrink on every menu keypress.
-                    // Pin the width and let the row WRAP instead: the card
-                    // stays put while you navigate.
+                    // FIXED WIDTH. The card is split by information cadence:
+                    // live transport + clock, stable run context, then live
+                    // telemetry. Its dimensions do not shift as values change.
                     let card_w = STATUS_CARD_WIDTH.min(ui.available_width());
                     ui.set_min_width(card_w);
                     ui.set_max_width(card_w);
-                    ui.horizontal_wrapped(|ui| {
+
+                    // game_in_game (exe+0x8895C) freezes at its last value when
+                    // Supreme::Cycle stops, so require a ticking cycle too.
+                    let cycle_ticking =
+                        self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400);
+                    let in_game = state.game_in_game != 0 && cycle_ticking;
+                    let card_level =
+                        tas_shared::resolved_level_id(state).and_then(level_name_from_id);
+                    let live_physics = tas_shared::physics_mode_label(
+                        state.renderer_id,
+                        state.fpu_control_word,
+                    );
+                    let live_rider =
+                        tas_shared::rider_label(state.rider_character, state.rider_stance);
+                    let (race_cs, race_start) = tas_shared::race_pair(state);
+
+                    // Primary dynamic row: transport on the left, race clock
+                    // on the right. Preserve the existing flag and stopwatch.
+                    ui.horizontal(|ui| {
                         ui.colored_label(
                             mode_color,
                             egui::RichText::new(headline.clone()).strong().size(16.0),
@@ -3573,171 +3637,134 @@ impl eframe::App for TasApp {
                                 t
                             ));
                         }
-                        // game_in_game (exe+0x8895C) freezes at its last value
-                        // when Supreme::Cycle stops (quit to menu / pause /
-                        // dialog) — so the flag alone reads "In Game" forever
-                        // after you leave. Gate it on the cycle actually
-                        // TICKING (frame_count advanced within ~400ms); a frozen
-                        // cycle = menu/paused. `cycle_advance_at` is a disjoint
-                        // field from `self.shared`, so reading it here is fine.
-                        let cycle_ticking =
-                            self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400);
-                        let in_game = state.game_in_game != 0 && cycle_ticking;
-                        // Resolved, not raw — the chip must go blank during a
-                        // level change rather than keep naming the old track.
-                        // That stale name is exactly the symptom that started
-                        // this whole line of work.
-                        let card_level =
-                            tas_shared::resolved_level_id(state).and_then(level_name_from_id);
-                        let (g_txt, g_col) = if in_game {
-                            (
-                                match card_level {
-                                    Some(lvl) if !lvl.is_empty() => {
-                                        format!("\u{1F3AE} In Game ({})", lvl)
-                                    }
-                                    _ => "\u{1F3AE} In Game".to_string(),
-                                },
-                                egui::Color32::from_rgb(90, 200, 120),
-                            )
-                        } else if state.game_in_game != 0 {
-                            // Flag set but cycle frozen = paused / dialog / a
-                            // static menu reached by quitting mid-level. If the
-                            // DLL captured the menu screen title (v44), name it.
-                            (
-                                match tas_shared::menu_screen(state) {
-                                    Some(s) => format!("\u{2630} {}{}", s, menu_item_suffix(state)),
-                                    None => "\u{2630} Menu / Paused".to_string(),
-                                },
-                                egui::Color32::from_gray(150),
-                            )
-                        } else {
-                            (
-                                match tas_shared::menu_screen(state) {
-                                    Some(s) => format!("\u{2630} {}{}", s, menu_item_suffix(state)),
-                                    None => "\u{2630} In Menu".to_string(),
-                                },
-                                egui::Color32::from_gray(150),
-                            )
-                        };
-                        ui.label(egui::RichText::new(g_txt).color(g_col).size(12.0))
-                            .on_hover_text(
-                                "Game state — in a race/level (with the current track) \
-                                 vs the main menu",
+                        if race_cs != u32::MAX {
+                            let t = format!(
+                                "\u{23F1} {:01}:{:02}.{:02}",
+                                race_cs / 6000,
+                                (race_cs % 6000) / 100,
+                                race_cs % 100
                             );
-                        // Renderer + x87 precision the physics run under. The
-                        // buffer's take carries its own stamp; a mismatch is the
-                        // "replay drifts for no reason" trap.
-                        let live_physics = tas_shared::physics_mode_label(
-                            state.renderer_id,
-                            state.fpu_control_word,
-                        );
+                            let clock_color = if self.finished_at_tick.is_some() {
+                                egui::Color32::from_rgb(235, 205, 90)
+                            } else {
+                                egui::Color32::from_gray(170)
+                            };
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(t).color(clock_color).size(12.0),
+                                    )
+                                    .on_hover_text(format!(
+                                        "Exact race time (from the HUD). start_ts={} — the gate \
+                                         clock value (F5 spawn-lottery metric)",
+                                        race_start
+                                    ));
+                                },
+                            );
+                        }
+                    });
+
+                    // Stable run context: map, physics mode, and rider/stance.
+                    // Mismatch details live on the small warning icons.
+                    ui.horizontal_wrapped(|ui| {
+                        if in_game {
+                            let level = card_level.unwrap_or("Level resolving…");
+                            ui.label(
+                                egui::RichText::new(format!("\u{1F3AE} {}", level))
+                                    .color(egui::Color32::from_rgb(90, 200, 120))
+                                    .size(12.0),
+                            )
+                            .on_hover_text("Current level");
+                        }
                         if let Some(live) = live_physics.as_deref() {
                             let mismatch = self
                                 .loaded_physics
                                 .as_deref()
                                 .is_some_and(|stamp| stamp != live);
-                            let (txt, col) = if mismatch {
-                                (
-                                    format!(
-                                        "\u{26A0} {} (take: {})",
-                                        live,
-                                        self.loaded_physics.as_deref().unwrap_or("?")
-                                    ),
-                                    egui::Color32::from_rgb(255, 140, 60),
-                                )
-                            } else {
-                                (live.to_string(), egui::Color32::from_gray(150))
-                            };
-                            ui.label(egui::RichText::new(txt).color(col).size(12.0))
+                            ui.label(
+                                egui::RichText::new(live)
+                                    .color(egui::Color32::from_gray(150))
+                                    .size(12.0),
+                            )
                                 .on_hover_text(
                                     "Renderer / x87 precision the game thread runs the \
                                      physics at (DirectX 6/7 = 24-bit, OpenGL = 53-bit). \
                                      A take recorded under the other mode rounds \
                                      differently and will not replay bit-exact.",
                                 );
+                            if mismatch {
+                                ui.label(
+                                    egui::RichText::new("\u{26A0}")
+                                        .color(egui::Color32::from_rgb(255, 140, 60))
+                                        .size(12.0),
+                                )
+                                .on_hover_text(format!(
+                                    "Physics mismatch\nLive: {}\nTake: {}",
+                                    live,
+                                    self.loaded_physics.as_deref().unwrap_or("?")
+                                ));
+                            }
                         }
-                        // Who is on the board: character + stance (the board
-                        // itself does not change the physics). A take recorded
-                        // as someone else, or in the other stance, will not
-                        // line up.
-                        let live_rider =
-                            tas_shared::rider_label(state.rider_character, state.rider_stance);
                         if let Some(live) = live_rider.as_deref() {
                             let mismatch = self
                                 .loaded_rider
                                 .as_deref()
                                 .is_some_and(|stamp| stamp != live);
-                            let (txt, col) = if mismatch {
-                                (
-                                    format!(
-                                        "\u{26A0} {} (take: {})",
-                                        live,
-                                        self.loaded_rider.as_deref().unwrap_or("?")
-                                    ),
-                                    egui::Color32::from_rgb(255, 140, 60),
-                                )
-                            } else {
-                                (live.to_string(), egui::Color32::from_gray(150))
-                            };
-                            ui.label(egui::RichText::new(txt).color(col).size(12.0))
+                            ui.label(
+                                egui::RichText::new(live)
+                                    .color(egui::Color32::from_gray(150))
+                                    .size(12.0),
+                            )
                                 .on_hover_text(
                                     "Character and stance the human rider is using. The \
                                      physics differ per character and per stance, so a take \
                                      recorded as another rider will not line up.",
                                 );
-                        }
-                        let (race_cs, race_start) = tas_shared::race_pair(state);
-                        if race_cs != u32::MAX {
-                            let cs = race_cs;
-                            let t = format!(
-                                "\u{23F1} {:01}:{:02}.{:02}",
-                                cs / 6000,
-                                (cs % 6000) / 100,
-                                cs % 100
-                            );
-                            ui.label(
-                                egui::RichText::new(t)
-                                    .color(egui::Color32::from_rgb(235, 205, 90))
-                                    .size(12.0),
-                            )
-                            .on_hover_text(format!(
-                                "Exact race time (from the HUD). start_ts={} — the gate \
-                                 clock value (F5 spawn-lottery metric)",
-                                race_start
-                            ));
+                            if mismatch {
+                                ui.label(
+                                    egui::RichText::new("\u{26A0}")
+                                        .color(egui::Color32::from_rgb(255, 140, 60))
+                                        .size(12.0),
+                                )
+                                .on_hover_text(format!(
+                                    "Rider mismatch\nLive: {}\nTake: {}",
+                                    live,
+                                    self.loaded_rider.as_deref().unwrap_or("?")
+                                ));
+                            }
                         }
                     });
+
+                    ui.separator();
                     ui.label(format!(
                         "Pos: ({:.1}, {:.1}, {:.1})    Speed: {:.1} km/h",
                         state.player_x, state.player_y, state.player_z, speed_kmh
                     ));
-                    // Tick is shown only when meaningful (REC/PLAY); the
-                    // headline already says "REC 1234 ticks" so duplicating
-                    // it here just adds noise.
-                    if matches!(state.mode_enum(), TasMode::Rec | TasMode::Play) {
-                        ui.label(format!(
-                            "Vel: ({:.2}, {:.2}, {:.2})    Tick: {}",
-                            state.velocity_x, state.velocity_y, state.velocity_z, state.tick_count
-                        ));
-                    } else {
-                        ui.label(format!(
-                            "Vel: ({:.2}, {:.2}, {:.2})",
-                            state.velocity_x, state.velocity_y, state.velocity_z
-                        ));
-                    }
+                    ui.label(format!(
+                        "Vel: ({:.2}, {:.2}, {:.2})",
+                        state.velocity_x, state.velocity_y, state.velocity_z
+                    ));
                 });
 
                 ui.separator();
 
-                // DRIFT ALERT BANNER — large, unmissable warning when drift is detected
+                // Show only drift established from a valid active PLAY session.
+                // `scan_drift` ignores stale OFF/history data and waits for the
+                // live gate before assessing an aligned PLAY or CONT prefix.
                 let max_drift = self.cached_max_drift_x.max(self.cached_max_drift_z);
-                if max_drift > 0.0 && state.mode_enum() == TasMode::Play {
+                if should_show_drift_banner(
+                    state,
+                    self.drift_latch_arm_generation,
+                    self.drift_first_tick,
+                    max_drift,
+                ) {
                     let (bg, text, msg) = if max_drift >= 1.0 {
                         (
                             egui::Color32::from_rgb(180, 30, 30),
                             egui::Color32::WHITE,
                             format!(
-                                "DRIFT DETECTED — TAS INVALID  (X={:.6}  Z={:.6})",
+                                "DRIFT DETECTED: TAS INVALID  (X={:.6}  Z={:.6})",
                                 self.cached_max_drift_x, self.cached_max_drift_z
                             ),
                         )
@@ -3761,15 +3788,67 @@ impl eframe::App for TasApp {
                     ui.separator();
                 }
 
-                // Input Timeline — full central width. Analysis is now a
-                // bottom panel (see below); Debug drift renders inline
-                // here when toggled (it's a wide table that reads best
-                // next to the timeline it's drifting against).
-                ui.label(egui::RichText::new("Input Timeline").strong());
+                // Timeline header: human time at a glance and the text editor
+                // route as a primary action. Exact tick units stay in the
+                // timeline ruler and raw edit controls.
+                let total_time = timeline::format_time(state.recorded_count);
+                let current_time = match state.mode_enum() {
+                    TasMode::Play => Some(timeline::format_time(
+                        state.playback_pos.min(state.recorded_count),
+                    )),
+                    TasMode::Rec => Some(total_time.clone()),
+                    TasMode::Off => None,
+                };
+                let time_summary = current_time
+                    .map(|current| format!("{} / {}", current, total_time))
+                    .unwrap_or_else(|| format!("{} total", total_time));
+                // Keep the game-clock origin after the course unloads. The
+                // selected history entry describes the recording itself and
+                // is therefore a better fallback than the current menu state.
+                let timeline_level = self
+                    .history
+                    .current_index()
+                    .and_then(|i| self.history.entries().get(i))
+                    .and_then(|entry| entry.level.as_deref())
+                    .or(self.last_resolved_level.as_deref());
+                let mut open_text_script = false;
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Input Timeline").strong());
+                    ui.label(
+                        egui::RichText::new(time_summary)
+                            .monospace()
+                            .size(12.0)
+                            .color(egui::Color32::from_gray(165)),
+                    );
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            let button = egui::Button::new(
+                                egui::RichText::new("↗ Text Script").strong().size(13.0),
+                            )
+                            .fill(egui::Color32::from_rgb(49, 95, 137))
+                            .stroke(egui::Stroke::new(
+                                1.0_f32,
+                                egui::Color32::from_rgb(96, 150, 202),
+                            ))
+                            .min_size(egui::vec2(132.0, 28.0));
+                            open_text_script = ui
+                                .add_enabled(state.recorded_count > 0, button)
+                                .on_hover_text(
+                                    "Write a .tas file and open it; edits reload on save",
+                                )
+                                .clicked();
+                            if self.script_watch.is_some() {
+                                ui.weak("watching .tas");
+                            }
+                        },
+                    );
+                });
                 prof.lap("central_pre");
                 let tl_outcome = timeline::show(
                     ui,
                     state,
+                    timeline_level,
                     &mut self.timeline_view,
                     &mut self.continue_from_frame,
                     &mut self.timeline_edit,
@@ -3785,15 +3864,8 @@ impl eframe::App for TasApp {
                     ));
                 }
 
-                // Text-script route: write a .tas and open it in the user's
-                // editor; poll_script_file reloads it on save.
-                ui.horizontal(|ui| {
-                    ui.label("Text script:");
-                    if ui
-                        .button("↗ Open in external editor")
-                        .on_hover_text("Write a .tas file and open it — edits reload on save")
-                        .clicked()
-                    {
+                // Text-script route: poll_script_file reloads it on save.
+                if open_text_script {
                         let total = state.recorded_count;
                         let events = input_script::runs_from_log(&state.input_log, total);
                         let timer =
@@ -3817,18 +3889,14 @@ impl eframe::App for TasApp {
                                     .unwrap_or_else(|_| std::time::SystemTime::now());
                                 self.script_watch = Some((path.clone(), mtime));
                                 self.log_lines.push(format!(
-                                    "[script] opened {} ({} inputs) — edits reload on save",
+                                    "[script] opened {} ({} inputs); edits reload on save",
                                     path.display(),
                                     events.len()
                                 ));
                             }
                             Err(e) => self.log_lines.push(format!("[script] write failed: {e}")),
                         }
-                    }
-                    if self.script_watch.is_some() {
-                        ui.weak("watching .tas — save to reload");
-                    }
-                });
+                }
 
                 prof.lap("timeline");
                 if self.show_debug_drift {
@@ -3871,23 +3939,18 @@ impl eframe::App for TasApp {
                     });
                 }
 
-                // Incremental max drift scan. Runs every frame (no UI of
-                // its own) because the big red DRIFT ALERT BANNER above
-                // and the Debug drift panel both read from
-                // `self.cached_max_drift_x/z`. The previous "Max Drift:
-                // X=0.0 Z=0.0" status line was dropped — when there's no
-                // drift it's noise; when there is drift the banner is
-                // louder and the debug panel has the per-tick breakdown.
+                // Incremental max drift scanner. It is invoked every UI frame,
+                // but only assesses an active PLAY. The banner above and Debug
+                // drift panel read its cache; no zero-drift status line is
+                // shown because it adds noise.
                 {
                     // Gate-aligned replays are correct when
                     // play[live_gate+k] == rec[rec_gate+k]; comparing raw
                     // indices there reports the alignment shift itself as
                     // drift - a false DRIFT banner on a bit-exact replay.
-                    // Scan gate-relative pairs when aligned (the pre-gate
-                    // settle is the watcher's business), raw indices
-                    // otherwise. The cache resets whenever the pair count
-                    // shrinks, which also covers the moment the gate fires
-                    // mid-replay and the indexing switches over.
+                    // Scan gate-relative pairs when aligned and wait for the
+                    // live gate before judging them. Near-gate CONT has no gate
+                    // alignment and is intentionally compared at raw indices.
                     let prev_dx = self.cached_max_drift_x;
                     let prev_dz = self.cached_max_drift_z;
                     let (count, reset) = scan_drift(
@@ -3897,6 +3960,7 @@ impl eframe::App for TasApp {
                         &mut self.last_drift_scan_count,
                         &mut self.drift_aligned_bases,
                         &mut self.drift_latch_arm_generation,
+                        &mut self.drift_first_tick,
                     );
                     if reset {
                         self.last_logged_drift_level = 0;
@@ -3913,12 +3977,14 @@ impl eframe::App for TasApp {
                     } else {
                         0
                     };
-                    if new_level > self.last_logged_drift_level {
+                    if state.mode == TasMode::Play as u32
+                        && new_level > self.last_logged_drift_level
+                    {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         self.log_lines.push(format!(
-                            "[{}] DRIFT at tick {}: X={:.9} Z={:.9} (was X={:.9} Z={:.9})",
+                            "[{}] DRIFT first at tick {}: max X={:.9} Z={:.9} (was X={:.9} Z={:.9})",
                             ts,
-                            count,
+                            self.drift_first_tick.unwrap_or(count),
                             self.cached_max_drift_x,
                             self.cached_max_drift_z,
                             prev_dx,
@@ -4237,6 +4303,7 @@ mod tests {
             last_drift_scan_count: 0,
             drift_aligned_bases: None,
             drift_latch_arm_generation: 0,
+            drift_first_tick: None,
             last_logged_drift_level: 0,
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
@@ -4994,6 +5061,7 @@ mod tests {
                 &mut app.last_drift_scan_count,
                 &mut app.drift_aligned_bases,
                 &mut app.drift_latch_arm_generation,
+                &mut app.drift_first_tick,
             )
         };
 
@@ -5019,35 +5087,143 @@ mod tests {
             "the latched alignment survives completion (this was the false DRIFT banner)"
         );
 
-        // A fresh session (position back below the latched gate) drops the latch.
+        // A fresh aligned session resets immediately, then waits for its own
+        // live gate instead of comparing raw countdown indices.
+        state.mode = TasMode::Play as u32;
         state.playback_pos = 100;
+        state.gate_align_rec = 299;
+        state.arm_generation += 1;
         let (count, reset) = scan(&mut app, &state);
         assert!(app.drift_aligned_bases.is_none());
         assert!(reset);
-        assert_eq!(count, 100);
-        assert_eq!(app.cached_max_drift_z, 0.0, "both still at the spawn before the gate");
+        assert_eq!(count, 0);
+        assert_eq!(app.cached_max_drift_z, 0.0, "pre-gate countdown is not drift");
 
-        // Recording drops it too.
-        app.drift_aligned_bases = Some((287, 299));
-        state.mode = TasMode::Rec as u32;
-        state.playback_pos = 388;
-        scan(&mut app, &state);
-        assert!(app.drift_aligned_bases.is_none());
-
-        // A new arm (arm_generation bumped) between two polls drops the latch
-        // and restarts the scan even though the position never fell back.
-        state.mode = TasMode::Play as u32;
+        // Once this attempt's gate arrives, aligned comparison starts cleanly.
         state.playback_pos = 380;
         state.gate_index = 287;
         state.gate_align_rec = 299;
         scan(&mut app, &state);
         assert_eq!(app.drift_aligned_bases, Some((287, 299)));
+
+        // A new arm between two polls always drops the latch and maxima.
+        app.cached_max_drift_z = 7.0;
         state.gate_index = 0;
-        state.gate_align_rec = 0;
         state.arm_generation += 1;
         let (_, reset) = scan(&mut app, &state);
         assert!(reset, "a new arm restarts the drift scan");
         assert!(app.drift_aligned_bases.is_none(), "the previous attempt bases are gone");
+        assert_eq!(app.cached_max_drift_z, 0.0);
+    }
+
+    #[test]
+    fn drift_scan_ignores_stale_playback_while_off() {
+        let mut app = test_app();
+        let mut state = tas_shared::zeroed_boxed();
+        state.mode = TasMode::Off as u32;
+        state.recorded_count = 20;
+        state.playback_pos = 20;
+        for i in 0..20 {
+            state.rec_coords[i] = [1000.0, 0.0, 2000.0];
+            state.play_coords[i] = [0.0, 0.0, 0.0];
+        }
+
+        let (count, _) = scan_drift(
+            &state,
+            &mut app.cached_max_drift_x,
+            &mut app.cached_max_drift_z,
+            &mut app.last_drift_scan_count,
+            &mut app.drift_aligned_bases,
+            &mut app.drift_latch_arm_generation,
+            &mut app.drift_first_tick,
+        );
+
+        assert_eq!(count, 0);
+        assert_eq!(app.cached_max_drift_x, 0.0);
+        assert_eq!(app.cached_max_drift_z, 0.0);
+        assert_eq!(app.drift_first_tick, None);
+    }
+
+    #[test]
+    fn drift_scan_records_the_actual_first_drift_tick() {
+        let mut app = test_app();
+        let mut state = tas_shared::zeroed_boxed();
+        state.mode = TasMode::Play as u32;
+        state.recorded_count = 10;
+        state.playback_pos = 10;
+        state.play_coords[4][0] = 0.25;
+        state.play_coords[8][2] = 3.0;
+
+        scan_drift(
+            &state,
+            &mut app.cached_max_drift_x,
+            &mut app.cached_max_drift_z,
+            &mut app.last_drift_scan_count,
+            &mut app.drift_aligned_bases,
+            &mut app.drift_latch_arm_generation,
+            &mut app.drift_first_tick,
+        );
+
+        assert_eq!(app.drift_first_tick, Some(4));
+        assert_eq!(app.cached_max_drift_x, 0.25);
+        assert_eq!(app.cached_max_drift_z, 3.0);
+    }
+
+    #[test]
+    fn cont_drift_banner_requires_current_measured_divergence() {
+        let mut app = test_app();
+        let mut state = tas_shared::zeroed_boxed();
+        state.mode = TasMode::Play as u32;
+        state.continue_from_frame = 8;
+        state.recorded_count = 10;
+        state.playback_pos = 10;
+        state.arm_generation = 41;
+
+        scan_drift(
+            &state,
+            &mut app.cached_max_drift_x,
+            &mut app.cached_max_drift_z,
+            &mut app.last_drift_scan_count,
+            &mut app.drift_aligned_bases,
+            &mut app.drift_latch_arm_generation,
+            &mut app.drift_first_tick,
+        );
+        assert!(!should_show_drift_banner(
+            &state,
+            app.drift_latch_arm_generation,
+            app.drift_first_tick,
+            app.cached_max_drift_x.max(app.cached_max_drift_z),
+        ));
+
+        // A genuinely divergent CONT prefix is still reported.
+        state.play_coords[4][0] = 0.5;
+        state.arm_generation += 1;
+        scan_drift(
+            &state,
+            &mut app.cached_max_drift_x,
+            &mut app.cached_max_drift_z,
+            &mut app.last_drift_scan_count,
+            &mut app.drift_aligned_bases,
+            &mut app.drift_latch_arm_generation,
+            &mut app.drift_first_tick,
+        );
+        assert_eq!(app.drift_first_tick, Some(4));
+        assert!(should_show_drift_banner(
+            &state,
+            app.drift_latch_arm_generation,
+            app.drift_first_tick,
+            app.cached_max_drift_x.max(app.cached_max_drift_z),
+        ));
+
+        // Before the next frame's scan, the next arm must not flash the prior
+        // attempt's warning.
+        state.arm_generation += 1;
+        assert!(!should_show_drift_banner(
+            &state,
+            app.drift_latch_arm_generation,
+            app.drift_first_tick,
+            app.cached_max_drift_x.max(app.cached_max_drift_z),
+        ));
     }
 
     #[test]

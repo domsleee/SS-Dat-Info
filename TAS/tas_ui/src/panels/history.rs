@@ -662,6 +662,17 @@ fn in_game_duration(tick: u32, first_moving: Option<u32>) -> String {
     format_recording_duration(tick.saturating_sub(offset))
 }
 
+fn finished_parts(cs: u32, exact: bool) -> Parts {
+    Parts {
+        total: format!(
+            "Finish {}",
+            crate::recording::format_finish_time(cs, exact)
+        ),
+        context: String::new(),
+        is_marker: false,
+    }
+}
+
 /// Build snapshot Parts. New entries with `start_tick > 0` get the
 /// "from <tick> · <in-game time>" form. New REC entries (start_tick = 0
 /// with end_tick > 0) get the empty context. Legacy entries — persisted
@@ -674,21 +685,10 @@ fn parse_snapshot(entry: &HistoryEntry) -> Parts {
         return parse_snapshot_label(&entry.label);
     }
     let total = in_game_duration(entry.end_tick, entry.first_moving);
-    // A run that ended at the finish line: the race time is the headline
-    // (the flag glyph is drawn by the row from the same field).
+    // A finished run has one authoritative visible time. Do not also render
+    // its recording duration or continuation origin beside it.
     if let Some(cs) = entry.finish_time_cs {
-        let mut context = format!(
-            "Finish {}",
-            crate::recording::format_finish_time(cs, entry.finish_time_exact)
-        );
-        if entry.start_tick > 0 {
-            context.push_str(&format!(" · from {}", entry.start_tick));
-        }
-        return Parts {
-            total,
-            context,
-            is_marker: false,
-        };
+        return finished_parts(cs, entry.finish_time_exact);
     }
     if entry.start_tick > 0 {
         return Parts {
@@ -749,6 +749,17 @@ fn parse_snapshot_label(label: &str) -> Parts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finished_run_has_one_race_time() {
+        let exact = finished_parts(4_690, true);
+        assert_eq!(exact.total, "Finish 0:46.90");
+        assert!(exact.context.is_empty());
+
+        let estimated = finished_parts(4_690, false);
+        assert_eq!(estimated.total, "Finish ~0:46.90");
+        assert!(estimated.context.is_empty());
+    }
 
     #[test]
     fn parses_continued_label() {
