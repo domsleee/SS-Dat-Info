@@ -3824,14 +3824,15 @@ impl eframe::App for TasApp {
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
                             let button = egui::Button::new(
-                                egui::RichText::new("↗ Text Script").strong().size(13.0),
+                                egui::RichText::new("↗ Text Script")
+                                    .strong()
+                                    .color(egui::Color32::from_gray(220)),
                             )
-                            .fill(egui::Color32::from_rgb(49, 95, 137))
+                            .fill(ui.visuals().widgets.inactive.weak_bg_fill)
                             .stroke(egui::Stroke::new(
                                 1.0_f32,
-                                egui::Color32::from_rgb(96, 150, 202),
-                            ))
-                            .min_size(egui::vec2(132.0, 28.0));
+                                egui::Color32::from_rgb(62, 86, 110),
+                            ));
                             open_text_script = ui
                                 .add_enabled(state.recorded_count > 0, button)
                                 .on_hover_text(
