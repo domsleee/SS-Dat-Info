@@ -31,6 +31,14 @@ test `captured_ui_break_at_4500_exercises_production_banner`:
 
 This fixture checks the production UI drift functions offline; it does not
 replace the live `cont-ui-left-spam` stage or certify a full zero-drift replay.
+`just test_cont_ui_left_spam` prepares the real UI automatically with the original
+"UI break at 4500" history capture (entry 2431, 5032 ticks)
+at tick 4500, sends F12 and physical Pico LEFT taps, and checks five splices.
+The raw history blob receives a normal recording-file metadata envelope in the
+artifact directory; its input and XYZ payload is copied byte-for-byte.
+It keeps history, settings and logs in an isolated artifact directory and closes
+its child UI afterwards. Save your active run first; no manual fixture loading
+or Pico-panel setup is required. This is also the first stage of `just test_live`.
 
 ## Offline inspection tools
 

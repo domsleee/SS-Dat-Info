@@ -78,6 +78,12 @@ const STEER_RELEASE_TICKS: u32 = 50;
 
 /// Run the full 3-phase acceptance test.
 pub fn run() -> AcceptanceResult {
+    // Fail before launching or changing the game if another controller owns
+    // the Pico, or the configured device is missing.
+    if let Err(error) = harness::PicoKeys::open_checked() {
+        eprintln!("ACCEPTANCE SETUP FAILED: {error}");
+        std::process::exit(1);
+    }
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
 
@@ -149,7 +155,11 @@ pub fn run() -> AcceptanceResult {
 
     println!("  Steering via Pico HID for {}s...", REC_DURATION_SECS);
     let steps = patterns::build_from_pattern(STEER_PATTERN, STEER_HOLD_TICKS, 0);
-    drive_pico_acceptance(&steps);
+    if let Err(error) = drive_pico_acceptance(&steps) {
+        harness::stop(&mut client);
+        eprintln!("ACCEPTANCE INPUT FAILED: {error}");
+        std::process::exit(1);
+    }
 
     let rec_count = client.state().recorded_count;
     harness::stop(&mut client);
@@ -310,9 +320,10 @@ pub fn run() -> AcceptanceResult {
 }
 
 /// Drive Pico HID for acceptance test Phase 2 (delegates to harness).
-fn drive_pico_acceptance(steps: &[patterns::PatternStep]) {
-    harness::drive_pico_steps_keepalive(steps, Some(STEER_HOLD_TICKS as u64 * 10), 200);
+fn drive_pico_acceptance(steps: &[patterns::PatternStep]) -> Result<(), String> {
+    harness::drive_pico_steps_required(steps)?;
     std::thread::sleep(std::time::Duration::from_millis(
         STEER_RELEASE_TICKS as u64 * 10,
     ));
+    Ok(())
 }

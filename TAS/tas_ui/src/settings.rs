@@ -51,6 +51,9 @@ impl Default for Settings {
 }
 
 fn settings_path() -> std::path::PathBuf {
+    if let Some(root) = std::env::var_os("SSB_INSPECT_DATA_DIR") {
+        return std::path::PathBuf::from(root).join("ssb_inspect_settings.json");
+    }
     // Store next to the executable
     if let Ok(exe) = std::env::current_exe() {
         exe.with_file_name("ssb_inspect_settings.json")
