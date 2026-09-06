@@ -92,6 +92,12 @@ write to uninvited — it already carries `System Volume Information` (Windows) 
 
 ## USB layout
 
+The UI connects only to the configured port (`TAS_PICO_PORT`, default `COM7`)
+after checking VID `2E8A`, PID `000B`, and interface `02`. It never probes other
+ports with key-mask bytes or falls back to the console. A successful serial write
+is not device identification. This checks the expected USB layout, not a firmware
+version handshake; the board must still run the firmware in this directory.
+
     MI_02  -> COM7   CDC data     <- harness writes mask bytes HERE
     MI_00  -> COM8   CDC console  (REPL; firmware deliberately does NOT read it,
                                    because 0x03 would be Ctrl-C and kill code.py)

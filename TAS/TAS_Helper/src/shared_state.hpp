@@ -1,5 +1,6 @@
 #pragma once
 #include "stdafx.h"
+#include "mapping_owner.hpp"
 
 // Shared memory layout between TAS_Helper.dll and the egui UI process.
 // Lock-free single-writer: UI writes command region, DLL writes status region.
@@ -652,11 +653,14 @@ inline void ResetHookPerfCounters(TasSharedState* s) {
 
 // Shared memory management (DLL side - creates the mapping)
 class TasSharedMemory {
+    MappingOwner owner;
 public:
     HANDLE hMapFile = nullptr;
     TasSharedState* state = nullptr;
 
     bool Create() {
+        if (state) return true;
+        if (!owner.Acquire("Local\\SupremeTAS.Owner")) return false;
         hMapFile = CreateFileMappingA(
             INVALID_HANDLE_VALUE,
             nullptr,
@@ -665,7 +669,10 @@ public:
             sizeof(TasSharedState),
             TAS_SHARED_MEMORY_NAME
         );
-        if (!hMapFile) return false;
+        if (!hMapFile) {
+            owner.Release();
+            return false;
+        }
 
         state = (TasSharedState*)MapViewOfFile(
             hMapFile,
@@ -676,6 +683,7 @@ public:
         if (!state) {
             CloseHandle(hMapFile);
             hMapFile = nullptr;
+            owner.Release();
             return false;
         }
 
@@ -745,6 +753,7 @@ public:
             CloseHandle(hMapFile);
             hMapFile = nullptr;
         }
+        owner.Release();
     }
 
     ~TasSharedMemory() { Destroy(); }

@@ -29,7 +29,7 @@ bool run() {
     }
 
     if (!g_sharedMem.Create()) {
-        Log("FATAL: Failed to create shared memory mapping");
+        Log("FATAL: Failed to acquire TAS shared memory. Close any other injected Supreme instance and retry.");
         return false;
     }
     Log(std::format("Shared memory '{}' created ({} bytes)",

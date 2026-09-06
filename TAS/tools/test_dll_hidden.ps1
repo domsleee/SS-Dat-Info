@@ -45,6 +45,7 @@ Remove-Item $vsOut -Force -ErrorAction SilentlyContinue
 if (-not $vsPath) { throw 'vswhere returned no installation path' }
 
 $suites = @(
+    @{ Src = '.\TAS\TAS_Helper\src\tests\test_mapping_owner.cpp'; Exe = 'tas_test_mapping_owner.exe'; Name = 'mapping_owner' },
     @{ Src = '.\TAS\TAS_Helper\src\tests\test_input_gate.cpp'; Exe = 'tas_test_input_gate.exe'; Name = 'input_gate' },
     @{ Src = '.\TAS\TAS_Helper\src\tests\test_level_path.cpp'; Exe = 'tas_test_level_path.exe'; Name = 'level_path' },
     @{ Src = '.\TAS\TAS_Helper\src\tests\test_setup_config.cpp'; Exe = 'tas_test_setup_config.exe'; Name = 'setup_config' },

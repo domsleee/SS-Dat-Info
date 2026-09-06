@@ -16,7 +16,22 @@ in `.github/workflows/ci.yaml`.
 cd TAS && cargo test --release
 ```
 
-That's the entire CI surface. No game, no Pico, no integration coverage.
+CI also builds the Win32 native DLL and runs the eight C++ policy suites via
+`TAS/tools/test_dll_hidden.ps1`. No game or Pico is involved. Windows Rust unit
+tests use private unnamed mappings, never the running game's shared memory.
+
+### Review follow-ups requiring live validation
+
+- Only one injected Supreme process is supported. A DLL-owned named handle
+  (`Local\SupremeTAS.Owner`) rejects a second owner before mapping initialization.
+  The handle is released on shutdown/process exit; a UI retaining the old data
+  mapping does not prevent a new game from acquiring ownership. All participating
+  DLLs must include the guard; it cannot protect an already-running older DLL.
+- CONT's 1024-tick gate-relative bucket check is not a full-prefix determinism
+  verdict. Replay the saved run through the intended splice when investigating
+  later drift, including whether edited inputs left obsolete reference positions.
+- The LEFT-spam retry regression and held LEFT+SHIFT restart tests do not prove
+  the reported crash fixed. That requires a separate crash reproduction/capture.
 
 ### Local lane (your machine)
 

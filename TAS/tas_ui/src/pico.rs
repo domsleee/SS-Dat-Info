@@ -1,5 +1,67 @@
 use eframe::egui;
 
+fn is_pico_data_port(info: &serialport::SerialPortInfo) -> bool {
+    // boot.py enables console (interface 0) and binary data (interface 2).
+    matches!(&info.port_type, serialport::SerialPortType::UsbPort(usb)
+        if usb.vid == 0x2e8a && usb.pid == 0x000b && usb.interface == Some(2))
+}
+
+fn select_data_port<'a>(
+    ports: &'a [serialport::SerialPortInfo],
+    preferred: &str,
+) -> Result<&'a str, String> {
+    if let Some(port) = ports
+        .iter()
+        .find(|port| port.port_name.eq_ignore_ascii_case(preferred))
+    {
+        return if is_pico_data_port(port) {
+            Ok(&port.port_name)
+        } else {
+            Err(format!(
+                "{} is not the expected Pico data interface",
+                preferred
+            ))
+        };
+    }
+    Err(format!(
+        "Pico data port {} not found; select its data COM port",
+        preferred
+    ))
+}
+
+#[cfg(test)]
+mod detection_tests {
+    use super::*;
+
+    fn usb(name: &str, vid: u16, interface: Option<u8>) -> serialport::SerialPortInfo {
+        serialport::SerialPortInfo {
+            port_name: name.into(),
+            port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+                vid,
+                pid: 0x000b,
+                interface,
+                serial_number: None,
+                manufacturer: None,
+                product: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn selects_only_configured_pico_data_interface_without_probing() {
+        let ports = vec![
+            usb("COM1", 0x1234, Some(2)),
+            usb("COM8", 0x2e8a, Some(0)),
+            usb("COM7", 0x2e8a, Some(2)),
+        ];
+        assert_eq!(select_data_port(&ports, "com7").unwrap(), "COM7");
+        assert!(select_data_port(&ports, "COM1").is_err());
+        assert!(select_data_port(&ports, "COM8").is_err());
+        assert!(select_data_port(&ports, "COM9").is_err());
+        assert!(select_data_port(&[usb("COM7", 0x2e8a, None)], "COM7").is_err());
+    }
+}
+
 pub struct PicoState {
     pub port_name: String,
     pub connected: bool,
@@ -21,7 +83,7 @@ impl PicoState {
         }
     }
 
-    /// Scan COM ports and auto-connect to the first responsive one.
+    /// Identify the configured data interface without sending probe bytes.
     /// Called once on startup. Returns log messages.
     pub fn auto_detect(&mut self) -> Vec<String> {
         if self.scan_attempted || self.connected {
@@ -34,36 +96,33 @@ impl PicoState {
             Err(_) => return Vec::new(),
         };
 
-        let mut logs = Vec::new();
-        let names: Vec<&str> = ports.iter().map(|p| p.port_name.as_str()).collect();
-        if names.is_empty() {
-            return Vec::new();
+        if let Err(error) = select_data_port(&ports, &self.port_name) {
+            return vec![format!("Pico auto-detect: {error}")];
         }
-        logs.push(format!("Pico auto-detect: scanning {}", names.join(", ")));
-
-        for info in &ports {
-            // Try to open and do a quick write test (send 0xFF = release all, harmless)
-            let result = serialport::new(&info.port_name, 115200)
-                .timeout(std::time::Duration::from_millis(100))
-                .open();
-
-            if let Ok(mut port) = result {
-                if port.write_all(&[0xFF]).is_ok() {
-                    self.port_name = info.port_name.clone();
-                    self.port = Some(port);
-                    self.connected = true;
-                    self.auto_detected = true;
-                    self.error = None;
-                    logs.push(format!("Pico auto-detected on {}", self.port_name));
-                    return logs;
-                }
-            }
+        self.connect();
+        self.auto_detected = self.connected;
+        if self.connected {
+            vec![format!(
+                "Pico data interface connected on {}",
+                self.port_name
+            )]
+        } else {
+            vec![format!(
+                "Pico connection failed: {}",
+                self.error.as_deref().unwrap_or("unknown error")
+            )]
         }
-        logs.push("Pico auto-detect: no responsive port found".to_string());
-        logs
     }
 
     pub fn connect(&mut self) {
+        self.disconnect();
+        let verified = serialport::available_ports()
+            .map_err(|error| error.to_string())
+            .and_then(|ports| select_data_port(&ports, &self.port_name).map(|_| ()));
+        if let Err(error) = verified {
+            self.error = Some(error);
+            return;
+        }
         match serialport::new(&self.port_name, 115200)
             .timeout(std::time::Duration::from_millis(100))
             .open()

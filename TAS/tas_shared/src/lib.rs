@@ -5020,6 +5020,8 @@ mod tests {
     #[test]
     fn print_offsets() {
         use std::mem::offset_of;
+        println!("capture offsets: segment_start_frame={} arm_generation={}",
+            offset_of!(TasSharedState, segment_start_frame), offset_of!(TasSharedState, arm_generation));
         println!(
             "offsets: version={} command={} mode={} frame_count={} recorded_count={} playback_pos={} \
              replay_ptr={} player_ptr={} player_x={} input_log={} rec_coords={} play_coords={} \

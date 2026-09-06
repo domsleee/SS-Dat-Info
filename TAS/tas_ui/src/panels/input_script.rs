@@ -124,6 +124,7 @@ pub fn events_to_script(events: &[InputEvent], timer_start: u32) -> String {
 
     let mut s = String::new();
     s.push_str("# units = ticks/frames (100 per second)\n");
+    s.push_str("# To remove every input, replace the script with: # clear inputs\n");
     s.push_str(&format!(
         "# timer starts @ tick {} (T=0); lower ticks run BEFORE the timer\n\n",
         timer_start
