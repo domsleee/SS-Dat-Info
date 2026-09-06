@@ -9,7 +9,7 @@ runs on the developer's machine — not in CI.
 
 ### CI lane (hosted runner)
 
-Runs on every pull request and on pushes to `main`/`tas` via the `tas:test` job
+Runs on every pull request and on pushes to `main` via the `tas:test` job
 in `.github/workflows/ci.yaml`.
 
 ```
@@ -19,6 +19,8 @@ cd TAS && cargo test --release
 CI also builds the Win32 native DLL and runs the eight C++ policy suites via
 `TAS/tools/test_dll_hidden.ps1`. No game or Pico is involved. Windows Rust unit
 tests use private unnamed mappings, never the running game's shared memory.
+Offline Python helper tests also run in this job (`just test_tools` locally).
+Tool usage and captured-fixture provenance are in the [TAS reference](../TAS/README.md).
 
 ### Local lane (your machine)
 

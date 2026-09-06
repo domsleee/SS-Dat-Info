@@ -1,4 +1,4 @@
-//! File-per-entry persistent history store (v2). See HISTORY_STORE_PLAN.md.
+//! File-per-entry persistent history store (v2). See TAS/README.md.
 //!
 //! Layout: `<dir>/<entry_id>.tasrec` (one immutable blob per snapshot entry)
 //! plus `<dir>/manifest.json` (ordered metadata + cursor + next_entry_id).
@@ -8,7 +8,6 @@
 //! nothing and hashing would force a canonical blob format + refcount GC.
 //! Integrity is a per-entry crc32 checksum stored in the manifest.
 
-// Not yet wired into the app (Phase 2); silence until then.
 #![allow(dead_code)]
 
 use crate::recording::{HistoryEntryKind, PersistedSnapshot};
