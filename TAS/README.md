@@ -68,8 +68,7 @@ dumps. Add `--max-value 0xf` to restrict both states to small values.
 `tas_shm.ps1` can also send commands; `keys.ps1` sends keyboard input. These are
 manual diagnostics, not substitutes for the Rust live suite.
 `test_dll_hidden.ps1` runs native tests without stealing game focus.
-Pico firmware and deployment have their own [README](pico/README.md);
-`code.proposed.py` is an unshipped proposal, not the deployed firmware.
+Pico firmware and deployment have their own [README](pico/README.md).
 
 History persistence is implemented in `tas_ui/src/history_store_v2.rs`:
 `manifest.json` stores ordered metadata and the current entry ID, with immutable

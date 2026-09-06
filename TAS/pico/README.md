@@ -1,267 +1,72 @@
-# Pico HID keyboard — firmware backup and notes
+# Pico HID keyboard
 
-The TAS harness drives the game with a **real USB keyboard** rather than synthetic
-input, because Supreme reads hardware key state: `keybd_event` does not engage the
-pause, so only this device can drive Escape/F5/steering for a test.
+The TAS live tests use a Raspberry Pi Pico 2 as a USB HID keyboard for
+Escape, F5 and steering. The firmware targets CircuitPython 10.1.3 on RP2350
+and requires the Adafruit HID library on the board.
 
-Hardware: **Raspberry Pi Pico 2** running **Adafruit CircuitPython 10.1.3**,
-`VID_2E8A PID_000B`, UID `719613738D55C04D`.
+## Deploy and check
 
-## This directory is the source of truth
+Edit the repository files, not the board. From the repository root:
 
-Migrated here 2026-08-22 from `cheatengine-mcp-bridge/tasks/pico/`, which is where
-it used to live. **Edit here, then run `deploy.ps1`. Do not edit the board.**
+```powershell
+.\TAS\pico\deploy.ps1 -Check   # Compare firmware without changing the board
+.\TAS\pico\deploy.ps1          # Show differences and ask before copying
+```
 
-    .\TAS\pico\deploy.ps1 -Check    # does the board match the repo?
-    .\TAS\pico\deploy.ps1           # flash it (diffs and asks first)
+The script finds the CIRCUITPY volume; use `-Drive E:` to select it explicitly.
+It copies only `code.py` and `boot.py`. Their line endings are pinned in
+`.gitattributes` because deployment checks compare bytes.
 
-### Why it moved
+`test.py` is a manual, host-side keyboard check, not firmware or an automated
+regression test. It requires pyserial and sends real keys to the focused window:
 
-The firmware is Supreme-TAS-specific, but it was living in a **public,
-general-purpose** project — the Cheat Engine MCP Bridge, v11.4.0, with a LICENSE
-and a demo — inside a `tasks/` folder of game-specific scratch work, on a side
-branch. Meanwhile its only live consumers are here: `tas_test`'s harness and
-`tas_ui`'s Pico panel. The CE-era driver that justified the old location,
-`serial.lua`, is referenced today only by `tasks/archive/*`.
+```powershell
+uv run TAS/pico/test.py COM7
+```
 
-Splitting the firmware from the code that speaks its protocol had already cost
-something real. Escape (bit 7) was added to the harness in this repo, and the
-matching firmware change was **never committed** in the other one:
+Select the data port explicitly, then focus a harmless text editor during the
+three-second countdown. Do not run this alongside a live game test.
 
-    device (CIRCUITPY)                    for i in range(8)   <- running
-    cheatengine-mcp-bridge working tree   for i in range(8)   <- uncommitted
-    cheatengine-mcp-bridge HEAD           for i in range(7)   <- committed
+## USB connection
 
-`range(7)` never touches bit 7, so the committed firmware never presses Escape at
-all — and Escape is the only input that engages the game's pause, which
-`escape-speedup` and `pause-resume` both depend on. Flashing a clean checkout of
-that repo would have silently broken them. That state stood for months, and the
-working version survived only as one uncommitted file plus the board's flash.
-Co-located, a protocol change is one atomic commit in the repo whose test suite
-would catch the mistake.
+The UI uses `TAS_PICO_PORT` (default `COM7`) and checks VID `2E8A`, PID `000B`
+and interface `02`. These identify the USB interface, not the firmware version.
 
-### What came across, and what did not
-
-Brought: `code.py`, `boot.py` (byte-identical to the running board), and `test.py`
-(a HOST-side pyserial tool that drives the board — it does not go on the device).
-
-Left behind deliberately: `serial.lua`, the Cheat Engine Lua driver, which belongs
-with CE and is only referenced by archived scripts; and `pico.log`, 6.2 MB of
-tracked log that should not have been committed anywhere.
-
-History is not carried over by a file copy, so it is recorded here instead —
-`tasks/pico/` in `cheatengine-mcp-bridge`, 11 commits, 2026-02-28 to 2026-03-24:
-
-    6a886bb  2026-03-24  ok
-    fd8fe62  2026-03-16  All keys work!!!
-    daad89c  2026-03-16  Works for up,left,right
-    7a4e51b  2026-03-15  checkpoint: save current drift-fix state and restore revive launcher
-    8cacce5  2026-03-08  whatever.
-    058dc46  2026-03-07  attempts...
-    988d8ab  2026-03-01  rewrite _full_drift_test to use real Pico HID input, add serial driver
-    addb880  2026-03-01  zero drift at natural tick rate with steered input
-    a99eac4  2026-02-28  achieve zero drift without poslock
-    f3266df  2026-02-28  cleanup: archive old probes, fix UI/test infrastructure
-    0eb44e2  2026-02-28  achieve verified steering + zero drift
-
-### The old location is retired
-
-Done, in `cheatengine-mcp-bridge` on branch `tas-loop`:
-
-* `a73d325` commits the Escape fix that had been sitting uncommitted, so it exists
-  in that repo's history instead of vanishing with the directory.
-* `c0c57f0` removes `code.py`, `boot.py`, `test.py` and `pico.log`, and leaves a
-  README there pointing here.
-
-`serial.lua` stayed behind on purpose: it is the Cheat Engine Lua driver for the
-same board, belongs with CE rather than with the firmware, and 16 files under
-`tasks/archive/` still reference it. **It speaks this same bitmask protocol**, so
-if the bit assignments below ever change, that file has to change with them — it
-is the one remaining place the protocol is duplicated.
-
-Note that this repo's harness still calls into that one for
-`skills/revive-supreme`, so the cross-repo dependency is not gone entirely; what
-has gone is the *protocol* being split across two repos.
-
-`boot_out.txt` is generated by the board and records only which CircuitPython build
-the firmware was written against.
-
-Worth knowing regardless: the CIRCUITPY volume is a removable drive that hosts
-write to uninvited — it already carries `System Volume Information` (Windows) plus
-`.fseventsd` and `.Trashes` (macOS).
-
-## USB layout
-
-The UI connects only to the configured port (`TAS_PICO_PORT`, default `COM7`)
-after checking VID `2E8A`, PID `000B`, and interface `02`. It never probes other
-ports with key-mask bytes or falls back to the console. A successful serial write
-is not device identification. This checks the expected USB layout, not a firmware
-version handshake; the board must still run the firmware in this directory.
-
-    MI_02  -> COM7   CDC data     <- harness writes mask bytes HERE
-    MI_00  -> COM8   CDC console  (REPL; firmware deliberately does NOT read it,
-                                   because 0x03 would be Ctrl-C and kill code.py)
-    MI_05 COL01      HID Keyboard Device   <- real keystrokes
-    plus mouse, consumer control, audio, and the CIRCUITPY mass-storage volume
+Use the CDC **data** interface (`MI_02`), never the CDC console (`MI_00`).
+Both have the same VID/PID; sending a mask such as `0x03` to the console can
+be interpreted as Ctrl-C. COM numbers can change after re-enumeration.
 
 ## Protocol
 
-One byte = the bitmask of keys to HOLD.
+Each byte sets the held-key mask, except the reserved commands below.
 
-| bit | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
-|-----|---|---|---|---|---|---|---|---|
-| key | LEFT | RIGHT | UP | DOWN | JUMP (LCTRL) | SHIFT | F5 | ESCAPE |
+| Bit | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Key | LEFT | RIGHT | UP | DOWN | LCTRL (jump) | SHIFT | F5 | ESCAPE |
 
-    0xFF  release all
-    0xFD  soft USB re-enumerate (D+ pullup toggle, ~2s)
-    0xFE  hard reset (pullup toggle + microcontroller.reset())
+- `0x00` or `0xFF`: release all keys.
+- `0xFD`: release keys and disconnect/reconnect USB.
+- `0xFE`: release keys, disconnect/reconnect USB, then reset the MCU.
 
-Only the LAST byte of a read batch is processed. Masks **latch** — a key stays
-down until a later byte clears it.
+The firmware processes only the last byte of each received batch. Keys latch
+until another mask changes them or 500 ms passes without a command. A successful
+serial write is not an acknowledgement that the firmware processed the command.
 
-## The 500ms watchdog, and why it is load-bearing
+The timeout affects recorded input: the harness's default 56-tick hold is
+560 ms at 100 Hz. Changing the timeout or adding keepalives changes test inputs
+and must be validated with the live regression suite.
 
-```python
-TIMEOUT_S = 0.5  # release all if no command in 500ms
-```
+## Troubleshooting and recovery
 
-Any hold longer than 500ms is released by the firmware unless the host re-sends.
-`drive_pico_steps` writes only on mask CHANGE and a pattern step is
-`DEFAULT_HOLD_TICKS (56) * 10ms = 560ms`, so holds ARE being truncated.
+If the configured COM port is missing, check the device's current CDC data port
+before retrying. A missing port does not by itself identify a firmware crash or
+prove that the HID interface disappeared.
 
-**Do not "fix" that with a keepalive without changing the test suite with it.**
-That watchdog release lands INSIDE the recording window; the explicit `0xFF` at
-the end of `drive_pico_steps` lands after it. So the watchdog is currently the
-only reason a recording contains press AND release. Adding a keepalive turned
-every recording press-only and took `regression` from 15/15 to a Gate 1 failure
-with the start match burning all 60 retries. Measured, A/B'd, reverted (e7434ba).
+If the port opens but keys do not work, inspect the console for exceptions:
+the current firmware can exit if a HID release raises in its exception handler
+or timeout path.
 
-## Known failure mode: the port vanishes
-
-The recurring failure in the session logs is
-
-    Failed to open COM7: The system cannot find the file specified. (os error 2)
-
-94 genuine occurrences across two sessions. `os error 2` is ERROR_FILE_NOT_FOUND:
-the COM7 device path **did not exist** at that instant. Note what that does and
-does not prove — it is not "busy" (that would be ERROR_ACCESS_DENIED) and not a
-failed write, but neither does it establish that the whole composite device left
-the bus. HID may well have stayed up, or the CDC data interface may have come back
-under a different COM number while the harness kept asking for COM7.
-
-Count episodes, not log lines, too: 94 failed opens across retry loops could be a
-much smaller number of actual disconnects.
-
-It is expensive because the harness degrades silently instead of stopping: F5
-falls back to PostMessage, Escape falls back to `keybd_event` (which cannot pause
-the game), and the run continues and reports things like
-`VERDICT: steering=FAIL replay_steered=FAIL zero_drift=FAIL` — which reads as a
-physics or determinism bug rather than a missing keyboard.
-
-## Improvement candidates — reviewed (gpt-5.6-sol, xhigh)
-
-An earlier version of this file claimed auto-reload was the best-evidenced cause
-of the vanishing COM port. **That was wrong** and the review said so plainly.
-Corrected below; the ranking is now the reviewed one.
-
-### Confirmed correct
-
-* **The exception handler can kill `code.py`.** `except Exception: kbd.release_all()`
-  — if HID is what broke, `release_all()` raises *inside the handler*, escapes, and
-  ends the program. The device then stays enumerated but deaf: the port opens,
-  writes "succeed", nothing happens. The review found a second instance I missed —
-  **the 500ms timeout's `kbd.release_all()` is outside the `try` as well**, and so
-  is the initial `Keyboard(...)` / `memorymap.AddressRange(...)` construction.
-  Explains "enumerated but deaf", NOT a missing COM7.
-
-* **Only the last byte of a batch is processed.** `cmd = data[-1]` discards
-  everything else in the same CDC read. If a press and its release land in one
-  batch the press is erased entirely — a real input-correctness bug, independent
-  of any disconnect.
-
-* **The health check is write-only and therefore lies.** A write succeeds into a
-  driver buffer even when `code.py` is wedged. Needs a correlated reply. But
-  **do not invent a new command byte for it**: every one of the 256 values is a
-  potentially valid mask (`0xF0` is Ctrl+Shift+F5+Escape), and the protocol has
-  already spent `0xFD`/`0xFE`/`0xFF`. ACK the existing `0xFF` instead, and drain
-  stale replies before reading.
-
-* **Port discovery must not be VID:PID alone.** COM7 and COM8 share the composite
-  parent's VID/PID, so "first match" can select the REPL console — where a `0x03`
-  byte is Ctrl-C and kills `code.py`. Discriminate on VID/PID **plus** serial
-  (`719613738D55C04D`) **plus** the CDC data interface (`MI_02`), and fail closed
-  unless exactly one matches.
-
-* **`0xFE` is badly sequenced** — detach 300ms, reattach, allow Windows only 200ms,
-  then reset the MCU: detach → partial enumeration → second reset. It is also
-  **dead code: nothing in this repo sends it.** Delete it or reset while detached.
-
-### Wrong, or oversold
-
-* **Auto-reload does NOT delete the COM port.** It is a soft VM reload — equivalent
-  to Ctrl-D — and CircuitPython keeps its USB stack up across it; `boot.py` is not
-  re-run. So it cannot produce `ERROR_FILE_NOT_FOUND`. Disabling it is still worth
-  doing, but for a different and smaller reason: a reload mid-test silently loses
-  `current_mask` and buffered commands, and can leave a key held that the 500ms
-  timeout will then never release because `current_mask` came back as 0. (Which is
-  also why the firmware should `release_all()` at startup.)
-
-* **A 1ms loop sleep is cargo cult for this symptom.** A hot Python loop does not
-  starve RP2350 USB; servicing is interrupt-driven. Harmless housekeeping, not a fix.
-
-* **The hardware watchdog is underdesigned as I proposed it.** `WatchDogMode.RESET`
-  lives in the `watchdog` module, not `microcontroller.watchdog`. Worse, a timeout
-  at or below ~2.3s **fires during `0xFD`'s own 0.3s + 2s sleeps**. And feeding it
-  every loop means a loop that is catching USB exceptions forever still feeds it —
-  it would not recover the failure it is aimed at. A reset also risks corrupting
-  CIRCUITPY if MSC is mounted and being written.
-
-* **`storage.disable_usb_drive()` is more reversible than I claimed** — safe mode
-  bypasses `boot.py`, and the REPL and BOOTSEL remain. Still good hardening, and a
-  clean A/B, but not proven causal.
-
-* **"USB selective suspend matches exactly" was too strong.** Selective suspend
-  preserves the device stack and resumes on I/O; it does not normally delete the
-  COM symbolic link. (It *is* enabled on this machine — AC and DC both `0x1` — so
-  it stays on the list, just not at the top.)
-
-### What the evidence actually supports
-
-`ERROR_FILE_NOT_FOUND` proves only that **the COM7 path did not exist at that
-instant** — not that the whole composite device left the bus. COM7 could have
-vanished while HID stayed up, or the CDC data interface could have come back under
-a different COM number against a hardcoded name.
-
-The review's leading suspect was the firmware disconnecting itself via `0xFD`/`0xFE`.
-**Checked: it is not that for these failures.** `0xFD` is sent only by a manual
-button in the tas_ui panel, `0xFE` is sent by nothing, and all 94 failures occurred
-in `tas_test`, which has no `0xFD`/`0xFE` path at all — it only ever writes masks,
-`0x40`, `0x80` and `0xFF`. So the remaining live hypotheses are a stale COM number
-after a re-enumeration, or Windows losing just the CDC child of the composite.
-
-**The decisive missing observation is what is still present when COM7 is gone.**
-Nothing records that today, which is why 94 occurrences produced no diagnosis. The
-cheapest real improvement is therefore not in the firmware at all: when a port open
-fails, enumerate the `VID_2E8A` device tree and log which interfaces survive. That
-turns the next occurrence into evidence instead of another shrug.
-
-### Highest-value change, and it is host-side
-
-**Make the harness fail closed.** Today a missing Pico degrades silently: F5 falls
-back to PostMessage, Escape to `keybd_event` (which cannot pause the game), steering
-to nothing at all — and the run continues to a verdict. That is how a missing
-keyboard gets reported as `steering=FAIL replay_steered=FAIL zero_drift=FAIL` and
-costs a debugging session. A required-but-absent Pico should abort the run.
-
-### Descriptor trimming (worth doing, not proven causal)
-
-This device only needs HID-keyboard + CDC. `usb_hid.enable((usb_hid.Device.KEYBOARD,))`
-drops mouse and consumer control; `usb_midi.disable()` drops what Windows shows as
-the audio function; MSC can be dropped conditionally. Fewer interfaces, fewer
-drivers, fewer things to go wrong — but treat it as hardening and an A/B, not a fix.
-
-## Restoring
-
-Copy `code.py` and `boot.py` onto the CIRCUITPY volume. If the board is
-unresponsive and the drive does not appear, hold BOOTSEL while plugging in to get
-the ROM bootloader, then reflash CircuitPython and copy these back.
+For a recoverable board, restore `code.py` and `boot.py` using the deploy script.
+If CIRCUITPY is unavailable, CircuitPython safe mode bypasses `boot.py`.
+BOOTSEL while plugging in enters the ROM bootloader for reinstalling
+CircuitPython, the Adafruit HID library and these firmware files.

@@ -8,5 +8,4 @@
 # device is ever normalised, update these lines to match.
 code.py          text eol=lf
 test.py          text eol=lf
-code.proposed.py text eol=lf
 boot.py          text eol=crlf

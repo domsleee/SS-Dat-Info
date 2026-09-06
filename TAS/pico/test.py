@@ -8,7 +8,7 @@ test.py — Standalone Pico HID keyboard test.
 Run on the PC (not the Pico) to verify the Pico is working.
 
 Usage:
-  uv run tasks/pico/test.py COM6
+  uv run TAS/pico/test.py COM7
 
 Opens the Pico data serial port, sends key commands, and you should
 see the corresponding keystrokes appear in whatever window has focus.
