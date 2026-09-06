@@ -12,14 +12,8 @@ use crate::harness;
 #[derive(Deserialize)]
 pub struct RecordingMetadata {
     pub recorded_count: u32,
-    #[allow(dead_code)]
-    pub inject_mode: u32,
-    #[allow(dead_code)]
+    #[serde(default)]
     pub force_fixed_tick: u32,
-    #[allow(dead_code)]
-    pub force_direct: u32,
-    #[allow(dead_code)]
-    pub input_source: u32,
     #[serde(default)]
     pub notes: String,
 }
@@ -225,10 +219,7 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
         }
     };
 
-    println!(
-        "Loaded: {} ticks, inject_mode={}, fft={}, force_direct={}",
-        rec.count, rec.meta.inject_mode, rec.meta.force_fixed_tick, rec.meta.force_direct
-    );
+    println!("Loaded: {} ticks, fft={}", rec.count, rec.meta.force_fixed_tick);
     if !rec.meta.notes.is_empty() {
         println!("Notes: {}", rec.meta.notes);
     }

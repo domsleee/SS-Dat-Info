@@ -1,6 +1,5 @@
 #pragma once
 #include "stdafx.h"
-#include "helper.hpp"
 #include "log.hpp"
 
 // Game module bases and resolved addresses.

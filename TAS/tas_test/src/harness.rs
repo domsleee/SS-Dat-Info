@@ -894,10 +894,7 @@ pub fn connect() -> TasSharedMemoryClient {
 /// Print current shared state status.
 pub fn print_status(client: &TasSharedMemoryClient) {
     let s = client.state();
-    println!(
-        "Config: inject_mode={} fft={} force_direct={}",
-        s.inject_mode, s.force_fixed_tick, s.force_direct
-    );
+    println!("Config: fft={}", s.force_fixed_tick);
     println!(
         "State: mode={} recorded={} playback_pos={} game_in_game={}",
         s.mode_str(),
@@ -906,12 +903,10 @@ pub fn print_status(client: &TasSharedMemoryClient) {
         s.game_in_game
     );
     println!(
-        "Level: epoch={} scan_epoch={} resolved={} hits={} vs {}",
+        "Level: epoch={} scan_epoch={} resolved={}",
         s.level_epoch,
         s.level_scan_epoch,
-        tas_shared::level_is_resolved(s),
-        s.level_scan_best_hits,
-        s.level_scan_second_hits
+        tas_shared::level_is_resolved(s)
     );
     match tas_shared::level_context(s) {
         Some((id, path)) => println!("Path: gen={} id={:#x} {:?}", s.level_path_gen, id, path),
@@ -1784,4 +1779,22 @@ mod pico_required_tests {
         assert!(super::require_pico_write(true, "test-port").is_ok());
         assert!(super::require_pico_write(false, "test-port").unwrap_err().contains("write failed"));
     }
+}
+
+/// Assert the proven zero-drift configuration before a gate runs: natural
+/// ticks (`force_fixed_tick == 0`) and a 1x (or unset) playback speed. Every
+/// live gate calls this once after `ensure_game_running`.
+pub fn assert_proven_config(client: &TasSharedMemoryClient) {
+    let s = client.state();
+    assert_eq!(s.force_fixed_tick, 0, "fft must be 0 (natural ticks)");
+    assert!(
+        s.playback_speed == 1.0 || s.playback_speed == 0.0,
+        "playback_speed must be 1.0 or 0.0 (got {})",
+        s.playback_speed
+    );
+    println!(
+        "Config OK: fft=0, speed={} (Cave5={})",
+        s.playback_speed,
+        if s.cave5_hooked == 1 { "hooked" } else { "missing" }
+    );
 }

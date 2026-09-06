@@ -30,6 +30,12 @@
 inline TasSharedState* g_cave5State = nullptr;
 static SafetyHookMid cave5Hook{};
 
+// CONT clock-backlog reset: cave2 sets it at the splice (and at a judged
+// PLAY's speed handover), cave5 consumes it on the next tick by advancing the
+// game's time accumulator to "now" without processing the backlog ticks.
+// DLL-private: both hooks run on the game thread.
+inline volatile uint32_t g_contResetPending = 0;
+
 // Pointer to the game's per-tick time advance constant (EXE + 0x46DB08).
 // VirtualProtect'd to PAGE_READWRITE during init so we can write it.
 static float* g_tickAdvancePtr = nullptr;
@@ -37,31 +43,23 @@ static float* g_tickAdvancePtr = nullptr;
 // The game keeps its per-tick time advance in ONE read-only float at
 // EXE+0x46DB08, and sixteen `fmul dword ptr [0x46db08]` instructions read it.
 // Four of them are in the game-cycle function this cave hooks; the other
-// twelve are the menu. Nothing in the game ever WRITES it - it is a constant,
-// and cave5 writing it was the only thing that ever did.
+// twelve are the menu. Nothing in the game ever WRITES it - it is a constant.
 //
-// That is what made the menu background video run fast. cave5 scales the
-// constant for speed playback and for the catch-up drain, and relies on its
-// next call to put it back. On the quit-to-level->menu transition there is no
-// next call: the census says cave5 fires ~167 times/second in a level, drains
-// once on the transition (realTick=591, i.e. 5.9s of backlog), and is then
-// NEVER CALLED AGAIN while the menu is up. The scaled value the drain left
-// behind - 5.91 instead of 0.01 - stayed there, twelve menu instructions read
-// it, Menu::Paint derived its animation dt from it, and the video decoder gate
-// (dt >= 0.04s) passed on every rendered frame instead of ~20 times a second.
-// Measured 63 fps of video against a native 20.
+// cave5 scales it for speed playback and for the catch-up drain, and relies
+// on its next call to put it back. On the quit-to-level->menu transition there
+// is no next call: cave5 drains once on the transition and is then never
+// called again while the menu is up, so the scaled value stays behind, the
+// twelve menu instructions read it, Menu::Paint derives its animation dt from
+// it, and the menu background video runs fast.
 //
 // So: give the four in-game readers a private copy and never touch the game's
-// constant again. The operand is a 4-byte absolute address inside a 6-byte
+// constant. The operand is a 4-byte absolute address inside a 6-byte
 // instruction, so this is a same-length rewrite of four immediates - no
-// relocation, no trampoline, nothing to keep in sync. In-game behaviour is
-// bit-identical (those four instructions see exactly the values cave5 writes
-// today); the menu becomes structurally incapable of seeing them, whether the
-// scale came from the drain, from playback_speed, or from anything added later.
+// relocation, no trampoline. In-game behaviour is bit-identical; the menu
+// becomes structurally incapable of seeing the scaled value.
 // inline, NOT static: the game code is patched to ONE fixed address, so a second
 // translation unit getting its own copy would mean cave5 updating a different
-// object than the one the patched instructions read. `inline` makes that
-// impossible by definition rather than relying on a link error to catch it.
+// object than the one the patched instructions read.
 inline float g_privateTickAdvance = 0.01f;
 
 // RVAs of the 4-byte operand inside each in-game `fmul dword ptr [0x46db08]`
@@ -81,14 +79,11 @@ static constexpr uint32_t CAVE5_TICK_ADVANCE_OPERANDS[] = {
 // three of the four fmul operands and the `cmp esi,14h` clamp byte all live on
 // page 0x425000. VirtualProtect reports the protection AT THE TIME OF THE CALL,
 // so the second call on a page reports back the PAGE_EXECUTE_READWRITE the first
-// one installed — only the first observation of a page is the truth, and that is
-// the one kept here.
+// one installed — only the first observation of a page is the truth.
 //
-// This matters more than "don't leave .text writable". The clamp patch below used
-// PAGE_READWRITE, which drops EXECUTE. On this game it is survivable only because
-// a 1999 binary has no /NXCOMPAT bit and so runs with DEP off; with DEP enforced,
-// leaving a code page PAGE_READWRITE means the next instruction fetched from it
-// faults. Restoring properly costs nothing and removes the whole question.
+// Restoring properly matters: PAGE_READWRITE drops EXECUTE, and a code page
+// left that way only survives because a 1999 binary has no /NXCOMPAT bit and
+// so runs with DEP off.
 struct Cave5CodePages {
     static constexpr size_t kMax = 8;
     uintptr_t base[kMax] = {};
@@ -165,21 +160,10 @@ static constexpr float TICK_ADVANCE_DEFAULT = 0.01f;
 // the game pauses, producing a fast-forward on resume.
 static float g_nativeTickAdvance = TICK_ADVANCE_DEFAULT;
 
-// Per-frame ticks-per-cycle ceiling after raising the game's clamp.
-// The game originally clamps esi to 14h (20). Raising the in-memory bytes
-// at install time lifts that ceiling. Cave5's own clamp is bumped to
-// match.
-//
-// Empirical findings:
-//   * 0x14 (20) — game default, ~12× effective ceiling at 60 fps.
-//   * 0x40 (64) — current value. ~57× measured on FE-5867 at 128× setting.
-//   * 0x64 (100) — tried; NO speed improvement (per-frame game overhead
-//     dominates, not tick budget) AND degraded reliability at the 64×
-//     setting (4/20 one-shot vs 16/20 at cap=64). Reverted.
-//   * 4096 with JA NOP'd — crashes instantly, physics loop unsafe.
-//
-// Conclusion: 64 is at or above the practical performance ceiling for
-// this game/workload. Raising further is a no-op or worse.
+// Per-frame ticks-per-cycle ceiling after raising the game's clamp (the game
+// clamps esi to 0x14 = 20; the bytes are patched at install time). 64 is at
+// the practical ceiling: per-frame game overhead dominates above it and
+// reliability at the 64x setting degraded when it was raised further.
 static constexpr int32_t CAVE5_PER_FRAME_TICK_CAP = 64;
 
 // Original game clamp value (cmp esi, 14h). Cave5 enforces this in software
@@ -211,25 +195,18 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // barely moves), prev_time catches up to wall_time, next frame is
         // back to a normal tick count under native tick_advance.
         //
-        // Fires in any mode at 1x speed (OFF/REC/PLAY) — the save-replay
-        // dialog can appear mid-PLAY or at the boundary between modes, and
-        // the user-visible bug ("fast-forward after dismissing dialog") needs
-        // the drain regardless of which mode is active when Escape is
-        // dismissed. Gated to playback_speed == 1.0 so speed-scaled playback
-        // (the 12× CONT catch-up etc.) still owns tick_advance, and gated to
-        // force_fixed_tick == 0 so the deterministic regression-suite path
-        // is untouched.
+        // Fires in any mode (OFF/REC/PLAY) at 1x, and at any speed when the
+        // engine itself was frozen. Gated to force_fixed_tick == 0 so the
+        // deterministic regression-suite path is untouched.
         const int32_t CATCHUP_THRESHOLD = 50;
 
         // Was the ENGINE itself frozen (dialog, menu, load) since our last
         // run? A backlog that appears after a freeze is wall-clock debt, not
         // simulation the user asked for — and it must be dropped at ANY
-        // playback speed. The old drain was gated on speed == 1.0, so a race
-        // finished at 2x left the save-replay dialog's whole idle time as
-        // demand, and dismissing it replayed 15s of backlog at 121.9x
-        // (measured). Deliberate catch-up (CONT at 256x) is not a freeze:
-        // cave5 runs every frame there, so the gap stays ~7-16ms and this
-        // never fires on it.
+        // playback speed (a race finished at 2x otherwise replays the whole
+        // save-dialog idle time on dismiss). Deliberate catch-up (CONT at
+        // 256x) is not a freeze: cave5 runs every frame there, so the gap
+        // stays ~7-16ms and this never fires on it.
         static uint32_t s_lastRunMs = 0;
         uint32_t nowMs = GetTickCount();
         bool resumed_from_freeze =
@@ -243,12 +220,11 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // nothing FORCED that order — a starved controller could let the
         // catch-up reach the splice unjudged. So an aligned CONT emits ZERO
         // ticks from the moment playback reaches its splice until the
-        // controller writes cont_splice_approved. 0-tick frames are routine
-        // (the [1,1,0] pin emits one every third frame): the sim and
-        // playback_pos freeze in place, the renderer keeps presenting. If the
-        // controller dies parked, STOP or RESTART clears the alignment and
-        // lifts the park (the UI's cycle deadline sends exactly that).
-        // Unaligned CONT (gate_align_rec == 0) never parks.
+        // controller writes cont_splice_approved. 0-tick frames are routine:
+        // the sim and playback_pos freeze in place, the renderer keeps
+        // presenting. If the controller dies parked, STOP or RESTART clears
+        // the alignment and lifts the park. Unaligned CONT (gate_align_rec ==
+        // 0) never parks.
         bool splice_parked = false;
         if (s->continue_from_frame > 0 && s->mode == MODE_PLAY
             && s->gate_align_rec != 0 && s->cont_splice_approved == 0) {
@@ -263,37 +239,33 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             && !splice_parked  // a parked splice must not leak a drain tick
             && (s->playback_speed == 1.0f || resumed_from_freeze);
 
-        // Diagnostics: the raw demand BEFORE any cap is the wall-clock backlog
-        // in ticks — the one number that explains a fast-forward burst.
-        s->diag_demand = realTick;
-
-        // CONT clock-backlog reset (Problem B — zero-cost, frame-exact at full
-        // speed). When cave2 flags a splice, advance the game's time accumulator
-        // to "now" so the resumed REC runs real-time from the splice frame, with
+        // CONT clock-backlog reset (zero-cost, frame-exact at full speed).
+        // When cave2 flags a splice, advance the game's time accumulator to
+        // "now" so the resumed REC runs real-time from the splice frame, with
         // NO end-of-replay deceleration. The accumulator is the clock object's
-        // +0x0C float, and at THIS hook site ctx.ebp IS that object (verified via
-        // CE: ebp=clock this, [ebp+0x0C]=seconds accumulator). raw demand
+        // +0x0C float, and at THIS hook site ctx.ebp IS that object (verified:
+        // ebp=clock this, [ebp+0x0C]=seconds accumulator). raw demand
         // (realTick) = elapsed*[0x46DB0C](=100) = (now-prev)/native, so
         // realTick * native(0.01) = (now-prev) seconds → prev jumps to now. We
         // use NATIVE (not the speed-scaled tick_advance) so it's
         // speed-independent, and we do NOT process the backlog ticks (ctx.esi
         // stays capped below), so there's no recorded burst and no huge-dt jump.
         bool did_reset = false;
-        if (s->cont_reset_pending && !splice_parked) {  // parked: keep it pending, no tick may leak
+        if (g_contResetPending && !splice_parked) {  // parked: keep it pending, no tick may leak
             if (ctx.ebp) {
                 float* prev_time = (float*)(uintptr_t)(ctx.ebp + 0x0C);
                 *prev_time += (float)realTick * g_nativeTickAdvance;
             }
-            s->cont_reset_pending = 0;
+            g_contResetPending = 0;
             did_reset = true;
         }
 
-        // (a) Land the catch-up batch EXACTLY on the splice frame. cave5 sets the
+        // Land the catch-up batch EXACTLY on the splice frame. cave5 sets the
         // per-frame tick count; capping it to the ticks-until-splice makes the
         // batch end on continue_from_frame so the PLAY→REC switch happens on the
         // LAST tick of the batch — no leftover catch-up ticks spill into the
-        // resumed REC (that splice-frame remainder was most of the overshoot).
-        // Free: the batch was already ≤ cap; only the final replay frame shortens.
+        // resumed REC. Free: the batch was already ≤ cap; only the final replay
+        // frame shortens.
         {
             uint32_t aligned_splice = GateAlignedSplicePos(
                 s->continue_from_frame, s->gate_index, s->gate_align_rec);
@@ -315,49 +287,7 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             if (realTick > remaining) realTick = remaining;
         }
 
-        // Clock-phase pin: canonical [1,1,0] ticks-per-frame whenever the game
-        // is idling in OFF mode, in-game, at 1x — exactly the regime where the
-        // post-restart spawn settle runs (REC/PLAY only arm after the settle).
-        // The settle's per-frame tick pattern IS the F5 bucket lottery: pinning
-        // it to a fixed cycle (phase reset by CMD_RESTART) makes every restart
-        // land the same bucket regardless of wall-clock phase, render fps, or
-        // OS timing changes. [1,1,0] ~= 100 ticks/sec at ~150 fps, so idle
-        // pacing stays ~native. prev_time is corrected by the difference
-        // between the natural and emitted tick counts so the game's time
-        // accumulator stays glued to wall time (no stall/burst on regime
-        // exit). Skipped when the drain/reset paths fire (they own the
-        // accumulator this frame).
-        bool pinned = false;
-        if (s->clock_pin_enabled && !did_reset && !catchup_drain
-            && s->mode == MODE_OFF && s->game_in_game
-            && s->playback_speed == 1.0f && s->force_fixed_tick == 0
-            && ctx.ebp) {
-            int32_t natural = realTick;
-            if (natural < 0) natural = 0;
-            if (natural > CAVE5_PER_FRAME_TICK_CAP) natural = CAVE5_PER_FRAME_TICK_CAP;
-            if (natural > 2) {
-                // The game is behind real time (level reload, slow frames,
-                // fps below ~50). Pinning here would freeze it in slow motion
-                // — the fixed pattern emits at most 2 ticks per 3 frames and
-                // the wall-glue correction erases the backlog it needs to
-                // catch up on. Let the native clamp path below drain the
-                // backlog like the unpatched game, and restart the canonical
-                // cycle at the next caught-up frame.
-                s->clock_pin_phase = 0;
-            } else {
-                uint32_t phase = s->clock_pin_phase;
-                int32_t emit = (phase % 3u == 2u) ? 0 : 1;
-                s->clock_pin_phase = (phase + 1u) % 3u;
-                float* prev_time = (float*)(uintptr_t)(ctx.ebp + 0x0C);
-                *prev_time += (float)(natural - emit) * g_nativeTickAdvance;
-                ctx.esi = (uintptr_t)emit;
-                pinned = true;
-            }
-        }
-
-        if (pinned) {
-            // tick handling complete for this frame
-        } else if (s->force_fixed_tick > 0) {
+        if (s->force_fixed_tick > 0) {
             // Deterministic mode: exact tick count per frame (0 while parked)
             ctx.esi = splice_parked ? 0 : (uintptr_t)s->force_fixed_tick;
         } else if (did_reset) {
@@ -371,7 +301,6 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             if (g_tickAdvancePtr) {
                 *g_tickAdvancePtr = (float)realTick * g_nativeTickAdvance;
             }
-            s->diag_drain_count++;
             ctx.esi = 1;
         } else {
             // Clamp raw tick first (fix __ftol garbage). The game's own
@@ -380,15 +309,14 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             if (realTick < 0) realTick = 0;
             if (realTick > CAVE5_PER_FRAME_TICK_CAP) realTick = CAVE5_PER_FRAME_TICK_CAP;
 
-            // OPTION 1: at normal playback speed (1×) preserve the game's
-            // original defensive clamp at 20 ticks/frame. Only relax the
-            // cap when the user has explicitly requested fast-forward via
-            // playback_speed > 1. This keeps non-fast-forward play
-            // behaviorally identical to the unpatched game — including its
-            // spiral-of-death protection for moderate stalls. The
-            // catchup-drain branch above handles long pauses (> 50 ticks
-            // accumulated) for 1× play, so this lower cap is only the
-            // ceiling for "normal stutter recovery" at 1×.
+            // At normal playback speed (1×) preserve the game's original
+            // defensive clamp at 20 ticks/frame. Only relax the cap when the
+            // user has explicitly requested fast-forward via playback_speed >
+            // 1. This keeps non-fast-forward play behaviorally identical to the
+            // unpatched game — including its spiral-of-death protection for
+            // moderate stalls. The catchup-drain branch above handles long
+            // pauses (> 50 ticks accumulated) for 1× play, so this lower cap is
+            // only the ceiling for "normal stutter recovery" at 1×.
             if (s->playback_speed <= 1.0f && realTick > NATIVE_GAME_CLAMP_AT_1X) {
                 realTick = NATIVE_GAME_CLAMP_AT_1X;
             }
@@ -412,67 +340,22 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
                 *g_tickAdvancePtr = g_nativeTickAdvance;
             }
         }
-        if (g_tickAdvancePtr) {
-            memcpy((void*)&s->diag_tick_advance, (const void*)g_tickAdvancePtr, 4);
-        }
     }
 
-
-    // Publish the per-frame tick count. tick_count was declared in shared state
-    // but nothing ever wrote it, so every consumer (video-rate's "cave5 ticks",
-    // escape-speedup) was reading a hardcoded zero. It is the only external
-    // signal of how fast the game is SIMULATING rather than rendering, which is
-    // exactly what a fast-forward regression changes and a frame counter cannot see.
+    // Publish the per-frame tick count: the only external signal of how fast
+    // the game is SIMULATING rather than rendering, which is exactly what a
+    // fast-forward regression changes and a frame counter cannot see.
     //
     // Count what the game will actually RUN, not what we asked for: the tick
     // loop bounds itself with ebx, which the clamp caps at CAVE5_PER_FRAME_TICK_CAP.
-    // esi above that is demand the game discards, and counting it would overstate
-    // the simulation rate — reachable today only via force_fixed_tick > 64, but
-    // this counter exists to answer "how fast is it simulating", so it should not
-    // lie in the one case a test could set up.
+    // esi above that is demand the game discards (reachable only via
+    // force_fixed_tick > 64), and counting it would overstate the rate.
     if (auto* sp = g_cave5State) {
         uint32_t emitted = (uint32_t)ctx.esi;
         if (emitted > (uint32_t)CAVE5_PER_FRAME_TICK_CAP) {
             emitted = (uint32_t)CAVE5_PER_FRAME_TICK_CAP;
         }
         sp->tick_count += emitted;
-
-        // Publish the engine's own 64-bit elapsed-time delta for this cycle —
-        // the sub-tick phase, which is the last candidate for judging an F5
-        // bucket without replaying 3.1s to watch where the boarder leaves spawn.
-        //
-        // Provenance, from the disassembly of this function:
-        //   0x425C4A  call [0x46D15C]        Kernel::Time::Current -> now
-        //   0x425C63  lea  edx,[esp+0x40]    out param
-        //   0x425C6E  call [0x46D164]        delta = now - prev, WRITTEN TO [esp+0x40]
-        //   0x425C74  fmul [0x46DB0C]        * 100.0
-        //   0x425C7A  call __ftol            <- the fraction dies HERE
-        //   0x425C81  cmp esi,0x14           <- our hook site, esp unchanged
-        //
-        // So [esp+0x40] still holds the full-precision delta when we run: nothing
-        // between the lea and here pushes without popping (two calls, both of
-        // which restore esp; __ftol takes its argument on the FPU, not the stack).
-        // Reading it costs two loads and cannot perturb the game.
-        if (ctx.esp) {
-            sp->clock_delta_lo = *(volatile uint32_t*)(uintptr_t)(ctx.esp + 0x40);
-            sp->clock_delta_hi = *(volatile uint32_t*)(uintptr_t)(ctx.esp + 0x44);
-
-            // Accumulate it. The delta alone says nothing — it is ~0.01 every
-            // frame, which is why differencing two of them measured exactly
-            // zero. The SUM since the reset is the quantity the game compares
-            // against 3 seconds, and its fractional part is the sub-tick phase
-            // that decides whether the gate lands on tick 300 or 301.
-            //
-            // INTEGER, not float. The calibration says ~99,999 units per 10ms
-            // tick at 10MHz, so this is a 64-bit QPC delta. Reading those bytes
-            // as a double gives a denormal around 5e-319, which sums to nothing
-            // — which is exactly what the first attempt measured.
-            uint64_t delta = 0, accum = 0;
-            memcpy(&delta, (const void*)&sp->clock_delta_lo, 8);
-            memcpy(&accum, (const void*)&sp->secs_since_reset_lo, 8);
-            accum += delta;
-            memcpy((void*)&sp->secs_since_reset_lo, &accum, 8);
-        }
     }
 
     __asm { frstor [fpu_buf] }
@@ -492,9 +375,9 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
 
     g_cave5State = state;
 
-    // Resolve and unprotect the per-tick time advance constant at EXE+0x46DB08.
-    // This float controls how much game-time each physics tick consumes from
-    // the accumulator. We modify it for variable speed playback.
+    // Resolve the per-tick time advance constant at EXE+0x46DB08. This float
+    // controls how much game-time each physics tick consumes from the
+    // accumulator; scaling it gives variable speed playback.
     auto* exeBase = (uint8_t*)addr.exe;
     g_cave5ExeBase = exeBase;
     g_tickAdvancePtr = (float*)(exeBase + 0x6DB08);
@@ -516,11 +399,6 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     g_privateTickAdvance = g_nativeTickAdvance;
     static const uint8_t kFmulTickAdvance[6] = { 0xD8, 0x0D, 0x08, 0xDB, 0x46, 0x00 };
     bool redirected = true;
-    char nrd[8] = {};
-    if (GetEnvironmentVariableA("TAS_NO_REDIRECT", nrd, sizeof(nrd)) > 0 && nrd[0] == '1') {
-        redirected = false;
-        Log("  Cave 5: TAS_NO_REDIRECT=1 - keeping the shared game constant");
-    }
 
     // Pass 1: unprotect and verify.
     const size_t kSiteCount = sizeof(CAVE5_TICK_ADVANCE_OPERANDS) / sizeof(uint32_t);
@@ -544,19 +422,13 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     // Pass 2: commit.
     //
     // The game loop runs on another thread and may be executing these very
-    // instructions right now. The operands are unaligned (0x25CE2/0x25D8B/
-    // 0x25DB4/0x25E2D are 2/3/0/1 mod 4), so a plain store is not guaranteed to
-    // be observed as one write — and a torn value here is not a stale number, it
-    // is half of one address and half of another, i.e. a garbage pointer the fmul
-    // would dereference. A lock-prefixed exchange removes the question.
-    //
-    // Strictly, the Interlocked* contract asks for an aligned LONG, so this leans
-    // on the x86 lowering rather than the API guarantee: MSVC emits `lock xchg`,
-    // which x86 performs atomically at any alignment. That is a safe thing to
-    // lean on in a DLL that is already 32-bit-x86-only and full of raw opcode
-    // patches. (None of the four crosses a cache line, so no split lock is even
-    // needed here — the lock prefix is belt-and-braces.) Every reader therefore
-    // sees either the old address or the new one, and at this instant both hold
+    // instructions right now. The operands are unaligned (2/3/0/1 mod 4), so a
+    // plain store is not guaranteed to be observed as one write — and a torn
+    // value here is half of one address and half of another, i.e. a garbage
+    // pointer the fmul would dereference. A lock-prefixed exchange removes the
+    // question: MSVC emits `lock xchg`, which x86 performs atomically at any
+    // alignment (none of the four crosses a cache line). Every reader sees
+    // either the old address or the new one, and at this instant both hold
     // 0.01, because g_privateTickAdvance was seeded from the game's own value.
     if (redirected) {
         LONG target = (LONG)(uintptr_t)&g_privateTickAdvance;
@@ -625,13 +497,8 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     }
 
     // Every code patch is written; hand all touched pages back exactly as we
-    // found them, icache flushed. This used to be "leave page RW" — which not
-    // only left .text writable but, because PAGE_READWRITE drops EXECUTE, left a
-    // code page non-executable. Harmless only because a 1999 binary carries no
-    // /NXCOMPAT bit and so runs with DEP off; not something to keep relying on.
-    //
-    // Done BEFORE create_mid so SafetyHook does its own protect/patch/restore on
-    // normally-protected pages, exactly as it expects to.
+    // found them, icache flushed. Done BEFORE create_mid so SafetyHook does its
+    // own protect/patch/restore on normally-protected pages, as it expects to.
     g_cave5CodePages.CloseAll();
 
     Log(std::format("Cave 5: hooking tick override at {:p} (EXE+0x25C81)", (void*)addr.cave5_site));

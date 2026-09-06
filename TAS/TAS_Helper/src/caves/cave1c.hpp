@@ -33,13 +33,6 @@ inline void UninstallCave1C() {
 
 // Handler signature emulated via __fastcall:
 //   ecx = this, edx = unused, stack: arg1, arg2, arg3
-// RDIAG: last `this` seen by the REAL native keyDown handler while in OFF mode
-// — the object the game actually routes live keyboard input through. Compared
-// against the kbobj cave2 resolves via the root chain ([SG+1D5450]->+0x530) to
-// find where the two diverge after an in-process restart (the
-// steering-dies-after-REC investigation).
-inline volatile uint32_t g_lastRealHandlerThis = 0;
-
 void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
     uint64_t t0 = __rdtsc();
     auto* s = g_cave1cState;
@@ -72,34 +65,6 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
         s->handler_block_count++;
         PerfSample(s->perf_cave1c_down, __rdtsc() - t0);
         return;
-    }
-    // RDIAG: record the real handler's `this` AND raw args on OFF-mode
-    // passthroughs, ring a log when (this,a1) changes (hand-rolled hex — hook
-    // context). a1/a2/a3 are compared against the arg4 the real BB3B10 call
-    // carries (cave1d log) — the handler forwards one of its own args as arg4,
-    // and identifying which one lets us calibrate the injected arg4 even from
-    // BLOCKED keypresses during REC (the handler detour still sees the args).
-    if (s && s->mode == MODE_OFF && !IsTasInjectionThread()) {
-        uint32_t cur = ((uint32_t)(uintptr_t)ecx) ^ (a1 << 1);
-        if (cur != g_lastRealHandlerThis) {
-            g_lastRealHandlerThis = cur;
-            char buf[112];
-            int p = 0;
-            auto put = [&](const char* t) { while (*t && p < 100) buf[p++] = *t++; };
-            put("RDIAG real-h this=");
-            DiagHexU32(buf + p, (uint32_t)(uintptr_t)ecx); p += 8;
-            put(" a1=");  DiagHexU32(buf + p, a1); p += 8;
-            put(" a2=");  DiagHexU32(buf + p, a2); p += 8;
-            put(" a3=");  DiagHexU32(buf + p, a3); p += 8;
-            // The CALLER of +3940 — disassembling around this return address
-            // shows where a3 (the dynamic arg4 counter) is LOADED from, which
-            // is the memory location cave2 should read live instead of
-            // calibrating from keypresses.
-            put(" ret=");
-            DiagHexU32(buf + p, (uint32_t)(uintptr_t)_ReturnAddress()); p += 8;
-            buf[p] = '\0';
-            LogRing(s, LOG_INFO, buf);
-        }
     }
     cave1cDownInline.thiscall<void>(ecx, a1, a2, a3);
     if (s) {

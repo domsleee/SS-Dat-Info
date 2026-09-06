@@ -1,19 +1,9 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{compiler_fence, AtomicU32, Ordering};
 
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
-use std::sync::atomic::compiler_fence;
 
-/// Frames of post-restart trace kept. The countdown is ~311 ticks, so this
-/// covers it end to end with room for the settle either side.
-pub const TRACE_FRAMES: usize = 384;
-
-/// Player object dwords captured for the hidden-state hunt (0x200 bytes).
-pub const OBJSNAP_PLAYER_DWORDS: usize = 128;
-/// Physics sub-object dwords captured (0x800 bytes; the rotation matrix sits
-/// at 0x1B4 so the object is at least 0x1D8, and this leaves headroom).
-pub const OBJSNAP_PHYSICS_DWORDS: usize = 512;
-
-pub const TAS_SHARED_VERSION: u32 = 49; // protected internal STOP command; layout unchanged
+/// Bumped whenever `TasSharedState` changes layout (mirrors shared_state.hpp).
+pub const TAS_SHARED_VERSION: u32 = 50;
 /// v46: size of the menu document buffer (JSON, NUL-terminated).
 pub const TAS_MENU_DOC_MAX: usize = 4096;
 /// v47: size of the menu command target (id or label, NUL-terminated).
@@ -230,13 +220,6 @@ pub enum TasCommand {
     Stop = 3,
     ArmContinue = 4,
     Restart = 5,
-    /// PROTOTYPE: capture a writable-memory snapshot at the current frame.
-    Snapshot = 6,
-    /// PROTOTYPE: restore the last snapshot (instant CONT rewind).
-    Restore = 7,
-    /// PROTOTYPE: arm a snapshot at the next PLAY frame-0 (the spawn) — captures
-    /// without disturbing the arm timing that selects the bucket.
-    SnapshotAtSpawn = 8,
     /// Stop for an internal restart while retaining live-input protection.
     StopForRestart = 9,
 }
@@ -323,28 +306,25 @@ pub mod input_bits {
     ];
 }
 
-/// Must match the C++ TasSharedState layout exactly.
-/// All fields are naturally aligned (u32/f32 = 4 bytes), so repr(C) suffices.
+/// Must match the C++ TasSharedState layout exactly (TAS_Helper/src/shared_state.hpp).
+/// All fields are naturally aligned (u32/f32 = 4 bytes, the perf counters 8),
+/// so repr(C) suffices. Both sides pin the size and the group-boundary offsets
+/// (see the layout tests) and bump `TAS_SHARED_VERSION` on any change.
 #[repr(C)]
 pub struct TasSharedState {
     pub version: u32,
 
-    // Command region (UI writes)
+    // Command region (UI writes, DLL reads)
     pub command: u32,
-    pub inject_mode: u32,
+    /// 0 = natural ticks, N = force N ticks per frame (cave5).
     pub force_fixed_tick: u32,
-    pub force_direct: u32,
-    pub self_capture: u32,
-    pub use_rec_msg_args: u32,
-    pub input_source: u32,
+    /// CMD_ARM_CONTINUE: splice point (PLAY 0..N, then REC).
     pub continue_from_frame: u32,
 
-    // Status region (DLL writes)
+    // Status region (DLL writes, UI reads)
     pub mode: u32,
     pub recorded_count: u32,
     pub playback_pos: u32,
-    pub prev_mask: u32,
-    pub cave2_injecting: u32,
     pub player_x: f32,
     pub player_y: f32,
     pub player_z: f32,
@@ -358,7 +338,7 @@ pub struct TasSharedState {
     pub event_count: u32,
     pub bb3b10_block_count: u32,
 
-    // Hook performance counters (DLL writes, UI/tests read)
+    // Hook performance counters (DLL writes, `tas_test benchmark` reads)
     pub perf_cave2: TasHookPerfCounter,
     pub perf_cave5: TasHookPerfCounter,
     pub perf_cave1c_down: TasHookPerfCounter,
@@ -366,7 +346,7 @@ pub struct TasSharedState {
     pub perf_cave1d: TasHookPerfCounter,
     pub perf_replay_capture: TasHookPerfCounter,
 
-    // Hook status
+    // Hook status (DLL writes, UI reads)
     pub cave2_hooked: u32,
     pub cave1c_hooked: u32,
     pub cave1d_hooked: u32,
@@ -377,36 +357,25 @@ pub struct TasSharedState {
     pub replay_ptr: u32,
     pub player_ptr: u32,
 
-    // Variable speed playback (1.0 = normal, 0.5 = half, 2.0 = double)
+    /// Variable speed playback (1.0 = normal). UI writes, cave5 reads.
     pub playback_speed: f32,
 
-    // In-process restart state machine (DLL internal)
-    // 0=idle, 1=F5 pressed (waiting frames), 2=F5 released (done)
+    /// In-process restart state machine: 0 = idle, 1 = F5 held, 2 = released (done).
     pub restart_state: u32,
-    pub restart_frames_held: u32,
 
     // Telemetry (DLL writes, UI reads)
-    pub prev_player_x: f32,
-    pub prev_player_y: f32,
-    pub prev_player_z: f32,
     pub velocity_x: f32,
     pub velocity_y: f32,
     pub velocity_z: f32,
-    pub speed: f32, // Squared speed (XZ plane) — UI should sqrt for display
+    /// Ticks emitted by cave5 (the simulation rate, not the render rate).
     pub tick_count: u32,
 
     // Segment fields (DLL writes, UI reads)
-    pub segment_index: u32,
     pub segment_start_frame: u32,
     pub segment_count: u32,
-    pub snapshot_size: u32,
-    pub snapshot_flags: u32,
-    pub snapshot_buffer_ptr: u32,
-    pub snapshot_buffer_capacity: u32,
     pub segment_boundaries: [TasSegmentBoundary; TAS_MAX_SEGMENTS],
 
-    // Rotation telemetry (DLL writes, UI reads)
-    // 3x3 row-major rotation matrix from player+0x104..+0x124
+    /// 3x3 row-major rotation matrix from player+0x104..+0x124.
     pub rotation_matrix: [f32; 9],
 
     pub input_log: [u8; TAS_MAX_TICKS],
@@ -417,489 +386,158 @@ pub struct TasSharedState {
     pub log_write_seq: u32,
     pub log_ring: [TasLogEntry; TAS_LOG_RING_SIZE],
 
-    // CONT splice timing (DLL writes, harness/UI reads) — measures the
-    // "resume off by a few frames" skew (Problem B). `frame_count` is stamped
-    // when the CONT replay first advances and again at the PLAY→REC splice; the
-    // DELTA is the number of game-frames the catch-up replay took to consume
-    // the prefix. Its run-to-run spread is the yield jitter. (frame_count is
-    // free-running — never reset on F5 — so only the delta is meaningful.)
+    /// `frame_count` at CONT replay start and at the PLAY->REC splice; the
+    /// delta is how many game frames the catch-up replay took.
     pub cont_replay_start_fc: u32,
     pub cont_splice_fc: u32,
 
-    // CONT resume speed (UI writes, DLL reads). Staged before a CONT; the DLL
-    // applies it to `playback_speed` ATOMICALLY at the splice instant so the
-    // resumed recording never fast-forwards at the catch-up rate while the UI's
-    // poll-driven speed-restore lags behind (the Problem B fix). 0.0 = unset
-    // (DLL leaves the speed as-is — backward compatible).
+    /// CONT resume speed (UI writes, DLL reads). Applied to `playback_speed`
+    /// atomically at the splice. 0.0 = unset.
     pub cont_resume_speed: f32,
 
-    // CONT clock-backlog reset (cave2 sets at the splice, cave5 consumes on the
-    // next tick). When set, cave5 advances the game-time accumulator
-    // (clockObj->+0x0C, reached via the hook's ebp) to "now" by adding
-    // raw_demand * native_tick_advance — clearing the catch-up backlog WITHOUT
-    // processing the backlog ticks, so the resume is frame-exact at full speed
-    // (no end-of-replay deceleration). 0 = idle.
-    pub cont_reset_pending: u32,
-
-    /// Game-state awareness: 0 = main menu, 1 = in-game (race/level). DLL writes
-    /// it each frame from `Supreme.exe + 0x8895C` (RE'd).
+    /// 0 = main menu, 1 = in-game. Written each frame by cave2 from
+    /// `Supreme.exe + 0x8895C`; stays 1 through a return to the menu, which
+    /// only the cycle heartbeat notices.
     pub game_in_game: u32,
 
-    /// Current track, detected by the DLL's in-process heap scan (majority-vote):
-    /// `0..8 = area*3 + difficulty` (area 0=Forest,1=Alpine,2=Village; diff
-    /// 0=Easy,1=Medium,2=Hard). `u32::MAX` = unknown / menu. See the DLL's
-    /// `level_scan.hpp`.
+    /// Current track: `0..9 = area*3 + difficulty` (area 0=Forest, 1=Alpine,
+    /// 2=Village, 3=Practice; diff 0=Easy, 1=Medium, 2=Hard). `u32::MAX` =
+    /// unknown / menu. Trustworthy only while `level_scan_epoch == level_epoch`;
+    /// read it through [`resolved_level_id`].
     pub level_id: u32,
 
     /// On-screen player race time in centiseconds, read by the DLL from the HUD
-    /// text line (SR_UIT `Append_Text`). Exact + map-agnostic. `u32::MAX` = not
-    /// racing / unknown.
+    /// text line. `u32::MAX` = not racing / unknown. Read via [`race_pair`].
     pub race_time_cs: u32,
-
     /// The 16-bit game clock value captured at the gate cross (= clock −
-    /// race_time); constant during a run; the F5 spawn-lottery metric.
-    /// `u32::MAX` = unknown.
+    /// race_time); constant during a run. `u32::MAX` = unknown.
     pub race_start_ts: u32,
 
-    /// Clock-phase pin config: 0 = natural wall-clock tick scheduling (the F5
-    /// bucket lottery), nonzero = cave5 pins the OFF-mode in-game tick pattern
-    /// to a canonical [1,1,0] cycle whose phase resets at each in-process
-    /// restart — every restart replays the same spawn-settle schedule, so the
-    /// F5 bucket is machine/fps/OS-independent. DLL defaults this ON.
-    pub clock_pin_enabled: u32,
-
-    /// Clock-phase pin internal state: current position in the [1,1,0] cycle.
-    /// DLL-written; reset by CMD_RESTART.
-    pub clock_pin_phase: u32,
-
-    /// Test hook: when nonzero, the DLL suppresses ALL BB3B10 arg4 calibration
-    /// and injects this exact value as the event Time.hi (arg4). The
-    /// steer-impact regression test sets this to isolate the inject path —
-    /// injected steering then lands only if the event Time is correct without
-    /// a keypress. 0 = normal (live Kernel::Time::Current stamp).
+    /// Test hook: when nonzero the DLL injects this exact value as the BB3B10
+    /// event Time.hi (arg4) and suppresses calibration. steer-impact sets a
+    /// deliberately wrong value to prove injected steering is then discarded.
     pub test_arg4_override: u32,
-
     /// DLL-written at each injection batch: where the injected event's Time
-    /// stamp came from. 0 = no injection yet, 1 = Kernel::Time::Current (the
-    /// proper, focus-independent path), 2 = keypress-calibrated fallback,
-    /// 3 = test_arg4_override forced. steer-impact asserts 1 in its live
-    /// phase so the proper mechanism can't silently regress to the fallback.
+    /// stamp came from (`ARG4_SOURCE_*`). steer-impact asserts
+    /// `ARG4_SOURCE_TIME_CURRENT`.
     pub arg4_source: u32,
 
-    /// UI-written: 1 while a Continue cycle is in flight (from CONT start,
-    /// before the F5 restart, until the bucket aligns). The DLL blocks the
-    /// real key handler whenever this is set — covering the OFF-mode spawn
-    /// countdown the mode-based block misses, so live input can't perturb the
-    /// bucket. Cleared the instant the bucket aligns (catch-up PLAY / resumed
-    /// REC are already handler-blocked by mode, and post-splice REC must see
-    /// live input). See cave1c.
+    /// UI-written: 1 while a Continue cycle is in flight (from before the F5
+    /// restart until the bucket aligns). The DLL blocks the real key handler
+    /// whenever this is set; the level-scan worker retires a flag left set for
+    /// more than 5 s of frozen cycle. Cleared by the UI the instant the bucket
+    /// aligns. ESC stays exempt.
     pub cont_suppress_input: u32,
 
-    /// DLL-written: monotonic count of gdi32!SwapBuffers presents. Lets a
-    /// poller measure the live present rate (menu vs in-game).
-    pub present_count: u32,
-    /// UI/config: menu present-rate cap. 0 = OFF (count only, no throttle);
-    /// N = cap presents to N fps while the engine cycle is frozen (menu/pause).
-    /// Default 34. The static main menu animates one frame per present and
-    /// sr.dll's limiter is Sleep-based, so the 1 ms system timer the TAS tooling
-    /// raises doubles it to ~68 fps (the "2x menu video"); capping to ~34
-    /// restores native. Gameplay (timer-independent accumulator) + CONT (gated
-    /// by cont_suppress_input) are untouched.
-    pub menu_fps_cap: u32,
-
-    /// Bumped by the DLL whenever the engine's root object
-    /// (`[SG+0x1D5450]`) changes, and once when it stays NULL for ~0.5s. That
-    /// root SURVIVES an F5 restart but is reallocated on quit-to-menu /
-    /// menu-demo load / track switch, so a change is the only trustworthy "the
-    /// level under you was swapped" event. A restart passes through NULL
-    /// transiently, which is why only a SUSTAINED null counts as a teardown.
+    /// Bumped by the DLL on every level-path change (a level loaded or
+    /// unloaded).
     pub level_epoch: u32,
-    /// The `level_epoch` the scan thread had observed when it last published a
-    /// concrete `level_id`.
-    ///
-    /// `level_id` is trustworthy **iff `level_scan_epoch == level_epoch`**. When
-    /// they differ the context changed and the new track has not been identified
-    /// yet — callers must treat the level as UNRESOLVED rather than asserting
-    /// the previous one. See [`level_is_resolved`].
+    /// The `level_epoch` the scan worker had observed when it last published a
+    /// concrete `level_id`. `level_id` is trustworthy iff the two are equal.
     pub level_scan_epoch: u32,
 
-    /// Hit count for the winning track in the last completed scan, and for the
-    /// runner-up. A loaded level references its resource paths pervasively;
-    /// residue from a level already left is sparse — so these separate
-    /// "detected" from "guessed from one stale string", a distinction that is
-    /// invisible in `level_id` alone.
-    pub level_scan_best_hits: u32,
-    pub level_scan_second_hits: u32,
-    /// The engine loads each track from loose files under
-    /// `Data/Levels/<Area>/<Category>/<Difficulty>/...`, so a file open IS the
-    /// level-identity event — exact and immediate, and richer than the heap
-    /// scan, which only matches `<area>/Tracks/<diff>` and so cannot see
-    /// Practice, Special, Halfpipe or Ramp at all.
+    /// The engine's own path for the current level's resources
+    /// (`Data/Levels/<Area>/<Category>/<Difficulty>/...`). Reliable for the
+    /// area; the difficulty comes from the game-setup object.
     pub level_path: [u8; TAS_LEVEL_PATH_MAX],
-    /// Bumped AFTER `level_path` is written, so a reader that sees a new
-    /// generation can already see the path it refers to.
+    /// Bumped AFTER `level_path` is written.
     pub level_path_gen: u32,
-    /// Seqlock over the level-context group (`level_epoch`,
-    /// `level_scan_epoch`, `level_id`, `level_path`). ODD = write in progress.
-    ///
-    /// `AtomicU32` rather than a plain `u32` read volatile. The seqlock's whole
-    /// correctness rests on the payload reads staying BETWEEN the two sequence
-    /// reads, and `read_volatile` does not give that: it promises only that the
-    /// access is not elided or reordered against other volatile accesses, which
-    /// is a statement about the compiler, not about the memory model. An
-    /// `Acquire` load plus a fence before the recheck is the real thing, and on
-    /// x86 it compiles to the same two `mov`s. Layout is identical (4 bytes,
-    /// align 4) so the C++ side stays a plain `volatile uint32_t` bumped with
-    /// `InterlockedIncrement`.
+    /// Seqlock over the level-context group (`level_epoch`, `level_scan_epoch`,
+    /// `level_id`, `level_path`, `level_path_gen`). ODD = write in progress.
+    /// `AtomicU32` so the payload reads stay between the two sequence reads
+    /// (an `Acquire` load plus a fence, which on x86 is the same two `mov`s a
+    /// volatile read would emit); the C++ side bumps it with
+    /// `InterlockedIncrement`. Read the group through [`level_context`].
     pub level_ctx_seq: AtomicU32,
 
-    /// The game`s own 64-bit elapsed-time delta for the current cycle, as cave5
-    /// sees it: the {lo,hi} pair the engine computed at EXE+0x25C6E and left at
-    /// [esp+0x40] before __ftol truncated it into a tick count.
-    ///
-    /// WHY: the F5 bucket is decided sub-tick. bucket-predict proved the spawn
-    /// state is CONSTANT across buckets and that the arm phase, measured to exact
-    /// tick granularity (0-tick measurement window), does not determine the
-    /// bucket either. Everything at tick resolution has been ruled out by
-    /// measurement. This is the pre-truncation quantity — the fraction __ftol
-    /// throws away — and `lo` is the sub-unit component (the BB3B10 arg4 work
-    /// found that FLOORING lo to 0 is what made injected stamps bit-exact).
-    /// Defer ARM until the physics tick counter reaches this value (0 = consume
-    /// immediately, the historical behaviour).
-    ///
-    /// WHY. Writing CMD_ARM_REC is a shared-memory store from another process;
-    /// cave2 CONSUMES it on some later Supreme::Cycle. So "armed at tick +40"
-    /// only ever meant "written at +40" — consumption could be +40 or +41, and
-    /// first_moving is measured from consumption. With the gate itself landing on
-    /// G or G+1, the difference of two +/-1 quantities produces exactly three
-    /// adjacent values with the middle one commonest, which is precisely the
-    /// observed 258 x2 / 259 x14 / 260 x4. Scheduling the arm INSIDE the game
-    /// thread removes one of the two.
-    /// Replay position at which the DLL drops playback_speed to
-    /// `speed_after_handoff`, atomically, on that exact tick. 0 = no handoff.
-    ///
-    /// This is CONT's splice mechanism generalised. A bucket-matched PLAY wants
-    /// to replay the countdown fast — the judge cannot rule until the replay
-    /// passes first_moving, and at 1x that is ~2.6s of a stationary boarder on
-    /// every attempt including the failures — and then hand back to normal speed
-    /// the instant the run becomes worth watching. Doing that from the UI thread
-    /// has no bound: cave5 may already have issued a batch of up to
-    /// CAVE5_PER_FRAME_TICK_CAP ticks, and the poll adds scheduler latency on
-    /// top. Doing it here is exact.
+    /// Replay position at which the DLL drops `playback_speed` to
+    /// `speed_after_handoff` on that exact tick and clears the catch-up clock
+    /// backlog. 0 = no handoff. This is CONT's splice mechanism generalised so
+    /// a judged PLAY can replay the countdown fast and hand back to 1x exactly
+    /// where the run becomes worth watching.
     pub speed_handoff_pos: u32,
     /// Speed to assert at the handoff (0 = leave the speed alone).
     pub speed_after_handoff: f32,
     /// Bumped by cave2 every time it PROCESSES an arm that starts a replay
-    /// (ARM_PLAY / ARM_CONTINUE), including one it refuses.
-    ///
-    /// The judge needs to know whether the mode and position it is reading
-    /// describe this attempt or the previous one, and neither of those fields
-    /// can answer it: mode is transient (a short replay at 256x can begin and
-    /// end between two polls, leaving every later poll reading OFF), and the
-    /// position still holds the previous replay's final value until the arm
-    /// resets it. This counter is monotonic and changes exactly once per arm,
-    /// so "has it moved since I armed" is a question with a durable answer.
-    ///
-    /// Counting REFUSED arms too is deliberate: a refusal leaves the mode OFF
-    /// forever, which is precisely the state that used to spin.
+    /// (ARM_PLAY / ARM_CONTINUE), refusals included. The judge uses it to tell
+    /// this attempt's mode/position from the previous replay's: mode is
+    /// transient and position holds the previous replay's final value until
+    /// the arm resets it.
     pub arm_generation: u32,
-    /// tick_count when the in-process F5 restart completed (restart_state -> 2).
-    ///
-    /// The three fields below exist to answer one question: is `first_moving`
-    /// COMPUTABLE at arm time instead of observable only after replaying the
-    /// whole countdown? The model says the countdown is a fixed number of ticks
-    /// from the restart, and `first_moving` is measured from the ARM - so it
-    /// should be `(restart_done_tick + K) - arm_consumed_tick`, with every term
-    /// known before a single tick is replayed.
+    /// `tick_count` when the in-process F5 restart completed (restart_state -> 2).
     pub restart_done_tick: u32,
-    /// tick_count at the first captured frame whose position differs from the
-    /// session's frame 0 — i.e. when the countdown gate actually fired.
+    /// `tick_count` at the first captured frame whose position differs from the
+    /// session's frame 0 (the countdown gate).
     pub gate_tick: u32,
-    /// The REC/PLAY index at that same moment. This is `first_moving` stamped
-    /// by the DLL, rather than re-derived from coordinates afterwards.
+    /// The REC/PLAY index at that same moment: `first_moving` as stamped by the
+    /// DLL.
     pub gate_index: u32,
     /// `restart_done_tick` as it stood when THIS attempt's arm was consumed,
-    /// copied by cave2 and published before `arm_generation`.
-    ///
-    /// Reading the live `restart_done_tick` instead pairs two independent
-    /// last-event fields: another writer issuing CMD_RESTART after our arm
-    /// moves one without moving the other, and the prediction would then be
-    /// confidently wrong about which restart started the countdown. The copy
-    /// is latched with the arm, so the pair always comes from one attempt.
+    /// published before `arm_generation` so the pair always comes from one
+    /// attempt.
     pub arm_restart_tick: u32,
-    /// The GAME's own 16-bit centisecond clock (SG+0x1D5334) sampled at the
-    /// restart, the arm, and the gate.
-    ///
-    /// `tick_count` is OUR counter, incremented once per Supreme::Cycle. The
-    /// countdown is not compared against it — the game compares its own clock,
-    /// and race_timer.hpp already records that the two are not perfectly
-    /// phase-locked ("(clock - cs) occasionally lands +/-1 off, sub-tick
-    /// rounding"). That drift is the entire reason the predicted first-moving
-    /// frame is good to +/-1 and no better: the tick counter throws away the
-    /// phase the game is actually measuring.
-    ///
-    /// Sampling the game's clock at the same three moments is what tests
-    /// whether the countdown is a fixed number of ITS units even while it is a
-    /// wobbling number of ours.
-    /// tick_count of the most recent LEVEL RESET — the frame the player
-    /// teleported back to the spawn.
-    ///
-    /// This is the quantity `restart_done_tick` was standing in for and is
-    /// not. That one is when OUR F5 hold finished; the countdown starts when
-    /// the GAME actually resets the level, and the gap between the two is not
-    /// constant. Measured: gate - restart_done_tick is 300 or 301, while
-    /// arm -> gate drift is 0 on every cycle — so the whole residual sits
-    /// across the restart, which is exactly where these two events disagree.
-    ///
-    /// Detected from motion rather than from any game flag: riding moves the
-    /// player ~0.12 units per tick, and a reset moves it hundreds. Nothing to
-    /// reverse-engineer and nothing track-specific.
-    pub reset_tick: u32,
-    /// `reset_tick` latched at the arm, and again at the gate. If they agree,
-    /// the reset is already final when a cycle arms — which is what makes it
-    /// usable for prediction rather than only for post-hoc explanation.
-    pub arm_reset_tick: u32,
-    pub gate_reset_tick: u32,
-    /// Raw bits of the player's position at the ARM tick.
-    ///
-    /// The boarder is not still during the countdown's opening: it SETTLES for
-    /// a few ticks after the level reset and only then holds position until the
-    /// gate. That is visible as the frame-0 offsets of 0.116 x n between
-    /// restarts — arming at different offsets captures different settle frames.
-    ///
-    /// If the settle is deterministic, the position at the arm says exactly how
-    /// many ticks have passed since the reset — which is the phase `tick_count`
-    /// cannot see, and the whole reason the gate was only predictable to +/-1.
-    /// The engine's QPC-domain clock (10MHz, ~99,999 units per tick) latched
-    /// at the reset frame, the arm frame and the gate frame.
-    ///
-    /// THIS is the only sub-tick quantity available. Everything measured so
-    /// far — our tick counter, the game's centisecond clock, the player
-    /// position — is tick-quantised, and at the arm all three are IDENTICAL
-    /// across cycles that go on to produce different gates. Identical
-    /// observable state with different outcomes means the deciding information
-    /// is finer than a tick, and 10MHz is fine enough to see it.
-    ///
-    /// The test: if the countdown's start stamp is the QPC at the reset frame,
-    /// then gate_qpc - reset_qpc is a constant 3 seconds and the gate is
-    /// exactly the first tick whose QPC crosses it.
-    /// Raw bits of a f64: the engine's elapsed SECONDS accumulated since the
-    /// level reset, summed at full precision.
-    ///
-    /// `[esp+0x40]` is a double in seconds, not an integer clock — it feeds
-    /// `fmul [0x46DB0C]` (x100.0) and then `__ftol`. That truncation is the
-    /// documented root cause of the whole bucket lottery: a frame of 0.0099999s
-    /// yields `0.99999 -> 0` ticks and a frame a hair over 10ms yields 1, with
-    /// the remainder carried in the game's own accumulator.
-    ///
-    /// So the sub-tick phase is not hidden, it is arithmetic — and summing the
-    /// deltas from the reset reconstructs exactly the quantity the game is
-    /// comparing against 3 seconds. Every tick-quantised observable failed to
-    /// separate a 300 from a 301 (measured: identical position bits, identical
-    /// clock phase, 36/36); this is the one that cannot be quantised away.
-    /// tick_count and 10MHz clock at the frame F5 is PRESSED.
-    ///
-    /// The countdown is 3.10000s = 310.003 ticks, and `gate - restart_done`
-    /// measured 300/301 — a gap of ~10, which is RESTART_F5_HOLD_FRAMES. The
-    /// level resets when the keypress lands, and every measurement so far was
-    /// taken from the RELEASE ten frames later. So the reference point was
-    /// wrong, and the hold length is what was leaking into it.
-    /// Frame-by-frame trace from the F5 press: [tick, x, y, z] raw bits.
-    ///
-    /// Every detector so far has been a guess about WHERE the countdown starts
-    /// — last position change, first position change, the press, the release —
-    /// and each guess left a residual of one or two ticks. Rather than guess
-    /// again, record what actually happens: the exact frame the level resets,
-    /// how long the boarder settles, and the exact frame it leaves. With the
-    /// whole sequence in hand the reference point is read off, not inferred.
-    pub trace_count: u32,
-    /// Per frame: [tick_count, x, y, z, now_lo, now_hi].
-    ///
-    /// `now` is the engine's absolute 10MHz clock, and consecutive tick_count
-    /// values give the ticks the game emitted that frame. Those two are exactly
-    /// what the game's own tick rule consumes —
-    ///     ticks = floor((now - prev) / tick_len);  prev += ticks * tick_len
-    /// — so the residual `now - prev`, which is the sub-tick phase that decides
-    /// whether the countdown takes 310 ticks or 311, can be RECONSTRUCTED from
-    /// the trace instead of hunted for in the game's memory.
-    /// Per frame: [tick, x, y, z, now_lo, now_hi, physics_ptr].
-    ///
-    /// The physics pointer is there because position cannot always see the
-    /// reset: if the boarder was ALREADY at the spawn when the level reloaded,
-    /// nothing about its position changes and the reset is invisible. Every run
-    /// where the reset was genuinely observed gave gate - reset = 308 exactly,
-    /// six for six; every deviation was a run where it was not. So the whole
-    /// problem is a reset signal that does not depend on the boarder having
-    /// moved, and a reallocated sub-object is one that cannot miss.
-    pub trace: [[u32; 7]; TRACE_FRAMES],
-    /// cave2 CYCLE ordinals at the F5 press, the arm and the gate.
-    ///
-    /// `tick_count` is the wrong unit and has been all along. cave5 adds the
-    /// whole batch (`esi`, up to 3) to it BEFORE the game runs those cycles, so
-    /// every cave2 call in a batch reads the same already-advanced value — the
-    /// counter cannot distinguish cycles inside a batch.
-    ///
-    /// `first_moving` is a cave2 CYCLE ordinal: playback_pos advances once per
-    /// cave2 call. So the thing being predicted was always counted in cycles
-    /// while the prediction was computed in batched ticks, and the 310/311
-    /// split may be nothing but that aliasing. frame_count already advances
-    /// exactly once per cave2 call, which is the right unit.
     /// The RECORDING's first-moving index. Non-zero turns on gate-relative
-    /// input alignment for PLAY; 0 leaves playback indexed from the arm.
-    ///
-    /// The gate index only ever mattered because a replay applies recorded
-    /// inputs BY INDEX, so a countdown that ends on a different index lands the
-    /// whole input stream at the wrong offset against the race start. Aligning
-    /// to the replay's OWN gate makes the index irrelevant instead of
-    /// predicted:
-    ///
-    /// ```text
-    /// recorded_index = playback_index - play_gate + rec_gate
-    /// ```
-    ///
-    /// which matters because the gate is NOT exactly predictable: the deciding
-    /// event is tick batching during the restart, which is over before the arm
-    /// and leaves nothing in the state to read.
+    /// input alignment for PLAY (`recorded_index = playback_index - gate_index
+    /// + gate_align_rec`), which makes the gate index irrelevant instead of
+    /// predicted. 0 leaves playback indexed from the arm.
     pub gate_align_rec: u32,
-    pub press_seq: u32,
-    pub arm_seq: u32,
-    pub gate_seq: u32,
-    pub f5_press_tick: u32,
-    pub f5_press_qpc_lo: u32,
-    pub f5_press_qpc_hi: u32,
-    pub secs_since_reset_lo: u32,
-    pub secs_since_reset_hi: u32,
-    /// The same accumulator latched at the arm — what a predictor would read.
-    pub arm_secs_lo: u32,
-    pub arm_secs_hi: u32,
-    /// ...and at the gate, which says what value actually tripped it.
-    pub gate_secs_lo: u32,
-    pub gate_secs_hi: u32,
-    pub reset_qpc_lo: u32,
-    pub reset_qpc_hi: u32,
-    pub arm_qpc_lo: u32,
-    pub arm_qpc_hi: u32,
-    pub gate_qpc_lo: u32,
-    pub gate_qpc_hi: u32,
-    pub arm_pos_x: u32,
-    pub arm_pos_y: u32,
-    pub arm_pos_z: u32,
-    pub restart_clk: u32,
-    pub arm_clk: u32,
-    pub gate_clk: u32,
-    /// 1 while every coordinate capture in this session has succeeded.
-    ///
-    /// `CapturePlayerCoords` can return having written nothing (no player
-    /// pointer, or a faulted read), but the caller still advances the index —
-    /// leaving a STALE coordinate inside the supposedly current prefix. A
-    /// first-moving scan can read that hole as early movement and learn a
-    /// countdown length that is simply wrong. Prediction refuses to learn from
-    /// a session that has one.
+    /// 1 while every coordinate capture in this session has succeeded. A
+    /// failed capture still advances the index, leaving a stale coordinate
+    /// inside the prefix that a first-moving scan could read as movement.
     pub capture_ok: u32,
-    pub arm_at_tick: u32,
-    /// The tick at which ARM was actually consumed (diagnostic).
+    /// `tick_count` at which the most recent arm was consumed.
     pub arm_consumed_tick: u32,
-    pub clock_delta_lo: u32,
-    pub clock_delta_hi: u32,
-    /// Raw dwords of the player object and its physics sub-object, captured
-    /// at the ARM and again at the GATE.
-    ///
-    /// The hunt for the second hidden spawn state. A control run settled that
-    /// the gate index is not the whole bucket: an aligned replay diverged at
-    /// the FIRST MOVING COORDINATE with its gate index matched, while the
-    /// legacy path replayed the same recording bit-exact. Position is
-    /// identical at the arm across restarts (measured 36/36), so whatever
-    /// differs is in the physics state position does not show — rotation,
-    /// velocity, contact, animation. Earlier work noted "rotation varies" and
-    /// dismissed it as unsound; this captures everything and lets the
-    /// trajectory outcome do the partitioning.
-    ///
-    /// Two capture points because they answer different questions: a
-    /// difference visible at the ARM can be rejected before a single tick
-    /// replays; one visible only at the GATE still names the field.
-    pub objsnap_arm_player: [u32; OBJSNAP_PLAYER_DWORDS],
-    pub objsnap_arm_physics: [u32; OBJSNAP_PHYSICS_DWORDS],
-    pub objsnap_gate_player: [u32; OBJSNAP_PLAYER_DWORDS],
-    pub objsnap_gate_physics: [u32; OBJSNAP_PHYSICS_DWORDS],
-    /// Dwords of each object that were actually readable (SEH-guarded).
-    pub objsnap_player_ok: u32,
-    pub objsnap_physics_ok: u32,
-    /// Clock diagnostics, published by cave5 every frame it runs. For the
-    /// "menu sometimes slow/fast" and "save-dialog fast-forward" reports:
-    /// what the tick machinery actually did is otherwise invisible.
-    ///
-    /// diag_demand: the RAW tick demand this frame, before any cap — the
-    /// wall-clock backlog in ticks. diag_tick_advance: f32 bits of the
-    /// private tick-advance the in-game readers currently see (native 0.01
-    /// means normal speed). diag_drain_count: how many times the one-tick
-    /// backlog drain has fired since injection.
-    pub diag_demand: i32,
-    pub diag_tick_advance: u32,
-    pub diag_drain_count: u32,
     /// Aligned-CONT splice interlock. The controller writes 1 when the
-    /// gate-relative watcher has validated the prefix (bit-exact up to
-    /// min(splice, gate+BUCKET_VALIDATE_WINDOW)). Until then cave5 parks
-    /// playback AT the aligned splice (0 ticks/frame) and cave2 refuses to
-    /// splice, so an unjudged prefix can never truncate the recording.
-    /// Cleared by ARM_CONTINUE and ClearGateAlign in the DLL. Unaligned
-    /// CONT ignores it.
+    /// gate-relative watcher has validated the prefix; until then cave5 parks
+    /// playback at the aligned splice and cave2 refuses to splice. Cleared by
+    /// ARM_CONTINUE and ClearGateAlign in the DLL. Unaligned CONT ignores it.
     pub cont_splice_approved: u32,
-    /// Explicit tail pad (align-8 struct) so the size pin stays honest.
-    pub pad_v40: u32,
-    /// v41: raw x87 control word sampled ON THE GAME THREAD every cycle.
-    /// 0x007F = 24-bit precision (DirectX 6/7), 0x027F = 53-bit (OpenGL /
-    /// Software2). The physics differ between the two, so recordings carry it.
+
+    /// Raw x87 control word sampled ON THE GAME THREAD every cycle: 0x007F =
+    /// 24-bit precision (DirectX 6/7), 0x027F = 53-bit (OpenGL / Software2).
+    /// The physics differ between the two, so recordings carry it.
     pub fpu_control_word: u32,
-    /// v41: loaded renderer plugin, see `TAS_RENDERER_*`.
+    /// Loaded renderer plugin, see `TAS_RENDERER_*`.
     pub renderer_id: u32,
-    /// v42: the human rider's character, see `TAS_CHARACTER_*` (0 until the
-    /// DLL has resolved the live loadout).
+    /// The human rider's character, see `TAS_CHARACTER_*` (0 until resolved).
     pub rider_character: u32,
-    /// v42: stance the game builds the rider with: 0 = regular (left-foot
-    /// icon, the default), 1 = goofy (right-foot icon); `u32::MAX` = unknown.
+    /// Stance the game builds the rider with: 0 = regular, 1 = goofy;
+    /// `u32::MAX` = unknown.
     pub rider_stance: u32,
-    /// v43: seqlock over the (rider_character, rider_stance) pair - odd while
-    /// the DLL's worker is writing it, even and unchanged around a clean read.
-    /// Same protocol and same x86-only caveats as `level_ctx_seq`; read the
-    /// pair through [`rider_pair`], never as two plain field reads.
+    /// Seqlock over the (rider_character, rider_stance) pair; read through
+    /// [`rider_pair`].
     pub rider_seq: AtomicU32,
-    /// v43: seqlock over the (race_time_cs, race_start_ts) pair, written on
-    /// the game thread by the race timer. Read through [`race_pair`].
+    /// Seqlock over the (race_time_cs, race_start_ts) pair; read through
+    /// [`race_pair`].
     pub race_seq: AtomicU32,
 
-    /// v44: the current menu screen's on-screen title ("Main Menu", "Select
-    /// Character", "Arcade", ...); all-zero while a level is running. Captured
-    /// by the DLL's SR_UIT text hook (no memory scan). Read via `menu_screen`.
+    /// The current menu screen's on-screen title ("Main Menu", "Select
+    /// Character", ...); all-zero while a level is running. Read via
+    /// [`menu_screen`].
     pub menu_screen: [u8; TAS_MENU_SCREEN_MAX],
 
-    /// v45: which menu item is focused, as its index among the same-kind items
-    /// in the page (`u32::MAX` = no menu / unreadable). Read from the menu
-    /// object. It is a STABLE per-item id, not the top-to-bottom visual row -
-    /// the game stores the children in creation order, not display order - so
-    /// map it per screen rather than assuming 0 = topmost.
+    /// Which menu item is focused, as a stable per-item id within the page
+    /// (`u32::MAX` = no menu / unreadable). Creation order, not display order.
     pub menu_selector: u32,
 
-    /// v46: seqlock over `menu_doc` - odd while the DLL's worker is writing
-    /// it. Read the document through [`menu_doc`], never as a plain copy.
+    /// Seqlock over `menu_doc`; read the document through [`menu_doc`].
     pub menu_seq: AtomicU32,
-    /// v46: the MENU DOCUMENT - the current page's items with their visible
-    /// labels and stable ids, as compact JSON:
+    /// The MENU DOCUMENT: the current page's items with their visible labels
+    /// and stable ids as compact JSON:
     /// `{"screen":"ID_ARCADE_MENU","sel":0,"items":[{"label":"Time Attack",
     /// "id":"ID_ARCADE_TIME_ATTACK_SEQUENCE","en":true,"vis":true},..]}`.
-    /// `sel` indexes `items` (null = nothing focused) and equals
-    /// `menu_selector`. Empty while a level runs. Read via [`menu_doc`].
+    /// Empty while a level runs.
     pub menu_doc: [u8; TAS_MENU_DOC_MAX],
 
-    /// v47: the menu COMMAND channel (agent -> DLL). Submit through
-    /// [`menu_command_submit`] (writes kind + target, then bumps this
-    /// sequence); the DLL executes it on the menu thread through the game's
-    /// own entry points and acks the sequence in `menu_cmd_ack` after writing
-    /// `menu_cmd_result`. Poll with [`menu_command_result`].
+    /// The menu COMMAND channel (agent -> DLL). Submit through
+    /// [`menu_command_submit`]; the DLL executes it on the menu thread and
+    /// acks the sequence in `menu_cmd_ack` after writing `menu_cmd_result`.
+    /// Poll with [`menu_command_result`].
     pub menu_cmd_seq: AtomicU32,
     pub menu_cmd_kind: u32,
     pub menu_cmd_target: [u8; TAS_MENU_CMD_TARGET_MAX],
-    /// v48: the page id the command was read from; refused as STALE_PAGE if
-    /// the menu moved on. Empty = unchecked.
+    /// The page id the command was read from; refused as STALE_PAGE if the
+    /// menu moved on. Empty = unchecked.
     pub menu_cmd_screen: [u8; TAS_MENU_SCREEN_MAX],
     pub menu_cmd_ack: AtomicU32,
     pub menu_cmd_result: u32,
@@ -988,23 +626,7 @@ pub fn race_pair(state: &TasSharedState) -> (u32, u32) {
 }
 
 fn with_level_context<T>(state: &TasSharedState, read: impl Fn() -> T) -> Option<T> {
-    for _ in 0..LEVEL_CTX_RETRIES {
-        let s1 = state.level_ctx_seq.load(Ordering::Acquire);
-        if s1 & 1 != 0 {
-            std::hint::spin_loop();
-            continue; // writer mid-update
-        }
-        let value = read();
-        // Keep the payload reads above the recheck. Without this they may sink
-        // below the second load, and then the comparison proves nothing about
-        // what was actually read.
-        std::sync::atomic::fence(Ordering::Acquire);
-        if state.level_ctx_seq.load(Ordering::Relaxed) == s1 {
-            return Some(value);
-        }
-        std::hint::spin_loop(); // torn: the group changed under us
-    }
-    None
+    with_seqlock(&state.level_ctx_seq, read)
 }
 
 /// Read the group's identity half. Caller must be inside [`with_level_context`].
@@ -1249,10 +871,9 @@ pub fn level_is_resolved(state: &TasSharedState) -> bool {
     resolved_level_id(state).is_some()
 }
 
-pub const ARG4_SOURCE_NONE: u32 = 0;
+/// `arg4_source` value meaning the injected event was stamped with the game's
+/// own `Kernel::Time::Current()` (the proper, focus-independent path).
 pub const ARG4_SOURCE_TIME_CURRENT: u32 = 1;
-pub const ARG4_SOURCE_CALIBRATED: u32 = 2;
-pub const ARG4_SOURCE_OVERRIDE: u32 = 3;
 
 impl TasSharedState {
     pub fn mode_enum(&self) -> TasMode {
@@ -5003,71 +4624,29 @@ mod tests {
 
     // ========== Layout assertions ==========
 
+    /// The C++ side (shared_state.hpp) pins the same size and offsets with
+    /// `static_assert`. Both processes map the same bytes, so a field that
+    /// moves on one side only is read as garbage by the other; the offsets
+    /// catch a reorder that leaves the total size unchanged.
     #[test]
-    fn size_of_tas_shared_state_pinned() {
-        // Pin the total struct size so C++ and Rust sides stay in sync.
-        // align-8 struct. Tail: ..., clock_pin_enabled, clock_pin_phase,
-        // test_arg4_override (v10, filled the v9 trailing pad), arg4_source
-        // (v11, +8 = field + pad), then cont_suppress_input (v12) — fills
-        // arg4_source's 4-byte trailing pad, so the total is unchanged at
-        // 1_647_280. v13 appends present_count + menu_fps_cap (2x u32 = +8) ->
-        // 1_647_288 (still 8-aligned, no extra pad).
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_667_776);
-    }
-
-    /// Prints field offsets for manual out-of-process debugging.
-    /// Run with `cargo test -p tas_shared print_offsets -- --nocapture`.
-    #[test]
-    fn print_offsets() {
+    fn layout_pinned_to_shared_state_hpp() {
         use std::mem::offset_of;
-        println!("capture offsets: segment_start_frame={} arm_generation={}",
-            offset_of!(TasSharedState, segment_start_frame), offset_of!(TasSharedState, arm_generation));
-        println!(
-            "offsets: version={} command={} mode={} frame_count={} recorded_count={} playback_pos={} \
-             replay_ptr={} player_ptr={} player_x={} input_log={} rec_coords={} play_coords={} \
-             gate_tick={} gate_index={} gate_align_rec={} level_id={} race_time_cs={} race_start_ts={} game_in_game={} rider_seq={} race_seq={} menu_screen={} menu_selector={} menu_seq={} menu_doc={} menu_cmd_seq={} menu_cmd_kind={} menu_cmd_target={} menu_cmd_screen={} menu_cmd_ack={} menu_cmd_result={} fpu_control_word={} renderer_id={} rider_character={} rider_stance={} perf_cave2={} perf_cave5={} perf_cave1c_down={} perf_cave1c_up={} perf_cave1d={} perf_replay_capture={}",
-            offset_of!(TasSharedState, version),
-            offset_of!(TasSharedState, command),
-            offset_of!(TasSharedState, mode),
-            offset_of!(TasSharedState, frame_count),
-            offset_of!(TasSharedState, recorded_count),
-            offset_of!(TasSharedState, playback_pos),
-            offset_of!(TasSharedState, replay_ptr),
-            offset_of!(TasSharedState, player_ptr),
-            offset_of!(TasSharedState, player_x),
-            offset_of!(TasSharedState, input_log),
-            offset_of!(TasSharedState, rec_coords),
-            offset_of!(TasSharedState, play_coords),
-            offset_of!(TasSharedState, gate_tick),
-            offset_of!(TasSharedState, gate_index),
-            offset_of!(TasSharedState, gate_align_rec),
-            offset_of!(TasSharedState, level_id),
-            offset_of!(TasSharedState, race_time_cs),
-            offset_of!(TasSharedState, race_start_ts),
-            offset_of!(TasSharedState, game_in_game),
-            offset_of!(TasSharedState, rider_seq),
-            offset_of!(TasSharedState, race_seq),
-            offset_of!(TasSharedState, menu_screen),
-            offset_of!(TasSharedState, menu_selector),
-            offset_of!(TasSharedState, menu_seq),
-            offset_of!(TasSharedState, menu_doc),
-            offset_of!(TasSharedState, menu_cmd_seq),
-            offset_of!(TasSharedState, menu_cmd_kind),
-            offset_of!(TasSharedState, menu_cmd_target),
-            offset_of!(TasSharedState, menu_cmd_screen),
-            offset_of!(TasSharedState, menu_cmd_ack),
-            offset_of!(TasSharedState, menu_cmd_result),
-            offset_of!(TasSharedState, fpu_control_word),
-            offset_of!(TasSharedState, renderer_id),
-            offset_of!(TasSharedState, rider_character),
-            offset_of!(TasSharedState, rider_stance),
-            offset_of!(TasSharedState, perf_cave2),
-            offset_of!(TasSharedState, perf_cave5),
-            offset_of!(TasSharedState, perf_cave1c_down),
-            offset_of!(TasSharedState, perf_cave1c_up),
-            offset_of!(TasSharedState, perf_cave1d),
-            offset_of!(TasSharedState, perf_replay_capture),
-        );
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_651_664);
+        let pins = [
+            ("perf_cave2", offset_of!(TasSharedState, perf_cave2), 72),
+            ("input_log", offset_of!(TasSharedState, input_log), 568),
+            ("rec_coords", offset_of!(TasSharedState, rec_coords), 66_104),
+            ("play_coords", offset_of!(TasSharedState, play_coords), 852_536),
+            ("log_write_seq", offset_of!(TasSharedState, log_write_seq), 1_638_968),
+            ("cont_replay_start_fc", offset_of!(TasSharedState, cont_replay_start_fc), 1_647_164),
+            ("level_ctx_seq", offset_of!(TasSharedState, level_ctx_seq), 1_647_344),
+            ("fpu_control_word", offset_of!(TasSharedState, fpu_control_word), 1_647_392),
+            ("menu_doc", offset_of!(TasSharedState, menu_doc), 1_647_456),
+            ("menu_cmd_result", offset_of!(TasSharedState, menu_cmd_result), 1_651_660),
+        ];
+        for (name, actual, expected) in pins {
+            assert_eq!(actual, expected, "offset of {name}");
+        }
     }
 
     /// The two control words the wiki documents: DirectX 6/7 leave the game
@@ -5268,35 +4847,6 @@ mod tests {
         for id in [1, 2, 3, 4, 5] {
             assert_eq!(renderer_id_from_name(renderer_name(id)), id);
         }
-    }
-
-    #[test]
-    fn offset_of_input_log_pinned() {
-        assert_eq!(mem::offset_of!(TasSharedState, input_log), 632);
-    }
-
-    #[test]
-    fn offset_of_rec_coords() {
-        assert_eq!(
-            mem::offset_of!(TasSharedState, rec_coords),
-            632 + TAS_MAX_TICKS // 66168
-        );
-    }
-
-    #[test]
-    fn offset_of_play_coords() {
-        assert_eq!(
-            mem::offset_of!(TasSharedState, play_coords),
-            632 + TAS_MAX_TICKS + TAS_MAX_TICKS * 12 // 852600
-        );
-    }
-
-    #[test]
-    fn offset_of_log_write_seq() {
-        assert_eq!(
-            mem::offset_of!(TasSharedState, log_write_seq),
-            632 + TAS_MAX_TICKS + TAS_MAX_TICKS * 12 * 2 // 1639032
-        );
     }
 
     #[test]
@@ -5595,7 +5145,9 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn unit_tests_cannot_open_live_game_memory() {
-        assert!(TasSharedMemoryClient::open().is_err());
+        // Two private test mappings must not see each other's writes, and
+        // neither may be the game's mapping. (Whether the game's mapping exists
+        // right now is a property of the machine, not of this crate.)
         let mut a = TasSharedMemoryClient::new_test_mapping();
         let b = TasSharedMemoryClient::new_test_mapping();
         a.send_command(TasCommand::ArmRec);

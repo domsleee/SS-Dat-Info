@@ -6,10 +6,7 @@
 //!    screen, it will play in fast forward when you do press it, for a while."
 //!   "The menu speed is sometimes slow and sometimes fast."
 //!
-//! dialog-speedup already reproduces + guards the burst mechanism, but it
-//! dismisses with a synthetic PostMessage Enter and only in PLAY mode, and
-//! menu-cap validates the present cap against the PAUSE menu as a proxy. This
-//! test closes all three gaps in one continuous session:
+//! One continuous session, driven with real input:
 //!
 //!   PHASE A — aligned PLAY of a finishing recording at 1x, idle at the save
 //!             dialog, dismiss with a REAL Pico Escape. No tick burst allowed.
@@ -17,10 +14,8 @@
 //!             flips to REC, the run crosses the line RECORDING, the dialog
 //!             appears in REC mode. Idle, real Pico Escape, no burst.
 //!   PHASE C — quit to the REAL main menu (pause-menu recipe) and measure
-//!             what the user sees: the present cap must engage (~menu_fps_cap
-//!             presents/sec, not uncapped or half), cont_suppress_input must
-//!             read 0 (a stale flag here is the "menu sometimes slow/fast"
-//!             cause AND kills the keyboard), and the menu VIDEO must move at
+//!             what the user sees: cont_suppress_input must read 0 (a stale
+//!             flag here kills the keyboard), and the menu VIDEO must move at
 //!             a plausible rate (video-rate's screen sampler).
 
 use std::path::PathBuf;
@@ -105,10 +100,8 @@ fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str)
     thread::sleep(Duration::from_secs(DIALOG_IDLE_SECS));
     let idled = client.state().tick_count.wrapping_sub(t0);
     println!(
-        "  [{}] during idle: {} ticks advanced (must be ~0) | demand={}",
-        label,
-        idled,
-        client.state().diag_demand
+        "  [{}] during idle: {} ticks advanced (must be ~0)",
+        label, idled
     );
 
     // THE REAL KEYPRESS: hardware HID Escape from the Pico, exactly what a
@@ -271,32 +264,13 @@ pub fn run() -> bool {
     }
     thread::sleep(Duration::from_secs(3));
 
-    // Present cap: the menu freezes the cycle, so frame_limit must throttle
-    // presents to ~menu_fps_cap. Uncapped here is exactly the "menu fast"
-    // symptom (the video is a step function of present rate).
-    let cap = client.state().menu_fps_cap;
-    let p0 = client.state().present_count;
-    thread::sleep(Duration::from_secs(2));
-    let p1 = client.state().present_count;
-    let present_rate = f64::from(p1.wrapping_sub(p0)) / 2.0;
-    // BOTH bounds: uncapped (165/s) is the "menu fast" bug, but HALF the cap
-    // (the coarse-timer regression this cap shipped with) must fail too.
-    let pass_c_cap =
-        cap == 0 || (present_rate < f64::from(cap) * 1.6 && present_rate > f64::from(cap) * 0.5);
-    println!(
-        "  main-menu present rate: {:.1}/s (cap {}) -> {}",
-        present_rate,
-        cap,
-        if pass_c_cap { "capped OK" } else { "UNCAPPED" }
-    );
-
     // The user-visible thing itself: the menu video's on-screen motion.
     println!("  menu video (screen sampler):");
     let pass_c_video = video_rate::run_region(Some(6), None);
 
-    // After >9s at the menu any stale suppress flag must have been retired
-    // (frame_limit's 5s override) — and a CONT that completed normally never
-    // leaves it set at all. A set flag here = dead keyboard + uncapped menu.
+    // After >9s at the menu any stale suppress flag must have been retired by
+    // the level-scan worker — and a CONT that completed normally never leaves
+    // it set at all. A set flag here = dead keyboard.
     let suppress = client.state().cont_suppress_input;
     let pass_c_flag = suppress == 0;
     println!(
@@ -313,10 +287,10 @@ pub fn run() -> bool {
 
     println!();
     println!(
-        "  A: PLAY-dialog no burst: {} | B: REC-dialog reached: {} + no burst: {} | C: cap: {} video: {} flag: {}",
-        pass_a, pass_b_rec, pass_b_burst, pass_c_cap, pass_c_video, pass_c_flag
+        "  A: PLAY-dialog no burst: {} | B: REC-dialog reached: {} + no burst: {} | C: video: {} flag: {}",
+        pass_a, pass_b_rec, pass_b_burst, pass_c_video, pass_c_flag
     );
-    let ok = pass_a && pass_b_rec && pass_b_burst && pass_c_cap && pass_c_video && pass_c_flag;
+    let ok = pass_a && pass_b_rec && pass_b_burst && pass_c_video && pass_c_flag;
     if ok {
         println!(
             "\n*** DIALOG-E2E PASSED: save-dialog and menu behave at native speed end to end ***"

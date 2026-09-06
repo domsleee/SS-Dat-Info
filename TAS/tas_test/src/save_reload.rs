@@ -125,10 +125,7 @@ pub fn run() -> bool {
     let meta_value = json!({
         "version": state.version,
         "recorded_count": state.recorded_count,
-        "inject_mode": state.inject_mode,
         "force_fixed_tick": state.force_fixed_tick,
-        "force_direct": state.force_direct,
-        "input_source": state.input_source,
         "max_drift_x": 0.0_f32,
         "max_drift_z": 0.0_f32,
         "timestamp": "save_reload_test",

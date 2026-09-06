@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! TAS test runner CLI for Supreme Snowboarding.
 //!
 //! Modes:
@@ -13,38 +12,22 @@
 //!   cont-reliability — CONT splice reliability test at long frame offsets
 
 mod acceptance;
-mod arm_precision;
 mod benchmark;
-mod bucket_predict;
-mod bucket_scan;
-mod cache;
 mod catchup_speed;
 mod certificate;
 mod cont_cases;
 mod cont_hijack;
 mod cont_reliability;
 mod cont_restart_race;
-mod cont_splice_frame;
-mod cont_stress;
 mod cont_ui;
-mod countdown_probe;
 mod dialog_e2e;
-mod dialog_speedup;
 mod drift;
 mod drift_speed;
-mod escape_speedup;
-mod f5_probe;
-mod fe_cont_stress;
 mod gate_align;
-mod gate_predict;
-mod gate_trace;
 mod gates;
 mod harness;
-mod hidden_state;
-mod level_hunt;
 mod level_seq;
 mod live_suite;
-mod menu_cap;
 mod patterns;
 mod pause_resume;
 mod play_judge;
@@ -55,13 +38,8 @@ mod refresh_recording;
 mod regression;
 mod reliability;
 mod replay;
-mod reroll_cost;
-mod restart_precision;
-mod restart_probe;
 mod save_reload;
 mod shm;
-mod snapshot_cont;
-mod snapshot_probe;
 mod speed;
 mod speed_reset;
 mod steer_impact;
@@ -217,14 +195,6 @@ fn main() {
             let ok = play_pace::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
-        "escape-speedup" => {
-            // Press Escape → wait 20s → press Escape → wait 5s. Verify the
-            // ticker (cave2 frame_count) behaves sensibly: ~0 ticks during
-            // the pause window, normal ~100 tps during the resume window.
-            // Catches the originally reported "fast-forward on resume" bug.
-            let ok = escape_speedup::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
         "cont-input-protection" => {
             let ok = cont_restart_race::run_input_protection();
             std::process::exit(if ok { 0 } else { 1 });
@@ -237,24 +207,6 @@ fn main() {
             // for mode==OFF, then sending Restart cleanly gets ArmContinue
             // accepted. If half 2 fails, tas_ui's CONT-twice fix is broken.
             let ok = cont_restart_race::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "fe-cont-stress" => {
-            // Speed sweep for CONT splice against FE-tremendous, using
-            // reference-comparison (first splice's prefix is the truth)
-            // instead of strict bit-match-vs-rec_coords. Reports the
-            // fastest speed where N iterations match the reference.
-            let mut speeds: Vec<f32> = vec![1.0, 12.0, 32.0, 64.0, 128.0, 256.0];
-            // Optional override: tas_test fe-cont-stress 512 1024 ...
-            let extra: Vec<f32> = args
-                .iter()
-                .skip(2)
-                .filter_map(|s| s.parse::<f32>().ok())
-                .collect();
-            if !extra.is_empty() {
-                speeds = extra;
-            }
-            let ok = fe_cont_stress::run(&speeds);
             std::process::exit(if ok { 0 } else { 1 });
         }
         "fe-cont-reliability" => {
@@ -282,55 +234,10 @@ fn main() {
             let ok = stop_play_flake::run();
             std::process::exit(if ok { 0 } else { 1 });
         }
-        "f5-probe" => {
-            let mut iterations = 50u32;
-            let mut i = 2;
-            while i < args.len() {
-                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
-                    iterations = args[i + 1].parse().unwrap_or(50);
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            f5_probe::run(iterations);
-            std::process::exit(0);
-        }
         "gate-align" => {
             let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(8u32);
             let rec = args.get(3).map(|s| s.as_str());
             std::process::exit(if gate_align::run(n, rec) { 0 } else { 1 });
-        }
-        "hidden-state" => {
-            let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(12u32);
-            let rec = args.get(3).map(|s| s.as_str());
-            let fresh = args.iter().any(|a| a == "--fresh");
-            let rec = rec.filter(|r| !r.starts_with("--"));
-            std::process::exit(if hidden_state::run(n, rec, fresh) {
-                0
-            } else {
-                1
-            });
-        }
-        "gate-trace" => {
-            let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(6u32);
-            std::process::exit(if gate_trace::run(n) { 0 } else { 1 });
-        }
-        "gate-predict" => {
-            let mut iterations = 3u32;
-            let mut i = 2;
-            while i < args.len() {
-                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
-                    iterations = args[i + 1].parse().unwrap_or(3);
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            std::process::exit(if gate_predict::run(iterations) { 0 } else { 1 });
-        }
-        "reroll-cost" => {
-            std::process::exit(if reroll_cost::run() { 0 } else { 1 });
         }
         "play-judge" => {
             let mut iterations = 5u32;
@@ -344,121 +251,6 @@ fn main() {
                 }
             }
             std::process::exit(if play_judge::run(iterations) { 0 } else { 1 });
-        }
-        "restart-precision" => {
-            let mut iterations = 10u32;
-            let mut i = 2;
-            while i < args.len() {
-                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
-                    iterations = args[i + 1].parse().unwrap_or(10);
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            restart_precision::run(iterations);
-            std::process::exit(0);
-        }
-        "arm-precision" => {
-            let mut iterations = 16u32;
-            let mut i = 2;
-            while i < args.len() {
-                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
-                    iterations = args[i + 1].parse().unwrap_or(16);
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            arm_precision::run(iterations);
-            std::process::exit(0);
-        }
-        "bucket-scan-heap" => {
-            let mut iterations = 14u32;
-            let mut i = 2;
-            while i < args.len() {
-                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
-                    iterations = args[i + 1].parse().unwrap_or(14);
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            bucket_scan::bucket_scan_heap(iterations);
-            std::process::exit(0);
-        }
-        "countdown-find-heap" => {
-            let mut iterations = 4u32;
-            let mut i = 2;
-            while i < args.len() {
-                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
-                    iterations = args[i + 1].parse().unwrap_or(4);
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            bucket_scan::find_countdown_heap(iterations);
-            std::process::exit(0);
-        }
-        "countdown-find" => {
-            let mut iterations = 6u32;
-            let mut i = 2;
-            while i < args.len() {
-                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
-                    iterations = args[i + 1].parse().unwrap_or(6);
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            bucket_scan::find_countdown(iterations);
-            std::process::exit(0);
-        }
-        "bucket-scan" => {
-            let mut iterations = 16u32;
-            let mut i = 2;
-            while i < args.len() {
-                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
-                    iterations = args[i + 1].parse().unwrap_or(16);
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            bucket_scan::run(iterations);
-            std::process::exit(0);
-        }
-        "countdown-probe" => {
-            let mut iterations = 20u32;
-            let mut i = 2;
-            while i < args.len() {
-                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
-                    iterations = args[i + 1].parse().unwrap_or(20);
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            countdown_probe::run(iterations);
-            std::process::exit(0);
-        }
-        "bucket-predict" => {
-            // Measurement, not a gate: pairs the early post-restart state with
-            // the bucket that restart actually produced, to see whether any of
-            // it predicts the bucket before the boarder moves.
-            let mut iterations = 24u32;
-            let mut i = 2;
-            while i < args.len() {
-                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
-                    iterations = args[i + 1].parse().unwrap_or(24);
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            bucket_predict::run(iterations);
-            std::process::exit(0);
         }
         "benchmark" => {
             let mut config = benchmark::BenchmarkConfig::default();
@@ -575,36 +367,11 @@ fn main() {
             let report = reliability::run(iterations, speed);
             std::process::exit(if report.all_pass() { 0 } else { 1 });
         }
-        "restart-probe" => {
-            // Measure the in-process F5 restart timeline (F5-press -> teleport
-            // -> first motion) to tell whether the short first-moving is a
-            // truncated countdown or an arm-timing offset.
-            let ok = restart_probe::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "snapshot-probe" => {
-            // PROTOTYPE: validate in-DLL writable-memory snapshot/restore as the
-            // instant-CONT mechanism (libTAS/TMInterface design). Go/no-go for
-            // the state-snapshot project.
-            let ok = snapshot_probe::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "snapshot-cont" => {
-            // PROTOTYPE: snapshot-based CONT — establish a frame-0 spawn snapshot
-            // (one-time F5 lottery), then RESTORE it instead of F5 for every
-            // replay → zero rerolls (bucket lottery eliminated).
-            let ok = snapshot_cont::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
         "cont-hijack" => {
             // Bug #2 regression: a continue_from_frame set during a plain PLAY
             // must NOT hijack the replay into REC (g_cave2_contArmed gate).
             let ok = cont_hijack::run();
             std::process::exit(if ok { 0 } else { 1 });
-        }
-        "level-hunt" => {
-            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
-            std::process::exit(if level_hunt::run(sub) { 0 } else { 1 });
         }
         "load" => {
             // Load a .tasrec into shared memory and EXIT — without stopping
@@ -651,31 +418,15 @@ fn main() {
             // (PLAY and REC modes), then the ACTUAL main menu measured.
             std::process::exit(if dialog_e2e::run() { 0 } else { 1 });
         }
-        "dialog-speedup" => {
-            let speed: f32 = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(1.0);
-            let rec = args.get(3).map(|s| s.as_str());
-            std::process::exit(if dialog_speedup::run(speed, rec) {
-                0
-            } else {
-                1
-            });
-        }
-        "menu-cap" => {
-            std::process::exit(if menu_cap::run() { 0 } else { 1 });
-        }
         "video-rate" => {
             // Measures the SCREEN, not shared memory, so the same command works
             // with TAS absent — which is the only way to get a no-TAS baseline
             // for the menu-video speed complaint.
             let secs = args.get(2).and_then(|s| s.parse::<u64>().ok());
-            let mut cap: Option<u32> = None;
             let mut region: Option<(i32, i32)> = None;
             let mut i = 2;
             while i < args.len() {
-                if args[i] == "--cap" && i + 1 < args.len() {
-                    cap = args[i + 1].parse::<u32>().ok();
-                    i += 2;
-                } else if args[i] == "--at" && i + 2 < args.len() {
+                if args[i] == "--at" && i + 2 < args.len() {
                     // `--at X Y`: sample a patch with its top-left THERE, instead
                     // of auto-picking. For pointing at a specific thing (e.g. the
                     // background video) rather than whatever moves most.
@@ -688,7 +439,7 @@ fn main() {
                     i += 1;
                 }
             }
-            std::process::exit(if video_rate::run_with_cap(secs, cap, region) {
+            std::process::exit(if video_rate::run_region(secs, region) {
                 0
             } else {
                 1
@@ -825,97 +576,6 @@ fn main() {
             );
             std::process::exit(if report.all_pass() { 0 } else { 1 });
         }
-        "cont-stress" => {
-            // The user's exact CONT flow: slow play speed, fast catch-up,
-            // repeated F12. Measures the reroll distribution.
-            let mut iterations = 5u32;
-            let mut splice = 1000u32;
-            let mut catchup = 64.0f32;
-            let mut record_speed = 0.5f32;
-            let mut max_median = 8u32;
-            let mut file: Option<String> = None;
-            let mut restart = "inprocess".to_string();
-            let mut i = 2;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--iterations" | "-n" => {
-                        iterations = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(5);
-                        i += 2;
-                    }
-                    "--restart" => {
-                        restart = args
-                            .get(i + 1)
-                            .cloned()
-                            .unwrap_or_else(|| "inprocess".into());
-                        i += 2;
-                    }
-                    "--splice" => {
-                        splice = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(1000);
-                        i += 2;
-                    }
-                    "--catchup" => {
-                        catchup = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(64.0);
-                        i += 2;
-                    }
-                    "--record-speed" => {
-                        record_speed = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0.5);
-                        i += 2;
-                    }
-                    "--max-median-rerolls" => {
-                        max_median = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(8);
-                        i += 2;
-                    }
-                    "--file" => {
-                        file = args.get(i + 1).cloned();
-                        i += 2;
-                    }
-                    _ => {
-                        i += 1;
-                    }
-                }
-            }
-            let ok = cont_stress::run(
-                iterations,
-                splice,
-                catchup,
-                record_speed,
-                max_median,
-                file.as_deref(),
-                &restart,
-            );
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "cont-splice-frame" => {
-            // "Continue continues on the correct frame": CONT at N must splice
-            // EXACTLY at frame N. Realistic profile — catch up fast (64x) then
-            // record slow (0.25x), so the splice frame is precise while catch-up
-            // stays quick.
-            let mut splice = 1000u32;
-            let mut catchup = 64.0f32;
-            let mut record_speed = 0.25f32;
-            let mut i = 2;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--splice" => {
-                        splice = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(1000);
-                        i += 2;
-                    }
-                    "--catchup" => {
-                        catchup = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(64.0);
-                        i += 2;
-                    }
-                    "--record-speed" => {
-                        record_speed = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0.25);
-                        i += 2;
-                    }
-                    _ => {
-                        i += 1;
-                    }
-                }
-            }
-            let ok = cont_splice_frame::run(splice, catchup, record_speed);
-            std::process::exit(if ok { 0 } else { 1 });
-        }
         "menu" => {
             // The menu as TEXT (shm v46) and the COMMAND channel (v47) for agents:
             //   tas_test menu                       print the document (one JSON line)
@@ -1045,17 +705,12 @@ fn main() {
             println!("  speed       Playback speed verification (0.25x, 1x, 2x)");
             println!("  speed-reset Speed reset verification (2x stop restores normal)");
             println!("  drift-speed Drift-at-speed verification (2x same, 1x/2x cross)");
-            println!("  f5-probe    F5 bucket characterization (records starting positions)");
-            println!("  bucket-predict  can the F5 bucket be identified before the boarder moves?");
             println!("  benchmark   Cave hook perf benchmark (frame-window repeats)");
             println!(
                 "  reliability N consecutive REC+PLAY cycles at Nx speed (default 10x at 12x)"
             );
             println!(
                 "  cont-reliability CONT splice reliability (default 10x, splice 2400 @ 12x; profile=taps)"
-            );
-            println!(
-                "  cont-splice-frame CONT splices on the EXACT requested frame (default splice 1000 @ 0.25x)"
             );
             println!("  replay      Load .tasrec file and play back N times (drift check)");
             println!("  refresh-tasrec Re-record a .tasrec baseline from live runtime");

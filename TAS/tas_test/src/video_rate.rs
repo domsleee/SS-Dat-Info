@@ -2,11 +2,10 @@
 //! ADVANCES, from outside the process.
 //!
 //! Built to answer one question that shared memory cannot: how fast does the
-//! menu background video run with NO TAS loaded? The DLL's own `present_count`
-//! is the natural instrument, but it only exists once the DLL is injected — so
-//! it can measure the suspect and never the control. This measures the screen
-//! instead, so the SAME method works with TAS absent, with the DLL injected, and
-//! with tas_ui also running.
+//! menu background video run with NO TAS loaded? Shared-memory counters only
+//! exist once the DLL is injected, so they can measure the suspect and never
+//! the control. This measures the screen instead, so the SAME method works with
+//! TAS absent, with the DLL injected, and with tas_ui also running.
 //!
 //! METHOD. Grab a small region of the game window as fast as Windows will allow,
 //! hash the pixels, and timestamp every change. Distinct images per second is
@@ -279,42 +278,6 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
-/// `--cap N` sets the DLL's `menu_fps_cap` before measuring.
-///
-/// A true no-TAS baseline turned out to be unreachable on this machine: a
-/// service auto-injects TAS_Helper into every launch, and with the DLL moved
-/// aside the game starts but never creates a window at all — the launch pipeline
-/// needs the injection to succeed. So the honest comparison available is between
-/// the DLL's throttle ON and OFF, which the DLL itself supports: `menu_fps_cap`
-/// is documented as "0 = OFF (no throttle, pure measurement)". That isolates the
-/// present cap, though NOT the other half of the story — the 1 ms system timer
-/// the tooling raises, which is what sped sr.dll's Sleep-limiter up in the first
-/// place. Measuring that half needs a game that can run without the DLL.
-pub fn run_with_cap(secs: Option<u64>, cap: Option<u32>, region: Option<(i32, i32)>) -> bool {
-    if let Some(c) = cap {
-        match tas_shared::TasSharedMemoryClient::open() {
-            Ok(mut client) => {
-                let prev = client.state().menu_fps_cap;
-                client.state_mut().menu_fps_cap = c;
-                println!(
-                    "  menu_fps_cap: {} -> {}{}",
-                    prev,
-                    c,
-                    if c == 0 { "  (throttle OFF)" } else { "" }
-                );
-                // The cap is read per-present, so give the game a few frames to
-                // settle onto the new rate before sampling it.
-                std::thread::sleep(Duration::from_millis(600));
-            }
-            Err(e) => {
-                eprintln!("ERROR: --cap needs TAS shared memory ({})", e);
-                return false;
-            }
-        }
-    }
-    run_region(secs, region)
-}
-
 pub fn run(secs: Option<u64>) -> bool {
     run_region(secs, None)
 }
@@ -367,29 +330,7 @@ pub fn run_region(secs: Option<u64>, region: Option<(i32, i32)>) -> bool {
         PATCH_H,
         observe
     );
-    // Say up front whether the DLL is in the process — this is the whole point
-    // of the comparison, and reading it from the run itself beats trusting the
-    // operator to remember which condition they were in.
-    //
-    // From the MODULE LIST, not from opening the shared memory. A named section
-    // outlives its creator while any handle stays open, so with tas_ui running
-    // the mapping of a long-dead game still opens — which reported "TAS present"
-    // against a game that had never loaded the DLL. That false positive would
-    // have quietly invalidated the entire comparison.
-    match crate::level_hunt::tas_dll_loaded() {
-        Some(true) => println!("  TAS_Helper.dll: LOADED in the game process"),
-        Some(false) => println!("  TAS_Helper.dll: NOT loaded — this is a clean baseline"),
-        None => println!("  TAS_Helper.dll: unknown (could not inspect the process)"),
-    }
-
-    // When the DLL is present, also read its own present counter. The screen
-    // metric counts CONTENT CHANGES; present_count counts SwapBuffers calls.
-    // They are not the same number, and conflating them is easy: if the menu
-    // redraws the same image twice, the screen sees one change and the engine
-    // made two presents. Reporting both says which of the two the throttle is
-    // actually acting on.
     let shm = tas_shared::TasSharedMemoryClient::open().ok();
-    let presents_before = shm.as_ref().map(|c| c.state().present_count);
     // The game's own tick/frame counters. If the menu's animation is advancing
     // too fast, the question is whether the TICK SOURCE is running fast — which
     // these answer directly, where the screen metric only shows the consequence.
@@ -479,14 +420,7 @@ pub fn run_region(secs: Option<u64>, region: Option<(i32, i32)>) -> bool {
         "  distinct frames: {} ({:.1} fps)  <- what the SCREEN shows",
         transitions, change_hz
     );
-    if let (Some(before), Some(c)) = (presents_before, shm.as_ref()) {
-        let presents = c.state().present_count.wrapping_sub(before);
-        println!(
-            "  engine presents: {} ({:.1} /s)  <- what the GAME draws (SwapBuffers)",
-            presents,
-            presents as f64 / elapsed
-        );
-        println!("  menu_fps_cap in effect: {}", c.state().menu_fps_cap);
+    if let Some(c) = shm.as_ref() {
         if let (Some(t0), Some(f0)) = (ticks_before, frames_before) {
             let dt = c.state().tick_count.wrapping_sub(t0);
             let df = c.state().frame_count.wrapping_sub(f0);
