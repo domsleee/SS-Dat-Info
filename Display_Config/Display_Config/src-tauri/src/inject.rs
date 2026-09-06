@@ -73,6 +73,8 @@ pub async fn run_tas_inject() -> Result<String, String> {
     let tas_folder = display_config_resources.join("TAS");
     let injector_path = display_config_resources.join("Injector.exe");
     let dll_path = tas_folder.join("TAS_Helper.dll");
+    let tas_ui_path = tas_folder.join("tas_ui.exe");
+    require_tas_ui(&tas_ui_path)?;
 
     if !injector_path.exists() {
         return Err(format!("Injector not found at {}", injector_path.display()));
@@ -114,15 +116,51 @@ pub async fn run_tas_inject() -> Result<String, String> {
     }
 
     // Launch tas_ui.exe (SSB Inspect) as a detached process
-    let tas_ui_path = tas_folder.join("tas_ui.exe");
-    if tas_ui_path.exists() {
-        let _ = Command::new(&tas_ui_path)
-            .current_dir(&tas_folder)
-            .creation_flags(0x00000008) // DETACHED_PROCESS
-            .spawn();
-    }
+    launch_tas_ui(&tas_ui_path)?;
 
     Ok("TAS_Helper.dll injected".to_string())
+}
+
+fn require_tas_ui(path: &std::path::Path) -> Result<(), String> {
+    if !path.is_file() {
+        return Err(format!(
+            "TAS UI not found at {}. Reinstall the TAS files and try again.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn launch_tas_ui(path: &std::path::Path) -> Result<(), String> {
+    require_tas_ui(path)?;
+    Command::new(path)
+        .current_dir(path.parent().unwrap_or(std::path::Path::new(".")))
+        .creation_flags(0x00000008) // DETACHED_PROCESS
+        .spawn()
+        .map_err(|error| format!("Could not launch TAS UI at {}: {}. Check the installation and antivirus quarantine, then try again.", path.display(), error))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    #[test]
+    fn missing_ui_is_an_actionable_error() {
+        let path = std::env::temp_dir().join(format!("missing-tas-{}.exe", uuid::Uuid::new_v4()));
+        let error = launch_tas_ui(&path).unwrap_err();
+        assert!(error.contains("TAS UI not found"));
+        assert!(error.contains(&path.display().to_string()));
+    }
+
+    #[test]
+    fn damaged_ui_spawn_error_is_not_success() {
+        let path = std::env::temp_dir().join(format!("invalid-tas-{}.exe", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"not an executable").unwrap();
+        let result = launch_tas_ui(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(result.unwrap_err().contains("Could not launch TAS UI"));
+    }
 }
 
 /// Poll for a Windows named shared-memory section by attempting to open it

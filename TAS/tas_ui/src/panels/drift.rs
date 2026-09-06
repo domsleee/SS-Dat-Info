@@ -2,41 +2,39 @@ use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
 use tas_shared::TasSharedState;
 
-/// Cached drift plot data, invalidated when recorded_count or playback_pos changes.
+/// Gate-aligned plot samples from the current playback generation.
 #[derive(Default)]
 pub struct DriftCache {
     drift_x: Vec<[f64; 2]>,
     drift_z: Vec<[f64; 2]>,
-    last_recorded: u32,
-    last_played: u32,
+    bases: Option<(usize, usize)>,
+    generation: u32,
 }
 
 impl DriftCache {
     /// Update the cache if the underlying data has changed. Returns true if refreshed.
     pub fn refresh(&mut self, state: &TasSharedState) -> bool {
-        let recorded = state.recorded_count;
-        let played = state.playback_pos;
-        if recorded == self.last_recorded && played == self.last_played {
-            return false;
-        }
-        self.last_recorded = recorded;
-        self.last_played = played;
-
-        let count = (played as usize).min(recorded as usize);
-        if count == 0 {
+        let generation_changed = self.generation != state.arm_generation;
+        let (count, _) = crate::drift_window(state, &mut self.bases, &mut self.generation);
+        if generation_changed {
             self.drift_x.clear();
             self.drift_z.clear();
-            return true;
         }
+        if state.mode != tas_shared::TasMode::Play as u32 {
+            return generation_changed;
+        }
+        let (play_base, rec_base) = self.bases.unwrap_or((0, 0));
 
         let step = (count / 1000).max(1);
         self.drift_x.clear();
         self.drift_z.clear();
         for i in (0..count).step_by(step) {
-            let dx = (state.play_coords[i][0] - state.rec_coords[i][0]) as f64;
-            self.drift_x.push([i as f64, dx]);
-            let dz = (state.play_coords[i][2] - state.rec_coords[i][2]) as f64;
-            self.drift_z.push([i as f64, dz]);
+            let dx =
+                (state.play_coords[play_base + i][0] - state.rec_coords[rec_base + i][0]) as f64;
+            self.drift_x.push([(rec_base + i) as f64, dx]);
+            let dz =
+                (state.play_coords[play_base + i][2] - state.rec_coords[rec_base + i][2]) as f64;
+            self.drift_z.push([(rec_base + i) as f64, dz]);
         }
         true
     }
@@ -86,4 +84,57 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut DriftCache) {
                     .style(egui_plot::LineStyle::dashed_dense()),
             );
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn graph_uses_gate_relative_pairs_and_refreshes_equal_length_replacements() {
+        let mut state = tas_shared::zeroed_boxed();
+        state.mode = tas_shared::TasMode::Play as u32;
+        state.arm_generation = 1;
+        state.recorded_count = 12;
+        state.playback_pos = 10;
+        state.gate_align_rec = 4;
+        state.gate_index = 2;
+        for i in 0..8 {
+            state.rec_coords[4 + i] = [i as f32, 0.0, i as f32];
+            state.play_coords[2 + i] = state.rec_coords[4 + i];
+        }
+        let mut cache = DriftCache::default();
+        cache.refresh(&state);
+        assert_eq!(cache.drift_x.len(), 8);
+        assert!(cache
+            .drift_x
+            .iter()
+            .chain(&cache.drift_z)
+            .all(|p| p[1] == 0.0));
+        state.rec_coords[4][0] += 1.0;
+        cache.refresh(&state);
+        assert_eq!(cache.drift_x[0], [4.0, -1.0]);
+        state.arm_generation += 1;
+        state.gate_index = 0;
+        cache.refresh(&state);
+        assert!(cache.drift_x.is_empty());
+    }
+
+    #[test]
+    fn graph_freezes_outside_play_and_drops_previous_generation() {
+        let mut state = tas_shared::zeroed_boxed();
+        state.mode = tas_shared::TasMode::Play as u32;
+        state.recorded_count = 1;
+        state.playback_pos = 1;
+        state.play_coords[0][0] = 1.0;
+        let mut cache = DriftCache::default();
+        cache.refresh(&state);
+        state.mode = tas_shared::TasMode::Off as u32;
+        state.rec_coords[0][0] = 99.0;
+        cache.refresh(&state);
+        assert_eq!(cache.drift_x[0][1], 1.0);
+        state.arm_generation += 1;
+        cache.refresh(&state);
+        assert!(cache.drift_x.is_empty());
+    }
 }
