@@ -65,10 +65,22 @@ dumps. Add `--max-value 0xf` to restrict both states to small values.
 ## Live utilities and history
 
 `tools/dump_mem.ps1` and `probe_actions.ps1` read live process memory.
-`tas_shm.ps1` can also send commands; `keys.ps1` sends keyboard input. These are
+`tas_test shm` prints typed, version-checked shared-memory diagnostics without
+launching or changing the game. For manual control, close competing controllers
+first and use `tas_test shm --command record|play|stop|restart`. It rejects pending
+commands but is not a multi-writer arbitration mechanism; publication does not
+mean the game completed the command. Raw numeric command writes are not supported.
+`keys.ps1` sends keyboard input. These are
 manual diagnostics, not substitutes for the Rust live suite.
 `test_dll_hidden.ps1` runs native tests without stealing game focus.
 Pico firmware and deployment have their own [README](pico/README.md).
+
+The CLI cases `fe-cont-reliability` and `fe10065-cont` share `cont_cases.rs`:
+FE-tremendous checks five splices at tick 2200 at 12×; FE-10065 checks eight at
+tick 6200 at each of 64× and 256×, with at most one frame of resume overshoot
+and best resume time at most 3000 ms. Both require the existing zero-drift,
+coverage and forward-progress checks. They remain explicit live commands, not
+offline tests or additional stages of `test_live`.
 
 History persistence is implemented in `tas_ui/src/history_store_v2.rs`:
 `manifest.json` stores ordered metadata and the current entry ID, with immutable

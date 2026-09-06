@@ -5015,7 +5015,7 @@ mod tests {
         assert_eq!(mem::size_of::<TasSharedState>(), 1_667_776);
     }
 
-    /// Prints field offsets for the out-of-process probes (tools/tas_shm.ps1).
+    /// Prints field offsets for manual out-of-process debugging.
     /// Run with `cargo test -p tas_shared print_offsets -- --nocapture`.
     #[test]
     fn print_offsets() {
