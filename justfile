@@ -89,6 +89,9 @@ deploy_all_fast: deploy
 test: tas_rust
     cd TAS && cargo test --release
 
+test_tools:
+    python -m unittest discover -s TAS/tools -p test_tools.py -v
+
 test_smoke: tas_rust
     cd TAS && cargo run --release --bin tas_test -- smoke
 
