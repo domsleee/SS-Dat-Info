@@ -517,20 +517,7 @@ pub fn run(
         thread::sleep(Duration::from_millis(100));
     }
 
-    {
-        let s = client.state();
-        assert_eq!(s.force_fixed_tick, 0, "fft must be 0");
-        assert_eq!(s.inject_mode, 6, "inject_mode must be 6");
-        assert_eq!(s.force_direct, 2, "force_direct must be 2");
-        println!(
-            "Config OK: fft=0, inject_mode=6, force_direct=2 (Cave5={})",
-            if s.cave5_hooked == 1 {
-                "hooked"
-            } else {
-                "missing"
-            }
-        );
-    }
+    harness::assert_proven_config(&client);
 
     let baseline_attempts = if source_tasrec.is_some() {
         1
@@ -562,11 +549,8 @@ pub fn run(
                 }
                 replay::write_to_shared(&mut client, &loaded);
                 println!(
-                    "  Loaded: {} ticks, inject_mode={}, fft={}, force_direct={}",
-                    loaded.count,
-                    loaded.meta.inject_mode,
-                    loaded.meta.force_fixed_tick,
-                    loaded.meta.force_direct
+                    "  Loaded: {} ticks, fft={}",
+                    loaded.count, loaded.meta.force_fixed_tick
                 );
                 if !loaded.meta.notes.is_empty() {
                     println!("  Notes: {}", loaded.meta.notes);

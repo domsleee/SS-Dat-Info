@@ -614,10 +614,7 @@ pub struct Segment {
 pub struct RecordingMetadata {
     pub version: u32,
     pub recorded_count: u32,
-    pub inject_mode: u32,
     pub force_fixed_tick: u32,
-    pub force_direct: u32,
-    pub input_source: u32,
     pub max_drift_x: f32,
     pub max_drift_z: f32,
     pub timestamp: String,
@@ -691,10 +688,7 @@ impl RecordingFile {
         let meta = RecordingMetadata {
             version: state.version,
             recorded_count: state.recorded_count,
-            inject_mode: state.inject_mode,
             force_fixed_tick: state.force_fixed_tick,
-            force_direct: state.force_direct,
-            input_source: state.input_source,
             max_drift_x: state.max_drift_x,
             max_drift_z: state.max_drift_z,
             timestamp: chrono::Local::now().to_rfc3339(),
@@ -842,10 +836,7 @@ impl RecordingFile {
         }
 
         state.recorded_count = meta.recorded_count;
-        state.inject_mode = meta.inject_mode;
         state.force_fixed_tick = 0; // always force fft=0 (proven zero-drift config)
-        state.force_direct = meta.force_direct;
-        state.input_source = meta.input_source;
 
         let segments = meta.segments;
         Ok((meta.recorded_count, segments))
@@ -2312,12 +2303,8 @@ pub fn dump_diagnostics(state: &TasSharedState, ui_drift: (f32, f32), log: &mut 
         out.push_str(&format!("BB3B10 blocks: {}\n", state.bb3b10_block_count));
         out.push_str(&format!("Events: {}\n", state.event_count));
         out.push_str(&format!(
-            "Config: inject_mode={} fft={} force_direct={} input_source={} speed={:.2}\n",
-            state.inject_mode,
-            state.force_fixed_tick,
-            state.force_direct,
-            state.input_source,
-            state.playback_speed
+            "Config: fft={} speed={:.2}\n",
+            state.force_fixed_tick, state.playback_speed
         ));
         out.push_str(&format!(
             "Hooks: cave2={} cave1c={} cave1d={} cave5={} replay={}\n",
@@ -3061,10 +3048,7 @@ mod tests {
         let mut state = zeroed_state();
         state.version = 4;
         state.recorded_count = 10;
-        state.inject_mode = 6;
         state.force_fixed_tick = 0;
-        state.force_direct = 2;
-        state.input_source = 1;
         state.max_drift_x = 0.0;
         state.max_drift_z = 0.0;
 
@@ -3082,9 +3066,7 @@ mod tests {
         assert_eq!(count, 10);
         assert!(segments.is_empty());
         assert_eq!(loaded.recorded_count, 10);
-        assert_eq!(loaded.inject_mode, 6);
         assert_eq!(loaded.force_fixed_tick, 0); // always forced to 0 on load
-        assert_eq!(loaded.force_direct, 2);
 
         for i in 0..10 {
             assert_eq!(loaded.input_log[i], (i as u8) & 0x3F);
@@ -3521,8 +3503,6 @@ mod tests {
     fn recording_file_with_segments_round_trip() {
         let mut state = zeroed_state();
         state.recorded_count = 5;
-        state.inject_mode = 6;
-        state.force_direct = 2;
         for i in 0..5 {
             state.input_log[i] = 0x04;
             state.rec_coords[i] = [i as f32, 0.0, i as f32 * 2.0];
@@ -3558,9 +3538,7 @@ mod tests {
         assert_eq!(loaded_segments[1].start_tick, 3);
         assert_eq!(loaded_segments[1].end_tick, 5);
         assert_eq!(loaded.recorded_count, 5);
-        assert_eq!(loaded.inject_mode, 6);
         assert_eq!(loaded.force_fixed_tick, 0); // fft always forced to 0 on load
-        assert_eq!(loaded.force_direct, 2);
         for i in 0..5 {
             assert_eq!(loaded.input_log[i], 0x04);
             assert_eq!(loaded.rec_coords[i], [i as f32, 0.0, i as f32 * 2.0]);

@@ -183,9 +183,8 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
         { 0x66, 0xFF, 0x05, 0x34, 0x53, 0x1D, 0x10, 0xC3 };
     static constexpr uint8_t kAppendText[] =                  // push -1; push UIT+0x12E87
         { 0x6A, 0xFF, 0x68, 0x87, 0x2E, 0x01, 0x10 };
-    // Validate every site BEFORE installing anything. The race timer is optional
-    // (TAS_NO_RACETIMER), so a mismatch here makes it unavailable rather than
-    // failing TAS_Initialize.
+    // Validate every site BEFORE installing anything. The race timer is optional,
+    // so a mismatch here makes it unavailable rather than failing TAS_Initialize.
     bool sitesOk =
         GameAddresses::ValidateCodeAbs<3>("Supreme_Game.dll+0xB4B80", sg + 0xB4B80,
                                           kRaceTick, sg, 0x1D5334) &&

@@ -2,39 +2,27 @@
 #include "../stdafx.h"
 #include <atomic>
 #include "../log.hpp"
-#include "../helper.hpp"
 #include "../gate_alignment.hpp"
 #include "../input_gate.hpp"
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
 #include "../external/safetyhook.hpp"
-#include "snapshot.hpp"
-#include "race_timer.hpp"   // racetimer::ReadClk() — the GAME's own clock
+#include "cave5.hpp"   // g_contResetPending (cave2 sets at the splice, cave5 consumes)
 
 // Cave 2: Supreme::Cycle hook (SG+0x13FE40)
 // Main REC/PLAY engine. Fires every render frame during gameplay.
 //
 // FPU PRESERVATION:
 // SafetyHookMid does NOT save x87 FPU state. The game does fld/fmul
-// immediately after the hook site. ALL float operations in this callback
-// MUST be avoided — use integer-width memcpy for coordinate capture.
-// Drift computation is deferred to the Rust test harness post-playback.
+// immediately after the hook site. Cave2_MidCallback wraps the logic in
+// FSAVE/FRSTOR; the command/capture helpers below still avoid float ops and
+// copy coordinates as integers so they stay safe wherever they are called.
 //
-// REC (inject_mode=6, source=0):
-//   1. Sample DI buffer -> build 6-bit input mask
-//   2. Write action_state from mask
-//   3. Call BB3B10 on transitions inside a thread-local injection scope
-//   4. Store mask in input_log[index]
-//   5. Capture player coordinates (integer-width copy)
-//   6. Increment recorded_count
-//
-// PLAY (inject_mode=6, force_direct=2):
-//   1. Read mask from input_log[playback_pos]
-//   2. Write DI buffer from mask
-//   3. Write action_state from mask
-//   4. Call BB3B10 on transitions inside a thread-local injection scope
-//   5. Capture player coordinates (integer-width copy)
-//   6. Increment playback_pos (stop at recorded_count)
+// REC: sample the keyboard, write the DI buffer + action state, notify the
+//      observer (BB3B10) on transitions, log the mask, capture coordinates.
+// PLAY: read the logged mask (gate-aligned when armed), write it into the
+//      game the same way, capture coordinates, splice to REC at the CONT
+//      point or hand the speed over at a judged PLAY's marker.
 
 // Globals accessed by hook callback
 inline TasSharedState* g_cave2State = nullptr;
@@ -46,12 +34,6 @@ inline void UninstallCave2() {
     if (g_cave2State) g_cave2State->cave2_hooked = 0;
     g_cave2State = nullptr;
     g_cave2Addr = nullptr;
-}
-
-// Hand-rolled hex for hook-context RDIAG logs (no CRT/format in a hook).
-static inline void DiagHexU32(char* dst, uint32_t v) {
-    static const char H[] = "0123456789ABCDEF";
-    for (int i = 0; i < 8; ++i) dst[i] = H[(v >> ((7 - i) * 4)) & 0xF];
 }
 
 // BB3B10 function type: __thiscall with 4 stack args
@@ -97,22 +79,6 @@ static uint8_t SampleGAKS() {
     return mask;
 }
 
-// Helper: sample DI buffer into a 6-bit mask (SEH-protected)
-static uint8_t SampleDIBuffer(uint32_t buffer) {
-    if (!buffer) return 0;
-    __try {
-        uint8_t mask = 0;
-        auto buf = (uint8_t*)buffer;
-        if (buf[GameAddresses::KEY_LEFT])   mask |= INPUT_LEFT;
-        if (buf[GameAddresses::KEY_RIGHT])  mask |= INPUT_RIGHT;
-        if (buf[GameAddresses::KEY_UP])     mask |= INPUT_UP;
-        if (buf[GameAddresses::KEY_DOWN])   mask |= INPUT_DOWN;
-        if (buf[GameAddresses::KEY_JUMP] || buf[GameAddresses::KEY_JUMP2])  mask |= INPUT_JUMP;
-        if (buf[GameAddresses::KEY_SHIFT] || buf[GameAddresses::KEY_SHIFT2]) mask |= INPUT_SHIFT;
-        return mask;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
-}
-
 // Helper: write DI buffer from mask (SEH-protected)
 static void WriteDIBuffer(uint32_t buffer, uint8_t mask) {
     if (!buffer) return;
@@ -148,17 +114,11 @@ static void WriteActionState(uint32_t kbobj, uint8_t mask) {
 // Kernel::Time the event was stamped with at message-pump dispatch (RE'd from
 // the exported Win32_Driver::Translate(tagMSG&, Kernel::Time) chain: +3940
 // forwards its Time args verbatim to BB3B10). The observer silently DISCARDS
-// events whose Time predates the current race context — the "dynamic arg4"
-// that made stale injection a silent no-op (dead REC steering, straight-line
-// replays). The primary fix is stamping injections with the game's own
-// Kernel::Time::Current() (see CallBB3B10OnTransitions); this calibrated
-// fallback value (Time.hi observed from real keypresses via cave1c/cave1d)
-// only matters if the Kernel export ever fails to resolve.
+// events whose Time predates the current race context. Injections are stamped
+// with the game's own Kernel::Time::Current() (see CallBB3B10OnTransitions);
+// this calibrated fallback value (Time.hi observed from real keypresses via
+// cave1c/cave1d) only matters if the Kernel export ever fails to resolve.
 inline volatile uint32_t g_bb3b10Arg4 = GameAddresses::BB3B10_ARG4;
-
-// RDIAG: one-shot guard so we log only the FIRST injection's arg4 per arm.
-// Reset at ARM_REC / ARM_PLAY (see ProcessCommand).
-inline volatile uint32_t g_diagInjectLogged = 0;
 
 // GetTickCount() stamped on every Supreme::Cycle tick. The message-pump-driven
 // hooks (cave1c) use it to detect "the game is PAUSED / at a non-ticking
@@ -167,20 +127,17 @@ inline volatile uint32_t g_diagInjectLogged = 0;
 // operate the pause menu / dialogs even while a TAS mode is armed.
 inline volatile uint32_t g_lastCycleMs = 0;
 
+// Last injected input mask (REC and PLAY), for transition detection.
+static uint8_t g_prevMask = 0;
+
 class ScopedTasInjection {
 public:
-    explicit ScopedTasInjection(TasSharedState* state) : state_(state) {
-        ++g_tasInjectionDepth;
-        if (state_) state_->cave2_injecting = 1;
-    }
+    ScopedTasInjection() { ++g_tasInjectionDepth; }
     ~ScopedTasInjection() {
         if (g_tasInjectionDepth > 0) --g_tasInjectionDepth;
-        if (state_ && g_tasInjectionDepth == 0) state_->cave2_injecting = 0;
     }
     ScopedTasInjection(const ScopedTasInjection&) = delete;
     ScopedTasInjection& operator=(const ScopedTasInjection&) = delete;
-private:
-    TasSharedState* state_;
 };
 
 // Helper: get the current Kernel::Time from the game's own clock.
@@ -214,12 +171,9 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
         s->arg4_source = ARG4_SOURCE_OVERRIDE;
     } else if (GetKernelTimeNow(addr, &t)) {
         // Floor the lo dword: the stamp stays in-window for the observer's
-        // event-time gate (hi is what the gate checks — proven live), but a
-        // FLOORED stamp is DETERMINISTIC for every event in the same ~7-min
-        // hi-window, where the live lo differs between a REC and its replay.
-        // The bit-exact zero-drift era injected a constant stamp; keeping the
-        // stamp constant-per-window preserves that determinism in case the
-        // game uses the stamp beyond the gate (sub-tick input timing).
+        // event-time gate (hi is what the gate checks), and a FLOORED stamp is
+        // DETERMINISTIC for every event in the same ~7-min hi-window, where the
+        // live lo differs between a REC and its replay.
         t.lo = 0;
         s->arg4_source = ARG4_SOURCE_TIME_CURRENT;
     } else {
@@ -228,20 +182,7 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
         s->arg4_source = ARG4_SOURCE_CALIBRATED;
     }
 
-    // RDIAG: log the Time the FIRST injection uses per arm — shows whether the
-    // injection is stamped live (source=1) or fell back (source=2).
-    if (!g_diagInjectLogged) {
-        g_diagInjectLogged = 1;
-        char buf[80]; int p = 0;
-        auto put = [&](const char* t2){ while (*t2 && p < 64) buf[p++] = *t2++; };
-        put("RDIAG inject m="); DiagHexU32(buf + p, s->mode); p += 8;
-        put(" hi="); DiagHexU32(buf + p, t.hi); p += 8;
-        put(" lo="); DiagHexU32(buf + p, t.lo); p += 8;
-        put(" src="); DiagHexU32(buf + p, s->arg4_source); p += 8; buf[p] = '\0';
-        LogRing(s, LOG_INFO, buf);
-    }
-
-    ScopedTasInjection injectionScope(s);
+    ScopedTasInjection injectionScope;
 
     if (transitions & INPUT_LEFT) {
         bb3b10(thisPtr, GameAddresses::BB3B10_LEFT, (mask & INPUT_LEFT) ? 1 : 0,
@@ -273,35 +214,6 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
 
 // Helper: capture player coordinates (SEH-protected, NO FLOAT OPS)
 // Uses integer-width memcpy to avoid corrupting x87 FPU state.
-// Drift computation is deferred to Rust test harness post-playback.
-// Snapshot the player object and its physics sub-object, raw, dword by dword
-// under SEH. Returns how many dwords of each were readable. Integer copies
-// only — no float ops, this runs inside the cave.
-static void SnapshotPlayerObjects(TasSharedState* s,
-                                  volatile uint32_t* player_out,
-                                  volatile uint32_t* physics_out) {
-    s->objsnap_player_ok = 0;
-    s->objsnap_physics_ok = 0;
-    if (!s->player_ptr) return;
-    auto player = (const uint32_t*)s->player_ptr;
-    uint32_t n = 0;
-    __try {
-        for (; n < OBJSNAP_PLAYER_DWORDS; ++n) player_out[n] = player[n];
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    s->objsnap_player_ok = n;
-    uint32_t physics = 0;
-    __try {
-        memcpy(&physics, (const uint8_t*)s->player_ptr + GameAddresses::PLAYER_PHYSICS, 4);
-    } __except(EXCEPTION_EXECUTE_HANDLER) { physics = 0; }
-    if (!physics) return;
-    auto phys = (const uint32_t*)(uintptr_t)physics;
-    n = 0;
-    __try {
-        for (; n < OBJSNAP_PHYSICS_DWORDS; ++n) physics_out[n] = phys[n];
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    s->objsnap_physics_ok = n;
-}
-
 static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
     // A capture that writes nothing still lets the caller advance the index,
     // leaving a STALE coordinate inside the current prefix. Anything scanning
@@ -353,10 +265,7 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
         }
 
         // Stamp the countdown gate: the first frame of this session whose
-        // position differs from frame 0. Stamped HERE rather than derived from
-        // the coordinate array afterwards because the TICK it happened on is
-        // what the prediction model needs, and that is only available now.
-        // Integer compare on the raw bits - no float ops inside the hook.
+        // position differs from frame 0. Integer compare on the raw bits.
         // capture_ok also means frame 0 of THIS session was really written;
         // without it the comparison below is against the previous session's
         // frame 0 and can stamp a gate that never happened.
@@ -366,14 +275,6 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
             if (raw[0] != z[0] || raw[1] != z[1] || raw[2] != z[2]) {
                 s->gate_tick = s->tick_count;
                 s->gate_index = index;
-                s->gate_clk = racetimer::ReadClk();
-                s->gate_reset_tick = s->reset_tick;
-                s->gate_seq = s->frame_count;
-                SnapshotPlayerObjects(s, s->objsnap_gate_player, s->objsnap_gate_physics);
-                s->gate_qpc_lo = s->clock_delta_lo;
-                s->gate_qpc_hi = s->clock_delta_hi;
-                s->gate_secs_lo = s->secs_since_reset_lo;
-                s->gate_secs_hi = s->secs_since_reset_hi;
             }
         }
     }
@@ -381,7 +282,7 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
 
 // In-process F5 restart constants
 static constexpr uint32_t RESTART_F5_HOLD_FRAMES = 10;  // Hold F5 for 10 frames
-
+static uint32_t g_restartFramesHeld = 0;                 // Frames F5 has been held down
 
 // Helper: press or release F5 in the DI buffer + notify BB3B10
 static void SafeWriteF5Buffer(uint32_t buffer, bool pressed) {
@@ -391,6 +292,7 @@ static void SafeWriteF5Buffer(uint32_t buffer, bool pressed) {
 }
 
 static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, bool pressed) {
+    (void)s;
     uint32_t buffer = GetDIBuffer(kbobj);
     if (buffer) {
         // Keep SEH in a leaf function. MSVC rejects a function that contains
@@ -403,15 +305,12 @@ static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, boo
     if (kbobj) {
         auto bb3b10 = (BB3B10Fn)(addr->bb3b10);
         void* thisPtr = (void*)(kbobj + GameAddresses::BB3B10_THIS_OFFSET);
-        ScopedTasInjection injectionScope(s);
+        ScopedTasInjection injectionScope;
         // Stamp F5 with the live Kernel::Time too. The restart itself is
         // driven by the DI-buffer write (the observer call is auxiliary), but
-        // a wrong stamp here POISONS the observer's event-time window: the
-        // old 0x96 constant is hours-of-uptime in the future after a reboot,
-        // and steering events stamped with the (smaller) true current time
-        // then look out-of-order and get silently dropped — dead steering
-        // right after every injected F5 (and the June-9 "environment cliff":
-        // a reboot turned the constant into a future stamp).
+        // a wrong stamp here POISONS the observer's event-time window: a stamp
+        // in the future makes later steering events look out-of-order and get
+        // silently dropped — dead steering right after every injected F5.
         KernelTime ft = { 0, GameAddresses::BB3B10_ARG4 };
         GetKernelTimeNow(addr, &ft);
         ft.lo = 0;  // floored like the steering stamp (see CallBB3B10OnTransitions)
@@ -421,11 +320,11 @@ static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, boo
 }
 
 // Clear the raw input state and return the mask that still needs observer UP
-// notifications. The direct writes are safe from the render-hook fallback;
+// notifications. The direct writes are safe from an out-of-cycle caller;
 // calling game code from that potentially different thread is not.
-static uint8_t ClearTasInputState(TasSharedState* s, GameAddresses* addr) {
-    uint8_t held = (uint8_t)s->prev_mask;
-    s->prev_mask = 0;
+static uint8_t ClearTasInputState(GameAddresses* addr) {
+    uint8_t held = g_prevMask;
+    g_prevMask = 0;
     uint32_t kbobj = GetKeyboardObject(addr);
     if (!kbobj) return held;
     WriteDIBuffer(GetDIBuffer(kbobj), 0);
@@ -442,21 +341,21 @@ static uint8_t ClearTasInputState(TasSharedState* s, GameAddresses* addr) {
 // level's state — release events for keys the new observer never saw pressed
 // are no-ops, same as a real keyUp without a down.
 static void ReleaseTasInput(TasSharedState* s, GameAddresses* addr) {
-    uint8_t held = ClearTasInputState(s, addr);
+    uint8_t held = ClearTasInputState(addr);
     if (!held) return;
     uint32_t kbobj = GetKeyboardObject(addr);
     if (!kbobj) return;
     CallBB3B10OnTransitions(s, addr, kbobj, 0, held);
 }
 
-// A STOP consumed out-of-cycle (level-scan worker, or the optional SwapBuffers
-// hook) clears the memory immediately, then defers observer callbacks until
-// Supreme::Cycle is running on its normal hook thread again. Multiple frozen
-// stops simply merge their held masks.
+// A STOP consumed out-of-cycle (the level-scan worker) clears the memory
+// immediately, then defers observer callbacks until Supreme::Cycle is running
+// on its normal hook thread again. Multiple frozen stops simply merge their
+// held masks.
 static volatile LONG g_deferredInputReleaseMask = 0;
 
-static void DeferTasInputRelease(TasSharedState* s, GameAddresses* addr) {
-    uint8_t held = ClearTasInputState(s, addr);
+static void DeferTasInputRelease(GameAddresses* addr) {
+    uint8_t held = ClearTasInputState(addr);
     if (held) InterlockedOr(&g_deferredInputReleaseMask, (LONG)held);
 }
 
@@ -471,34 +370,6 @@ static void FlushDeferredTasInputRelease(TasSharedState* s, GameAddresses* addr)
     CallBB3B10OnTransitions(s, addr, kbobj, 0, (uint8_t)held);
 }
 
-// Deferred log messages — set in callback, logged outside callback
-// Restart/root diagnostics (RDIAG): the visible-steering-dies-after-REC bug
-// tracks to the game's root player pointer ([SG+1D5450]) dangling across the
-// in-process restart. These hook-safe ring logs capture the root, a vtable
-// readability probe, and the resolved keyboard object at each restart stage so
-// one repro shows exactly where the chain breaks. No CRT formatting (hook
-// context) — hand-rolled hex.
-static uint32_t g_diagRootAtRestartCmd = 0;
-
-static void LogRootDiag(TasSharedState* s, const char* stage) {
-    auto* addr = g_cave2Addr;
-    if (!s || !addr) return;
-    uint32_t root = SafeReadPtr((uint32_t)addr->player_base);
-    uint32_t vt   = root ? SafeReadPtr(root) : 0;   // 0 = root dangles
-    uint32_t kb   = root ? SafeReadPtr(root + GameAddresses::KEYBOARD_OBJ_OFFSET) : 0;
-    char buf[112];
-    int p = 0;
-    auto put = [&](const char* t) { while (*t && p < 100) buf[p++] = *t++; };
-    put("RDIAG ");
-    put(stage);
-    put(" root=");  DiagHexU32(buf + p, root); p += 8;
-    put(" vt=");    DiagHexU32(buf + p, vt);   p += 8;
-    put(" kb=");    DiagHexU32(buf + p, kb);   p += 8;
-    put(" prev=");  DiagHexU32(buf + p, g_diagRootAtRestartCmd); p += 8;
-    buf[p] = '\0';
-    LogRing(s, LOG_INFO, buf);
-}
-
 // A judged PLAY armed this attempt's speed handover. Mirrors g_cave2_contArmed:
 // the marker in shared memory says WHERE to hand over, this says the current
 // attempt is the one that asked for it. Without it a marker left behind by a
@@ -506,10 +377,6 @@ static void LogRootDiag(TasSharedState* s, const char* stage) {
 // speed and clock reset partway through somebody else's replay.
 static volatile uint32_t g_cave2_handoffArmed = 0;
 
-// Drop any staged PLAY speed handover. Called from every path that ends or
-// invalidates a replay - stop, refusal, restart, playback completion, the
-// level-swap auto-stop. A marker that outlives its replay would fire against
-// whatever runs next, at a position that means nothing there.
 // Drop any gate-relative input alignment. Called from every path that is not
 // an aligned PLAY: the field is persistent shared memory, and a value left
 // behind by an earlier replay would silently re-index a later one. CONT is the
@@ -521,6 +388,10 @@ static inline void ClearGateAlign(TasSharedState* s) {
     s->cont_splice_approved = 0;  // no alignment, nothing to approve
 }
 
+// Drop any staged PLAY speed handover. Called from every path that ends or
+// invalidates a replay - stop, refusal, restart, playback completion, the
+// level-swap auto-stop. A marker that outlives its replay would fire against
+// whatever runs next, at a position that means nothing there.
 static inline void ClearSpeedHandoff(TasSharedState* s) {
     s->speed_handoff_pos = 0;
     g_cave2_handoffArmed = 0;
@@ -529,13 +400,13 @@ static volatile uint32_t g_cave2_pendingLog = 0;  // 0=none, 1=REC, 2=PLAY, 3=ST
 static volatile uint32_t g_cave2_logParam = 0;
 
 // Root player pointer ([SG+1D5450]) captured at ARM time. The root object is
-// STABLE across in-process F5 restarts (RDIAG-proven: same pointer through
-// restart-cmd/f5-released) but is reallocated when the level itself is torn
-// down — quitting to the menu, the menu's attract demo loading a level, or
-// switching tracks. A TAS mode left armed across that boundary then drives
-// the WRONG context: REC records the menu demo, the scaled playback_speed
-// fast-forwards the menu video, and the cave1c gate eats all native keys.
-// Cave2 auto-stops the session when the live root no longer matches.
+// STABLE across in-process F5 restarts but is reallocated when the level
+// itself is torn down — quitting to the menu, the menu's attract demo loading
+// a level, or switching tracks. A TAS mode left armed across that boundary
+// then drives the WRONG context: REC records the menu demo, the scaled
+// playback_speed fast-forwards the menu video, and the cave1c gate eats all
+// native keys. Cave2 auto-stops the session when the live root no longer
+// matches.
 inline volatile uint32_t g_armedRoot = 0;
 
 // Splice gate: 1 only between a SUCCESSFUL CMD_ARM_CONTINUE and its splice
@@ -548,28 +419,25 @@ static volatile uint32_t g_cave2_contArmed = 0;
 
 // STOP also has to work while Supreme::Cycle is frozen. That is not an edge
 // case: leaving a level is detected precisely because the Cycle hook stopped
-// running. A STOP left for ProcessCommand() can therefore remain pending
-// forever, leaving MODE_PLAY/MODE_REC asserted and making tas_ui retry every
-// two seconds. The level-scan worker (level_scan.hpp; the default consumer -
-// note TAS_NO_LEVELSCAN=1 removes it) and the optional SwapBuffers hook
-// (frame_limit.hpp, TAS_FRAMELIMIT=1) call TryProcessStopCommand() while the
-// cycle is frozen, so every consumer needs an atomic claim word.
+// running. A STOP left for ProcessCommand() could therefore remain pending
+// forever, leaving MODE_PLAY/MODE_REC asserted. The level-scan worker
+// (level_scan.hpp) calls TryProcessStopCommand() while the cycle is frozen,
+// so every consumer needs an atomic claim word.
 static constexpr LONG CAVE2_CMD_CLAIMED_STOP = -1;
 
 // Apply the complete TAS -> OFF transition. No logging/formatting/float
 // arithmetic: this is called from the Cycle mid-hook and from the
-// out-of-cycle consumers above.
+// out-of-cycle consumer above.
 static void ApplyStopTransition(TasSharedState* s, bool notifyObserverNow, bool protectRestart) {
     static constexpr uint32_t ZERO_BITS = 0;
     // Install protection before publishing OFF so real keys cannot enter the
     // restart window. Ordinary STOP still releases it for menu navigation.
     s->cont_suppress_input = protectRestart ? 1u : 0u;
     s->mode = MODE_OFF;
-    s->cave2_injecting = 0;
     if (notifyObserverNow) {
         ReleaseTasInput(s, g_cave2Addr);
     } else {
-        DeferTasInputRelease(s, g_cave2Addr);
+        DeferTasInputRelease(g_cave2Addr);
     }
     s->continue_from_frame = 0;
     g_cave2_contArmed = 0;
@@ -612,23 +480,6 @@ static bool ProcessCommand(TasSharedState* s) {
         return true;
     }
 
-    // Deterministic arm scheduling. If the caller asked for a specific tick,
-    // leave the command PENDING until the counter reaches it — do not consume,
-    // do not clear. The command slot is a single u32 and nothing else writes it
-    // while an arm is outstanding, so holding it is safe.
-    //
-    // This exists because the arm consumption tick was never controlled: an
-    // external send is a memory store, and consumption happens on whichever
-    // Supreme::Cycle comes next. first_moving counts from consumption.
-    if (s->arm_at_tick != 0 &&
-        (cmd == CMD_ARM_REC || cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE)) {
-        // Unsigned wrap-safe "have we reached it yet".
-        if ((s->tick_count - s->arm_at_tick) >= 0x80000000u) {
-            return true;
-        }
-        s->arm_consumed_tick = s->tick_count;
-        s->arm_at_tick = 0;
-    }
     // Integer zero for clearing float fields without x87 instructions
     static constexpr uint32_t ZERO_BITS = 0;
 
@@ -636,14 +487,13 @@ static bool ProcessCommand(TasSharedState* s) {
         case CMD_ARM_REC:
             s->recorded_count = 0;
             s->playback_pos = 0;
-            s->prev_mask = 0;
+            g_prevMask = 0;
             memcpy(&s->max_drift_x, &ZERO_BITS, 4);
             memcpy(&s->max_drift_z, &ZERO_BITS, 4);
             s->bb3b10_call_count = 0;
             s->handler_block_count = 0;
             s->bb3b10_block_count = 0;
             // Reset segment tracking for fresh recording
-            s->segment_index = 0;
             s->segment_count = 1;
             s->segment_start_frame = 0;
             memset(s->segment_boundaries, 0, sizeof(s->segment_boundaries));
@@ -656,15 +506,13 @@ static bool ProcessCommand(TasSharedState* s) {
             // cannot inherit either.
             ClearSpeedHandoff(s);
             ClearGateAlign(s);
-            g_diagInjectLogged = 0;
             g_cave2_pendingLog = 1;
-            LogRootDiag(s, "arm-rec");
             break;
 
         case CMD_ARM_PLAY:
             g_cave2_logParam = s->recorded_count;
             s->playback_pos = 0;
-            s->prev_mask = 0;
+            g_prevMask = 0;
             memcpy(&s->max_drift_x, &ZERO_BITS, 4);
             memcpy(&s->max_drift_z, &ZERO_BITS, 4);
             s->bb3b10_call_count = 0;
@@ -687,7 +535,6 @@ static bool ProcessCommand(TasSharedState* s) {
             // a marker present now belongs to this attempt; one that arrives by
             // any other route never opens the gate.
             g_cave2_handoffArmed = (s->speed_handoff_pos != 0) ? 1 : 0;
-            LogRootDiag(s, "arm-play");
 
             // No position forcing — F5 matching must happen naturally.
             // Position forcing (even velocity-preserving) creates physics state
@@ -696,7 +543,6 @@ static bool ProcessCommand(TasSharedState* s) {
 
             s->mode = MODE_PLAY;
             g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
-            g_diagInjectLogged = 0;
             g_cave2_pendingLog = 2;
             break;
 
@@ -719,10 +565,7 @@ static bool ProcessCommand(TasSharedState* s) {
             // mid-run injects the recorded inputs against whatever state
             // the player happens to be in, producing drift or worse. The
             // tas_ui CONT button uses RestartThen(ArmContinue), which goes
-            // through CMD_RESTART first — that's the only safe entry. Any
-            // direct CMD_ARM_CONTINUE from mid-run (e.g. a segments-panel
-            // "redo from frame" without an explicit restart) lands here and
-            // gets bounced.
+            // through CMD_RESTART first — that's the only safe entry.
             if (s->mode != MODE_OFF) {
                 LogRing(s, LOG_ERROR,
                     "ARM_CONTINUE: refused — game is REC/PLAY; CONT requires a fresh restart first");
@@ -736,7 +579,7 @@ static bool ProcessCommand(TasSharedState* s) {
             }
             g_cave2_logParam = s->continue_from_frame;
             s->playback_pos = 0;
-            s->prev_mask = 0;
+            g_prevMask = 0;
             memcpy(&s->max_drift_x, &ZERO_BITS, 4);
             memcpy(&s->max_drift_z, &ZERO_BITS, 4);
             s->bb3b10_call_count = 0;
@@ -749,9 +592,9 @@ static bool ProcessCommand(TasSharedState* s) {
             s->cont_splice_approved = 0;  // aligned attempts start unapproved (splice interlock)
             // CONT hands over at its splice (cont_resume_speed), never
             // mid-replay. Refuse any speed-handover marker it might have
-            // inherited. Gate alignment, however, is now SUPPORTED for CONT:
-            // the splice fires at the aligned index while the recording stays
-            // in rec-index space (see the splice block). The controller stages
+            // inherited. Gate alignment, however, is SUPPORTED for CONT: the
+            // splice fires at the aligned index while the recording stays in
+            // rec-index space (see the splice block). The controller stages
             // gate_align_rec immediately before this arm, so keep it — only a
             // value from any OTHER route is stale, and STOP/RESTART/ARM_REC
             // clear those.
@@ -761,9 +604,8 @@ static bool ProcessCommand(TasSharedState* s) {
 
         case CMD_RESTART:
             // Begin in-process F5 restart sequence
-            s->trace_count = 0;   // trace from HERE, so the reset is inside it
             s->restart_state = 1;
-            s->restart_frames_held = 0;
+            g_restartFramesHeld = 0;
             // The replay a handover was staged for is about to stop existing.
             // Every armer stages its own AFTER its restart, so clearing here
             // cannot break a controller cycle - it only stops a bare F5 from
@@ -773,53 +615,8 @@ static bool ProcessCommand(TasSharedState* s) {
             // in OFF cannot leak into a legacy ARM_CONTINUE.
             ClearSpeedHandoff(s);
             ClearGateAlign(s);
-            // Clock-phase pin: restart the canonical [1,1,0] tick cycle here so
-            // every in-process restart replays the same settle schedule (the
-            // F5 bucket). See cave5's pin block.
-            s->clock_pin_phase = 0;
-            g_diagRootAtRestartCmd = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
-            LogRootDiag(s, "restart-cmd");
             g_cave2_pendingLog = 7;  // "restart initiated"
             break;
-
-        case CMD_SNAPSHOT: {
-            // PROTOTYPE: capture writable memory at this frame boundary.
-            // bytes -> snapshot_size, microseconds -> snapshot_flags (reused).
-            uint64_t us = 0;
-            uint32_t bytes = SnapshotCapture(s, &us);
-            s->snapshot_flags = (uint32_t)us;
-            // Record the player coords (raw bits) at the snapshot instant for the
-            // frame-exact rewind proof at restore time.
-            g_snapPlayerValid = SnapReadPlayerBits(s, g_snapPlayerBits);
-            SnapTrajStart(1); // record traj A for the next N frames
-            g_cave2_logParam = bytes;
-            g_cave2_pendingLog = 9;  // "snapshot captured"
-            break;
-        }
-
-        case CMD_SNAPSHOT_AT_SPAWN:
-            // Arm a capture at the next PLAY frame-0 — see the MODE_PLAY handler.
-            g_snapAtSpawn = true;
-            break;
-
-        case CMD_RESTORE: {
-            // PROTOTYPE: restore the last snapshot (instant rewind) + clock reset.
-            uint64_t us = 0;
-            uint32_t bytes = SnapshotRestore(s, &us);
-            // Frame-exact proof: re-read the player coords NOW (same hook call,
-            // zero frames advanced) and compare bit-for-bit to the snapshot.
-            uint32_t match = SnapshotRevertMatch(s); // 0..3, or 0xFF if no ptr
-            s->snapshot_size = bytes;
-            s->snapshot_flags = (uint32_t)us;
-            s->snapshot_buffer_capacity = match; // probe reads: 3 = bit-exact revert
-            // Region accounting for the long-window diagnostic: high16=skipped,
-            // low16=faulted (regions that changed shape since the snapshot).
-            s->snapshot_buffer_ptr = (g_snapLastSkipped << 16) | (g_snapLastFaulted & 0xFFFF);
-            SnapTrajStart(2); // record traj B for the next N frames, then compare
-            g_cave2_logParam = match;
-            g_cave2_pendingLog = 10; // "snapshot restored"
-            break;
-        }
     }
 
     // Durable "the arm landed" signal for the judge, published AFTER the switch.
@@ -833,26 +630,10 @@ static bool ProcessCommand(TasSharedState* s) {
     // too, which take an early `break`: a refusal leaves the mode OFF forever,
     // and that is exactly the state the judge would otherwise spin on.
     if (cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE || cmd == CMD_ARM_REC) {
-        // Stamp the arm tick for EVERY arm, not just a deferred one. The
-        // deferral path above returns early while it is still waiting, so
-        // reaching here always means the command was really consumed, now.
         s->arm_consumed_tick = s->tick_count;
         // Latch the restart this arm belongs to, so a later CMD_RESTART from
         // anywhere cannot repair the pair into a different attempt's.
         s->arm_restart_tick = s->restart_done_tick;
-        s->arm_clk = racetimer::ReadClk();
-        s->arm_reset_tick = s->reset_tick;
-        s->arm_seq = s->frame_count;
-        SnapshotPlayerObjects(s, s->objsnap_arm_player, s->objsnap_arm_physics);
-        s->arm_qpc_lo = s->clock_delta_lo;
-        s->arm_qpc_hi = s->clock_delta_hi;
-        s->arm_secs_lo = s->secs_since_reset_lo;
-        s->arm_secs_hi = s->secs_since_reset_hi;
-        // Integer copies of the live position — no float ops, and the raw bits
-        // are what a settle-frame comparison wants anyway.
-        memcpy((void*)&s->arm_pos_x, (const void*)&s->player_x, 4);
-        memcpy((void*)&s->arm_pos_y, (const void*)&s->player_y, 4);
-        memcpy((void*)&s->arm_pos_z, (const void*)&s->player_z, 4);
         // Fresh session: the gate has not fired yet, and no capture has failed.
         s->gate_tick = 0;
         s->gate_index = 0;
@@ -882,8 +663,6 @@ static void FlushPendingLog() {
         case 6: Log(std::format("Cave 2: spliced to REC at frame {}", param)); break;
         case 7: Log("Cave 2: in-process F5 restart initiated"); break;
         case 8: Log("Cave 2: F5 released, restart complete"); break;
-        case 9: Log(std::format("Cave 2: [snap] captured {} bytes", param)); break;
-        case 10: Log(std::format("Cave 2: [snap] restored; player revert match {}/3 (3=bit-exact)", param)); break;
         case 11: Log(std::format("Cave 2: PLAY speed handover at frame {}", param)); break;
     }
 }
@@ -896,7 +675,7 @@ static void __declspec(noinline) Cave2_Logic() {
     if (!s || !addr) return;
 
     // Finish any observer notifications deferred by a frozen-cycle STOP. Raw
-    // buffers were already cleared in SwapBuffers; this only publishes key-up
+    // buffers were already cleared out-of-cycle; this only publishes key-up
     // transitions from the game thread once it exists again.
     FlushDeferredTasInputRelease(s, addr);
 
@@ -910,32 +689,7 @@ static void __declspec(noinline) Cave2_Logic() {
     }
 
     if (s->replay_ptr) {
-        uint32_t playerPtr = SafeReadPtr(s->replay_ptr + GameAddresses::REPLAY_PLAYER_OFFSET);
-        // Diagnostic (ghost investigation): the player object behind the
-        // recorder is re-created on F5 with Time Attack ghosts enabled. Log
-        // every change with the frame/mode so a stale read is visible.
-        if (playerPtr != s->player_ptr) {
-            static uint32_t s_playerChanges = 0;
-            if (++s_playerChanges <= 40) {
-                char msg[96] = "player_ptr ";
-                char* p = msg + 11;
-                DiagHexU32(p, s->player_ptr); p += 8;
-                *p++ = '-'; *p++ = '>';
-                DiagHexU32(p, playerPtr); p += 8;
-                const char* t1 = " frame=";
-                while (*t1) *p++ = *t1++;
-                DiagHexU32(p, s->frame_count); p += 8;
-                const char* t2 = " mode=";
-                while (*t2) *p++ = *t2++;
-                *p++ = (char)('0' + (s->mode & 7));
-                const char* t3 = " restart=";
-                while (*t3) *p++ = *t3++;
-                *p++ = (char)('0' + (s->restart_state & 7));
-                *p = 0;
-                LogRing(s, LOG_DEBUG, msg);
-            }
-        }
-        s->player_ptr = playerPtr;
+        s->player_ptr = SafeReadPtr(s->replay_ptr + GameAddresses::REPLAY_PLAYER_OFFSET);
     }
 
     // Always update live position (for F5 stabilization position matching).
@@ -952,73 +706,6 @@ static void __declspec(noinline) Cave2_Logic() {
             s->velocity_x = new_x - s->player_x;
             s->velocity_y = new_y - s->player_y;
             s->velocity_z = new_z - s->player_z;
-            float vxz2 = s->velocity_x * s->velocity_x + s->velocity_z * s->velocity_z;
-            // Approximate sqrt via integer hack (no x87 fsqrt needed)
-            // Just store squared speed; UI can sqrt if needed
-            s->speed = vxz2;
-
-            // Update previous position
-            s->prev_player_x = s->player_x;
-            s->prev_player_y = s->player_y;
-            s->prev_player_z = s->player_z;
-
-            // Level-reset detector: the most recent tick on which the position
-            // changed AT ALL.
-            //
-            // No distance threshold, because none is needed and the obvious one
-            // is wrong. A first attempt looked for a big teleport back to spawn,
-            // which never fired in a countdown-only cycle — the boarder had never
-            // left the spawn area, so the "teleport" was a fraction of a unit.
-            //
-            // The real signal is much simpler: during the countdown the boarder
-            // is BIT-IDENTICALLY still (measured: the position captured at the
-            // arm is the same 36/36 across every arm offset). So the last frame
-            // the position moved, read any time during the countdown, IS the
-            // frame the level reset. Raw-bit compare, no float ops.
-            // ...and only while OFF. The gate is a position change too, so a
-            // detector that watches every mode re-stamps itself at the very
-            // moment it is meant to be measuring the distance to — which is
-            // exactly what made every QPC reading come out as zero. The reset
-            // happens in OFF; the gate happens in REC/PLAY.
-            if (s->mode == MODE_OFF) {
-                uint32_t nb[3], ob[3];
-                memcpy(&nb[0], &new_x, 4);
-                memcpy(&nb[1], &new_y, 4);
-                memcpy(&nb[2], &new_z, 4);
-                memcpy(&ob[0], (const void*)&s->player_x, 4);
-                memcpy(&ob[1], (const void*)&s->player_y, 4);
-                memcpy(&ob[2], (const void*)&s->player_z, 4);
-                if (nb[0] != ob[0] || nb[1] != ob[1] || nb[2] != ob[2]) {
-                    s->reset_tick = s->tick_count;
-                    // cave5 published this frame's engine clock already.
-                    s->reset_qpc_lo = s->clock_delta_lo;
-                    s->reset_qpc_hi = s->clock_delta_hi;
-                    // Restart the seconds accumulator from the reset frame.
-                    s->secs_since_reset_lo = 0;
-                    s->secs_since_reset_hi = 0;
-                }
-            }
-
-            // Record the frame. Runs from the F5 press until the buffer fills,
-            // which covers the whole countdown — the reset, the settle and the
-            // gate all land inside it.
-            {
-                uint32_t n = s->trace_count;
-                if (n < TRACE_FRAMES) {
-                    s->trace[n][0] = s->tick_count;
-                    memcpy((void*)&s->trace[n][1], &new_x, 4);
-                    memcpy((void*)&s->trace[n][2], &new_y, 4);
-                    memcpy((void*)&s->trace[n][3], &new_z, 4);
-                    s->trace[n][4] = s->clock_delta_lo;
-                    s->trace[n][5] = s->clock_delta_hi;
-                    {
-                        uint32_t ph = 0;
-                        memcpy(&ph, (uint8_t*)s->player_ptr + GameAddresses::PLAYER_PHYSICS, 4);
-                        s->trace[n][6] = ph;
-                    }
-                    s->trace_count = n + 1;
-                }
-            }
 
             // Update current position
             s->player_x = new_x;
@@ -1036,68 +723,50 @@ static void __declspec(noinline) Cave2_Logic() {
 
     if (!ProcessCommand(s)) return;
 
-    // PROTOTYPE: record the post-snapshot / post-restore player trajectory for
-    // the frame-exact determinism check (no-op unless a snapshot/restore armed it).
-    SnapTrajTick(s);
-
     // In-process F5 restart state machine (runs regardless of mode)
     if (s->restart_state == 1) {
         uint32_t kbobj = GetKeyboardObject(addr);
         if (kbobj) {
-            if (s->restart_frames_held == 0) {
-                // First frame: press F5. THIS is when the level resets and the
-                // countdown starts — the release is ten frames of our own
-                // making later, and measuring from it put that hold length
-                // straight into the prediction error.
-                s->f5_press_tick = s->tick_count;
-                s->press_seq = s->frame_count;
-                s->f5_press_qpc_lo = s->clock_delta_lo;
-                s->f5_press_qpc_hi = s->clock_delta_hi;
+            if (g_restartFramesHeld == 0) {
                 InjectF5(s, addr, kbobj, true);
             }
-            s->restart_frames_held++;
-            if (s->restart_frames_held >= RESTART_F5_HOLD_FRAMES) {
+            g_restartFramesHeld++;
+            if (g_restartFramesHeld >= RESTART_F5_HOLD_FRAMES) {
                 // Release F5 after holding long enough
                 InjectF5(s, addr, kbobj, false);
                 s->restart_done_tick = s->tick_count;
-                s->restart_clk = racetimer::ReadClk();
                 s->restart_state = 2;  // Done
-                LogRootDiag(s, "f5-released");
                 g_cave2_pendingLog = 8;
             }
         }
     }
 
     // NOTE: the level-context epoch is NOT bumped here. Supreme::Cycle freezes
-    // at static menus, dialogs and level LOADS (frame_limit.hpp:43-47) — exactly
-    // the transitions it must detect — so a cycle-driven bump would not land
-    // until the new level's first tick, leaving the old track asserted for the
-    // whole menu + load. levelscan's background thread polls the same root every
-    // 100 ms instead (level_scan.hpp).
+    // at static menus, dialogs and level LOADS — exactly the transitions it must
+    // detect — so a cycle-driven bump would not land until the new level's first
+    // tick, leaving the old track asserted for the whole menu + load.
+    // levelscan's background thread polls the level path every 100 ms instead.
 
     if (s->mode == MODE_OFF) return;
 
     // Auto-stop when the LEVEL is swapped out under an armed TAS mode. The
-    // root object survives F5 restarts (same pointer — RDIAG-proven) but is
-    // reallocated on quit-to-menu / the menu demo loading / track switches.
-    // Without this, a session left armed across that boundary records the
-    // menu demo, fast-forwards the menu video at the scaled playback_speed,
-    // and eats every native key via the cave1c gate. root==0 (mid-teardown)
-    // is NOT a trigger — restarts pass through that transiently.
+    // root object survives F5 restarts (same pointer) but is reallocated on
+    // quit-to-menu / the menu demo loading / track switches. Without this, a
+    // session left armed across that boundary records the menu demo,
+    // fast-forwards the menu video at the scaled playback_speed, and eats
+    // every native key via the cave1c gate. root==0 (mid-teardown) is NOT a
+    // trigger — restarts pass through that transiently.
     {
         uint32_t curRoot = SafeReadPtr((uint32_t)addr->player_base);
         if (curRoot && g_armedRoot && curRoot != g_armedRoot) {
             s->mode = MODE_OFF;
-            s->cave2_injecting = 0;
             ReleaseTasInput(s, addr);  // clears the NEW level's input state
             s->continue_from_frame = 0;
             g_cave2_contArmed = 0;
             ClearSpeedHandoff(s);
             ClearGateAlign(s);
             // The level was swapped out, so any judged cycle is definitionally
-            // over — release the live-input block. Left set, it permanently
-            // disables the menu present cap (frame_limit gates on it) and the
-            // menu video runs at the wrong speed.
+            // over — release the live-input block.
             s->cont_suppress_input = 0;
             g_armedRoot = 0;
             LogRing(s, LOG_WARN,
@@ -1113,7 +782,12 @@ static void __declspec(noinline) Cave2_Logic() {
     if (s->mode == MODE_REC) {
         uint32_t index = s->recorded_count;
         if (index >= TAS_MAX_TICKS) {
+            // The buffer holds 10 min 55 s at 100 ticks/s. Say so, rather than
+            // ending the take indistinguishably from a user STOP.
+            LogRing(s, LOG_WARN, "REC stopped: recording buffer full (TAS_MAX_TICKS)");
             s->mode = MODE_OFF;
+            ReleaseTasInput(s, addr);
+            g_cave2_pendingLog = 3;
             return;
         }
 
@@ -1121,30 +795,23 @@ static void __declspec(noinline) Cave2_Logic() {
         // This makes REC symmetric with PLAY: both write buffer + action_state
         // + BB3B10 at the same point in Supreme::Cycle.
         uint8_t mask = SampleGAKS();
-        uint8_t transitions = mask ^ (uint8_t)s->prev_mask;
+        uint8_t transitions = mask ^ g_prevMask;
 
         uint32_t buffer = GetDIBuffer(kbobj);
         WriteDIBuffer(buffer, mask);
 
         WriteActionState(kbobj, mask);
 
-        if (s->inject_mode == 6 && transitions) {
+        if (transitions) {
             CallBB3B10OnTransitions(s, addr, kbobj, mask, transitions);
         }
 
         s->input_log[index] = mask;
-        s->prev_mask = mask;
+        g_prevMask = mask;
 
         CapturePlayerCoords(s, index, true);
 
         s->recorded_count = index + 1;
-
-        // RDIAG: periodic root/kbobj probe during REC — shows whether the
-        // chain the input writes go through still matches the live session
-        // (the steering-dies-after-REC investigation).
-        if ((index & 0xFF) == 0) {
-            LogRootDiag(s, "rec");
-        }
 
     } else if (s->mode == MODE_PLAY) {
         uint32_t pos = s->playback_pos;
@@ -1156,29 +823,13 @@ static void __declspec(noinline) Cave2_Logic() {
             s->cont_replay_start_fc = s->frame_count;
         }
 
-        // PROTOTYPE: snapshot the exact spawn at frame-0 of the replay (armed via
-        // CMD_SNAPSHOT_AT_SPAWN). Captured BEFORE this frame's input is injected,
-        // so it's the pure spawn the replay starts from — restoring it later
-        // reproduces this bucket bit-exactly (no F5 lottery). Done here (not from
-        // the harness) so the arm timing that picks the bucket isn't disturbed by
-        // the ~200ms capture.
-        if (pos == 0 && g_snapAtSpawn) {
-            uint64_t us = 0;
-            uint32_t bytes = SnapshotCapture(s, &us);
-            g_snapPlayerValid = SnapReadPlayerBits(s, g_snapPlayerBits);
-            s->snapshot_size = bytes;
-            s->snapshot_flags = (uint32_t)us;
-            g_snapAtSpawn = false;
-        }
-
         // The endpoint has to move with the input.
         //
-        // Alignment made the SOURCE index gate-relative but left this test
-        // arm-relative, so a replay whose gate landed 4 ticks early stopped 4
-        // gate-relative ticks short: its last four source indices ran past
-        // recorded_count and injected nothing, and the run ended before the
-        // recording did. Invisible to a fixed-window comparison, and exactly
-        // the sort of thing that changes a finish.
+        // Alignment made the SOURCE index gate-relative, so the end test must
+        // be gate-relative too: otherwise a replay whose gate landed 4 ticks
+        // early stops 4 gate-relative ticks short — its last four source
+        // indices run past recorded_count and inject nothing, and the run ends
+        // before the recording did.
         uint32_t play_end = s->recorded_count;
         if (s->gate_align_rec > 0 && s->gate_index > 0
                 && s->recorded_count > s->gate_align_rec) {
@@ -1200,26 +851,20 @@ static void __declspec(noinline) Cave2_Logic() {
         // Normally the replay applies input_log[pos] — indexed from the ARM. If
         // this replay's countdown ends on a different index than the
         // recording's did, every input then lands at the wrong offset relative
-        // to the race start. This fixes that indexing failure; the transport's
-        // trajectory watcher separately rejects a differing hidden spawn state.
-        //
-        // With gate_align_rec set, indexing is relative to the gate instead, so
-        // a countdown one tick longer or shorter simply shifts where the
-        // recording is read from without shifting the run's input timing.
+        // to the race start. With gate_align_rec set, indexing is relative to
+        // the gate instead, so a countdown one tick longer or shorter simply
+        // shifts where the recording is read from without shifting the run's
+        // input timing. The transport's trajectory watcher separately rejects
+        // a differing hidden spawn state.
         //
         // Before the gate, replay the recording's real input history until the
-        // final safety window, then HOLD the input it had at its own gate.
-        //
-        // Injecting nothing there instead costs one cycle of input and shows up
-        // as a constant 0.389 drift: gate_index is stamped at the END of the
-        // cycle whose position first differs, so on that cycle the mask is
-        // still chosen without it, and input_log[rec_gate] is never applied at
-        // all. Holding it near the end fixes that exactly — the boarder cannot
-        // move before the gate, so the value is inert until the moment it
-        // becomes the correct one. Preserving earlier transitions still
-        // matters to the input observer: moving a long-held key-down all the
-        // way back to the arm produced intermittent late drift in the Pico
-        // acceptance test.
+        // final safety window, then HOLD the input it had at its own gate:
+        // gate_index is stamped at the END of the cycle whose position first
+        // differs, so on that cycle the mask is still chosen without it, and
+        // injecting nothing there costs one cycle of input (a constant 0.389
+        // drift). The boarder cannot move before the gate, so the held value
+        // is inert until the moment it becomes the correct one. Preserving
+        // earlier transitions still matters to the input observer.
         uint32_t src = pos;
         if (s->gate_align_rec > 0) {
             src = GateAlignedInputSource(pos, s->gate_index, s->gate_align_rec,
@@ -1232,12 +877,12 @@ static void __declspec(noinline) Cave2_Logic() {
 
         WriteActionState(kbobj, mask);
 
-        uint8_t transitions = mask ^ (uint8_t)s->prev_mask;
-        if (s->force_direct == 2 && transitions) {
+        uint8_t transitions = mask ^ g_prevMask;
+        if (transitions) {
             CallBB3B10OnTransitions(s, addr, kbobj, mask, transitions);
         }
 
-        s->prev_mask = mask;
+        g_prevMask = mask;
 
         CapturePlayerCoords(s, pos, false);
 
@@ -1247,16 +892,11 @@ static void __declspec(noinline) Cave2_Logic() {
         //
         // A bucket-matched PLAY replays the countdown purely so the judge can see
         // where the boarder leaves the spawn; nothing before that is worth
-        // watching, and at 1x it costs ~3s on the accepted run AND on every
-        // reroll. So the controller replays it at catch-up speed and asks for
+        // watching. So the controller replays it at catch-up speed and asks for
         // the drop back here, at the tick it names. Doing it from a polling
         // thread instead would be unbounded: cave5 can already have issued up to
-        // CAVE5_PER_FRAME_TICK_CAP ticks before the poll even runs, so the run
-        // would start fast-forwarded by a variable amount — precisely the
-        // "Problem B" overshoot the CONT splice was changed to avoid.
-        //
-        // cave5 caps the batch to land on this position, so the handover is
-        // exact and not up to a batch late.
+        // CAVE5_PER_FRAME_TICK_CAP ticks before the poll even runs. cave5 caps
+        // the batch to land on this position, so the handover is exact.
         if (g_cave2_handoffArmed && s->speed_handoff_pos > 0
                 && s->playback_pos >= s->speed_handoff_pos) {
             float resume = s->speed_after_handoff;
@@ -1282,7 +922,7 @@ static void __declspec(noinline) Cave2_Logic() {
             // Clear the catch-up clock backlog on cave5's next tick, exactly as
             // the splice does, so the replay resumes frame-exact at the new speed
             // instead of burning down the accumulated fast-forward debt.
-            s->cont_reset_pending = 1;
+            g_contResetPending = 1;
             g_cave2_logParam = s->playback_pos;
             g_cave2_pendingLog = 11;
         }
@@ -1309,7 +949,6 @@ static void __declspec(noinline) Cave2_Logic() {
         if (g_cave2_contArmed && s->continue_from_frame > 0
                 && s->playback_pos >= aligned_splice
                 && (s->gate_align_rec == 0 || s->cont_splice_approved != 0)) {
-            uint32_t splice_pos = s->playback_pos;
             uint32_t rec_splice = s->continue_from_frame;
             s->recorded_count = rec_splice;
 
@@ -1318,11 +957,11 @@ static void __declspec(noinline) Cave2_Logic() {
             // diagnostic for "resume yields a few frames early/late".
             s->cont_splice_fc = s->frame_count;
 
-            // Problem B fix: drop to the user's resume speed ATOMICALLY here, at
-            // the exact splice tick. Otherwise the recording keeps fast-
-            // forwarding at the catch-up rate (e.g. 64x) for the whole window
-            // until the UI polls, sees PLAY->REC, and restores the speed — a
-            // variable post-splice overshoot. Cave5 picks this up next tick.
+            // Drop to the user's resume speed ATOMICALLY here, at the exact
+            // splice tick. Otherwise the recording keeps fast-forwarding at the
+            // catch-up rate (e.g. 64x) for the whole window until the UI polls,
+            // sees PLAY->REC, and restores the speed — a variable post-splice
+            // overshoot. Cave5 picks this up next tick.
             if (s->cont_resume_speed > 0.0f) {
                 s->playback_speed = s->cont_resume_speed;
             }
@@ -1330,7 +969,7 @@ static void __declspec(noinline) Cave2_Logic() {
             // (advance the game-time accumulator to "now" without processing the
             // backlog ticks) so the resume is frame-exact at full speed — no
             // end-of-replay deceleration needed.
-            s->cont_reset_pending = 1;
+            g_contResetPending = 1;
 
             // Record new segment boundary
             uint32_t segIdx = s->segment_count;
@@ -1338,7 +977,6 @@ static void __declspec(noinline) Cave2_Logic() {
                 s->segment_boundaries[segIdx].frame = rec_splice;
                 s->segment_boundaries[segIdx].input_log_offset = rec_splice;
                 s->segment_count = segIdx + 1;
-                s->segment_index = segIdx;
             }
             s->segment_start_frame = rec_splice;
 

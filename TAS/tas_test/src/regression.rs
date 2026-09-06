@@ -9,7 +9,6 @@ use std::path::Path;
 
 use tas_shared::input_bits;
 
-use crate::cache;
 use crate::drift;
 use crate::gates;
 use crate::harness;
@@ -183,22 +182,7 @@ pub fn run(cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
     harness::ensure_exclusive_runtime_ownership(&mut client, "regression determinism failures");
     harness::print_status(&client);
 
-    // Config preconditions: assert proven zero-drift config before running.
-    {
-        let s = client.state();
-        assert_eq!(s.force_fixed_tick, 0, "fft must be 0 (natural ticks)");
-        assert_eq!(s.inject_mode, 6, "inject_mode must be 6");
-        assert_eq!(s.force_direct, 2, "force_direct must be 2");
-        assert!(
-            s.playback_speed == 1.0 || s.playback_speed == 0.0,
-            "playback_speed must be 1.0 or 0.0 (got {})",
-            s.playback_speed
-        );
-        println!(
-            "Config OK: fft=0, inject_mode=6, force_direct=2, speed={}",
-            s.playback_speed
-        );
-    }
+    harness::assert_proven_config(&client);
 
     println!("\n=== Regression Suite: {} cases ===\n", cases.len());
 
@@ -278,12 +262,6 @@ fn run_single_case(
 
     if rec_count == 0 {
         return error_result(case, "No ticks recorded");
-    }
-
-    // Save recording to cache
-    let recording = cache::capture_from_state(client.state(), &case.name);
-    if let Err(e) = recording.save(&cache_path) {
-        eprintln!("  WARNING: Failed to save cache: {}", e);
     }
 
     // Compute live drift (REC vs itself is always zero, but we track the recording quality)

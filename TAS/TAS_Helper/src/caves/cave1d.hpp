@@ -13,8 +13,9 @@
 //
 // Gate logic:
 //   - current thread is in a TAS injection scope: ALWAYS pass through
-//   - MODE_REC + inject_mode=6: BLOCK (Cave 2 will call BB3B10 directly
-//     on transitions for timing symmetry with PLAY)
+//   - a CONT is in flight (cont_suppress_input): BLOCK, ESC exempt
+//   - MODE_REC: BLOCK (Cave 2 calls BB3B10 directly on transitions for
+//     timing symmetry with PLAY), ESC and paused-game exempt
 //   - All other cases: pass through
 //
 // Uses SafetyHookInline for clean function interception.
@@ -64,8 +65,8 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
             return;
         }
 
-        // Block during REC mode 6: Cave 2 will call BB3B10 directly on
-        // transitions for symmetric timing between REC and PLAY. Exempt:
+        // Block during REC: Cave 2 will call BB3B10 directly on transitions
+        // for symmetric timing between REC and PLAY. Exempt:
         //  - ESC (ki 0x48): not a gameplay key; the PAUSE MENU subscribes to
         //    its broadcast — blocking it made ESC dead during REC even with
         //    the cave1c handler passthrough in place.
@@ -73,7 +74,7 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
         //    there's no REC/PLAY symmetry to protect, and the pause menu's
         //    OWN navigation (arrows/enter) is observer-driven — without this
         //    the menu opens but can't be operated during REC.
-        if (s->mode == MODE_REC && s->inject_mode == 6
+        if (s->mode == MODE_REC
             && keyIndex != GameAddresses::BB3B10_ESC && !gamePaused) {
             s->bb3b10_block_count++;
             PerfSample(s->perf_cave1d, __rdtsc() - t0);
@@ -81,31 +82,7 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
         }
     }
 
-    // RDIAG: on OFF-mode REAL BB3B10 calls (the game's own input path), log the
-    // full call signature (this, keyIndex, pressed, arg4) whenever the
-    // (this,keyIndex) pair changes — the apples-to-apples diff against cave2's
-    // injected calls (kbobj+0x18, BB3B10_LEFT/RIGHT 0x3A/0x3B, arg4 0x96) for
-    // the steering-dies-after-REC investigation.
-    if (s && s->mode == MODE_OFF) {
-        // (calibration handled above, all-modes); this block is RDIAG only.
-        static volatile uint32_t lastRealSig = 0;
-        uint32_t cur = ((uint32_t)(uintptr_t)ecx) ^ (keyIndex << 1);
-        if (cur != lastRealSig) {
-            lastRealSig = cur;
-            char buf[80];
-            int p = 0;
-            auto put = [&](const char* t) { while (*t && p < 68) buf[p++] = *t++; };
-            put("RDIAG real-bb this=");
-            DiagHexU32(buf + p, (uint32_t)(uintptr_t)ecx); p += 8;
-            put(" ki=");  DiagHexU32(buf + p, keyIndex); p += 8;
-            put(" pr=");  DiagHexU32(buf + p, pressed);  p += 8;
-            put(" a4=");  DiagHexU32(buf + p, arg4);     p += 8;
-            buf[p] = '\0';
-            LogRing(s, LOG_INFO, buf);
-        }
-    }
-
-    // Pass through in all other cases (IDLE, PLAY, non-mode-6)
+    // Pass through in all other cases (IDLE, PLAY)
     cave1dInline.thiscall<void>(ecx, keyIndex, pressed, unk, arg4);
     if (s) {
         PerfSample(s->perf_cave1d, __rdtsc() - t0);

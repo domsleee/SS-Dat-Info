@@ -18,9 +18,8 @@ struct InputGateInputs {
     bool is_escape;      // the event is ESC (always exempt: abort hatch + menu nav)
 };
 
-// The shared cave2_injecting word is useful diagnostics, but it cannot identify
-// who made a concurrent call. Gate exemptions must be thread-scoped so a real
-// keyboard event on another game thread cannot slip through during injection.
+// Gate exemptions are thread-scoped so a real keyboard event on another game
+// thread cannot slip through during injection.
 inline thread_local uint32_t g_tasInjectionDepth = 0;
 
 inline bool IsTasInjectionThread() {

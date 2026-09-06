@@ -27,11 +27,8 @@ pub fn run(source: &str, out: &str) -> Result<(), String> {
     }
 
     println!(
-        "Loaded: {} ticks, inject_mode={}, fft={}, force_direct={}",
-        loaded.count,
-        loaded.meta.inject_mode,
-        loaded.meta.force_fixed_tick,
-        loaded.meta.force_direct
+        "Loaded: {} ticks, fft={}",
+        loaded.count, loaded.meta.force_fixed_tick
     );
 
     let mut client = harness::ensure_game_running();
@@ -80,10 +77,7 @@ pub fn run(source: &str, out: &str) -> Result<(), String> {
         .as_object_mut()
         .ok_or_else(|| "source metadata is not a JSON object".to_string())?;
     set_u32(meta_obj, "recorded_count", loaded.count);
-    set_u32(meta_obj, "inject_mode", state.inject_mode);
     set_u32(meta_obj, "force_fixed_tick", 0);
-    set_u32(meta_obj, "force_direct", state.force_direct);
-    set_u32(meta_obj, "input_source", state.input_source);
     set_f32(meta_obj, "max_drift_x", 0.0)?;
     set_f32(meta_obj, "max_drift_z", 0.0)?;
     let timestamp = SystemTime::now()

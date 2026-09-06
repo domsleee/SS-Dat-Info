@@ -129,15 +129,8 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
     // test back to 1× rate. Kill it before doing speed-sensitive work.
     harness::ensure_exclusive_runtime_ownership(&mut client, "reliability speed scaling");
 
-    // Config preconditions
-    {
-        let s = client.state();
-        assert_eq!(s.force_fixed_tick, 0, "fft must be 0");
-        assert_eq!(s.inject_mode, 6, "inject_mode must be 6");
-        assert_eq!(s.force_direct, 2, "force_direct must be 2");
-        assert_eq!(s.cave5_hooked, 1, "Cave 5 must be hooked for speed test");
-        println!("Config OK: fft=0, inject_mode=6, force_direct=2, cave5=hooked");
-    }
+    harness::assert_proven_config(&client);
+    assert_eq!(client.state().cave5_hooked, 1, "Cave 5 must be hooked for speed test");
 
     let mut results = Vec::new();
 
