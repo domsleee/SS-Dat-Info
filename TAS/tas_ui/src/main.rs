@@ -1251,7 +1251,11 @@ impl TasApp {
         };
 
         // Auto-detect Pico on startup
-        let detect_logs = app.pico.auto_detect();
+        let detect_logs = if std::env::var_os("SSB_INSPECT_E2E_RECORDING").is_some() {
+            Vec::new() // The live test owns the physical Pico input.
+        } else {
+            app.pico.auto_detect()
+        };
         for msg in detect_logs {
             let ts = chrono::Local::now().format("%H:%M:%S");
             app.log_lines.push(format!("[{}] {}", ts, msg));
@@ -1277,7 +1281,43 @@ impl TasApp {
             app.clear_recovery_after_durable_persist();
         }
 
+        if let Some(path) = std::env::var_os("SSB_INSPECT_E2E_RECORDING") {
+            let setup = (|| -> Result<(), String> {
+                if std::env::var_os("SSB_INSPECT_DATA_DIR").is_none() {
+                    return Err("E2E startup requires an isolated SSB_INSPECT_DATA_DIR".into());
+                }
+                let splice = std::env::var("SSB_INSPECT_E2E_SPLICE")
+                    .map_err(|e| e.to_string())?.parse::<u32>().map_err(|e| e.to_string())?;
+                app.prepare_e2e_recording(std::path::Path::new(&path), splice)
+            })();
+            if let Err(error) = setup {
+                eprintln!("UI E2E setup failed: {error}");
+                std::process::exit(1);
+            }
+            app.push_log("UI E2E ready");
+        }
+
         app
+    }
+
+    fn prepare_e2e_recording(&mut self, path: &std::path::Path, splice: u32) -> Result<(), String> {
+        let shared = self.shared.as_mut().ok_or("No game connection")?;
+        if shared.mode_volatile() != TasMode::Off as u32 || !shared.command_idle() {
+            return Err("Game must be stopped before UI fixture loading".into());
+        }
+        let metadata = recording::RecordingFile::read_metadata(path)?;
+        if splice == 0 || splice > metadata.recorded_count {
+            return Err("Splice outside recording".into());
+        }
+        tas_shared::level::check_recording_matches_live(&path.to_string_lossy(), shared.state().level_id)?;
+        if !recording::load_recording_path(shared.state_mut(), &mut self.segment_tracker, &mut self.log_lines, path) {
+            return Err("Could not load UI fixture".into());
+        }
+        self.loaded_physics = metadata.physics_label();
+        self.loaded_rider = metadata.rider_label();
+        self.history.push_loaded_snapshot(shared.state(), path);
+        self.apply_transport_action(transport::Action::SetContinueFrame(splice), "E2E");
+        Ok(())
     }
 
     fn playback_speed_for_settings(&self) -> f32 {
@@ -4247,6 +4287,13 @@ fn open_in_file_browser(path: &std::path::Path) -> Result<(), String> {
 
 #[allow(clippy::upper_case_acronyms)] // Match Win32 FFI type names.
 fn main() -> eframe::Result {
+    // Reject unsafe automation setup before opening any user history/settings.
+    if std::env::var_os("SSB_INSPECT_E2E_RECORDING").is_some()
+        && std::env::var_os("SSB_INSPECT_DATA_DIR").is_none()
+    {
+        eprintln!("UI E2E setup requires an isolated SSB_INSPECT_DATA_DIR");
+        std::process::exit(1);
+    }
     // Dev harness: render just the input timeline with real recording data
     // and screenshot it (no game/DLL needed). Skips the single-instance
     // guard so it runs alongside a live SSB Inspect.

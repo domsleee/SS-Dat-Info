@@ -1032,8 +1032,8 @@ fn main() {
             println!("Modes:");
             println!("  shm [--command record|play|stop|restart]  Version-checked diagnostics; read-only by default");
             println!("  fe-cont-reliability / fe10065-cont       Named real-recording CONT cases");
-            println!("  live        UI LEFT-spam, acceptance, regression (--log PATH --splice N --iterations N)");
-            println!("  cont-ui-left-spam  Live UI F12 + Pico LEFT taps (--log PATH --splice N --iterations N)");
+            println!("  live        UI LEFT-spam, acceptance, regression (--recording PATH --splice N --iterations N)");
+            println!("  cont-ui-left-spam  Self-contained UI F12 + Pico LEFT taps (--recording PATH --splice N --iterations N)");
             println!("  smoke       Basic REC/PLAY without F5 alignment");
             println!("  menu        Print the menu document (current page items, labels, ids) as JSON");
             println!("  menu activate <id|label> / focus <id|label> / up|down|left|right|trigger");

@@ -15,17 +15,18 @@ during a test. Unit tests do not require or control the game.
 
 ## Complete live workflow
 
-Save your run, load it in the deployed UI on Forest Easy, set From to 4500, STOP,
-and disconnect the UI's Pico panel. Then run `just test_live` from the repository
-root. To choose another splice, use `just test_live 2200`.
+Save your run, then run `just test_live` from the repository root. The test
+establishes a game session, closes competing UI instances, and launches a fresh UI
+with the original "UI break at 4500" recording and From set to 4500. History, settings and
+logs are isolated under the test artifacts. To choose another splice, use
+`just test_live 2200`.
 
 The required stages are UI F12/LEFT-spam, acceptance, then regression. The UI test
 runs first because subsequent harness tests take ownership, close the UI, and
 replace the active recording. A missing UI, missing splice verdict, or any failing
 stage fails the workflow; later stages are not run. Setup is never silently skipped.
 
-The default UI log is under the `supreme_folder` configured in `justfile`. Override
-it with `just test_live 4500 5 'path/to/tas_ui.log'`. Each invocation produces a
+Each invocation produces a
 `live-<timestamp>-<pid>/summary.json`, per-stage `output.log`, and the existing
 acceptance/regression artifacts under `TAS_TEST_OUTPUT` (default: beside tas_test).
 The 4500 captured-data regression continues to run in the ordinary unit suite/CI.
@@ -51,16 +52,20 @@ PLAY-to-REC transition, not just a completed coordinate comparison.
 
 ## UI F12 with LEFT spam
 
-Load a saved Forest Easy run in the deployed UI, set its From tick, then STOP.
-Disconnect the UI's Pico panel so the test can use the verified `TAS_PICO_PORT`
-(default `COM7`). This test uses the running UI and game; it does not restart or
-replace them. Run from the repository root:
+The test prepares its own UI and saved recording, with Pico auto-connect disabled
+in that UI so the harness can drive physical input through `TAS_PICO_PORT`
+(default `COM7`). It closes competing UI instances and replaces the active game
+recording. Run from the repository root:
 
 ```powershell
-just test_cont_ui_left_spam 'T:\Games\SupremeORIG\Display_Config_Resources\TAS\data\tas_ui.log' 4500 5
+just test_cont_ui_left_spam
 ```
 
-This invokes `tas_test cont-ui-left-spam --log <path> --splice 4500 --iterations 5`.
+This invokes `tas_test cont-ui-left-spam --splice 4500 --iterations 5`.
+Use `--recording <path.tasrec>` on the CLI to select another fixture. It launches
+the `tas_ui.exe` beside `tas_test.exe`; `just` builds both first. The child UI is
+closed on success or failure, and its logs and isolated data are retained under
+`TAS_TEST_OUTPUT` (default: beside the test binary).
 It sends F12 through the UI, verifies physical LEFT down/up transitions, checks
 first-attempt resume and an explicit zero splice mismatch, then stops via F11.
 Retries, missing verdicts, focus loss, process exit and nonzero splice differences

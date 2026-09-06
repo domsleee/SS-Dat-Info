@@ -49,12 +49,16 @@ pub struct PicoKeys {
 
 impl PicoKeys {
     pub fn open() -> Option<PicoKeys> {
+        Self::open_checked().ok()
+    }
+
+    pub fn open_checked() -> Result<PicoKeys, String> {
         let port_name = pico_port();
         let com_path = format!("\\\\.\\{}", port_name);
         std::fs::OpenOptions::new()
             .write(true)
             .open(&com_path)
-            .ok()
+            .map_err(|error| format!("Cannot open Pico {port_name}: {error}"))
             .map(|port| PicoKeys { port, port_name })
     }
 
@@ -1648,7 +1652,7 @@ fn poll_cont_verdict(
 /// `fallback_ms` is the sleep duration if the Pico port cannot be opened
 /// (allows the test to wait for the equivalent recording duration).
 pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep], fallback_ms: Option<u64>) {
-    drive_pico_steps_inner(steps, fallback_ms, None);
+    let _ = drive_pico_steps_inner(steps, fallback_ms, None, false);
 }
 
 /// Drive a pattern while periodically refreshing a held non-zero mask. This is
@@ -1660,14 +1664,20 @@ pub fn drive_pico_steps_keepalive(
     fallback_ms: Option<u64>,
     keepalive_ms: u64,
 ) {
-    drive_pico_steps_inner(steps, fallback_ms, Some(keepalive_ms.max(1)));
+    let _ = drive_pico_steps_inner(steps, fallback_ms, Some(keepalive_ms.max(1)), false);
+}
+
+/// Acceptance must not substitute an unsteered recording for missing hardware.
+pub fn drive_pico_steps_required(steps: &[crate::patterns::PatternStep]) -> Result<(), String> {
+    drive_pico_steps_inner(steps, None, Some(200), true)
 }
 
 fn drive_pico_steps_inner(
     steps: &[crate::patterns::PatternStep],
     fallback_ms: Option<u64>,
     keepalive_ms: Option<u64>,
-) {
+    required: bool,
+) -> Result<(), String> {
     let port_name = pico_port();
     // PicoKeys, not a bare File: this loop holds movement keys down for the whole
     // pattern — seconds at a time — which makes it by far the most exposed place
@@ -1702,16 +1712,19 @@ fn drive_pico_steps_inner(
     // agree — shorten DEFAULT_HOLD_TICKS under the watchdog, or lengthen the
     // window and re-baseline the gates — not a unilateral keepalive here.
 
-    let mut port = match PicoKeys::open() {
-        Some(p) => p,
-        None => {
+    let mut port = match PicoKeys::open_checked() {
+        Ok(p) => p,
+        Err(error) => {
+            if required {
+                return Err(error);
+            }
             eprintln!(
                 "  ERROR: Cannot open {}. Steering will be absent.",
                 port_name
             );
             let ms = fallback_ms.unwrap_or_else(|| crate::patterns::total_ticks(steps) as u64 * 10);
             thread::sleep(Duration::from_millis(ms));
-            return;
+            return Ok(());
         }
     };
     let total = crate::patterns::total_ticks(steps);
@@ -1737,7 +1750,10 @@ fn drive_pico_steps_inner(
             });
         if mask != prev_mask || keepalive_due {
             let send_byte = if mask == 0 { 0xFF } else { mask };
-            port.send(send_byte);
+            let sent = port.send(send_byte);
+            if required {
+                require_pico_write(sent, &port_name)?;
+            }
             prev_mask = mask;
             last_send = Some(Instant::now());
         }
@@ -1750,5 +1766,22 @@ fn drive_pico_steps_inner(
 
     // Explicit release on the normal path so the keys go up at a known instant
     // rather than whenever `port` happens to drop; Drop then makes it idempotent.
-    port.send(0xFF);
+    let released = port.send(0xFF);
+    if required {
+        require_pico_write(released, &port_name)?;
+    }
+    Ok(())
+}
+
+fn require_pico_write(sent: bool, port: &str) -> Result<(), String> {
+    if sent { Ok(()) } else { Err(format!("Pico {port} write failed; acceptance cannot verify steering")) }
+}
+
+#[cfg(test)]
+mod pico_required_tests {
+    #[test]
+    fn failed_steering_or_release_write_is_an_error() {
+        assert!(super::require_pico_write(true, "test-port").is_ok());
+        assert!(super::require_pico_write(false, "test-port").unwrap_err().contains("write failed"));
+    }
 }

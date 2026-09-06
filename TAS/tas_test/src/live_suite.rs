@@ -109,8 +109,8 @@ mod tests {
     #[test]
     fn ui_is_mandatory_and_precedes_harness_ownership() {
         let args = vec![
-            "--log".into(),
-            "ui.log".into(),
+            "--recording".into(),
+            "FE-test.tasrec".into(),
             "--splice".into(),
             "4500".into(),
         ];

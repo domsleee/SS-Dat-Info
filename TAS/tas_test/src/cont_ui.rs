@@ -1,5 +1,6 @@
 //! Live F12 regression through the deployed UI, with real Pico LEFT taps.
-//! Unlike harness-driven CONT, this never writes commands to shared memory.
+//! CONT always goes through F12. Shared-memory commands are only used for setup
+//! and emergency STOP after the owned UI has exited.
 use std::{
     io::{Read, Seek, SeekFrom},
     path::PathBuf,
@@ -8,6 +9,7 @@ use std::{
 
 struct Options {
     log: PathBuf,
+    recording: Option<PathBuf>,
     splice: u32,
     iterations: u32,
 }
@@ -15,7 +17,8 @@ struct Options {
 fn options(args: &[String]) -> Result<Options, String> {
     let mut result = Options {
         log: PathBuf::new(),
-        splice: 2200,
+        recording: None,
+        splice: 4500,
         iterations: 5,
     };
     for pair in args.chunks(2) {
@@ -23,7 +26,7 @@ fn options(args: &[String]) -> Result<Options, String> {
             return Err("Each option needs a value".into());
         }
         match pair[0].as_str() {
-            "--log" => result.log = pair[1].as_str().into(),
+            "--recording" => result.recording = Some(pair[1].as_str().into()),
             "--splice" => result.splice = pair[1].parse().map_err(|_| "Invalid splice")?,
             "--iterations" => {
                 result.iterations = pair[1].parse().map_err(|_| "Invalid iterations")?
@@ -31,13 +34,32 @@ fn options(args: &[String]) -> Result<Options, String> {
             other => return Err(format!("Unknown option: {other}")),
         }
     }
-    if result.log.as_os_str().is_empty()
-        || !(1..=65535).contains(&result.splice)
-        || !(1..=100).contains(&result.iterations)
-    {
-        return Err("Use --log <running UI log> --splice <1..65535> --iterations <1..100>".into());
+    if !(1..=65535).contains(&result.splice) || !(1..=100).contains(&result.iterations) {
+        return Err("Use --recording <tasrec> --splice <1..65535> --iterations <1..100>".into());
     }
     Ok(result)
+}
+
+// The same original history capture used by the offline banner regression.
+const ORIGINAL_RECORDING: &[u8] =
+    include_bytes!("../../tas_ui/src/tests/data/cont-splice-4500/recording.tasrec");
+
+fn original_recording_file() -> Vec<u8> {
+    let count = u32::from_le_bytes(ORIGINAL_RECORDING[..4].try_into().unwrap());
+    assert_eq!(ORIGINAL_RECORDING.len(), 4 + count as usize * 13);
+    // History blobs have no file metadata. Add the normal file envelope using
+    // the test's standard injection configuration, without inventing a rider
+    // or renderer stamp. Copy the captured inputs and XYZ bytes verbatim.
+    let metadata = serde_json::to_vec(&serde_json::json!({
+        "version": 1, "recorded_count": count, "inject_mode": 6,
+        "force_fixed_tick": 0, "force_direct": 2, "input_source": 0,
+        "max_drift_x": 0.0, "max_drift_z": 0.0, "timestamp": "2026-09-05",
+        "notes": "UI break at 4500: original history entry 2431; metadata envelope added for live UI loading"
+    })).unwrap();
+    let mut file = (metadata.len() as u32).to_le_bytes().to_vec();
+    file.extend_from_slice(&metadata);
+    file.extend_from_slice(&ORIGINAL_RECORDING[4..]);
+    file
 }
 
 fn verdict(log: &str, splice: u32) -> Result<bool, String> {
@@ -101,9 +123,10 @@ fn new_log(path: &std::path::Path, offset: u64) -> Result<String, String> {
 }
 
 pub fn run(args: &[String]) -> Result<(), String> {
-    let config = options(args)?;
+    let mut config = options(args)?;
     #[cfg(windows)]
     {
+        let _ui = live::prepare(&mut config)?;
         live::run(&config)
     }
     #[cfg(not(windows))]
@@ -122,6 +145,89 @@ mod live {
     use super::*;
     use std::{os::windows::process::CommandExt, thread};
     use tas_shared::{TasMode, TasSharedMemoryClient};
+
+    pub(super) struct UiProcess(std::process::Child);
+    impl Drop for UiProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+            // If focus was lost, StopOnExit could not safely send F11. With
+            // our UI gone, no controller can re-arm while we stop the game.
+            if let Ok(mut client) = TasSharedMemoryClient::open() {
+                if client.mode_volatile() != TasMode::Off as u32 || !client.command_idle() {
+                    crate::harness::stop(&mut client);
+                }
+            }
+        }
+    }
+
+    pub(super) fn prepare(config: &mut Options) -> Result<UiProcess, String> {
+        let executable = std::env::current_exe()
+            .map_err(|e| e.to_string())?
+            .with_file_name("tas_ui.exe");
+        if !executable.is_file() {
+            return Err("Build tas_ui beside tas_test before running".into());
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_millis();
+        let root = crate::output_dir().join(format!("cont-ui-{stamp}-{}", std::process::id()));
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let root = root.canonicalize().map_err(|e| e.to_string())?;
+        let recording = match &config.recording {
+            Some(path) => path.canonicalize().map_err(|e| format!("Recording: {e}"))?,
+            None => {
+                let path = root.join("FE-UI-break-at-4500.tasrec");
+                std::fs::write(&path, original_recording_file()).map_err(|e| e.to_string())?;
+                path
+            }
+        };
+        let loaded = crate::replay::load_tasrec(&recording)?;
+        if config.splice > loaded.count {
+            return Err("Splice outside recording".into());
+        }
+        let mut client = crate::harness::ensure_game_running();
+        crate::harness::ensure_exclusive_runtime_ownership(&mut client, "UI LEFT-spam setup");
+        if client.state().level_id != 0 {
+            return Err("UI LEFT-spam requires Forest Easy".into());
+        }
+        println!(
+            "UI fixture: {} ({} ticks)",
+            recording.display(),
+            loaded.count
+        );
+        config.log = root.join("tas_ui.log");
+        let stderr = std::fs::File::create(root.join("startup.log")).map_err(|e| e.to_string())?;
+        let mut ui = UiProcess(
+            std::process::Command::new(executable)
+                .env("SSB_INSPECT_DATA_DIR", &root)
+                .env("SSB_INSPECT_E2E_RECORDING", &recording)
+                .env("SSB_INSPECT_E2E_SPLICE", config.splice.to_string())
+                .stderr(stderr)
+                .creation_flags(0x08000000)
+                .spawn()
+                .map_err(|e| e.to_string())?,
+        );
+        println!("UI artifacts: {}", root.display());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(status) = ui.0.try_wait().map_err(|e| e.to_string())? {
+                return Err(format!(
+                    "UI setup exited {status}; see {}",
+                    root.join("startup.log").display()
+                ));
+            }
+            if std::fs::read_to_string(&config.log).is_ok_and(|s| s.contains("UI E2E ready")) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("UI setup timed out; see startup.log".into());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        Ok(ui)
+    }
     #[link(name = "user32")]
     extern "system" {
         fn SetForegroundWindow(window: isize) -> i32;
@@ -160,8 +266,7 @@ mod live {
         Ok(())
     }
     pub(super) fn run(config: &Options) -> Result<(), String> {
-        // Do not use harness::connect: that stops competing UI writers. Here
-        // the deployed UI is precisely the controller being tested.
+        // Setup is complete; the child UI is now the controller under test.
         let client = TasSharedMemoryClient::open()?;
         if client.mode_volatile() != TasMode::Off as u32
             || !client.command_idle()
@@ -169,7 +274,7 @@ mod live {
             || client.state().level_id != 0
         {
             return Err(
-                "Load the saved FE run in the UI, set From to --splice, and STOP before testing"
+                "Automatic UI setup did not leave a stopped FE recording at the requested splice"
                     .into(),
             );
         }
@@ -250,6 +355,16 @@ mod live {
 mod tests {
     use super::*;
     #[test]
+    fn default_fixture_is_the_original_4500_capture_without_modified_samples() {
+        assert!(options(&[]).unwrap().recording.is_none());
+        let file = original_recording_file();
+        let header_len = u32::from_le_bytes(file[..4].try_into().unwrap()) as usize;
+        let meta: serde_json::Value = serde_json::from_slice(&file[4..4 + header_len]).unwrap();
+        assert_eq!(meta["recorded_count"], 5032);
+        assert_eq!(&file[4 + header_len..], &ORIGINAL_RECORDING[4..]);
+        assert_eq!(options(&[]).unwrap().splice, 4500);
+    }
+    #[test]
     fn resume_alone_cannot_pass_and_transients_are_diagnostic() {
         let resume = "Global F12 (in-game): CONT\nCONT resumed at frame 4500 after 1 bucket attempt — bucket matched\n";
         assert!(!verdict(resume, 4500).unwrap());
@@ -265,15 +380,15 @@ mod tests {
         assert!(!verdict(&format!("{resume}CONT splice 2200: X=0 Z=0"), 4500).unwrap());
     }
     #[test]
-    fn cli_requires_log_and_bounded_parameters() {
-        assert!(options(&[]).is_err());
+    fn cli_has_self_contained_defaults_and_bounded_parameters() {
+        assert!(options(&[]).is_ok());
         for args in [
-            vec!["--log", "test.log", "--iterations", "0"],
-            vec!["--log", "test.log", "--splice", "65536"],
+            vec!["--iterations", "0"],
+            vec!["--splice", "65536"],
             vec!["--unknown", "x"],
         ] {
             assert!(options(&args.into_iter().map(str::to_string).collect::<Vec<_>>()).is_err());
         }
-        assert!(options(&["--log".into(), "test.log".into()]).is_ok());
+        assert!(options(&["--recording".into(), "test.tasrec".into()]).is_ok());
     }
 }
