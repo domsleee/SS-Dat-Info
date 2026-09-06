@@ -20,6 +20,7 @@ mod bucket_scan;
 mod cache;
 mod catchup_speed;
 mod certificate;
+mod cont_cases;
 mod cont_hijack;
 mod cont_reliability;
 mod cont_restart_race;
@@ -33,8 +34,6 @@ mod drift;
 mod drift_speed;
 mod escape_speedup;
 mod f5_probe;
-mod fe10065_cont;
-mod fe_cont_reliability;
 mod fe_cont_stress;
 mod gate_align;
 mod gate_predict;
@@ -60,6 +59,7 @@ mod reroll_cost;
 mod restart_precision;
 mod restart_probe;
 mod save_reload;
+mod shm;
 mod snapshot_cont;
 mod snapshot_probe;
 mod speed;
@@ -75,6 +75,12 @@ fn main() {
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("help");
 
     match mode {
+        "shm" => {
+            if let Err(error) = shm::run(&args[2..]) {
+                eprintln!("SHM: {error}");
+                std::process::exit(1);
+            }
+        }
         "live" => {
             if let Err(error) = live_suite::run(&args[2..], output_dir()) {
                 eprintln!("LIVE SUITE FAILED: {error}");
@@ -256,15 +262,15 @@ fn main() {
             // frame 2200, 5 iterations at 12x catchup. Pinned variant of
             // cont-reliability for the specific recording the user cares
             // about; passes only if all 5/5 splices are zero-drift.
-            let ok = fe_cont_reliability::run();
+            let ok = cont_cases::run(&cont_cases::FE_TREMENDOUS);
             std::process::exit(if ok { 0 } else { 1 });
         }
         "fe10065-cont" => {
             // CONT splice against TAS/recordings/FE-10065.tasrec at frame 6200,
-            // 12 iterations at 64x. Pinned to the user's real case; passes only
+            // 8 iterations each at 64x and 256x. Passes only
             // if all splices are zero-drift AND the resume lands within a few
             // frames of the splice (the Problem B resume-timing guard).
-            let ok = fe10065_cont::run();
+            let ok = cont_cases::run(&cont_cases::FE_10065);
             std::process::exit(if ok { 0 } else { 1 });
         }
         "stop-play-flake" => {
@@ -1024,6 +1030,8 @@ fn main() {
             println!("Usage: tas_test <mode>");
             println!();
             println!("Modes:");
+            println!("  shm [--command record|play|stop|restart]  Version-checked diagnostics; read-only by default");
+            println!("  fe-cont-reliability / fe10065-cont       Named real-recording CONT cases");
             println!("  live        UI LEFT-spam, acceptance, regression (--log PATH --splice N --iterations N)");
             println!("  cont-ui-left-spam  Live UI F12 + Pico LEFT taps (--log PATH --splice N --iterations N)");
             println!("  smoke       Basic REC/PLAY without F5 alignment");
