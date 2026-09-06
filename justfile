@@ -98,12 +98,16 @@ test_acceptance: tas_rust
 test_regression: tas_rust
     cd TAS && cargo run --release --bin tas_test -- regression
 
+# Requires the deployed UI with a saved FE run loaded and From set to splice.
+test_cont_ui_left_spam log splice="2200" iterations="5":
+    cd TAS && cargo run --release --bin tas_test -- cont-ui-left-spam --log '{{log}}' --splice {{splice}} --iterations {{iterations}}
+
 test_replay file iterations="5":
     cd TAS && cargo run --release --bin tas_test -- replay {{file}} --iterations {{iterations}} --verbose
 
-test_live: tas_rust
-    cd TAS && cargo run --release --bin tas_test -- acceptance && \
-    cargo run --release --bin tas_test -- regression
+# UI runs first: later harness stages stop the competing UI and replace the run.
+test_live splice="4500" iterations="5" log=(supreme_folder + '\Display_Config_Resources\TAS\data\tas_ui.log'): tas_rust
+    cd TAS && cargo run --release --bin tas_test -- live --log '{{log}}' --splice {{splice}} --iterations {{iterations}}
 
 clean:
     $ErrorActionPreference = 'Stop'; \

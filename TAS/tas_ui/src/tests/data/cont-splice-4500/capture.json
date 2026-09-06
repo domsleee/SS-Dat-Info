@@ -1,0 +1,13 @@
+{
+  "case": "UI break at 4500",
+  "level": "FE",
+  "history_entry": 2431,
+  "recording_ticks": 5032,
+  "splice_exclusive": 4500,
+  "play_tail_recording_start": 945,
+  "play_tail_samples": 4500,
+  "first_transient_tick": 1831,
+  "recording_format": "u32le count, count input bytes, count f32le XYZ triples",
+  "play_tail_format": "f32le XYZ triples",
+  "provenance": "Captured from real game shared memory on 2026-09-05. Original script incorrectly labelled a later replay tail as a prefix ending at 4500. Coverage starts at recording tick 945, verified by 16 exact XYZ pairs. This is not a full-prefix determinism certificate."
+}
