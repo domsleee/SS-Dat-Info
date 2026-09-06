@@ -1,140 +1,83 @@
-# Supreme TAS E2E Test Guide
+# Supreme TAS E2E tests
 
-This guide shows how to run the live `tas_test` E2E checks used for CONT reliability.
-
-For recurring schedule/ownership/escalation policy, see `docs/live-runtime-validation-cadence.md`.
-
-## Scope
-
-Main E2E command:
-
-```powershell
-cargo run --release --bin tas_test -- cont-reliability ...
-```
-
-Covers:
-
-- CONT splice success (`PLAY -> REC` at the splice frame)
-- zero drift across replayed prefix
-- replay coverage up to splice frame
-- movement-quality metrics for the replayed prefix
+These tests control the real game and can replace its active recording. Save the
+run first, stop other tools that write to shared memory, and do not play manually
+during a test. Unit tests do not require or control the game.
 
 ## Prerequisites
 
-- Windows + PowerShell
-- Supreme Snowboarding installed and runnable
-- `SS-Dat-Info` repo at `C:\Users\user\git\SS-Dat-Info`
-- `cheatengine-mcp-bridge` repo at `C:\Users\user\git\cheatengine-mcp-bridge`
-- `nu` available (for `revive-supreme`)
-- Cave hooks active (`tas_test` will print hook/liveness status)
+- Windows, Rust, and Supreme Snowboarding with the current TAS DLL.
+- A Pico HID board running the firmware in `TAS/pico/` for input-driven tests.
+- The `revive-supreme` launcher from `cheatengine-mcp-bridge`, with Nushell (`nu`)
+  available. The harness uses it to launch the game; `NO_REVIVE=1` disables
+  automatic launching so an existing session must be available.
+- Forest Easy, unless deliberately selecting another track with `TAS_TEST_LEVEL`.
 
-## 1) Quick Sanity Run (single tier, short)
+## Complete live workflow
+
+Save your run, load it in the deployed UI on Forest Easy, set From to 4500, STOP,
+and disconnect the UI's Pico panel. Then run `just test_live` from the repository
+root. To choose another splice, use `just test_live 2200`.
+
+The required stages are UI F12/LEFT-spam, acceptance, then regression. The UI test
+runs first because subsequent harness tests take ownership, close the UI, and
+replace the active recording. A missing UI, missing splice verdict, or any failing
+stage fails the workflow; later stages are not run. Setup is never silently skipped.
+
+The default UI log is under the `supreme_folder` configured in `justfile`. Override
+it with `just test_live 4500 5 'path/to/tas_ui.log'`. Each invocation produces a
+`live-<timestamp>-<pid>/summary.json`, per-stage `output.log`, and the existing
+acceptance/regression artifacts under `TAS_TEST_OUTPUT` (default: beside tas_test).
+The 4500 captured-data regression continues to run in the ordinary unit suite/CI.
+
+## CONT reliability
+
+Run from `TAS/`:
 
 ```powershell
-Set-Location C:\Users\user\git\cheatengine-mcp-bridge
-$env:NO_CE = '1'
-nu skills/revive-supreme/scripts/revive-supreme.nu
-
-Set-Location C:\Users\user\git\SS-Dat-Info\TAS
 cargo run --release --bin tas_test -- cont-reliability --iterations 1 --splice 2400 --speed 32 --profile taps --tap-ticks 8
 ```
 
-## 2) Full E2E Reliability Sweep (32x / 64x / 100x)
+For repeated coverage, use `--iterations 10`. Test other catch-up speeds with
+`--speed 64` and `--speed 100`.
 
-Run a clean revive before each tier:
+Success requires exit code 0, the `CONT RELIABILITY PASSED` summary, zero measured
+drift, and passing coverage and forward-progress checks. A bucket match alone is
+not proof that the full replayed prefix matches.
 
-```powershell
-$tasRepo = 'C:\Users\user\git\SS-Dat-Info\TAS'
-$bridgeRepo = 'C:\Users\user\git\cheatengine-mcp-bridge'
-$reviveScript = Join-Path $bridgeRepo 'skills/revive-supreme/scripts/revive-supreme.nu'
-$speeds = @(32, 64, 100)
+When testing a UI indicator, exercise the actual UI as well: command-line replay
+checks cannot verify what it renders. Include polls during catch-up and after the
+PLAY-to-REC transition, not just a completed coordinate comparison.
 
-foreach ($speed in $speeds) {
-    Set-Location $bridgeRepo
-    $env:NO_CE = '1'
-    nu $reviveScript
+## UI F12 with LEFT spam
 
-    Set-Location $tasRepo
-    cargo run --release --bin tas_test -- cont-reliability --iterations 10 --splice 2400 --speed $speed --profile taps --tap-ticks 8
-}
-```
-
-Expected pass result per tier:
-
-- `*** CONT RELIABILITY PASSED: 10/10 splice cycles clean ***`
-- `max_drift_x = 0.000000000`
-- `max_drift_z = 0.000000000`
-- `cover = ok` in summary table
-- `fwd = ok` in summary table
-
-## 3) File-Backed CONT Diagnostic (FE-decent compatibility baseline)
-
-This command is compatibility evidence only. Do not treat it as a required release or CI gate while replay-vs-CONT baseline semantics remain split.
+Load a saved Forest Easy run in the deployed UI, set its From tick, then STOP.
+Disconnect the UI's Pico panel so the test can use the verified `TAS_PICO_PORT`
+(default `COM7`). This test uses the running UI and game; it does not restart or
+replace them. Run from the repository root:
 
 ```powershell
-Set-Location C:\Users\user\git\SS-Dat-Info\TAS
-cargo run --release --bin tas_test -- cont-reliability --file recordings/FE-decent.tasrec --splice 2400 --iterations 1 --speed 12
+just test_cont_ui_left_spam 'T:\Games\SupremeORIG\Display_Config_Resources\TAS\data\tas_ui.log' 4500 5
 ```
 
-## 4) Replay-Only Compatibility Diagnostic
+This invokes `tas_test cont-ui-left-spam --log <path> --splice 4500 --iterations 5`.
+It sends F12 through the UI, verifies physical LEFT down/up transitions, checks
+first-attempt resume and an explicit zero splice mismatch, then stops via F11.
+Retries, missing verdicts, focus loss, process exit and nonzero splice differences
+fail the test. Historical `CONT prefix difference` diagnostics alone do not.
 
-This command is also diagnostic-only for FE-decent. Capture the output for comparison, but do not fail a heartbeat solely on this result unless the active issue is specifically about FE-decent compatibility.
-
-```powershell
-Set-Location C:\Users\user\git\SS-Dat-Info\TAS
-cargo run --release --bin tas_test -- replay recordings/FE-decent.tasrec --iterations 1 --verbose
-```
-
-## 5) Compare Z-axis Travel vs FE-decent
-
-Use this one-off script to inspect `rec_coords` from `FE-decent.tasrec`:
-
-```powershell
-@'
-import json, struct, pathlib
-path = pathlib.Path(r"C:/Users/user/git/SS-Dat-Info/TAS/recordings/FE-decent.tasrec")
-d = path.read_bytes()
-meta_len = int.from_bytes(d[:4], "little")
-meta = json.loads(d[4:4+meta_len])
-n = meta["recorded_count"]
-coords_off = 4 + meta_len + n
-zs = []
-off = coords_off
-for _ in range(n):
-    off += 8
-    z = struct.unpack_from("<f", d, off)[0]
-    off += 4
-    zs.append(z)
-def stats(k):
-    z = zs[:k]
-    fwd = back = flat = 0
-    for i in range(1, len(z)):
-        dz = z[i] - z[i-1]
-        if dz > 1e-4: fwd += 1
-        elif dz < -1e-4: back += 1
-        else: flat += 1
-    return {
-        "count": len(z),
-        "start_z": z[0],
-        "end_z": z[-1],
-        "net_z": z[-1]-z[0],
-        "min_z": min(z),
-        "max_z": max(z),
-        "range_z": max(z)-min(z),
-        "steps": {"fwd": fwd, "back": back, "flat": flat},
-    }
-print("full", stats(len(zs)))
-print("prefix_2400", stats(2400))
-'@ | python -
-```
+The 4500 regression capture lives under `TAS/tas_ui/src/tests/data/cont-splice-4500/`.
+Its metadata records that it is a replay tail, starting at recording tick 945.
+`cargo test --release -p tas_ui cont_splice` drives that capture through the
+production scanner/banner, including the PLAY-to-REC transition and a divergent
+endpoint negative control. This runs offline in CI; the LEFT-spam case is live-only.
 
 ## Troubleshooting
 
-- `ERROR: Cave 2 not firing`
-- Hooks are not active. Re-run revive and confirm the game is fully in-run before launching test.
-- `Could not complete CONT splice after 40 retries`
-- Position/anchor matching did not converge. Re-run revive and repeat the tier.
-- Drift not zero
-- Ensure config is at proven settings printed by test (`fft=0`, `inject_mode=6`, `force_direct=2`).
-- `fwd = rev` in summary
-- Prefix did not satisfy forward-progress quality gate (net forward/range/forward-step requirements).
+- **Cave 2 not firing:** confirm the current DLL is injected and the game is in a race.
+- **CONT retries exhausted:** check the track, loaded recording and restart state.
+- **Drift:** keep the failing recording and logs; check the rider and physics-mode
+  stamps before retrying. Do not treat a clean retry as explaining the failure.
+
+See [TAS test coverage and commands](tas-quality-gates.md) for the other test modes
+and artifact locations.

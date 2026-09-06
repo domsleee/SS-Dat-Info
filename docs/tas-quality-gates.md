@@ -1,7 +1,7 @@
 # TAS Quality Gates
 
-The TAS workspace has two test surfaces: hosted CI (Rust unit tests) and a local
-hardware lane (everything else). The full integration suite needs `Supreme.exe`
+The TAS workspace has two test surfaces: hosted CI (Rust tests and native C++
+tests) and local game integration tests. The integration suite needs `Supreme.exe`
 running with hooks injected, and most of it also needs a Pico HID board, so it
 runs on the developer's machine — not in CI.
 
@@ -20,22 +20,10 @@ CI also builds the Win32 native DLL and runs the eight C++ policy suites via
 `TAS/tools/test_dll_hidden.ps1`. No game or Pico is involved. Windows Rust unit
 tests use private unnamed mappings, never the running game's shared memory.
 
-### Review follow-ups requiring live validation
-
-- Only one injected Supreme process is supported. A DLL-owned named handle
-  (`Local\SupremeTAS.Owner`) rejects a second owner before mapping initialization.
-  The handle is released on shutdown/process exit; a UI retaining the old data
-  mapping does not prevent a new game from acquiring ownership. All participating
-  DLLs must include the guard; it cannot protect an already-running older DLL.
-- CONT's 1024-tick gate-relative bucket check is not a full-prefix determinism
-  verdict. Replay the saved run through the intended splice when investigating
-  later drift, including whether edited inputs left obsolete reference positions.
-- The LEFT-spam retry regression and held LEFT+SHIFT restart tests do not prove
-  the reported crash fixed. That requires a separate crash reproduction/capture.
-
 ### Local lane (your machine)
 
-All other modes require a live game and most require a Pico HID. The harness
+Live tests control the game and can replace its recording. Save your run first.
+Use only one injected game and one test controller at a time. The harness
 auto-launches `Supreme.exe` via `revive-supreme` (set `NO_REVIVE=1` to reuse a
 session you already have running).
 
@@ -95,7 +83,5 @@ $env:TAS_TEST_OUTPUT = 'C:\Users\user\git\SS-Dat-Info\TAS\artifacts\latest'
 
 Otherwise artifacts (CSVs, certificates) land next to the binary.
 
-## Cadence
-
-For hardware-backed validation cadence, preconditions, and escalation, see
-[`docs/live-runtime-validation-cadence.md`](live-runtime-validation-cadence.md).
+See the [E2E test guide](e2e-test-guide.md) for CONT reliability commands and
+troubleshooting.

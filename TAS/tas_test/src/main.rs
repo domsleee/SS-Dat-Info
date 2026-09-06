@@ -25,6 +25,7 @@ mod cont_reliability;
 mod cont_restart_race;
 mod cont_splice_frame;
 mod cont_stress;
+mod cont_ui;
 mod countdown_probe;
 mod dialog_e2e;
 mod dialog_speedup;
@@ -43,6 +44,7 @@ mod harness;
 mod hidden_state;
 mod level_hunt;
 mod level_seq;
+mod live_suite;
 mod menu_cap;
 mod patterns;
 mod pause_resume;
@@ -73,6 +75,18 @@ fn main() {
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("help");
 
     match mode {
+        "live" => {
+            if let Err(error) = live_suite::run(&args[2..], output_dir()) {
+                eprintln!("LIVE SUITE FAILED: {error}");
+                std::process::exit(1);
+            }
+        }
+        "cont-ui-left-spam" => {
+            if let Err(error) = cont_ui::run(&args[2..]) {
+                eprintln!("CONT UI LEFT-SPAM FAILED: {error}");
+                std::process::exit(1);
+            }
+        }
         "smoke" => run_smoke_test(),
         "f5" => run_f5_aligned_test(),
         "segment" => run_segment_test(),
@@ -1010,6 +1024,8 @@ fn main() {
             println!("Usage: tas_test <mode>");
             println!();
             println!("Modes:");
+            println!("  live        UI LEFT-spam, acceptance, regression (--log PATH --splice N --iterations N)");
+            println!("  cont-ui-left-spam  Live UI F12 + Pico LEFT taps (--log PATH --splice N --iterations N)");
             println!("  smoke       Basic REC/PLAY without F5 alignment");
             println!("  menu        Print the menu document (current page items, labels, ids) as JSON");
             println!("  menu activate <id|label> / focus <id|label> / up|down|left|right|trigger");
