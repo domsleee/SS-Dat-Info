@@ -6,6 +6,8 @@ replays/**/*Alex*.dat
 replays/**/*Clark*.dat
 
 .DS_Store
+/.mcp.json
+/TAS/pico/boot_out.txt
 
 # TAS automation artifacts and logs
 TAS/artifacts/
