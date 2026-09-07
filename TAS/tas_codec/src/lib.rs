@@ -159,29 +159,52 @@ pub fn encode(
     Ok(data)
 }
 /// Write bytes atomically (temp + fsync + rename): a crash leaves the old
-/// file or the new one, never a half-written recording. `create_new` refuses
-/// to clobber a temp file a crashed previous save left behind.
+/// file or the new one, never a half-written recording.
+///
+/// The temp name is unique per call (process id + counter): a fixed sibling
+/// name lets a second concurrent save delete the first writer's in-flight
+/// file, and an unconditional cleanup deletes a temp this call never
+/// created. Only a temp this call created is ever removed; a leftover from
+/// a crashed previous save is left alone (and never collides).
 pub fn save_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     use std::io::Write;
-    let tmp = path.with_extension("tasrec.tmp");
-    let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(|e| format!("failed to create {}: {}", tmp.display(), e))?;
-        file.write_all(data)
-            .map_err(|e| format!("failed to write {}: {}", tmp.display(), e))?;
-        file.sync_all()
-            .map_err(|e| format!("failed to flush {}: {}", tmp.display(), e))?;
-        drop(file);
-        std::fs::rename(&tmp, path)
-            .map_err(|e| format!("failed to publish recording {}: {}", path.display(), e))
-    })();
-    if result.is_err() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "{}.{}.tmp",
+        std::process::id(),
+        TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    // A create_new failure means the unique temp somehow already exists:
+    // bail WITHOUT deleting — that file belongs to someone else.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| format!("failed to create {}: {}", tmp.display(), e))?;
+    // From here the temp is ours: every failure below removes it, and only it.
+    if let Err(e) = file
+        .write_all(data)
+        .map_err(|e| format!("failed to write {}: {}", tmp.display(), e))
+    {
         let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
-    result
+    if let Err(e) = file
+        .sync_all()
+        .map_err(|e| format!("failed to flush {}: {}", tmp.display(), e))
+    {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    drop(file); // Windows cannot rename an open file.
+    if let Err(e) = std::fs::rename(&tmp, path)
+        .map_err(|e| format!("failed to publish recording {}: {}", path.display(), e))
+    {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -233,6 +256,59 @@ mod tests {
         assert!(!body.has_coords);
         assert_eq!(body.rec_coords, vec![[0.0; 3]; 4]);
         assert_eq!(body.input_log, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn pre_existing_temp_is_neither_used_nor_removed() {
+        let dir = std::env::temp_dir().join(format!(
+            "tas_codec_tmp_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run.tasrec");
+        // A leftover fixed-name temp from before unique naming existed.
+        std::fs::write(path.with_extension("tasrec.tmp"), b"stale").unwrap();
+        let bytes = encode(b"{\"recorded_count\":1}", &[3], &[[0.0; 3]]).unwrap();
+        save_atomic(&path, &bytes).unwrap();
+        // The save went through under its own unique temp, and the stale
+        // file it never created is untouched.
+        assert_eq!(
+            std::fs::read(path.with_extension("tasrec.tmp")).unwrap(),
+            b"stale"
+        );
+        assert_eq!(read_bounded(&path).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn consecutive_saves_do_not_share_temps() {
+        let dir = std::env::temp_dir().join(format!(
+            "tas_codec_twice_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run.tasrec");
+        for byte in [1u8, 2u8] {
+            let bytes = encode(b"{}", &[byte], &[[0.0; 3]]).unwrap();
+            save_atomic(&path, &bytes).unwrap();
+            assert_eq!(read_bounded(&path).unwrap(), bytes);
+        }
+        // No temp files leak next to the destination.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "run.tasrec")
+            .collect();
+        assert!(leftovers.is_empty(), "leaked temps: {:?}", leftovers);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

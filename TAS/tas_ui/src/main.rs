@@ -356,6 +356,7 @@ impl TasApp {
                         session_label.clone(),
                         start,
                         end,
+                        Some(cp_stamps),
                     ) {
                         if let Some(id) = history.entries().last().map(|e| e.entry_id) {
                             // Restore the track the checkpoint was RECORDED on.
@@ -368,7 +369,6 @@ impl TasApp {
                             history.set_level(id, cp_level);
                             history.set_rider(id, cp_rider);
                             history.set_physics(id, cp_physics);
-                            history.set_stamps(id, cp_stamps);
                             history.set_pinned(id, true);
                             // Mark recovery with a compact ⟲ glyph and let the
                             // panel render the duration via the normal parsed
@@ -527,7 +527,11 @@ impl TasApp {
         self.loaded_physics = metadata.physics_label();
         self.loaded_rider = metadata.rider_label();
         self.loaded_identity = Some(recording::IdentityStamps::from_metadata(&metadata));
-        self.history.push_loaded_snapshot(shared.state(), path);
+        self.history.push_loaded_snapshot(
+            shared.state(),
+            path,
+            Some(recording::IdentityStamps::from_metadata(&metadata)),
+        );
         self.apply_transport_action(transport::Action::SetContinueFrame(splice));
         Ok(())
     }
@@ -1483,8 +1487,13 @@ impl TasApp {
             } else {
                 label
             };
-            self.history
-                .push_snapshot_data_with_session(snapshot, label, 0, 0);
+            self.history.push_snapshot_data_with_session(
+                snapshot,
+                label,
+                0,
+                0,
+                self.loaded_identity.clone(),
+            );
         }
     }
 
@@ -1982,7 +1991,7 @@ impl TasApp {
             // Resolve the track BEFORE the dialog: it belongs to the recording,
             // and the engine may be frozen in its own post-run dialog by now.
             let level = self.level_for_save().map(str::to_string);
-            if let Some(ref shared) = self.shared {
+            if let Some(shared) = self.shared.as_ref() {
                 if let Some(path) = recording::save_dialog_with_segments(
                     shared.state(),
                     &self.segment_tracker.segments,
@@ -1990,7 +1999,11 @@ impl TasApp {
                     level.as_deref(),
                     self.loaded_identity.as_ref(),
                 ) {
-                    self.history.push_save_marker(shared.state(), &path);
+                    self.history.push_save_marker(
+                        shared.state(),
+                        &path,
+                        self.loaded_identity.clone(),
+                    );
                 }
             }
         }
@@ -2052,7 +2065,11 @@ impl TasApp {
                 self.loaded_physics = meta.as_ref().and_then(|m| m.physics_label());
                 self.loaded_rider = meta.as_ref().and_then(|m| m.rider_label());
                 self.loaded_identity = meta.as_ref().map(recording::IdentityStamps::from_metadata);
-                let _ = self.history.push_loaded_snapshot(shared.state(), &path);
+                let _ = self.history.push_loaded_snapshot(
+                    shared.state(),
+                    &path,
+                    meta.as_ref().map(recording::IdentityStamps::from_metadata),
+                );
                 if shared.state().recorded_count > 0 {
                     self.queue_restart_then(TasCommand::ArmPlay);
                 }
@@ -2297,7 +2314,7 @@ impl eframe::App for TasApp {
                     if ui.button("Save Recording...  Ctrl+S").clicked() {
                         ui.close_menu();
                         let level = self.level_for_save().map(str::to_string);
-                        if let Some(ref shared) = self.shared {
+                        if let Some(shared) = self.shared.as_ref() {
                             if let Some(path) = recording::save_dialog_with_segments(
                                 shared.state(),
                                 &self.segment_tracker.segments,
@@ -2305,7 +2322,11 @@ impl eframe::App for TasApp {
                                 level.as_deref(),
                                 self.loaded_identity.as_ref(),
                             ) {
-                                self.history.push_save_marker(shared.state(), &path);
+                                self.history.push_save_marker(
+                                    shared.state(),
+                                    &path,
+                                    self.loaded_identity.clone(),
+                                );
                             }
                         }
                     }
@@ -3036,6 +3057,62 @@ fn main() -> eframe::Result {
 mod tests {
     mod cont_splice;
 
+    #[test]
+    fn load_restore_save_and_edit_keep_take_identity() {
+        use tas_shared::{TAS_CHARACTER_KEITH, TAS_CHARACTER_VINCENT};
+        use tas_shared::{TAS_RENDERER_DIRECTX7, TAS_RENDERER_OPENGL};
+
+        let mut app = test_app();
+        // Live game runs Vincent/DirectX7.
+        app.history.set_live_stamps(recording::IdentityStamps {
+            renderer_id: Some(TAS_RENDERER_DIRECTX7),
+            fpu_control_word: Some(0x007F),
+            rider_character: Some(TAS_CHARACTER_VINCENT),
+            rider_stance: Some(0),
+        });
+        // A Keith/OpenGL file is loaded: the buffer and its history entry
+        // carry the file's stamps, not the live game's.
+        let mut file_state = tas_shared::zeroed_boxed();
+        file_state.recorded_count = 4;
+        let keith = recording::IdentityStamps {
+            renderer_id: Some(TAS_RENDERER_OPENGL),
+            fpu_control_word: Some(0x027F),
+            rider_character: Some(TAS_CHARACTER_KEITH),
+            rider_stance: Some(0),
+        };
+        assert!(app.history.push_loaded_snapshot(
+            &file_state,
+            std::path::Path::new("keith.tasrec"),
+            Some(keith.clone()),
+        ));
+        assert_eq!(app.history.entries().last().unwrap().stamps, keith);
+        // Restore the entry as the UI does, then save a copy: the file must
+        // keep saying Keith/OpenGL even though the game runs Vincent/DX7.
+        app.note_restored_physics();
+        assert_eq!(app.loaded_identity, Some(keith.clone()));
+        let path =
+            std::env::temp_dir().join(format!("identity_chain_{}.tasrec", std::process::id()));
+        recording::RecordingFile::save_with_segments(
+            &file_state,
+            &path,
+            &[],
+            app.loaded_identity.as_ref(),
+        )
+        .unwrap();
+        let meta = recording::RecordingFile::read_metadata(&path).unwrap();
+        assert_eq!(meta.renderer.as_deref(), Some("OpenGL"));
+        assert_eq!(meta.character.as_deref(), Some("Keith"));
+        // An edit derived from the loaded take keeps its identity too.
+        assert!(app.history.push_snapshot_data_with_session(
+            recording::RecordingSnapshot::from_state(&file_state),
+            "Edited inputs",
+            0,
+            0,
+            app.loaded_identity.clone(),
+        ));
+        assert_eq!(app.history.entries().last().unwrap().stamps, keith);
+        let _ = std::fs::remove_file(&path);
+    }
     #[test]
     fn checkpoint_survives_missing_or_failed_history() {
         // Durable flush authorizes deletion with no notice.

@@ -1351,18 +1351,22 @@ impl RecordingHistory {
             HistoryEntryKind::Snapshot,
             None,
             None,
+            None,
         )
     }
 
     /// Like `push_snapshot_data` but records the session's `start_tick` /
     /// `end_tick` on the entry so the panel can render "from <tick> ·
-    /// <in-game time>" without parsing the label string.
+    /// <in-game time>" without parsing the label string. `stamps` overrides
+    /// the live identity for takes that were not just recorded (edits of a
+    /// loaded take); `None` stamps the live words (fresh sessions).
     pub fn push_snapshot_data_with_session(
         &mut self,
         snapshot: RecordingSnapshot,
         label: impl Into<String>,
         start_tick: u32,
         end_tick: u32,
+        stamps: Option<IdentityStamps>,
     ) -> bool {
         self.push_snapshot_entry(
             snapshot,
@@ -1370,6 +1374,7 @@ impl RecordingHistory {
             HistoryEntryKind::Snapshot,
             Some((start_tick, end_tick)),
             None,
+            stamps,
         )
     }
 
@@ -1391,10 +1396,19 @@ impl RecordingHistory {
             HistoryEntryKind::Snapshot,
             Some((start_tick, end_tick)),
             finish,
+            None,
         )
     }
 
-    pub fn push_loaded_snapshot(&mut self, state: &TasSharedState, path: &Path) -> bool {
+    /// A loaded file's identity comes from its header, not the live game —
+    /// the caller passes the take's stamps (`None` only when the header had
+    /// none, which stays unknown rather than backfilling live).
+    pub fn push_loaded_snapshot(
+        &mut self,
+        state: &TasSharedState,
+        path: &Path,
+        stamps: Option<IdentityStamps>,
+    ) -> bool {
         let label = format!("Load: {}", short_file_label(path));
         self.push_snapshot_entry(
             RecordingSnapshot::from_state(state),
@@ -1402,16 +1416,28 @@ impl RecordingHistory {
             HistoryEntryKind::LoadSnapshot,
             None,
             None,
+            stamps,
         )
     }
 
     /// Record a save marker without changing the current restored state.
-    pub fn push_save_marker(&mut self, state: &TasSharedState, path: &Path) {
-        if self.current_index.is_none() && state.recorded_count > 0 {
-            let _ = self.push_snapshot(state, "Current recording");
-        }
-        if self.entries.is_empty() {
-            return;
+    /// `stamps` carries the saved take's identity into the auto-pushed
+    /// "Current recording" entry when the buffer holds a loaded take;
+    /// `None` keeps the live stamps (a genuinely new recording).
+    pub fn push_save_marker(
+        &mut self,
+        state: &TasSharedState,
+        path: &Path,
+        stamps: Option<IdentityStamps>,
+    ) {
+        let pushed = self.current_index.is_none()
+            && state.recorded_count > 0
+            && self.push_snapshot(state, "Current recording");
+        if let Some((id, stamps)) = pushed
+            .then(|| self.current_entry_id().zip(stamps))
+            .flatten()
+        {
+            self.set_stamps(id, stamps);
         }
         let label = format!("Save: {}", short_file_label(path));
         let mut marker = HistoryEntry::marker(label, HistoryEntryKind::SaveMarker);
@@ -1832,6 +1858,7 @@ impl RecordingHistory {
         kind: HistoryEntryKind,
         session: Option<(u32, u32)>,
         finish: Option<FinishStamp>,
+        stamps: Option<IdentityStamps>,
     ) -> bool {
         if snapshot.recorded_count == 0 {
             return false;
@@ -1842,7 +1869,9 @@ impl RecordingHistory {
         entry.level = self.live_level.clone();
         entry.physics = self.live_physics.clone();
         entry.rider = self.live_rider.clone();
-        entry.stamps = self.live_stamps.clone().unwrap_or_default();
+        entry.stamps = stamps
+            .or_else(|| self.live_stamps.clone())
+            .unwrap_or_default();
         entry.finish_time_cs = finish.map(|f| f.cs);
         entry.finish_time_exact = finish.is_some_and(|f| f.exact);
         if let Some((start_tick, end_tick)) = session {
@@ -2214,7 +2243,7 @@ mod tests {
         assert!(history.push_snapshot(&b, "B"));
         let before = history.current_index();
 
-        history.push_save_marker(&b, Path::new("C:\\temp\\run.tasrec"));
+        history.push_save_marker(&b, Path::new("C:\\temp\\run.tasrec"), None);
         assert_eq!(history.len(), 3);
         assert_eq!(history.current_index(), before);
         assert_eq!(history.entries()[2].kind, HistoryEntryKind::SaveMarker);
@@ -2227,7 +2256,7 @@ mod tests {
         let a = one_tick_state(0x01);
         let loaded = one_tick_state(0x20);
         assert!(history.push_snapshot(&a, "A"));
-        assert!(history.push_loaded_snapshot(&loaded, Path::new("C:\\temp\\loaded.tasrec")));
+        assert!(history.push_loaded_snapshot(&loaded, Path::new("C:\\temp\\loaded.tasrec"), None));
         let current = history.current_index().unwrap();
         assert_eq!(
             history.entries()[current].kind,
@@ -2244,7 +2273,7 @@ mod tests {
         let b = one_tick_state(0x02);
         assert!(history.push_snapshot(&a, "A"));
         assert!(history.push_snapshot(&b, "B"));
-        history.push_save_marker(&b, Path::new("run.tasrec"));
+        history.push_save_marker(&b, Path::new("run.tasrec"), None);
 
         // Save marker cannot be restored directly.
         assert!(history.restore_index(2).is_none());
@@ -2724,7 +2753,8 @@ mod tests {
             RecordingSnapshot::from_state(&state),
             "take 3".to_string(),
             0,
-            4
+            4,
+            None
         ));
         let stored = history.to_stored_entries();
         assert!(stored[2].snapshot.is_some(), "new take travels with bytes");
@@ -2823,7 +2853,8 @@ mod tests {
             RecordingSnapshot::from_state(&state),
             "take".to_string(),
             0,
-            3
+            3,
+            None
         ));
         assert_eq!(
             history.entries()[0].rider.as_deref(),
@@ -2964,7 +2995,8 @@ mod tests {
             RecordingSnapshot::from_state(&state),
             "Recorded 0:00.03".to_string(),
             0,
-            3
+            3,
+            None
         ));
         assert_eq!(history.entries()[0].finish_time_cs, Some(5334));
         assert!(history.entries()[0].finish_time_exact);
@@ -3009,7 +3041,8 @@ mod tests {
             RecordingSnapshot::from_state(&state),
             "take".to_string(),
             0,
-            3
+            3,
+            None
         ));
         assert_eq!(
             history.entries()[0].physics.as_deref(),
@@ -3644,7 +3677,7 @@ mod tests {
         let mut h = RecordingHistory::new(16);
         h.push_snapshot(&state_with_ticks(5), "A");
         h.push_snapshot(&state_with_ticks(7), "B");
-        h.push_save_marker(&state_with_ticks(7), Path::new("run.tasrec"));
+        h.push_save_marker(&state_with_ticks(7), Path::new("run.tasrec"), None);
         let b_id = h.entries()[1].entry_id;
         h.set_pinned(b_id, true);
         h.rename(b_id, "B renamed");
@@ -3791,6 +3824,7 @@ mod tests {
             cp.session.label.clone(),
             cp.session.start_tick,
             cp.session.end_tick,
+            None,
         ));
         let id = history.entries().last().unwrap().entry_id;
         // Mirror startup: restore every stamp the checkpoint carries.
@@ -3892,7 +3926,7 @@ mod tests {
         let mut h = RecordingHistory::new(8);
         h.push_snapshot(&state_with_ticks(5), "A");
         let r = h.revision();
-        h.push_save_marker(&state_with_ticks(5), Path::new("x.tasrec"));
+        h.push_save_marker(&state_with_ticks(5), Path::new("x.tasrec"), None);
         assert!(h.revision() > r, "save marker must bump revision");
     }
 
@@ -3994,7 +4028,7 @@ mod tests {
         assert_eq!(history.current_index(), Some(1));
 
         // Save marker should not change current_index
-        history.push_save_marker(&s2, Path::new("test.tasrec"));
+        history.push_save_marker(&s2, Path::new("test.tasrec"), None);
         assert_eq!(history.current_index(), Some(1)); // still on B
         assert_eq!(history.len(), 4); // A, B, SaveMarker, C
         assert_eq!(history.entries()[2].kind, HistoryEntryKind::SaveMarker);
@@ -4066,7 +4100,7 @@ mod tests {
         assert!(history.push_snapshot(&s20, "Recorded 0:00.20"));
 
         // Step 3: Save
-        history.push_save_marker(&s20, Path::new("run.tasrec"));
+        history.push_save_marker(&s20, Path::new("run.tasrec"), None);
 
         // Step 4: Undo to 10 ticks
         let snap = history.undo().unwrap();
@@ -4076,7 +4110,7 @@ mod tests {
         assert!(history.push_snapshot(&s15, "Continued from 0:00.10, total 0:00.15"));
 
         // Step 6: Load a file
-        assert!(history.push_loaded_snapshot(&s_loaded, Path::new("other.tasrec")));
+        assert!(history.push_loaded_snapshot(&s_loaded, Path::new("other.tasrec"), None));
 
         // Trace: [s10, s20] → save marker at idx 2 → [s10, s20, SaveMarker]
         // undo → current=0 → push s15 → [s10, s20, SaveMarker, s15] current=3
@@ -4138,7 +4172,7 @@ mod tests {
         let s_loaded = state_with_ticks(50);
 
         assert!(history.push_snapshot(&s1, "Recording"));
-        assert!(history.push_loaded_snapshot(&s_loaded, Path::new("loaded.tasrec")));
+        assert!(history.push_loaded_snapshot(&s_loaded, Path::new("loaded.tasrec"), None));
 
         // Should be able to undo back to the recording
         assert!(history.undo_depth() > 0);
