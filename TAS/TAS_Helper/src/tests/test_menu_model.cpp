@@ -4,15 +4,10 @@
 // on - the document's shape, escaping, and which item "activate X" picks - is
 // decided here and pinned here.
 #include "../menu_model.hpp"
+#include "check.hpp"
 #include <cstdio>
 #include <cstring>
-
-static int g_fail = 0;
-
-static void check(bool cond, const char* name) {
-    std::printf("  %-4s %s\n", cond ? "ok" : "FAIL", name);
-    if (!cond) g_fail++;
-}
+#include <string>
 
 static void Put(menumodel::MenuSnapshot& s, const char* id, const char* label, bool enabled = true) {
     if (s.count >= menumodel::kMaxItems) return;
@@ -22,6 +17,13 @@ static void Put(menumodel::MenuSnapshot& s, const char* id, const char* label, b
     it.enabled = enabled ? 1 : 0;
     it.visible = 1;
     it.comp = 0x1000 * s.count;
+}
+
+// The DLL writes into shm's fixed buffer; the tests read the same bytes back.
+static std::string Doc(const menumodel::MenuSnapshot& s, const char* screen) {
+    char buf[4096];
+    menumodel::BuildDoc(s, screen, buf, sizeof buf);
+    return buf;
 }
 
 static bool Has(const std::string& doc, const char* needle) { return doc.find(needle) != std::string::npos; }
@@ -42,7 +44,7 @@ int main() {
     s.items[1].focused = 1;
 
     // --- The document. ---
-    const std::string d = BuildDoc(s, "ID_ARCADE_MENU");
+    const std::string d = Doc(s, "ID_ARCADE_MENU");
     check(d.rfind("{\"screen\":\"ID_ARCADE_MENU\",\"sel\":1,\"items\":[", 0) == 0,
           "document opens with the screen and the selector");
     check(Has(d, "{\"label\":\"Time Attack\",\"id\":\"ID_ARCADE_TIME_ATTACK_SEQUENCE\",\"en\":true,\"vis\":true}"),
@@ -55,14 +57,21 @@ int main() {
     check(Has(d, "},{"), "items are comma-separated");
 
     MenuSnapshot none;
-    check(BuildDoc(none, "ID_X") == "{\"screen\":\"ID_X\",\"sel\":null,\"items\":[]}",
+    check(Doc(none, "ID_X") == "{\"screen\":\"ID_X\",\"sel\":null,\"items\":[]}",
           "nothing focused = sel null, no items");
-    check(BuildDoc(s, "") == "", "no screen = no document");
-    check(BuildDoc(s, nullptr) == "", "null screen = no document");
+    check(Doc(s, "") == "", "no screen = no document");
+    check(Doc(s, nullptr) == "", "null screen = no document");
 
     MenuSnapshot q;
     Put(q, "ID_A", "Say \"hi\" \\ bye");
-    check(Has(BuildDoc(q, "ID_S"), "\"label\":\"Say \\\"hi\\\" \\\\ bye\""), "quotes and backslashes are escaped");
+    check(Has(Doc(q, "ID_S"), "\"label\":\"Say \\\"hi\\\" \\\\ bye\""), "quotes and backslashes are escaped");
+
+    char exact[64];
+    const uint32_t n = BuildDoc(none, "ID_X", exact, sizeof exact);
+    check(n == std::strlen(exact) && n == 39, "BuildDoc returns the length it wrote");
+    char tiny[16];
+    check(BuildDoc(s, "ID_ARCADE_MENU", tiny, sizeof tiny) == 0 && tiny[0] == 0,
+          "a document that does not fit is empty, never cut off");
 
     // --- Target matching: what "activate X" picks. ---
     check(FindTarget(s, "ID_ARCADE_RACE_SEQUENCE") == 1, "by id");
@@ -83,10 +92,5 @@ int main() {
     Put(t, "Race", "Something else");   // an id that reads like a label
     check(FindTarget(t, "Race") == 1, "an exact id match beats a label match");
 
-    if (g_fail == 0) {
-        std::printf("ALL PASS\n");
-        return 0;
-    }
-    std::printf("%d FAILED\n", g_fail);
-    return 1;
+    return FinishTests();
 }

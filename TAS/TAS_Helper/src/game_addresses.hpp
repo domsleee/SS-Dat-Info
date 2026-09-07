@@ -2,8 +2,8 @@
 #include "stdafx.h"
 #include "log.hpp"
 
-// Game module bases and resolved addresses.
-// All offsets from reverse engineering documented in tasks/tas.md.
+// Game module bases and resolved addresses. Every offset is a fixed RVA of the
+// stock v1.035 images; ValidateModule / ValidateCode* in Resolve are the pin.
 
 // Housemarque Kernel::Time — a 64-bit timestamp ({lo, hi} dwords; ~QPC-derived
 // machine-uptime units). The input pipeline stamps every key event with the
@@ -152,29 +152,20 @@ struct GameAddresses {
     std::uint8_t* cave1c_up = nullptr;      // HMG+0x3980: key handler (up)
     std::uint8_t* bb3b10 = nullptr;         // HMG+0x3B10: BB3B10 observer
 
-    // Game key codes (DI buffer indices)
-    static constexpr uint8_t KEY_UP    = 0x38;
-    static constexpr uint8_t KEY_DOWN  = 0x39;
-    static constexpr uint8_t KEY_LEFT  = 0x3A;
-    static constexpr uint8_t KEY_RIGHT = 0x3B;
-    static constexpr uint8_t KEY_JUMP  = 0x27;  // LCTRL
-    static constexpr uint8_t KEY_JUMP2 = 0x28;  // CTRL (duplicate)
-    static constexpr uint8_t KEY_SHIFT = 0x24;  // SHIFT
-    static constexpr uint8_t KEY_SHIFT2 = 0x25; // LSHIFT (duplicate)
-    static constexpr uint8_t KEY_F5 = 0x58;     // F5 (restart race)
-
-    // BB3B10 keyIndex values (game key codes for observer notification)
-    static constexpr uint32_t BB3B10_LEFT  = 0x3A;
-    static constexpr uint32_t BB3B10_RIGHT = 0x3B;
-    static constexpr uint32_t BB3B10_UP    = 0x38;
-    static constexpr uint32_t BB3B10_DOWN  = 0x39;
-    static constexpr uint32_t BB3B10_JUMP  = 0x27;
-    static constexpr uint32_t BB3B10_SHIFT = 0x24;
-    static constexpr uint32_t BB3B10_F5    = 0x58;
-    // ESC's game Key_Code (live-captured via RDIAG: VK 0x1B → ki 0x48). The
-    // pause menu listens for it through the BB3B10 observer broadcast, so the
-    // REC-mode observer block must exempt it (ESC-during-REC fix).
-    static constexpr uint32_t BB3B10_ESC   = 0x48;
+    // Game key codes: the DI-buffer index and the keyIndex BB3B10 broadcasts
+    // to the observers are the same value.
+    static constexpr uint32_t KEY_UP     = 0x38;
+    static constexpr uint32_t KEY_DOWN   = 0x39;
+    static constexpr uint32_t KEY_LEFT   = 0x3A;
+    static constexpr uint32_t KEY_RIGHT  = 0x3B;
+    static constexpr uint32_t KEY_JUMP   = 0x27;  // LCTRL
+    static constexpr uint32_t KEY_JUMP2  = 0x28;  // CTRL (duplicate)
+    static constexpr uint32_t KEY_SHIFT  = 0x24;  // SHIFT
+    static constexpr uint32_t KEY_SHIFT2 = 0x25;  // LSHIFT (duplicate)
+    static constexpr uint32_t KEY_F5     = 0x58;  // restart race
+    // ESC (VK 0x1B). The pause menu listens for it through the BB3B10 observer
+    // broadcast, so the REC-mode observer block must exempt it.
+    static constexpr uint32_t KEY_ESC    = 0x48;
 
     // Pointer chain: root = [SG+1D5450], kbobj = [root+530], buffer = [kbobj+30]
     static constexpr uint32_t ROOT_PTR_OFFSET = 0x1D5450;
@@ -192,20 +183,16 @@ struct GameAddresses {
 
     // Replay object: player ptr at [replayObj+0x84]
     static constexpr uint32_t REPLAY_PLAYER_OFFSET = 0x84;
-    // Human-player identity (RTTI + live scan, 2026-09-02): the rider the
-    // keyboard drives in a race is a plain `Player` (the base class, vtable
-    // below); Time Attack ghosts / the guide are `Ghost_Player`, computer riders
-    // `AI_Player`, network riders `Net_Player` - each with its own vtable. The
-    // player links back to its recorder at +0x14C (decompile param_1[0x53]);
-    // the replay-capture hook adopts a recorder only if its owner is a Player
-    // that still points at it (see replay_identity.hpp). Both vtable RVAs are
-    // validated against the constructors' `mov [this], offset vtable`
-    // immediates in Resolve.
-    // (A first attempt keyed on [[player+0x1B8]+0x590] == keyboard object; that
-    // was heap adjacency - +0x1B8 is the player's Player_Event_Interface - and
-    // never matched in a fresh process.)
+    // Human-player identity (RTTI): the rider the keyboard drives in a race is
+    // a plain `Player` (the base class, vtable below); Time Attack ghosts / the
+    // guide are `Ghost_Player`, computer riders `AI_Player`, network riders
+    // `Net_Player` - each with its own vtable. The player links back to its
+    // recorder at +0x14C (decompile param_1[0x53]); the replay-capture hook
+    // adopts a recorder only if its owner is a Player that still points at it
+    // (see replay_identity.hpp). Both vtable RVAs are validated against the
+    // constructors' `mov [this], offset vtable` immediates in Resolve.
     static constexpr uint32_t PLAYER_RECORDER_OFFSET = 0x14C;
-    // Rider identity (live object-graph dump, 2026-09-02). The Player's
+    // Rider identity (live object-graph dump). The Player's
     // loadout object ([player+0x20], no RTTI) holds MSVC6 std::strings
     // ({allocator, char* ptr, size, capacity} = 16 bytes each): the character
     // folder at +0x10 ("vincent"), the character config path at +0x30
@@ -233,13 +220,10 @@ struct GameAddresses {
     static constexpr uint32_t PLAYER_PHYSICS = 0x110; // Pointer to physics sub-object
     static constexpr uint32_t PHYSICS_ROT = 0x1B4;   // 3x3 rotation matrix in physics sub-object (9 floats, row-major)
 
-    // BB3B10 calling convention constant.
-    // 2026-06: live capture of the REAL key handler's BB3B10 call (cave1d
-    // diagnostic, holding a real steering key in OFF) showed arg4=0x96 for
-    // every steering key — not 0x588. The 0x588 (set in d04104f) made cave2's
-    // injected BB3B10 call a no-op for steering, which is why record AND
-    // playback steered dead. The real this(kbobj+0x18) and keyIndex(0x3A/0x3B)
-    // were already correct.
+    // Fallback Time.hi for injected BB3B10 calls when Kernel::Time::Current is
+    // unavailable: what the real key handler passes for a steering key (live
+    // capture). A stale stamp is discarded by the observer, which turns the
+    // injected call into a silent no-op.
     static constexpr uint32_t BB3B10_ARG4 = 0x96;
     // BB3B10 this pointer offset from keyboard object
     static constexpr uint32_t BB3B10_THIS_OFFSET = 0x18;

@@ -3,18 +3,8 @@
 //   just test_dll      (from repo root)
 
 #include "../rider_identity_parse.hpp"
+#include "check.hpp"
 #include <cstdio>
-
-static int g_failures = 0;
-
-static void check(bool cond, const char* name) {
-    if (cond) {
-        std::printf("  ok   %s\n", name);
-    } else {
-        std::printf("  FAIL %s\n", name);
-        g_failures++;
-    }
-}
 
 int main() {
     std::printf("rider_identity tests:\n");
@@ -60,10 +50,5 @@ int main() {
     check(!IsPrintableAscii("\xC3\xA9", 2), "non-ASCII rejected");
     check(!IsPrintableAscii("", 0), "empty rejected");
 
-    if (g_failures == 0) {
-        std::printf("ALL PASS\n");
-        return 0;
-    }
-    std::printf("%d FAILED\n", g_failures);
-    return 1;
+    return FinishTests();
 }

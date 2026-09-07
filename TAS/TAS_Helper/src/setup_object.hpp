@@ -18,13 +18,9 @@
 //   +0x1B0 controller  ("Keyboard" / "Mouse" / "Joystick")
 // It reads "Village"/"Hard" for Village Hard where the shared path asset reads
 // ".../village/Tracks/easy", so it also settles the one level pair the path
-// string cannot.
-//
-// The earlier Main_Menu+0x6B9A4 anchor was a category error: it correctly
-// points to Threedee_Engine::Engine, but these fields are not in that class.
-// They lined up only through accidental heap adjacency on one launch. The EXE
-// global above directly owns the config pointer; the pure reader and its unit
-// tests validate the complete chain and field layout used here.
+// string cannot. The EXE global owns the config pointer directly (no anchor
+// into another module's object graph); setup_config_parse.hpp and its unit
+// tests validate the chain and field layout used here.
 namespace gamesetup {
 
 using Setup = setupconfig::Values;
@@ -45,9 +41,9 @@ static bool SafeCopy(uint32_t src, void* dst, uint32_t n) {
 // second, structural proof this is the right object. The stance is UNKNOWN on
 // a faulted read, never 0 = "regular".
 //
-// Logs every resolved <-> unresolved transition: if this anchor ever rots the
-// way the two before it did, the log says so on the first race instead of the
-// level id and the rider stance going quietly blank.
+// Logs every resolved <-> unresolved transition, so a broken chain shows in
+// the log on the first race instead of the level id and the rider stance
+// going quietly blank.
 inline bool Read(Setup* out) {
     const HMODULE exe = GetModuleHandleA(nullptr);
     auto reader = [](uint32_t address, void* destination, uint32_t size) {

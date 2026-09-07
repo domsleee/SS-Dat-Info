@@ -4,7 +4,7 @@
 #include "../shared_state.hpp"
 #include "../gate_alignment.hpp"
 #include "../game_addresses.hpp"
-#include "../external/safetyhook.hpp"
+#include <safetyhook.hpp>
 
 // Cave 5: Fixed tick override with variable speed via time-advance scaling.
 // Hook at Supreme.exe+25C81 (after __ftol call and mov esi, eax).

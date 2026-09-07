@@ -1,6 +1,4 @@
 #pragma once
-#include <filesystem>
-#include <iostream>
 #include "stdafx.h"
 
 static std::string GetTasLogPath() {

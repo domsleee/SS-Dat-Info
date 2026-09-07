@@ -35,15 +35,12 @@ inline bool EqualsIgnoreCase(const char* a, const char* b) {
     }
 }
 
-// The character id for a display name ("Vincent") or data folder
-// ("vincent"). Names outside the table (mods, custom riders) map to OTHER,
-// never to UNKNOWN - UNKNOWN means "not resolved yet".
 // Is an MSVC6 std::string header {allocator, ptr, size, capacity} usable for a
-// copy into a `cap`-byte C buffer? Codex review 2026-09-03: the previous
-// `len + 1 > cap` guard WRAPS when a dangling string reports len 0xFFFFFFFF,
-// letting a ~4 GB memcpy loose on a 32-byte stack buffer before SEH can fire.
-// Every bound is checked without arithmetic on `len`; the game's own
-// capacity must not be smaller than its size either.
+// copy into a `cap`-byte C buffer? Every bound is checked without arithmetic
+// on `len`: a dangling string reports len 0xFFFFFFFF, and a `len + 1 > cap`
+// guard wraps and lets a ~4 GB memcpy loose on a 32-byte stack buffer before
+// SEH can fire. The game's own capacity must not be smaller than its size
+// either.
 inline bool StringHeaderUsable(uint32_t ptr, uint32_t len, uint32_t capacity, uint32_t cap) {
     if (ptr < 0x10000 || cap == 0) return false;
     if (len == 0 || len >= cap) return false;
@@ -51,6 +48,9 @@ inline bool StringHeaderUsable(uint32_t ptr, uint32_t len, uint32_t capacity, ui
     return true;
 }
 
+// The character id for a display name ("Vincent") or data folder
+// ("vincent"). Names outside the table (mods, custom riders) map to OTHER,
+// never to UNKNOWN - UNKNOWN means "not resolved yet".
 inline uint32_t CharacterFromName(const char* name) {
     if (!name || !*name) return CHARACTER_UNKNOWN;
     static const struct { const char* name; uint32_t id; } kTable[] = {

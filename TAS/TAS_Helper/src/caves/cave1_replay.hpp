@@ -5,7 +5,7 @@
 #include "../game_addresses.hpp"
 #include "../replay_capture_policy.hpp"
 #include "../replay_identity.hpp"
-#include "../external/safetyhook.hpp"
+#include <safetyhook.hpp>
 
 // Replay object capture hook at SG+0x9E8F0.
 // Original instruction: sub esp, 00000080 (6 bytes).
@@ -115,8 +115,7 @@ bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
                 s->replay_ptr = newPtr;
             }
             // Ring-log adoptions and rejections (rate-limited) with the owner
-            // and its class: this is how the ghost/AI behaviour around
-            // restarts was established, keep it visible.
+            // and its class.
             if ((adopted || g_capture.rejected != rejectedBefore) && ++s_logged <= 60) {
                 char msg[128];
                 char* p = ReplayPut(msg, "replay-capture ecx=");

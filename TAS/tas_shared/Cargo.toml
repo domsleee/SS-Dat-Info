@@ -2,6 +2,6 @@
 name = "tas_shared"
 version = "0.1.0"
 edition = "2021"
-description = "Shared types for TAS DLL <-> UI IPC (TasSharedState repr)"
+description = "TAS_Helper.dll shared-memory protocol (TasSharedState, seqlocked readers, Win32 client) plus the CONT bucket judge and transport controller that tas_ui and tas_test share"
 
 [dependencies]

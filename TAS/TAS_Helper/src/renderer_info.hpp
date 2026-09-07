@@ -52,16 +52,6 @@ inline const char* Name(uint32_t id) {
     }
 }
 
-// Precision-control field (bits 8-9) of an x87 control word.
-inline uint32_t PrecisionBits(uint32_t cw) {
-    switch ((cw >> 8) & 3) {
-        case 0: return 24;
-        case 2: return 53;
-        case 3: return 64;
-        default: return 0;
-    }
-}
-
 // Publish renderer_id; log whenever the renderer or the game thread's control
 // word changes. Called from the level-scan worker (~10 Hz), never from a hook.
 inline void Refresh(TasSharedState* s) {
@@ -74,8 +64,9 @@ inline void Refresh(TasSharedState* s) {
     if (id == lastRenderer && cw == lastCw) return;
     lastRenderer = id;
     lastCw = cw;
+    const uint32_t pc = (cw >> 8) & 3;   // precision-control field: 0 = 24-bit, 2 = 53, 3 = 64
     Log(std::format("Renderer: {} (srDD id {}), game-thread x87 control word 0x{:04X} = {}-bit precision",
-                    Name(id), id, cw, PrecisionBits(cw)));
+                    Name(id), id, cw, pc == 0 ? 24 : pc == 2 ? 53 : pc == 3 ? 64 : 0));
 }
 
 } // namespace renderer

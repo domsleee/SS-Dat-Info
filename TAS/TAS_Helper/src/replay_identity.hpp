@@ -16,15 +16,8 @@
 // So a recorder is the human's iff its owner's vtable is Player's AND the
 // owner's recorder slot still points at it. The second half rejects a dead
 // recorder whose owner has since been rebuilt (ghost restarts re-create the
-// player set) and any pusher with a garbage owner.
-//
-// History: the first identity test ([[player+0x1B8]+0x590] == keyboard object,
-// 2026-09-02 morning) was a heap-adjacency artifact - +0x1B8 is the player's
-// Player_Event_Interface (a Basic_Event in Time Attack) and the keyboard
-// pointer sat 0x590 past a neighbouring allocation. It never matched in a
-// fresh process, so the DLL adopted nothing and recorded all-zero coordinates
-// (which a zero-vs-zero judge then "accepted"). A class check has no offset
-// to get wrong, and both vtables are validated at Resolve.
+// player set) and any pusher with a garbage owner. A class check has no
+// offset to get wrong, and both vtables are validated at Resolve.
 struct ReplayIdentityEnv {
     uint32_t player_vtable = 0;  // live address of the Player vtable (SG + RVA)
     uint32_t ghost_vtable = 0;   // live address of the Ghost_Player vtable (diagnostic only)

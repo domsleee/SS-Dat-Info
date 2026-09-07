@@ -6,9 +6,7 @@
 #include <windows.h>
 #include <intrin.h>
 #include <fstream>
-#include <iostream>
 #include <inttypes.h>
-#include <filesystem>
 #include <string>
 #include <format>
 #include <atomic>

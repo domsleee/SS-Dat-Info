@@ -3,17 +3,11 @@
 
 #include "../setup_config_parse.hpp"
 #include "../level_path_parse.hpp"
+#include "check.hpp"
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <unordered_map>
-
-static int g_failures = 0;
-
-static void check(bool condition, const char* name) {
-    std::printf("  %-4s %s\n", condition ? "ok" : "FAIL", name);
-    if (!condition) g_failures++;
-}
 
 struct Memory {
     std::unordered_map<uint32_t, unsigned char> bytes;
@@ -151,10 +145,5 @@ int main() {
               "EXE base plus global RVA overflow is rejected");
     }
 
-    if (g_failures == 0) {
-        std::printf("ALL PASS\n");
-        return 0;
-    }
-    std::printf("%d FAILED\n", g_failures);
-    return 1;
+    return FinishTests();
 }

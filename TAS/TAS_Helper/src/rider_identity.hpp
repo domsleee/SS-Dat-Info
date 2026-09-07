@@ -15,7 +15,7 @@
 // replay's stamp differs from the live one - the same shape as the renderer /
 // x87-precision stamp. (The board does not affect the physics.)
 //
-// Sources (NO heap scan since 2026-09-03):
+// Sources (no heap scan):
 //   character - the human Player's Player_Config name ([player+0x48] ->
 //               std::string at +0x48, "Vincent"; the loadout folder at
 //               [[player+0x20]+0x10] as the fallback).
@@ -93,9 +93,9 @@ inline void Refresh(TasSharedState* s) {
     }
 
     // The pair is published under rider_seq so a reader never pairs a new
-    // character with the previous stance (codex review 2026-09-03: a REC armed
-    // in that window would stamp the mixed identity into the file). Bumped only
-    // when the value changes, so steady state costs readers nothing.
+    // character with the previous stance (a REC armed in that window would
+    // stamp the mixed identity into the file). Bumped only when the value
+    // changes, so steady state costs readers nothing.
     static bool s_seqChecked = false;
     if (!s_seqChecked) {
         s_seqChecked = true;

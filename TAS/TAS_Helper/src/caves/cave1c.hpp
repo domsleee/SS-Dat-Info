@@ -4,7 +4,7 @@
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
 #include "../input_gate.hpp"
-#include "../external/safetyhook.hpp"
+#include <safetyhook.hpp>
 
 // Cave 1C: Handler gate hooks at HMG+3940 (keyDown) and HMG+3980 (keyUp).
 //

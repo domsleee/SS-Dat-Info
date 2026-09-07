@@ -1,44 +1,54 @@
 # TAS development
 
 `TAS_Helper` is the injected native DLL, `tas_shared` defines its shared-memory
-protocol, `tas_ui` is the desktop UI, and `tas_test` is the live game harness.
+protocol, `tas_ui` (SSB Inspect) is the desktop UI, and `tas_test` is the live
+game harness. The hooking library shared with `Display_Config_Helper` lives in
+`third_party/safetyhook/` (safetyhook with its Zydis amalgamation).
 
-## Tests
+## Quick start
 
 From the repository root:
 
 ```
-just test             # Rust unit and captured-fixture regressions
-just test_tools       # Offline Python helpers; standard library only
-just test_dll         # Native C++ policy tests
-just test_live        # Real game: CONT UI regression, acceptance, regression
+just deploy_run       # build DLL, tas_ui, tas_test and the injector; deploy; relaunch the game
+just test             # Rust unit and captured-fixture regressions (the CI surface)
+just test_tools       # offline Python helper tests
+just test_dll         # native C++ policy tests
+just test_live        # real game: UI LEFT-spam, acceptance, regression
 ```
 
-Live tests control the game and replace recordings. Save your run first and
-follow the [E2E guide](../docs/e2e-test-guide.md) for deployment, Pico and UI setup.
-The [quality gates](../docs/tas-quality-gates.md) describe each test's contract.
-Replay equality alone cannot prove correct recording startup or playback speed;
-those need the separate `rec-start`, `play-pace` and `catchup-speed` checks.
+`just deploy_run` is the one deploy flow. It stops the game and every TAS
+process, copies `TAS_Helper.dll`, `tas_ui.exe`, `tas_test.exe` and
+`Injector.exe` into the game folder and relaunches the game with a fresh UI.
+The game folder is the `supreme_folder` variable at the top of the root
+`justfile` (`just --set supreme_folder D:\Games\Supreme deploy_run` overrides
+it), exported to the harness as `SUPREME_FOLDER`. Live tests control the game
+and replace its recording, so save your run first. The full test contract,
+every `tas_test` mode, the environment variables, artifacts and
+troubleshooting are in [TAS quality gates](../docs/tas-quality-gates.md).
 
-The `tas_ui/src/tests/data/cont-splice-4500` fixture supports the ordinary Rust
-test `captured_ui_break_at_4500_exercises_production_banner`:
+`TAS/Cargo.lock` is committed on purpose: the binaries ship, so every build
+resolves the same dependency versions.
 
-- `recording.tasrec` is the saved FE recording.
-- `play-tail.bin` is 4,500 captured playback XYZ samples (54 KB), not a duplicate
-  recording. Its coverage starts at recording tick 945. Intermediate differences
-  reproduce the false banner while the actual splice endpoint matches.
-- `capture.json` records the binary layouts, alignment and capture provenance.
+## Recordings
 
-This fixture checks the production UI drift functions offline; it does not
-replace the live `cont-ui-left-spam` stage or certify a full zero-drift replay.
-`just test_cont_ui_left_spam` prepares the real UI automatically with the original
-"UI break at 4500" history capture (entry 2431, 5032 ticks)
-at tick 4500, sends F12 and physical Pico LEFT taps, and checks five splices.
-The raw history blob receives a normal recording-file metadata envelope in the
-artifact directory; its input and XYZ payload is copied byte-for-byte.
-It keeps history, settings and logs in an isolated artifact directory and closes
-its child UI afterwards. Save your active run first; no manual fixture loading
-or Pico-panel setup is required. This is also the first stage of `just test_live`.
+`recordings/*.tasrec` are the recordings the live modes replay and splice.
+`FE-tremendous.tasrec` (4,696 ticks) is the default `cont-reliability`
+baseline and drives `fe-cont-reliability`, `stop-play-flake`,
+`catchup-speed`, `play-pace` and `cont-restart-race`; `FE-10065.tasrec`
+(7,162 ticks, 221 segments) drives `fe10065-cont`, `gate-align`,
+`play-judge` and `cont-hijack`; `FE-decent-done.tasrec` (8,149 ticks, crosses
+the finish line) drives `dialog-e2e`. A `.tasrec` is a little-endian `u32`
+header length, a JSON header, then the per-tick input bytes and XYZ
+coordinates. Headers written by the current `tas_ui` carry `renderer`,
+`fpu_control_word`, `character` and `stance`, the stamps the UI compares with
+the live game because DirectX (24-bit) and OpenGL (53-bit) precision,
+character and stance each change the physics. The three committed files were
+saved before those stamps existed (header versions 5 and 6), so their renderer
+and rider are unknown; the loaders ignore header fields they do not know.
+When a physics change moves a trajectory, `tas_test refresh-tasrec
+<source.tasrec> <out.tasrec>` replays the recording in the live game and
+writes it back with the freshly captured coordinates.
 
 ## Offline inspection tools
 
@@ -53,46 +63,31 @@ Run these from the repository root. They read files, not the live game.
 | `tools/pe_inspect.py FILE callers 3940` | x86 call/jump byte-scan candidates and raw pointers |
 | `tools/level_points.py generate start` | Rust start-line table; also `finish` and `spawn` |
 | `tools/level_points.py inspect start` | Marker positions/orientations; `finish` includes object counts |
-| `tools/diff_states.py A1 A2 B1 B2` | Bytes stable within each state but different between states |
 
 Prefix the tool paths above with `python TAS/`. PE inspection requires `pefile`;
 disassembly additionally requires `capstone`. Install with
-`python -m pip install pefile capstone`. Caller results are candidates, not
-validated instruction boundaries.
+`python -m pip install pefile capstone`. The caller scan reports every byte
+pattern that decodes as a call or jump to the target, so confirm each hit in
+the disassembly.
 
 Level tools default to the repository's `analyze/src/LevelData/levelData.json`;
 override with `--input PATH` before the subcommand. Generated tables go to stdout.
-Practice rows in `tas_ui/src/start_line.rs` are maintained separately because the
+Practice rows in `tas_ui/src/start_line.rs` are maintained by hand because the
 JSON has no Practice data. Spawn output also reports shared clusters, which must
 not be classified as a unique level.
 
-Memory diffs default to base offset `88000` (hex). An optional fifth positional
-argument sets a common base; `--a-base HEX --b-base HEX` aligns differently based
-dumps. Add `--max-value 0xf` to restrict both states to small values.
+`tools/keys.ps1 -Keys "ESC,DOWN,ENTER"` sends scan-code key presses to the game
+window; `dialog-e2e` uses it for its quit sequence. `tools/test_dll_hidden.ps1`
+compiles and runs the C++ policy tests with hidden windows so they cannot take
+focus from the game. The Pico firmware and its deployment have their own
+[README](pico/README.md).
 
-## Live utilities and history
+## History store
 
-`tools/dump_mem.ps1` and `probe_actions.ps1` read live process memory.
-`tas_test shm` prints typed, version-checked shared-memory diagnostics without
-launching or changing the game. For manual control, close competing controllers
-first and use `tas_test shm --command record|play|stop|restart`. It rejects pending
-commands but is not a multi-writer arbitration mechanism; publication does not
-mean the game completed the command. Raw numeric command writes are not supported.
-`keys.ps1` sends keyboard input. These are
-manual diagnostics, not substitutes for the Rust live suite.
-`test_dll_hidden.ps1` runs native tests without stealing game focus.
-Pico firmware and deployment have their own [README](pico/README.md).
-
-The CLI cases `fe-cont-reliability` and `fe10065-cont` share `cont_cases.rs`:
-FE-tremendous checks five splices at tick 2200 at 12×; FE-10065 checks eight at
-tick 6200 at each of 64× and 256×, with at most one frame of resume overshoot
-and best resume time at most 3000 ms. Both require the existing zero-drift,
-coverage and forward-progress checks. They remain explicit live commands, not
-offline tests or additional stages of `test_live`.
-
-History persistence is implemented in `tas_ui/src/history_store_v2.rs`:
+`tas_ui` keeps run history in `tas_ui/src/history_store_v2.rs`:
 `manifest.json` stores ordered metadata and the current entry ID, with immutable
-ID-named `.tasrec` blobs and per-entry CRC32 checksums. Metadata edits do not
-require rewriting recording blobs. See its tests and the recording/UI tests for
-migration, recovery and eviction behavior. The former history and test-coverage
-implementation plans have been retired; Git retains their historical details.
+ID-named `.tasrec` blobs and per-entry CRC32 checksums. Metadata edits leave the
+recording blobs untouched. Its tests and the recording/UI tests cover migration,
+recovery and eviction. The store lives under `SSB_INSPECT_DATA_DIR` when that
+is set, otherwise in `data/` next to a deployed `tas_ui.exe`, or
+`~/.ssb-inspector` for a dev build.

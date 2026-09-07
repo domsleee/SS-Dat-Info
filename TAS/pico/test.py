@@ -29,7 +29,7 @@ SHIFT = 0x20
 RELEASE_ALL = 0xFF
 
 def main():
-    port = sys.argv[1] if len(sys.argv) > 1 else "COM6"
+    port = sys.argv[1] if len(sys.argv) > 1 else "COM7"
     print(f"Opening {port}...")
     ser = serial.Serial(port, baudrate=115200, timeout=1)
     time.sleep(0.5)

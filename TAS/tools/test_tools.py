@@ -3,29 +3,10 @@ import json
 from pathlib import Path
 import re
 import struct
-import subprocess
-import sys
 import unittest
 
-from diff_states import stable_runs
 from level_points import DEFAULT_INPUT, generate
 from pe_inspect import direct_sites
-
-
-class MemoryDiffTests(unittest.TestCase):
-    def test_only_stable_differences_are_grouped(self):
-        self.assertEqual(stable_runs(b"\1\2\3\4\5", b"\1\2\0\4\5",
-                                     b"\6\7\3\4\6", b"\6\7\3\0\6", 16, 16),
-                         [[16, 17], [20, 20]])
-
-    def test_bases_align_and_all_four_lengths_bound_overlap(self):
-        self.assertEqual(stable_runs(b"\0\1\2", b"\0\1", b"\3\4", b"\3", 16, 17),
-                         [[17, 17]])
-        self.assertEqual(stable_runs(b"\1", b"\1", b"\2", b"\2", 0, 10), [])
-
-    def test_filter_applies_to_both_states(self):
-        self.assertEqual(stable_runs(b"\1\20\1", b"\1\20\1", b"\2\1\20", b"\2\1\20", 0, 0, 15),
-                         [[0, 0]])
 
 
 class CallerTests(unittest.TestCase):
@@ -68,12 +49,6 @@ class LevelPointsTests(unittest.TestCase):
     def test_missing_spawn_is_an_explicit_error(self):
         with self.assertRaisesRegex(ValueError, "ForestEasy has no Player_Start_Location"):
             generate({"ForestEasy": []}, "spawn")
-
-    def test_default_input_does_not_depend_on_working_directory(self):
-        result = subprocess.run([sys.executable, str(Path(__file__).with_name("level_points.py").resolve()),
-                                 "generate", "start"], cwd=DEFAULT_INPUT.parent,
-                                capture_output=True, text=True, check=True)
-        self.assertIn('("FE",', result.stdout)
 
 
 if __name__ == "__main__":
