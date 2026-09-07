@@ -17,6 +17,7 @@
     <ClInclude Include="src\caves\cave2.hpp" />
     <ClInclude Include="src\caves\cave5.hpp" />
     <ClInclude Include="src\caves\menu_state.hpp" />
+    <ClInclude Include="src\caves\menu_page.hpp" />
     <ClInclude Include="src\caves\race_timer.hpp" />
     <ClInclude Include="..\..\third_party\safetyhook\safetyhook.hpp" />
     <ClInclude Include="..\..\third_party\safetyhook\Zydis.h" />

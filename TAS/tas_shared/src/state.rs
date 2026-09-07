@@ -561,6 +561,16 @@ impl TasSharedState {
 
     /// Read log entries newer than `after_seq`. Returns (entries, new_cursor).
     /// The cursor should start at 0 and be updated with each call.
+    ///
+    /// Cursor contract: the reservation counter (`log_write_seq`) advances
+    /// BEFORE a writer copies its text and publishes the slot, so a slot in
+    /// range may be reserved-but-unpublished. The cursor never advances past
+    /// such a slot — the read stops and retries from there next poll —
+    /// otherwise a poll landing in the reserve/publish window would skip the
+    /// entry forever. Slots the ring has already reused (overwritten past the
+    /// retained window, or torn mid-copy) are skipped explicitly. A writer
+    /// that dies mid-write stalls the cursor until the cursor resets (the UI
+    /// resets it on reconnect), which is preferred to silent loss.
     pub fn read_log_entries(&self, after_seq: u32) -> (Vec<(u32, TasLogSeverity, String)>, u32) {
         let write_seq = self.log_write_seq;
         if write_seq == 0 || after_seq >= write_seq {
@@ -572,19 +582,35 @@ impl TasSharedState {
         let effective_start = start.max(after_seq);
 
         let mut entries = Vec::new();
+        let mut cursor = effective_start;
         for seq in effective_start..write_seq {
             let idx = (seq % TAS_LOG_RING_SIZE as u32) as usize;
             let entry = &self.log_ring[idx];
             // Sequence in entry is seq+1 (0 means unused)
-            if entry.sequence == seq + 1 {
-                entries.push((
-                    entry.sequence,
-                    entry.severity_enum(),
-                    entry.text_str().to_string(),
-                ));
+            let published = entry.sequence;
+            if published != seq + 1 {
+                if published > seq + 1 {
+                    // Reused past the retained window (or torn mid-copy below):
+                    // seq is unrecoverable — skip it, keep going.
+                    cursor = seq + 1;
+                    continue;
+                }
+                // Reserved but not yet published: stop here and retry from
+                // this seq next poll.
+                break;
             }
+            let severity = entry.severity_enum();
+            let text = entry.text_str().to_string();
+            if entry.sequence != seq + 1 {
+                // Reused between the check and the copy: discard the torn
+                // text; the replacement is visited at its own seq.
+                cursor = seq + 1;
+                continue;
+            }
+            entries.push((seq + 1, severity, text));
+            cursor = seq + 1;
         }
-        (entries, write_seq)
+        (entries, cursor)
     }
 
     pub fn reset_hook_perf_counters(&mut self) {
@@ -826,10 +852,39 @@ mod tests {
         // Don't write seq=1 — its slot has sequence=0 (stale)
         state.log_write_seq = 2;
 
-        let (entries, _) = state.read_log_entries(0);
+        let (entries, cursor) = state.read_log_entries(0);
         // seq=0 matches (entry.sequence == 0+1 == 1), seq=1 doesn't (slot has sequence=0, expects 2)
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].2, "zero");
+        assert_eq!(
+            cursor, 1,
+            "cursor stops at the unpublished slot, not past it"
+        );
+    }
+
+    #[test]
+    fn read_log_entries_waits_for_reserved_slot_then_reads_it() {
+        let mut state = zeroed_boxed();
+        // Reserve slot 0 without publishing: the counter advanced, the
+        // entry's sequence did not (writer between increment and copy).
+        state.log_write_seq = 1;
+        let (entries, cursor) = state.read_log_entries(0);
+        assert!(entries.is_empty());
+        assert_eq!(
+            cursor, 0,
+            "cursor must not advance past an unpublished slot"
+        );
+        // Publish, then read again with the returned cursor: the entry
+        // appears exactly once.
+        write_log_entry(&mut state, 0, 1, "hello");
+        let (entries, cursor) = state.read_log_entries(cursor);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].2, "hello");
+        assert_eq!(cursor, 1);
+        // And it is not repeated.
+        let (entries, cursor) = state.read_log_entries(cursor);
+        assert!(entries.is_empty());
+        assert_eq!(cursor, 1);
     }
 }
 

@@ -7,6 +7,7 @@
 #include "../rider_identity_parse.hpp"
 #include <safetyhook.hpp>
 #include <format>
+#include "menu_page.hpp"
 
 // Menu state, read from the MENU OBJECTS - and ONLY on the menu thread.
 //
@@ -207,10 +208,6 @@ static bool ReadMenu(uint32_t uiMenu, MenuSnapshot& out) {
 // ---------------------------------------------------------------------------
 // The SNAPSHOT (menu thread, from the Execute hook).
 // ---------------------------------------------------------------------------
-inline char g_changedName[TAS_MENU_SCREEN_MAX] = {};   // from the last Change_Page
-inline volatile uint32_t g_pageGen = 0;                 // bumped by every Change_Page
-inline uint32_t g_snapGen = 0;                          // the generation the snapshot has adopted
-inline char g_screen[TAS_MENU_SCREEN_MAX] = {};         // the current page id
 inline volatile uint64_t g_lastExecuteMs = 0;           // heartbeat: a menu is executing
 inline uint64_t g_lastSnapMs = 0;
 inline uint32_t g_lastDumpHash = 0;
@@ -270,17 +267,16 @@ static uint32_t ReadPage(uint32_t uiMenu) {
 // thread, after the swap completed, so screen and items always describe the
 // same page. Injected after the last Change_Page? The page's own name (if it
 // carries one) bootstraps it; otherwise the id arrives with the next change.
+
 static void Snapshot(uint32_t uiMenu, bool force) {
     const uint64_t now = GetTickCount64();
     if (!force && now - g_lastSnapMs < 50) return;
     g_lastSnapMs = now;
     const uint32_t page = ReadPage(uiMenu);
-    const uint32_t gen = g_pageGen;
-    if (gen != g_snapGen) {
-        g_snapGen = gen;
-        memcpy(g_screen, g_changedName, sizeof g_screen);
-        if (g_menuDiag) Log(std::format("Menu diag: page change #{} -> screen '{}' (page {:#x})", gen, g_screen, page));
+    if (AdoptPendingPage()) {
+        if (g_menuDiag) Log(std::format("Menu diag: page change #{} -> screen '{}' (page {:#x})", g_snapGen, g_screen, page));
     } else if (!g_screen[0] && page) {
+
         // No Change_Page seen since injection: take the page's own name if it
         // reads as an id (bootstrap), else wait for the next page change.
         char own[TAS_MENU_SCREEN_MAX];
@@ -355,10 +351,9 @@ static constexpr uint8_t kMenuActionSig[] = { 0x8B, 0x81, 0x0C, 0x01, 0x00, 0x00
 // mov ecx,esi; call [eax+0x2C] (Want_Focus)
 static constexpr uint8_t kRequestFocusSig[] = { 0x53, 0x56, 0x8B, 0xF1, 0x8B, 0x4E, 0x0C, 0x85, 0xC9, 0x8B, 0xDA, 0x74, 0x24,
                                                 0x84, 0xDB, 0x74, 0x18, 0x8B, 0x06, 0x8B, 0xCE, 0xFF, 0x50, 0x2C };
-
 static uint32_t RunCommand(uint32_t uiMenu, uint32_t kind, const char* target, const char* screen) {
-    if (!g_screen[0]) return TAS_MENU_RESULT_NO_MENU;
-    if (screen[0] && strncmp(screen, g_screen, TAS_MENU_SCREEN_MAX) != 0) return TAS_MENU_RESULT_STALE_PAGE;
+    const uint32_t page = ValidateScreen(screen);
+    if (page != TAS_MENU_RESULT_OK) return page;
     switch (kind) {
     case TAS_MENU_CMD_UP: g_up(uiMenu); return TAS_MENU_RESULT_OK;
     case TAS_MENU_CMD_DOWN: g_down(uiMenu); return TAS_MENU_RESULT_OK;
@@ -413,6 +408,10 @@ static bool ConsumeCommand(uint32_t uiMenu) {
         target[TAS_MENU_CMD_TARGET_MAX - 1] = 0;
         screen[TAS_MENU_SCREEN_MAX - 1] = 0;
         const uint32_t kind = g_state->menu_cmd_kind;
+        // Validate against the page the agent could have seen, not the one
+        // cached before the last Change_Page: adopt first, bypassing the
+        // 50 ms snapshot throttle for this command.
+        AdoptPendingPage();
         const uint32_t result = RunCommandGuarded(uiMenu, kind, target, screen);
         Answer(seq, result);
         // Ring log, not the file log: this runs inside the Execute hook.

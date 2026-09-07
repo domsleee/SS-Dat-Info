@@ -66,6 +66,10 @@ pub struct EntryMeta {
     /// Rider stamp (`tas_shared::rider_label`); None = unknown.
     #[serde(default)]
     pub rider: Option<String>,
+    /// Raw identity words behind the stamps, for exact save round trips.
+    /// `serde(default)` so pre-stamp manifests still load (as unknown).
+    #[serde(default)]
+    pub stamps: crate::recording::IdentityStamps,
     pub created_at_iso: String,
 }
 
@@ -236,6 +240,19 @@ impl HistoryStoreV2 {
             }
         }
 
+        // Corrupt-store quarantine: a present-but-unusable manifest with
+        // surviving blobs is a data-loss trap. The next persist would publish
+        // a valid EMPTY manifest, and the launch after that would GC every
+        // surviving recording as an orphan — with no new recording or explicit
+        // deletion in between. Move the orphans out of GC reach BEFORE
+        // anything can publish, and set the bad manifest aside for forensics.
+        // (A missing manifest is a fresh store: strays there are still GC'd,
+        // tested by crash_after_blob_before_manifest_is_clean.)
+        let manifest_present = dir.join("manifest.json").exists();
+        if manifest.is_none() && manifest_present && !disk_ids.is_empty() {
+            quarantine_unmanifested_blobs(&dir, &disk_ids, &mut warnings);
+            set_aside_unusable_manifest(&dir, &mut warnings);
+        }
         // GC: delete blob files not referenced by the manifest — but ONLY when
         // we actually loaded a usable manifest. If the manifest is absent or
         // unparseable we must NOT delete blobs (that would turn a transiently
@@ -249,7 +266,7 @@ impl HistoryStoreV2 {
                     }
                 }
             }
-        } else if !disk_ids.is_empty() {
+        } else if !disk_ids.is_empty() && !manifest_present {
             warnings.push(format!(
                 "no usable manifest — {} blob(s) preserved (not GC'd)",
                 disk_ids.len()
@@ -622,7 +639,8 @@ fn parse_raw_blob(bytes: &[u8]) -> Option<PersistedSnapshot> {
     let input_end = 4 + count;
     let input_log = bytes[4..input_end].to_vec();
     let mut rec_coords = Vec::with_capacity(count);
-    for chunk in bytes[input_end..].chunks_exact(12) {
+    let (chunks, _) = bytes[input_end..].as_chunks::<12>();
+    for chunk in chunks {
         rec_coords.push([
             f32::from_le_bytes(chunk[0..4].try_into().ok()?),
             f32::from_le_bytes(chunk[4..8].try_into().ok()?),
@@ -634,6 +652,42 @@ fn parse_raw_blob(bytes: &[u8]) -> Option<PersistedSnapshot> {
         input_log,
         rec_coords,
     })
+}
+
+/// Move `<id>.tasrec` blobs with no usable manifest out of GC reach: renamed
+/// to `<id>.tasrec.orphaned`, which neither `list_blob_ids` nor the orphan GC
+/// touches. The bytes stay on disk for manual re-import; the store never
+/// deletes what it cannot account for.
+fn quarantine_unmanifested_blobs(dir: &Path, ids: &[u64], warnings: &mut Vec<String>) {
+    let mut kept = 0u64;
+    for &id in ids {
+        let from = blob_path(dir, id);
+        let to = dir.join(format!("{}.tasrec.orphaned", id));
+        match std::fs::rename(&from, &to) {
+            Ok(()) => kept += 1,
+            Err(e) => warnings.push(format!(
+                "cannot preserve orphan blob {}: {}",
+                from.display(),
+                e
+            )),
+        }
+    }
+    if kept > 0 {
+        warnings.push(format!(
+            "unusable manifest — {} recording blob(s) preserved as *.tasrec.orphaned (not GC'd); re-import manually",
+            kept
+        ));
+    }
+}
+
+/// Rename a present-but-unusable `manifest.json` aside so the next persist
+/// starts clean instead of re-triggering quarantine on an empty store.
+/// Best-effort: if the rename fails the corrupt file stays and the next open
+/// simply quarantines nothing (no blobs left) and warns again.
+fn set_aside_unusable_manifest(dir: &Path, warnings: &mut Vec<String>) {
+    if std::fs::rename(dir.join("manifest.json"), dir.join("manifest.corrupt.json")).is_err() {
+        warnings.push("unusable manifest could not be set aside".to_string());
+    }
 }
 
 fn quarantine_blob(dir: &Path, id: u64) {
@@ -799,6 +853,7 @@ mod tests {
             level: None,
             physics: None,
             rider: None,
+            stamps: crate::recording::IdentityStamps::default(),
             created_at_iso: "2026-06-06T00:00:00+00:00".to_string(),
         }
     }
@@ -1283,13 +1338,41 @@ mod tests {
                 3,
             )
             .unwrap();
-        // Corrupt the manifest — must NOT trigger GC of the blobs.
+        let blob1 = std::fs::read(blob_path(&dir, 1)).unwrap();
+        let blob2 = std::fs::read(blob_path(&dir, 2)).unwrap();
+        // Corrupt the manifest — blobs must be quarantined out of GC reach,
+        // not just left for the next persist to orphan-GC.
         std::fs::write(dir.join("manifest.json"), b"{ not valid json").unwrap();
-        let (_s, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
-        assert!(blob_path(&dir, 1).exists(), "blob 1 preserved");
-        assert!(blob_path(&dir, 2).exists(), "blob 2 preserved");
+        let (mut store2, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
         assert!(res.entries.is_empty(), "unusable manifest -> no entries");
-        assert!(res.warnings.iter().any(|w| w.contains("preserved")));
+        assert!(
+            res.warnings.iter().any(|w| w.contains("preserved")),
+            "quarantine warning, got: {:?}",
+            res.warnings
+        );
+        assert!(
+            !blob_path(&dir, 1).exists(),
+            "quarantined blob no longer at its live path"
+        );
+        // App persists its (empty) history, then the UI closes and reopens:
+        // the replacement manifest must not cost the quarantined bytes.
+        store2.persist(&[], None, res.next_entry_id).unwrap();
+        let (_s3, res3) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        assert!(res3.entries.is_empty());
+        assert_eq!(
+            std::fs::read(dir.join("1.tasrec.orphaned")).unwrap(),
+            blob1,
+            "quarantined bytes survive persist + reopen"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("2.tasrec.orphaned")).unwrap(),
+            blob2,
+            "quarantined bytes survive persist + reopen"
+        );
+        assert!(
+            dir.join("manifest.corrupt.json").exists(),
+            "bad manifest set aside, not silently overwritten"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

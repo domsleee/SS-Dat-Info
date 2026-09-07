@@ -122,6 +122,10 @@ struct TasApp {
     /// Rider stamp (character · stance) of the take in the recording buffer,
     /// same lifecycle as `loaded_physics`.
     loaded_rider: Option<String>,
+    /// Raw identity words of the take in the recording buffer, same lifecycle
+    /// as the labels above. Save paths stamp the file with these, never the
+    /// live game — `None` halves stay unknown.
+    loaded_identity: Option<recording::IdentityStamps>,
     /// Soft cap (max unpinned entries) — from settings.
     history_cap: usize,
     recovery_store: Option<recording::RecoveryStore>,
@@ -253,6 +257,30 @@ struct TasApp {
     dark_title_bar_set: bool,
 }
 
+/// Whether the recovery checkpoint may be deleted: only when the recovered
+/// take is durably committed to history. A missing history writer is NOT
+/// durability — the checkpoint files are then the only copy in existence,
+/// and deleting them loses the recovered take permanently.
+fn checkpoint_clear_decision(flush: Option<Result<(), String>>) -> (bool, Option<String>) {
+    match flush {
+        Some(Ok(())) => (true, None),
+        Some(Err(e)) => (
+            false,
+            Some(format!(
+                "[history] persist failed — keeping recovery checkpoint: {}",
+                e
+            )),
+        ),
+        None => (
+            false,
+            Some(
+                "[history] store unavailable — keeping recovery checkpoint (no history was written)"
+                    .to_string(),
+            ),
+        ),
+    }
+}
+
 impl TasApp {
     fn new() -> Self {
         let (shared, connect_error) = match TasSharedMemoryClient::open() {
@@ -319,6 +347,18 @@ impl TasApp {
                     let (start, end) = (cp.session.start_tick, cp.session.end_tick);
                     let cp_level = cp.session.level.clone();
                     let cp_rider = cp.session.rider_label();
+                    let cp_physics = tas_shared::physics_mode_label(
+                        cp.session
+                            .renderer_id
+                            .unwrap_or(tas_shared::TAS_RENDERER_UNKNOWN),
+                        cp.session.fpu_control_word.unwrap_or(0),
+                    );
+                    let cp_stamps = recording::IdentityStamps {
+                        renderer_id: cp.session.renderer_id,
+                        fpu_control_word: cp.session.fpu_control_word,
+                        rider_character: cp.session.rider_character,
+                        rider_stance: cp.session.rider_stance,
+                    };
                     if history.push_snapshot_data_with_session(
                         cp.snapshot,
                         session_label.clone(),
@@ -335,6 +375,8 @@ impl TasApp {
                             // is the "my favourited FE runs show on FM" report.
                             history.set_level(id, cp_level);
                             history.set_rider(id, cp_rider);
+                            history.set_physics(id, cp_physics);
+                            history.set_stamps(id, cp_stamps);
                             history.set_pinned(id, true);
                             // Mark recovery with a compact ⟲ glyph and let the
                             // panel render the duration via the normal parsed
@@ -369,6 +411,7 @@ impl TasApp {
             last_reconnect_attempt: std::time::Instant::now(),
             loaded_physics: None,
             loaded_rider: None,
+            loaded_identity: None,
             history_cap,
             recovery_store,
             recovery_writer: recording::RecoveryWriter::new(),
@@ -495,6 +538,7 @@ impl TasApp {
         }
         self.loaded_physics = metadata.physics_label();
         self.loaded_rider = metadata.rider_label();
+        self.loaded_identity = Some(recording::IdentityStamps::from_metadata(&metadata));
         self.history.push_loaded_snapshot(shared.state(), path);
         self.apply_transport_action(transport::Action::SetContinueFrame(splice));
         Ok(())
@@ -559,6 +603,7 @@ impl TasApp {
             }
         }
         self.loaded_rider = rider;
+        self.loaded_identity = self.history.entries().get(idx).map(|e| e.stamps.clone());
     }
 
     fn push_log(&mut self, msg: &str) {
@@ -743,6 +788,8 @@ impl TasApp {
         // Who is on the board (character · stance, v42): stamped onto every
         // pushed history entry, compared on restore/load.
         self.history.set_live_rider(shared.rider());
+        self.history
+            .set_live_stamps(recording::IdentityStamps::from_live(shared.state()));
         // id and epoch from ONE seqlock window: a separate epoch read can pair
         // the old track's id with the new epoch across a switch, and the stamp
         // below then keeps the old track's history through the very change it
@@ -961,7 +1008,7 @@ impl TasApp {
 
         let mut target: Option<tas_shared::transport::BucketTarget> = None;
         let mut gate_align_rec = 0;
-        let continue_from_frame;
+        let mut continue_from_frame = 0;
         if command == TasCommand::ArmContinue {
             if self.cont_catchup_speed.is_none() {
                 self.cont_catchup_speed = Some(self.playback_speed);
@@ -1016,7 +1063,6 @@ impl TasApp {
                     .and_then(|t| t.expected_first_moving)
                     .unwrap_or(0);
             }
-            continue_from_frame = 0;
         }
 
         // A recorded input transition inside the pre-gate hold window is
@@ -1303,25 +1349,18 @@ impl TasApp {
     /// checkpoint files after we delete them.
     fn clear_recovery_after_durable_persist(&mut self) {
         self.persist_history_if_needed();
-        let durable = match self.history_writer.as_ref() {
-            Some(writer) => match writer.flush() {
-                Ok(()) => {
-                    self.last_persisted_revision =
-                        self.last_persisted_revision.max(writer.durable_revision());
-                    true
-                }
-                Err(e) => {
-                    self.log_lines.push(format!(
-                        "[history] persist failed — keeping recovery checkpoint: {}",
-                        e
-                    ));
-                    false
-                }
-            },
-            // No store at all: nothing can be made durable, so clear anyway to
-            // avoid recovering the same checkpoint into a duplicate every launch.
-            None => true,
-        };
+        let flush = self.history_writer.as_ref().map(|writer| {
+            let result = writer.flush();
+            if result.is_ok() {
+                self.last_persisted_revision =
+                    self.last_persisted_revision.max(writer.durable_revision());
+            }
+            result
+        });
+        let (durable, notice) = checkpoint_clear_decision(flush);
+        if let Some(notice) = notice {
+            self.log_lines.push(notice);
+        }
         // Drain in-flight recovery writes BEFORE clearing the files.
         self.recovery_writer.flush();
         if durable {
@@ -1962,6 +2001,7 @@ impl TasApp {
                     &self.segment_tracker.segments,
                     &mut self.log_lines,
                     level.as_deref(),
+                    self.loaded_identity.as_ref(),
                 ) {
                     self.history.push_save_marker(shared.state(), &path);
                 }
@@ -2024,6 +2064,7 @@ impl TasApp {
                 let meta = recording::RecordingFile::read_metadata(&path).ok();
                 self.loaded_physics = meta.as_ref().and_then(|m| m.physics_label());
                 self.loaded_rider = meta.as_ref().and_then(|m| m.rider_label());
+                self.loaded_identity = meta.as_ref().map(recording::IdentityStamps::from_metadata);
                 let _ = self.history.push_loaded_snapshot(shared.state(), &path);
                 if shared.state().recorded_count > 0 {
                     self.queue_restart_then(TasCommand::ArmPlay);
@@ -2155,6 +2196,10 @@ impl eframe::App for TasApp {
                     // Same for the rider: the take now in the buffer was recorded as the
                     // live character / stance, so a later PLAY compares against that.
                     self.loaded_rider = self.history.live_rider().map(str::to_string);
+                    self.loaded_identity = self
+                        .shared
+                        .as_ref()
+                        .map(|s| recording::IdentityStamps::from_live(s.state()));
                     self.log_cont_resume_summary();
                     self.clear_cont_catchup();
                     // Splice fired (or REC began).
@@ -2273,6 +2318,7 @@ impl eframe::App for TasApp {
                                 &self.segment_tracker.segments,
                                 &mut self.log_lines,
                                 level.as_deref(),
+                                self.loaded_identity.as_ref(),
                             ) {
                                 self.history.push_save_marker(shared.state(), &path);
                             }
@@ -3032,6 +3078,21 @@ mod tests {
     mod cont_splice;
 
     #[test]
+    fn checkpoint_survives_missing_or_failed_history() {
+        // Durable flush authorizes deletion with no notice.
+        assert_eq!(checkpoint_clear_decision(Some(Ok(()))), (true, None));
+        // A failed flush keeps the checkpoint and says so.
+        let (durable, notice) = checkpoint_clear_decision(Some(Err("disk full".into())));
+        assert!(!durable);
+        assert!(notice.unwrap().contains("keeping recovery checkpoint"));
+        // A missing writer is NOT durability: the checkpoint files are the
+        // only copy, so they stay, with an actionable notice.
+        let (durable, notice) = checkpoint_clear_decision(None);
+        assert!(!durable);
+        assert!(notice.unwrap().contains("store unavailable"));
+    }
+
+    #[test]
     fn replacing_a_recording_detaches_its_script_and_queued_stop_edit() {
         let mut app = test_app();
         let old_path = crate::script_watch::ScriptWatch::fresh_path();
@@ -3104,6 +3165,7 @@ mod tests {
             last_reconnect_attempt: std::time::Instant::now(),
             loaded_physics: None,
             loaded_rider: None,
+            loaded_identity: None,
             history_cap: 64,
             recovery_store: None,
             log_lines: ui_log::UiLog::default(),

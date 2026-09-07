@@ -118,8 +118,8 @@ fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str)
     (rate, ok)
 }
 
-/// Drive `TAS/tools/keys.ps1`; a failed quit sequence is reported because it
-/// would turn Phase C into measuring the wrong screen.
+/// Drive `TAS/tools/keys.ps1` for the one thing that needs a physical key:
+/// opening the pause menu. Everything after goes through the menu protocol.
 fn run_keys(keys: &str, delay_ms: u32) -> bool {
     let script = match harness::repo_path("TAS/tools/keys.ps1") {
         Ok(p) => p,
@@ -240,14 +240,42 @@ pub fn run() -> bool {
     let (_rate_b, pass_b_burst) = idle_dismiss_profile(&client, "B/REC");
 
     println!("--- PHASE C: quit to the main menu, measure what the user sees ---");
-    // Pause menu: DOWN x4 = Return To Menu; "Are you sure?" = LEFT then ENTER.
-    if !run_keys("ESC,DOWN,DOWN,DOWN,DOWN,ENTER,LEFT,ENTER", 700) {
-        eprintln!(
-            "ERROR: quit-to-menu key sequence failed; Phase C would measure the wrong screen"
-        );
+    // Entering the pause menu needs a physical key; every step after goes
+    // through the menu protocol — read the document, activate by published
+    // id, wait for the ack, verify the destination page. No blind cursor
+    // counting: a wrong screen fails here instead of silently measuring it.
+    if !run_keys("ESC", 700) {
+        eprintln!("ERROR: opening the pause menu failed; Phase C would measure the wrong screen");
         return false;
     }
-    thread::sleep(Duration::from_secs(3));
+    let confirm = match crate::menu::activate_label_and_wait(
+        &mut client,
+        "Return To Menu",
+        None,
+        Duration::from_secs(10),
+    ) {
+        Ok(screen) => screen,
+        Err(e) => {
+            eprintln!("ERROR: pause-menu navigation failed: {}", e);
+            return false;
+        }
+    };
+    println!("  pause menu -> {}", confirm);
+    // The confirm dialog's affirmative button, by label: the old blind
+    // recipe (LEFT then ENTER) assumed its position, which no protocol
+    // change can verify. Fail loud with the live labels if this is wrong.
+    match crate::menu::activate_label_and_wait(
+        &mut client,
+        "Yes",
+        Some("ID_MAIN_MENU"),
+        Duration::from_secs(10),
+    ) {
+        Ok(screen) => println!("  confirm dialog -> {}", screen),
+        Err(e) => {
+            eprintln!("ERROR: confirm-dialog navigation failed: {}", e);
+            return false;
+        }
+    }
 
     // The user-visible thing itself: the menu video's on-screen motion.
     println!("  menu video (screen sampler):");
