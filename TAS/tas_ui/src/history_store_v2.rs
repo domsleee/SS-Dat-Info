@@ -132,6 +132,7 @@ pub struct BlobRef {
     pub checksum: u32,
 }
 
+#[derive(Debug)]
 pub struct HistoryStoreV2 {
     dir: PathBuf,
     /// Entry ids currently referenced by the on-disk manifest.
@@ -240,23 +241,41 @@ impl HistoryStoreV2 {
             }
         }
 
-        // Corrupt-store quarantine: a present-but-unusable manifest with
-        // surviving blobs is a data-loss trap. The next persist would publish
+        // Corrupt-store quarantine: a manifest that cannot be used, with
+        // surviving blobs, is a data-loss trap. The next persist would publish
         // a valid EMPTY manifest, and the launch after that would GC every
         // surviving recording as an orphan — with no new recording or explicit
         // deletion in between. Move the orphans out of GC reach BEFORE
-        // anything can publish, and set the bad manifest aside for forensics.
-        // (A missing manifest is a fresh store: strays there are still GC'd,
-        // tested by crash_after_blob_before_manifest_is_clean.)
+        // anything can publish, and set a present-but-bad manifest aside for
+        // forensics. This covers a missing manifest too: blobs without any
+        // manifest are preserved, never treated as a fresh store.
+        // Quarantine is all-or-nothing: if ANY blob cannot be moved, the open
+        // fails and the store stays disabled (no writer, no replacement
+        // manifest) rather than publishing past an unprotected blob.
         let manifest_present = dir.join("manifest.json").exists();
-        if manifest.is_none() && manifest_present && !disk_ids.is_empty() {
-            quarantine_unmanifested_blobs(&dir, &disk_ids, &mut warnings);
-            set_aside_unusable_manifest(&dir, &mut warnings);
+        if manifest.is_none() && !disk_ids.is_empty() {
+            quarantine_unmanifested_blobs(&dir, &disk_ids).map_err(|failed| {
+                format!(
+                    "history manifest unusable and orphan blobs {} could not be preserved; \
+                     history disabled to protect them",
+                    failed
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+            warnings.push(format!(
+                "unusable manifest — {} recording blob(s) preserved as *.tasrec.orphaned (not GC'd); re-import manually",
+                disk_ids.len()
+            ));
+            if manifest_present {
+                set_aside_unusable_manifest(&dir, &mut warnings);
+            }
         }
         // GC: delete blob files not referenced by the manifest — but ONLY when
-        // we actually loaded a usable manifest. If the manifest is absent or
-        // unparseable we must NOT delete blobs (that would turn a transiently
-        // bad manifest into permanent data loss).
+        // we actually loaded a usable manifest. Without one, every surviving
+        // blob was just quarantined above, so there is nothing to collect.
         if manifest.is_some() {
             for id in &disk_ids {
                 if !referenced.contains(id) {
@@ -266,11 +285,6 @@ impl HistoryStoreV2 {
                     }
                 }
             }
-        } else if !disk_ids.is_empty() && !manifest_present {
-            warnings.push(format!(
-                "no usable manifest — {} blob(s) preserved (not GC'd)",
-                disk_ids.len()
-            ));
         }
 
         let max_disk_id = disk_ids.iter().copied().max().unwrap_or(0);
@@ -656,27 +670,21 @@ fn parse_raw_blob(bytes: &[u8]) -> Option<PersistedSnapshot> {
 
 /// Move `<id>.tasrec` blobs with no usable manifest out of GC reach: renamed
 /// to `<id>.tasrec.orphaned`, which neither `list_blob_ids` nor the orphan GC
-/// touches. The bytes stay on disk for manual re-import; the store never
-/// deletes what it cannot account for.
-fn quarantine_unmanifested_blobs(dir: &Path, ids: &[u64], warnings: &mut Vec<String>) {
-    let mut kept = 0u64;
+/// touches. The bytes stay on disk for manual re-import. All-or-nothing:
+/// returns the ids that could NOT be moved, so the caller can refuse to open
+/// rather than publish past an unprotected blob.
+fn quarantine_unmanifested_blobs(dir: &Path, ids: &[u64]) -> Result<(), Vec<u64>> {
+    let mut failed = Vec::new();
     for &id in ids {
-        let from = blob_path(dir, id);
         let to = dir.join(format!("{}.tasrec.orphaned", id));
-        match std::fs::rename(&from, &to) {
-            Ok(()) => kept += 1,
-            Err(e) => warnings.push(format!(
-                "cannot preserve orphan blob {}: {}",
-                from.display(),
-                e
-            )),
+        if std::fs::rename(blob_path(dir, id), &to).is_err() {
+            failed.push(id);
         }
     }
-    if kept > 0 {
-        warnings.push(format!(
-            "unusable manifest — {} recording blob(s) preserved as *.tasrec.orphaned (not GC'd); re-import manually",
-            kept
-        ));
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed)
     }
 }
 
@@ -1373,6 +1381,63 @@ mod tests {
             dir.join("manifest.corrupt.json").exists(),
             "bad manifest set aside, not silently overwritten"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn quarantine_failure_disables_store_until_released() {
+        let dir = tmp_dir("quarfail");
+        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        store
+            .persist(
+                &[entry(1, "A", false, 3), entry(2, "B", false, 3)],
+                Some(2),
+                3,
+            )
+            .unwrap();
+        let blob1 = std::fs::read(blob_path(&dir, 1)).unwrap();
+        let blob2 = std::fs::read(blob_path(&dir, 2)).unwrap();
+        std::fs::write(dir.join("manifest.json"), b"{ not valid json").unwrap();
+        // Block blob 2's quarantine move with a directory at its destination.
+        std::fs::create_dir_all(dir.join("2.tasrec.orphaned")).unwrap();
+        let err = HistoryStoreV2::open_eager(dir.clone()).unwrap_err();
+        assert!(err.contains('2'), "names the unprotected blob, got: {err}");
+        // Blob 1 was quarantined; blob 2 is untouched at its live path; the
+        // corrupt manifest is still there — NO replacement was published and
+        // nothing was set aside, so a later open retries the same protection.
+        assert!(dir.join("1.tasrec.orphaned").exists());
+        assert!(blob_path(&dir, 2).exists());
+        assert!(dir.join("manifest.json").exists());
+        assert!(!dir.join("manifest.corrupt.json").exists());
+        // Release and reopen: quarantine completes, persist, reopen, and both
+        // byte strings survive.
+        std::fs::remove_dir_all(dir.join("2.tasrec.orphaned")).unwrap();
+        let (mut store2, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        assert!(res.entries.is_empty());
+        store2.persist(&[], None, res.next_entry_id).unwrap();
+        let (_s3, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        assert_eq!(std::fs::read(dir.join("1.tasrec.orphaned")).unwrap(), blob1);
+        assert_eq!(std::fs::read(dir.join("2.tasrec.orphaned")).unwrap(), blob2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_manifest_blobs_are_quarantined_not_freed() {
+        let dir = tmp_dir("nomanifest");
+        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        store
+            .persist(&[entry(1, "A", false, 3)], Some(1), 2)
+            .unwrap();
+        let blob1 = std::fs::read(blob_path(&dir, 1)).unwrap();
+        drop(store);
+        // The manifest is gone entirely (deleted, salvaged dir, ...): the
+        // surviving blob is still protected, never treated as a fresh store.
+        std::fs::remove_file(dir.join("manifest.json")).unwrap();
+        let (mut store2, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        assert!(res.entries.is_empty());
+        assert!(res.warnings.iter().any(|w| w.contains("preserved")));
+        store2.persist(&[], None, res.next_entry_id).unwrap();
+        let (_s3, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        assert_eq!(std::fs::read(dir.join("1.tasrec.orphaned")).unwrap(), blob1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
