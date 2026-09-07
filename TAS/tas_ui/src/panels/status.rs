@@ -90,7 +90,8 @@ pub fn status_card(ui: &mut egui::Ui, state: &TasSharedState, props: &StatusProp
         ui.set_max_width(card_w);
 
         let card_level = tas_shared::resolved_level_id(state).and_then(level_name_from_id);
-        let live_physics = tas_shared::physics_mode_label(state.renderer_id, state.fpu_control_word);
+        let live_physics =
+            tas_shared::physics_mode_label(state.renderer_id, state.fpu_control_word);
         let live_rider = tas_shared::rider_label(state.rider_character, state.rider_stance);
         let (race_cs, race_start) = tas_shared::race_pair(state);
 

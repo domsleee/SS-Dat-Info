@@ -60,8 +60,7 @@ pub fn run() -> bool {
         if pos >= 100 {
             break;
         }
-        if client.state().mode != TasMode::Play as u32 || t0.elapsed() > Duration::from_secs(10)
-        {
+        if client.state().mode != TasMode::Play as u32 || t0.elapsed() > Duration::from_secs(10) {
             eprintln!(
                 "  ERROR: replay didn't start (pos={}, mode={})",
                 pos,

@@ -24,7 +24,8 @@ pub fn run() -> bool {
 
     harness::arm_rec(&mut client);
     println!("  Recording with LEFT steering via Pico HID...");
-    let seg0_steps = patterns::build_from_explicit(&[(input_bits::LEFT, SPLICE_FRAME), (0x00, 100)]);
+    let seg0_steps =
+        patterns::build_from_explicit(&[(input_bits::LEFT, SPLICE_FRAME), (0x00, 100)]);
     harness::drive_pico_steps(&seg0_steps, None);
 
     let seg0_count = client.state().recorded_count;

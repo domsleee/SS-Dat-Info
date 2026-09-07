@@ -128,23 +128,14 @@ fn new_log(path: &std::path::Path, offset: u64) -> Result<String, String> {
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut config = options(args)?;
-    #[cfg(windows)]
-    {
-        let _ui = live::prepare(&mut config)?;
-        live::run(&config)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = config;
-        Err("Live UI tests require Windows".into())
-    }
+    let _ui = live::prepare(&mut config)?;
+    live::run(&config)
 }
 
 pub fn validate_options(args: &[String]) -> Result<(), String> {
     options(args).map(|_| ())
 }
 
-#[cfg(windows)]
 mod live {
     use super::*;
     use crate::win32;

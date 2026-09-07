@@ -33,9 +33,9 @@ impl UiLog {
         }
     }
 
-    pub fn push(&mut self, msg: &str) {
+    pub fn push(&mut self, msg: impl AsRef<str>) {
         let ts = chrono::Local::now().format("%H:%M:%S");
-        self.lines.push(format!("[{}] {}", ts, msg));
+        self.lines.push(format!("[{}] {}", ts, msg.as_ref()));
         if self.lines.len() > CAP {
             // The on-disk mirror already has these (flushed before any push
             // this frame); only the persisted cursor needs to follow.
@@ -78,7 +78,7 @@ mod tests {
     fn cap_applies_and_clear_resets_the_mirror_cursor() {
         let mut log = UiLog::default();
         for i in 0..(CAP + 1) {
-            log.push(&i.to_string());
+            log.push(i.to_string());
         }
         assert_eq!(log.lines().len(), CAP + 1 - DRAIN);
         assert!(log.lines()[0].ends_with(&format!("] {}", DRAIN)));

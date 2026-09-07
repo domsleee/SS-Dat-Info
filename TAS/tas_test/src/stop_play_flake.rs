@@ -8,14 +8,9 @@
 //! adds non-determinism on top of it, so the judge is "second playback ==
 //! reference playback", not "playback == recording".
 //!
-//! Sequence:
-//!   1. Phase 0: one reference PLAY, capture play_coords[0..VERIFY_FRAMES]
-//!   2. For each iteration:
-//!      a. CMD_RESTART → ARM_PLAY (no position match, like tas_ui's PLAY)
-//!      b. wait until playback_pos hits the iteration's stop frame, STOP
-//!      c. CMD_RESTART → ARM_PLAY again, rerolling F5 until the reference
-//!         bucket comes up
-//!      d. compare play_coords[0..VERIFY_FRAMES] against the reference bit-for-bit
+//! The test captures one reference play, then repeatedly stops and restarts at
+//! different frames. It rerolls F5 until the reference bucket returns and
+//! compares the replay coordinates bit for bit.
 
 use std::thread;
 use std::time::{Duration, Instant};
@@ -61,11 +56,9 @@ fn restart_then_play(client: &mut tas_shared::TasSharedMemoryClient) -> bool {
 }
 
 fn first_bit_divergence(play: &[[f32; 3]], reference: &[[f32; 3]]) -> Option<usize> {
-    play.iter().zip(reference).position(|(p, r)| {
-        p.iter()
-            .zip(r)
-            .any(|(a, b)| a.to_bits() != b.to_bits())
-    })
+    play.iter()
+        .zip(reference)
+        .position(|(p, r)| p.iter().zip(r).any(|(a, b)| a.to_bits() != b.to_bits()))
 }
 
 /// Restart + ARM_PLAY, rerolling F5 until the first RETRY_VERIFY_FRAMES frames
@@ -191,7 +184,10 @@ pub fn run() -> bool {
         );
         return false;
     }
-    println!("  Reference travel over the verify window: {:.3}", reference_travel);
+    println!(
+        "  Reference travel over the verify window: {:.3}",
+        reference_travel
+    );
 
     let mut results: Vec<CycleResult> = Vec::with_capacity(STOP_AT_FRAMES.len());
     for (i, &stop_at) in STOP_AT_FRAMES.iter().enumerate() {

@@ -456,7 +456,10 @@ fn run_acceptance(args: &[String]) -> bool {
     let mut last_result = None;
     let mut passed = 0u32;
     for i in 1..=iterations {
-        println!("\n========== Acceptance run {}/{} ==========", i, iterations);
+        println!(
+            "\n========== Acceptance run {}/{} ==========",
+            i, iterations
+        );
         let result = acceptance::run();
         let ok = result.all_pass();
         last_result = Some(result);
@@ -502,9 +505,10 @@ fn run_replay(args: &[String]) -> bool {
     // Drift, incomplete playback and (unless --no-match) a failed start match
     // all fail; drift alone is not enough because a run that never started
     // reports 0.0 drift over zero frames.
-    !report.results.iter().any(|r| {
-        r.has_drift() || !r.playback_complete || (!no_match && !r.position_matched)
-    })
+    !report
+        .results
+        .iter()
+        .any(|r| r.has_drift() || !r.playback_complete || (!no_match && !r.position_matched))
 }
 
 fn run_cont_reliability(args: &[String]) -> bool {
@@ -526,8 +530,11 @@ fn run_cont_reliability(args: &[String]) -> bool {
     let splice = num(&flags, "--splice", 2200u32);
     let profile = match flags.value("--profile") {
         None => cont_reliability::BaselineInputProfile::Taps,
-        Some(raw) => cont_reliability::BaselineInputProfile::parse(raw)
-            .unwrap_or_else(|| usage_error(format!("invalid --profile '{raw}'; expected 'taps' or 'sweep'"))),
+        Some(raw) => cont_reliability::BaselineInputProfile::parse(raw).unwrap_or_else(|| {
+            usage_error(format!(
+                "invalid --profile '{raw}'; expected 'taps' or 'sweep'"
+            ))
+        }),
     };
     let tap_ticks = flags
         .value("--tap-ticks")
@@ -547,7 +554,14 @@ fn run_cont_reliability(args: &[String]) -> bool {
         Some(p) => println!("  Baseline: real recording {}", p),
         None => println!("  Baseline: synthetic"),
     }
-    let report = cont_reliability::run(iterations, speed, splice, file.as_deref(), profile, tap_ticks);
+    let report = cont_reliability::run(
+        iterations,
+        speed,
+        splice,
+        file.as_deref(),
+        profile,
+        tap_ticks,
+    );
     report.all_pass()
 }
 

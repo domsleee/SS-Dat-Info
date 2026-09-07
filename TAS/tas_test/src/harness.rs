@@ -470,7 +470,13 @@ fn hide_console(command: &mut Command) {
 /// Matches exact image names, and never `supreme-service.exe`.
 fn kill_image(image: &str, exclude_pid: Option<u32>) -> u32 {
     let mut command = Command::new("taskkill");
-    command.args(["/F", "/IM", image, "/FI", "IMAGENAME ne supreme-service.exe"]);
+    command.args([
+        "/F",
+        "/IM",
+        image,
+        "/FI",
+        "IMAGENAME ne supreme-service.exe",
+    ]);
     if let Some(pid) = exclude_pid {
         command.args(["/FI", &format!("PID ne {pid}")]);
     }
@@ -1391,7 +1397,11 @@ pub fn assert_proven_config(client: &TasSharedMemoryClient) {
     println!(
         "Config OK: fft=0, speed={} (Cave5={})",
         s.playback_speed,
-        if s.cave5_hooked == 1 { "hooked" } else { "missing" }
+        if s.cave5_hooked == 1 {
+            "hooked"
+        } else {
+            "missing"
+        }
     );
 }
 

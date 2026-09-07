@@ -24,6 +24,7 @@ impl DriftWindow {
         self.bases.unwrap_or((0, 0))
     }
 
+    #[cfg(test)]
     pub fn aligned_bases(&self) -> Option<(usize, usize)> {
         self.bases
     }
@@ -303,9 +304,15 @@ mod tests {
         state.gate_index = 0;
         state.gate_align_rec = 0;
         let (_, reset) = tracker.scan(&state);
-        assert!(!reset, "completion must not restart the scan from raw indices");
+        assert!(
+            !reset,
+            "completion must not restart the scan from raw indices"
+        );
         assert_eq!(tracker.window.aligned_bases(), Some((287, 299)));
-        assert_eq!(tracker.max_dz, 0.0, "the latched alignment survives completion");
+        assert_eq!(
+            tracker.max_dz, 0.0,
+            "the latched alignment survives completion"
+        );
 
         // A fresh aligned session resets immediately, then waits for its own
         // live gate instead of comparing raw countdown indices.
@@ -441,7 +448,11 @@ mod tests {
                 "no banner with head at {playback_pos}"
             );
         }
-        assert_eq!(tracker.first_drift_tick, Some(4), "transient still diagnosed");
+        assert_eq!(
+            tracker.first_drift_tick,
+            Some(4),
+            "transient still diagnosed"
+        );
         assert!(tracker.max_dx > 0.0, "history keeps the transient");
         assert_eq!(tracker.splice_tick, Some(8));
         assert_eq!(tracker.splice_dx, 0.0);

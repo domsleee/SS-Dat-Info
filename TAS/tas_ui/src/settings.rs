@@ -57,16 +57,10 @@ fn settings_path() -> PathBuf {
 impl Settings {
     pub fn load() -> Self {
         let path = settings_path();
-        let mut settings: Self = match std::fs::read_to_string(&path) {
+        match std::fs::read_to_string(&path) {
             Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
             Err(_) => Self::default(),
-        };
-        // Superseded defaults move to the current one; any other value is a
-        // deliberate choice and is left alone.
-        if [20.0, 64.0, 96.0].contains(&settings.cont_catchup_speed) {
-            settings.cont_catchup_speed = 256.0;
         }
-        settings
     }
 
     pub fn save(&self) {

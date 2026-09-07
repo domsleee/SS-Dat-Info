@@ -1,4 +1,4 @@
-mod history_store;
+mod drift_scan;
 mod history_store_v2;
 mod level;
 mod panels;
@@ -7,230 +7,14 @@ mod recording;
 mod script_watch;
 mod settings;
 mod start_line;
+mod ui_log;
+mod win32;
+mod worker;
 
 use eframe::egui;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
-
-/// Map the DLL's `level_id` (area*3 + difficulty, or u32::MAX = unknown) to a
-/// display name for the game-state chip. The DLL detects the track in-process
-/// (see TAS_Helper `level_scan.hpp`) so the UI just reads the index.
-/// " · item N" for the focused menu item (v45), or "" when there is no
-/// selection. The index is a stable per-item id, not the visual row.
-/// The menu document the DLL publishes (shm v46): the current page's items
-/// with their visible labels and stable ids. See `tas_shared::menu_doc`.
-#[derive(serde::Deserialize)]
-#[cfg(test)]
-struct MenuDoc {
-    #[allow(dead_code)]
-    screen: String,
-    sel: Option<u32>,
-    items: Vec<MenuDocItem>,
-}
-
-#[derive(serde::Deserialize)]
-#[cfg(test)]
-struct MenuDocItem {
-    label: String,
-    #[allow(dead_code)]
-    id: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    en: bool,
-    #[serde(default)]
-    #[allow(dead_code)]
-    vis: bool,
-}
-
-#[cfg(test)]
-fn parse_menu_doc(state: &tas_shared::TasSharedState) -> Option<MenuDoc> {
-    tas_shared::menu_doc(state).and_then(|s| serde_json::from_str(&s).ok())
-}
-
-/// The focused item's LABEL from the menu document (" \u{203A} Time Attack");
-/// falls back to the bare selector index when the document is not available.
-#[cfg(test)]
-fn menu_item_suffix(state: &tas_shared::TasSharedState) -> String {
-    if let Some(doc) = parse_menu_doc(state) {
-        if let Some(item) = doc.sel.and_then(|s| doc.items.get(s as usize)) {
-            // The image-only controls (the page arrows) carry an id and no
-            // text, so name those by id - a bare separator with nothing after
-            // it just looks broken.
-            let name = if item.label.is_empty() {
-                tas_shared::prettify_menu_id(&item.id)
-            } else {
-                item.label.clone()
-            };
-            if !name.is_empty() {
-                return format!(" \u{203A} {}", name);
-            }
-        }
-    }
-    if state.menu_selector == u32::MAX {
-        String::new()
-    } else {
-        format!(" \u{00B7} item {}", state.menu_selector)
-    }
-}
-
-#[cfg(test)]
-mod menu_doc_tests {
-    use super::*;
-
-    /// A document exactly as the DLL published it on the Arcade page.
-    const SAMPLE: &str = concat!(
-        r#"{"screen":"ID_ARCADE_MENU","sel":2,"items":["#,
-        r#"{"label":"Time Attack","id":"ID_ARCADE_TIME_ATTACK_SEQUENCE","en":true,"vis":true},"#,
-        r#"{"label":"Race","id":"ID_ARCADE_RACE_SEQUENCE","en":true,"vis":true},"#,
-        r#"{"label":"Pipe","id":"ID_ARCADE_HALF_PIPE_SEQUENCE","en":true,"vis":true},"#,
-        r#"{"label":"Air","id":"ID_ARCADE_STADIUM_RAMP_SEQUENCE","en":true,"vis":true}]}"#
-    );
-
-    fn state_with_doc(doc: &str, seq: u32) -> Box<tas_shared::TasSharedState> {
-        let mut s = tas_shared::zeroed_boxed();
-        s.menu_doc[..doc.len()].copy_from_slice(doc.as_bytes());
-        s.menu_seq.store(seq, std::sync::atomic::Ordering::Relaxed);
-        s.menu_selector = u32::MAX;
-        s
-    }
-
-    /// The chip names the focused item from the document.
-    #[test]
-    fn suffix_is_the_focused_label() {
-        let s = state_with_doc(SAMPLE, 2);
-        assert_eq!(menu_item_suffix(&s), " \u{203A} Pipe");
-    }
-
-    /// The document parses fully - every item keeps its stable id.
-    #[test]
-    fn doc_parses_ids() {
-        let s = state_with_doc(SAMPLE, 2);
-        let doc = parse_menu_doc(&s).expect("parses");
-        assert_eq!(doc.screen, "ID_ARCADE_MENU");
-        let ids: Vec<&str> = doc.items.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            [
-                "ID_ARCADE_TIME_ATTACK_SEQUENCE",
-                "ID_ARCADE_RACE_SEQUENCE",
-                "ID_ARCADE_HALF_PIPE_SEQUENCE",
-                "ID_ARCADE_STADIUM_RAMP_SEQUENCE"
-            ]
-        );
-        assert!(doc.items.iter().all(|i| i.en && i.vis));
-    }
-
-    /// Nothing focused (a page transition) shows nothing, never "item null".
-    #[test]
-    fn suffix_empty_when_nothing_focused() {
-        let s = state_with_doc(
-            r#"{"screen":"ID_OPTIONS_MENU","sel":null,"items":[{"label":"Graphics","id":"ID_OPTIONS_GRAPHICS_ADVANCED","en":true,"vis":true}]}"#,
-            2,
-        );
-        assert_eq!(menu_item_suffix(&s), "");
-    }
-
-    /// Without a document (older DLL, or a torn read) the bare index still shows.
-    #[test]
-    fn suffix_falls_back_to_the_index() {
-        let mut s = tas_shared::zeroed_boxed();
-        s.menu_selector = 3;
-        assert_eq!(menu_item_suffix(&s), " \u{00B7} item 3");
-    }
-}
-
-/// Width of the status card ("the card with OFF in it"). Fixed so the card
-/// does not resize as the level / rider / clock text changes underneath it.
-const STATUS_CARD_WIDTH: f32 = 560.0;
-
-fn level_name_from_id(id: u32) -> Option<&'static str> {
-    const NAMES: [&str; 10] = [
-        "Forest Easy",
-        "Forest Medium",
-        "Forest Hard",
-        "Alpine Easy",
-        "Alpine Medium",
-        "Alpine Hard",
-        "Village Easy",
-        "Village Medium",
-        "Village Hard",
-        "Practice",
-    ];
-    NAMES.get(id as usize).copied()
-}
-
-/// Find Supreme.exe's PID by enumerating processes. Returns None if not
-/// running. Used by the global-shortcut poll to gate "F-key fired while
-/// game has focus" — we don't want F9 in the user's browser to start a
-/// recording. Cached at the call site and invalidated when shared-memory
-/// disconnects (game closed/restarted).
-#[cfg(windows)]
-#[allow(clippy::upper_case_acronyms)] // Match Win32 FFI type names.
-fn find_supreme_pid() -> Option<u32> {
-    use std::ffi::c_void;
-    type HANDLE = *mut c_void;
-    type DWORD = u32;
-    type BOOL = i32;
-    type WCHAR = u16;
-    const TH32CS_SNAPPROCESS: DWORD = 0x00000002;
-    const MAX_PATH: usize = 260;
-    const INVALID_HANDLE_VALUE: HANDLE = -1isize as *mut c_void;
-
-    #[repr(C)]
-    struct ProcessEntry32W {
-        dw_size: DWORD,
-        cnt_usage: DWORD,
-        th32_process_id: DWORD,
-        th32_default_heap_id: usize,
-        th32_module_id: DWORD,
-        cnt_threads: DWORD,
-        th32_parent_process_id: DWORD,
-        pc_pri_class_base: i32,
-        dw_flags: DWORD,
-        sz_exe_file: [WCHAR; MAX_PATH],
-    }
-
-    extern "system" {
-        fn CreateToolhelp32Snapshot(flags: DWORD, pid: DWORD) -> HANDLE;
-        fn Process32FirstW(snap: HANDLE, entry: *mut ProcessEntry32W) -> BOOL;
-        fn Process32NextW(snap: HANDLE, entry: *mut ProcessEntry32W) -> BOOL;
-        fn CloseHandle(h: HANDLE) -> BOOL;
-    }
-
-    // Match both the unversioned and versioned Supreme executable names —
-    // is_supreme_running() and the injector also accept Supreme_v1.035.exe,
-    // so if we only look for the plain name here, F9-F12 global shortcuts
-    // silently stop firing when the user runs the versioned build.
-    let targets: [Vec<u16>; 2] = [
-        "Supreme.exe".encode_utf16().collect(),
-        "Supreme_v1.035.exe".encode_utf16().collect(),
-    ];
-    unsafe {
-        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if snap == INVALID_HANDLE_VALUE {
-            return None;
-        }
-        let mut entry: ProcessEntry32W = std::mem::zeroed();
-        entry.dw_size = std::mem::size_of::<ProcessEntry32W>() as DWORD;
-        let mut ok = Process32FirstW(snap, &mut entry);
-        while ok != 0 {
-            let len = entry
-                .sz_exe_file
-                .iter()
-                .position(|&c| c == 0)
-                .unwrap_or(MAX_PATH);
-            let name = &entry.sz_exe_file[..len];
-            if targets.iter().any(|t| name == t.as_slice()) {
-                CloseHandle(snap);
-                return Some(entry.th32_process_id);
-            }
-            ok = Process32NextW(snap, &mut entry);
-        }
-        CloseHandle(snap);
-    }
-    None
-}
 
 /// Identifiers for the four TAS shortcut keys, used both for
 /// `poll_global_shortcuts` and for the pure edge-detector unit tests
@@ -255,205 +39,9 @@ fn compute_global_key_edges(now: [bool; 4], prev: &mut [bool; 4]) -> [bool; 4] {
     edges
 }
 
-/// Encode an `egui::ColorImage` (RGBA premultiplied, top-to-bottom) as
-/// a PNG file. Used by the F8 screenshot path so an external caller
-/// (an automation script, the AI agent helping debug a UX problem) can
-/// read the rendered framebuffer even when the window is occluded.
-fn save_color_image_as_png(image: &egui::ColorImage, path: &std::path::Path) -> Result<(), String> {
-    let [width, height] = image.size;
-    // ColorImage stores premultiplied RGBA in `Color32` (which is
-    // [u8; 4]). Flatten into a byte slice for png encoding.
-    let mut bytes = Vec::with_capacity(width * height * 4);
-    for c in &image.pixels {
-        bytes.extend_from_slice(&[c.r(), c.g(), c.b(), c.a()]);
-    }
-    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width as u32, height as u32);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-    writer.write_image_data(&bytes).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-// ===================== timeline preview harness =====================
-// `tas_ui --timeline-preview` renders the input timeline alone, fed the
-// newest `~/.ssb-inspector` recording, screenshots the framebuffer to
-// `timeline_preview.png` next to the crate, then exits.
-
-fn run_timeline_preview() -> eframe::Result {
-    let state = load_preview_state();
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 380.0]),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "Timeline Preview",
-        options,
-        Box::new(|_cc| Ok(Box::new(TimelinePreview::new(state)))),
-    )
-}
-
-struct TimelinePreview {
-    state: Box<tas_shared::TasSharedState>,
-    view: timeline::TimelineView,
-    edit: timeline::TimelineEdit,
-    continue_from: u32,
-    frames: u32,
-    done: bool,
-}
-
-impl TimelinePreview {
-    fn new(state: Box<tas_shared::TasSharedState>) -> Self {
-        Self {
-            state,
-            view: timeline::TimelineView::default(),
-            edit: timeline::TimelineEdit::default(),
-            continue_from: 0,
-            frames: 0,
-            done: false,
-        }
-    }
-}
-
-impl eframe::App for TimelinePreview {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.frames == 0 {
-            ctx.set_visuals(egui::Visuals::dark());
-        }
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new("Input Timeline").strong());
-            let _ = timeline::show(
-                ui,
-                &self.state,
-                None,
-                &mut self.view,
-                &mut self.continue_from,
-                &mut self.edit,
-            );
-        });
-
-        // Save any screenshot that arrived this frame, then exit.
-        let shots: Vec<std::sync::Arc<egui::ColorImage>> = ctx.input(|i| {
-            i.events
-                .iter()
-                .filter_map(|e| match e {
-                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                    _ => None,
-                })
-                .collect()
-        });
-        for image in shots {
-            let path =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("timeline_preview.png");
-            match save_color_image_as_png(&image, &path) {
-                Ok(()) => eprintln!("timeline preview written to {}", path.display()),
-                Err(e) => eprintln!("preview screenshot failed: {e}"),
-            }
-            self.done = true;
-        }
-        if self.done {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
-        }
-
-        self.frames += 1;
-        if self.frames == 3 {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
-        }
-        ctx.request_repaint();
-    }
-}
-
-fn load_preview_state() -> Box<tas_shared::TasSharedState> {
-    let mut state = tas_shared::zeroed_boxed();
-    state.mode = TasMode::Off as u32;
-    if let Some(path) = newest_history_json() {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            #[derive(serde::Deserialize)]
-            struct PSnap {
-                recorded_count: u32,
-                input_log: Vec<u8>,
-            }
-            #[derive(serde::Deserialize)]
-            struct PEntry {
-                #[serde(default)]
-                snapshot: Option<PSnap>,
-            }
-            #[derive(serde::Deserialize)]
-            struct PHist {
-                #[serde(default)]
-                current_index: usize,
-                entries: Vec<PEntry>,
-            }
-            if let Ok(h) = serde_json::from_str::<PHist>(&text) {
-                let snap = h
-                    .entries
-                    .get(h.current_index)
-                    .and_then(|e| e.snapshot.as_ref())
-                    .or_else(|| h.entries.iter().rev().find_map(|e| e.snapshot.as_ref()));
-                if let Some(s) = snap {
-                    let n = (s.recorded_count as usize)
-                        .min(state.input_log.len())
-                        .min(s.input_log.len());
-                    state.input_log[..n].copy_from_slice(&s.input_log[..n]);
-                    state.recorded_count = n as u32;
-                    eprintln!("preview loaded {} ticks from {}", n, path.display());
-                }
-            }
-        }
-    }
-    state
-}
-
-fn newest_history_json() -> Option<std::path::PathBuf> {
-    let root = history_store::default_history_root_dir();
-    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
-    for entry in std::fs::read_dir(&root).ok()?.flatten() {
-        let p = entry.path().join("history.json");
-        if p.is_file() {
-            if let Ok(m) = p.metadata().and_then(|md| md.modified()) {
-                let replace = best.as_ref().map(|(t, _)| m > *t).unwrap_or(true);
-                if replace {
-                    best = Some((m, p));
-                }
-            }
-        }
-    }
-    best.map(|(_, p)| p)
-}
-
-/// Force dark title bar on Windows 10+ via DwmSetWindowAttribute.
-#[cfg(windows)]
-#[allow(clippy::upper_case_acronyms)] // Match Win32 FFI type names.
-fn set_dark_title_bar(title: &str) {
-    use std::ffi::c_void;
-    type HWND = *mut c_void;
-    type BOOL = i32;
-    type DWORD = u32;
-    const DWMWA_USE_IMMERSIVE_DARK_MODE: DWORD = 20;
-    extern "system" {
-        fn FindWindowW(class: *const u16, title: *const u16) -> HWND;
-        fn DwmSetWindowAttribute(hwnd: HWND, attr: DWORD, value: *const c_void, size: DWORD)
-            -> i32;
-    }
-    unsafe {
-        let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
-        if !hwnd.is_null() {
-            let value: BOOL = 1;
-            DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_USE_IMMERSIVE_DARK_MODE,
-                &value as *const BOOL as *const c_void,
-                std::mem::size_of::<BOOL>() as DWORD,
-            );
-        }
-    }
-}
-
-use panels::{config, drift, history, input_script, log_panel, timeline, trajectory, transport};
+use panels::{
+    config, drift, history, input_script, log_panel, status, timeline, trajectory, transport,
+};
 use pico::PicoState;
 use recording::{RecordingHistory, RecordingSessionKind};
 
@@ -472,20 +60,6 @@ const CONT_START_MATCH_MAX_RETRIES: u32 = tas_shared::cont::START_MATCH_MAX_RETR
 /// the input block forever.
 const CONT_CYCLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(180);
 
-/// Open `tas_ui.log` in append mode next to the history JSON for this
-/// session. Returns `None` if the file system isn't usable — silent
-/// failure mode, since losing the on-disk mirror is preferable to
-/// blocking the UI from starting.
-fn open_session_log_file(history_path: &std::path::Path) -> Option<std::fs::File> {
-    let dir = history_path.parent()?;
-    let log_path = dir.join("tas_ui.log");
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .ok()
-}
-
 fn normalize_playback_speed(speed: f32) -> f32 {
     if !speed.is_finite() {
         return DEFAULT_PLAYBACK_SPEED;
@@ -498,137 +72,6 @@ fn normalize_playback_speed(speed: f32) -> f32 {
     DEFAULT_PLAYBACK_SPEED
 }
 
-/// Per-frame section stopwatch. Inert unless `TAS_UI_PROFILE=1` was set at
-/// launch; then `FrameProfAccum` logs a `[perf] frame` summary every 2 s.
-struct FrameProf {
-    enabled: bool,
-    t0: std::time::Instant,
-    last: std::time::Instant,
-    laps: Vec<(&'static str, f64)>,
-}
-
-impl FrameProf {
-    fn start(enabled: bool) -> Self {
-        let now = std::time::Instant::now();
-        Self {
-            enabled,
-            t0: now,
-            last: now,
-            laps: Vec::new(),
-        }
-    }
-
-    /// Close the section that began at the previous lap (or frame start).
-    fn lap(&mut self, name: &'static str) {
-        if !self.enabled {
-            return;
-        }
-        let now = std::time::Instant::now();
-        self.laps
-            .push((name, (now - self.last).as_secs_f64() * 1000.0));
-        self.last = now;
-    }
-}
-
-/// Process private bytes (MB) for the profiler line, so a slow leak shows up
-/// as a trend across the 2-second summaries.
-#[cfg(windows)]
-fn process_private_mb() -> f64 {
-    use std::ffi::c_void;
-    #[repr(C)]
-    struct ProcessMemoryCountersEx {
-        cb: u32,
-        page_fault_count: u32,
-        peak_working_set_size: usize,
-        working_set_size: usize,
-        quota_peak_paged_pool_usage: usize,
-        quota_paged_pool_usage: usize,
-        quota_peak_non_paged_pool_usage: usize,
-        quota_non_paged_pool_usage: usize,
-        pagefile_usage: usize,
-        peak_pagefile_usage: usize,
-        private_usage: usize,
-    }
-    extern "system" {
-        fn GetCurrentProcess() -> *mut c_void;
-        fn K32GetProcessMemoryInfo(
-            process: *mut c_void,
-            counters: *mut ProcessMemoryCountersEx,
-            cb: u32,
-        ) -> i32;
-    }
-    let mut pmc: ProcessMemoryCountersEx = unsafe { std::mem::zeroed() };
-    pmc.cb = std::mem::size_of::<ProcessMemoryCountersEx>() as u32;
-    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb) };
-    if ok != 0 {
-        pmc.private_usage as f64 / (1024.0 * 1024.0)
-    } else {
-        0.0
-    }
-}
-
-#[cfg(not(windows))]
-fn process_private_mb() -> f64 {
-    0.0
-}
-
-#[derive(Default)]
-struct FrameProfAccum {
-    enabled: bool,
-    frames: u32,
-    total_ms: f64,
-    max_ms: f64,
-    sections: Vec<(&'static str, f64)>,
-    window_start: Option<std::time::Instant>,
-}
-
-impl FrameProfAccum {
-    fn record(&mut self, prof: FrameProf, eframe_cpu_ms: Option<f32>, log: &mut Vec<String>) {
-        if !self.enabled {
-            return;
-        }
-        let total = prof.t0.elapsed().as_secs_f64() * 1000.0;
-        self.frames += 1;
-        self.total_ms += total;
-        self.max_ms = self.max_ms.max(total);
-        for (name, ms) in prof.laps {
-            match self.sections.iter_mut().find(|(n, _)| *n == name) {
-                Some(e) => e.1 += ms,
-                None => self.sections.push((name, ms)),
-            }
-        }
-        let started = *self
-            .window_start
-            .get_or_insert_with(std::time::Instant::now);
-        let window = started.elapsed();
-        if window < std::time::Duration::from_secs(2) {
-            return;
-        }
-        let n = self.frames.max(1) as f64;
-        let parts: Vec<String> = self
-            .sections
-            .iter()
-            .map(|(name, ms)| format!("{}={:.2}", name, ms / n))
-            .collect();
-        log.push(format!(
-            "[perf] frame avg {:.2}ms max {:.2}ms, {} frames in {:.1}s ({:.1} fps), eframe cpu {:.2}ms, private {:.2} MB | {}",
-            self.total_ms / n,
-            self.max_ms,
-            self.frames,
-            window.as_secs_f64(),
-            n / window.as_secs_f64(),
-            eframe_cpu_ms.unwrap_or(0.0) * 1000.0,
-            process_private_mb(),
-            parts.join(" ")
-        ));
-        self.frames = 0;
-        self.total_ms = 0.0;
-        self.max_ms = 0.0;
-        self.sections.clear();
-        self.window_start = Some(std::time::Instant::now());
-    }
-}
-
 fn stop_is_acknowledged(mode: u32, command_idle: bool) -> bool {
     mode == TasMode::Off as u32 && command_idle
 }
@@ -636,204 +79,6 @@ fn stop_is_acknowledged(mode: u32, command_idle: bool) -> bool {
 /// `stop_pending` = a STOP is already published or being consumed. Any OTHER
 /// pending command (e.g. a tick-scheduled arm that never fired because the
 /// level was left) must not suppress the auto-stop: STOP overwrites it.
-/// Incremental max-drift scan behind the DRIFT banner: compares
-/// play[play_base+i] with rec[rec_base+i] for the pairs not scanned yet and
-/// keeps the running maxima in `max_dx` / `max_dz`. It also reports the
-/// splice drift at the last replayed pair (`splice - 1`). REC can publish this
-/// verdict even if the UI missed the entire catch-up PLAY. Returns (pairs, reset).
-///
-/// Gate-aligned replays are correct when play[live_gate+k] == rec[rec_gate+k],
-/// so the bases come from the DLL's gate fields while both are set - and stay
-/// LATCHED in `bases` after that: the DLL clears both fields the moment
-/// playback completes (ClearGateAlign / the stop path), and re-scanning raw
-/// indices at that point reported the alignment shift itself as drift - a
-/// false "DRIFT" line at the end of every bit-exact replay whose gate landed
-/// elsewhere (Time Attack ghosts move it ~11 ticks earlier; measured
-/// 2026-09-02, 1035/1035 aligned pairs exact, banner said Z=2.5). The completed
-/// result freezes outside PLAY, and a new `arm_generation` drops the latch and
-/// cache. The cache also resets whenever the aligned bases change or the pair
-/// count shrinks.
-fn scan_drift(
-    state: &tas_shared::TasSharedState,
-    max_dx: &mut f32,
-    max_dz: &mut f32,
-    splice_dx: &mut f32,
-    splice_dz: &mut f32,
-    splice_tick: &mut Option<usize>,
-    last_count: &mut usize,
-    bases: &mut Option<(usize, usize)>,
-    latch_arm_generation: &mut u32,
-    first_drift_tick: &mut Option<usize>,
-) -> (usize, bool) {
-    let (count, forced_reset) = drift_window(state, bases, latch_arm_generation);
-    if forced_reset {
-        *max_dx = 0.0;
-        *max_dz = 0.0;
-        *splice_dx = 0.0;
-        *splice_dz = 0.0;
-        *splice_tick = None;
-        *last_count = 0;
-        *first_drift_tick = None;
-    }
-    if state.mode != TasMode::Play as u32 {
-        if state.mode == TasMode::Rec as u32 {
-            *splice_tick = None;
-            *splice_dx = 0.0;
-            *splice_dz = 0.0;
-            let splice = state.segment_start_frame as usize;
-            let played = state.playback_pos as usize;
-            // cave2 freezes playback_pos at the splice and starts writing REC
-            // at `splice`. The last untouched reference is `splice - 1`.
-            // This also works when 256x PLAY completed between two UI polls.
-            if splice > 0 && splice <= state.recorded_count as usize
-                && splice <= state.rec_coords.len()
-                && played > 0 && played <= state.play_coords.len()
-            {
-                *splice_dx = coordinate_delta(state.play_coords[played - 1][0], state.rec_coords[splice - 1][0]);
-                *splice_dz = coordinate_delta(state.play_coords[played - 1][2], state.rec_coords[splice - 1][2]);
-                *splice_tick = Some(splice);
-            }
-        }
-        return (*last_count, forced_reset);
-    }
-    let (play_base, rec_base) = bases.unwrap_or((0, 0));
-    let reset = forced_reset || count < *last_count;
-    if reset {
-        *max_dx = 0.0;
-        *max_dz = 0.0;
-        *splice_dx = 0.0;
-        *splice_dz = 0.0;
-        *splice_tick = None;
-        *last_count = 0;
-        *first_drift_tick = None;
-    }
-    for i in *last_count..count {
-        let rec_tick = rec_base + i;
-        let d = (state.play_coords[play_base + i][0] - state.rec_coords[rec_tick][0]).abs();
-        if d > 0.0 && first_drift_tick.is_none() {
-            *first_drift_tick = Some(rec_tick);
-        }
-        if d > *max_dx {
-            *max_dx = d;
-        }
-        let d = (state.play_coords[play_base + i][2] - state.rec_coords[rec_tick][2]).abs();
-        if d > 0.0 && first_drift_tick.is_none() {
-            *first_drift_tick = Some(rec_tick);
-        }
-        if d > *max_dz {
-            *max_dz = d;
-        }
-    }
-    *last_count = count;
-    // `splice` is an exclusive prefix endpoint, not a captured playback tick.
-    // A parked PLAY may reach it before the watcher authorizes the REC switch.
-    *splice_dx = 0.0;
-    *splice_dz = 0.0;
-    *splice_tick = None;
-    let splice = state.continue_from_frame as usize;
-    if splice > rec_base && count >= splice - rec_base {
-        let i = splice - rec_base - 1;
-        let rec_tick = rec_base + i;
-        *splice_dx =
-            coordinate_delta(state.play_coords[play_base + i][0], state.rec_coords[rec_tick][0]);
-        *splice_dz =
-            coordinate_delta(state.play_coords[play_base + i][2], state.rec_coords[rec_tick][2]);
-        *splice_tick = Some(splice);
-    }
-    (count, reset)
-}
-
-/// Shared window for the status verdict and debug plot. No countdown samples.
-fn drift_window(
-    state: &tas_shared::TasSharedState,
-    bases: &mut Option<(usize, usize)>,
-    latch_arm_generation: &mut u32,
-) -> (usize, bool) {
-    // A new arm landed since the latch was taken: whatever bases we hold
-    // belong to the previous attempt. A fast replay that starts and finishes
-    // between two UI polls never shows the position falling back below the
-    // old gate, so without this the next run was compared at the old offsets
-    // (codex review 2026-09-03). arm_generation is the durable arm signal.
-    let mut forced_reset = false;
-    if state.arm_generation != *latch_arm_generation {
-        *latch_arm_generation = state.arm_generation;
-        *bases = None;
-        forced_reset = true;
-    }
-
-    // OFF can retain the previous playback position and coordinate buffer,
-    // while history restore replaces the recording underneath it. Comparing
-    // those unrelated sessions produced huge drift lines without any replay.
-    // REC is also not a playback verdict. Freeze the completed result until a
-    // new PLAY arm generation resets it.
-    if state.mode != TasMode::Play as u32 {
-        return (0, forced_reset);
-    }
-
-    let live_gate = state.gate_index as usize;
-    let rec_gate = state.gate_align_rec as usize;
-    if live_gate > 0 && rec_gate > 0 {
-        let next = Some((live_gate, rec_gate));
-        if *bases != next {
-            *bases = next;
-            forced_reset = true;
-        }
-    } else if rec_gate > 0 && bases.is_none() {
-        // This arm expects gate alignment, but the live gate has not fired yet.
-        // Raw-index comparisons during the variable spawn countdown are not a
-        // statement about replay determinism.
-        return (0, forced_reset);
-    }
-    let (play_base, rec_base) = bases.unwrap_or((0, 0));
-    let count = (state.playback_pos as usize)
-        .saturating_sub(play_base)
-        .min((state.recorded_count as usize).saturating_sub(rec_base))
-        .min(state.play_coords.len().saturating_sub(play_base))
-        .min(state.rec_coords.len().saturating_sub(rec_base));
-    (count, forced_reset)
-}
-
-fn coordinate_delta(play: f32, rec: f32) -> f32 {
-    if play.is_finite() && rec.is_finite() { (play - rec).abs() } else { f32::INFINITY }
-}
-
-fn cont_verdict_boundary(state: &tas_shared::TasSharedState) -> usize {
-    if state.mode == TasMode::Rec as u32 {
-        state.segment_start_frame as usize
-    } else {
-        state.continue_from_frame as usize
-    }
-}
-
-fn should_show_drift_banner(
-    state: &tas_shared::TasSharedState,
-    latch_arm_generation: u32,
-    first_drift_tick: Option<usize>,
-    splice_tick: Option<usize>,
-    splice_drift: f32,
-    max_drift: f32,
-) -> bool {
-    // The banner is the F12/CONT verdict: for a CONT (splice != 0) it reports
-    // the splice-tick agreement only, once playback has covered it. A
-    // transient that heals before the splice (UI break at 4500: tick-1831
-    // jump wobble, exact at the 4500 splice, CONT bucket matched) must never
-    // banner — not even while the playback head is inside the transient,
-    // which is why the head drift is not consulted here. A plain PLAY
-    // (splice 0) has no verdict point, so any measured divergence banners as
-    // before. Full-prefix maxima stay visible in the debug drift graph and
-    // the session log either way.
-    if (state.mode != TasMode::Play as u32 && state.mode != TasMode::Rec as u32)
-        || state.arm_generation != latch_arm_generation
-    {
-        return false;
-    }
-    let splice = cont_verdict_boundary(state);
-    if splice != 0 {
-        return splice_tick == Some(splice) && splice_drift > 0.0;
-    }
-    state.mode == TasMode::Play as u32 && first_drift_tick.is_some() && max_drift > 0.0
-}
-
 fn should_request_auto_stop(
     racing: bool,
     cycle_frozen: bool,
@@ -867,8 +112,6 @@ struct TasApp {
     last_queued_revision: u64,
     last_failed_revision: u64,
     history_retry_after: Option<std::time::Instant>,
-    /// `TAS_UI_PROFILE=1` frame-section profiler (inert otherwise).
-    frame_prof: FrameProfAccum,
     /// Last automatic `try_reconnect` while disconnected.
     last_reconnect_attempt: std::time::Instant,
     /// Physics-mode stamp (renderer + x87 precision) of the take currently in
@@ -886,17 +129,7 @@ struct TasApp {
     /// `thread::spawn` per write so a late write can't land after `clear_pending`
     /// and resurrect a stale checkpoint into a duplicate "Recovered" entry.
     recovery_writer: recording::RecoveryWriter,
-    log_lines: Vec<String>,
-    /// Append-only on-disk mirror of `log_lines`. Lives under
-    /// `~/.ssb-inspector/{session}/tas_ui.log` (same session dir as the
-    /// history store) so AI agents and post-mortem debuggers can read
-    /// the full transport-log scrollback after `log_lines` has been
-    /// truncated to its 500-entry in-memory cap.
-    log_file: Option<std::fs::File>,
-    /// Index in `log_lines` up to which we've already flushed to
-    /// `log_file`. Bumped each UI frame; resilient to the cap-drain
-    /// because the drain happens AFTER we've persisted.
-    log_lines_persisted: usize,
+    log_lines: ui_log::UiLog,
     timeline_view: timeline::TimelineView,
     timeline_edit: timeline::TimelineEdit,
     /// Input edit (new full event list, commit-undo flag) produced by the
@@ -911,7 +144,6 @@ struct TasApp {
     continue_from_frame: u32,
     continue_from_text: String,
     playback_speed: f32,
-    step_mode: bool,
     show_debug_drift: bool,
     show_history: bool,
     show_log: bool,
@@ -940,27 +172,7 @@ struct TasApp {
     /// approximate one.
     finished_hud_cs: Option<u32>,
 
-    // Cached max drift (incremental scan instead of per-frame O(n)).
-    // This is the HISTORICAL diagnostic: the largest difference seen anywhere
-    // in this PLAY prefix. It stays latched (see the UI-break-at-4500 case:
-    // a brief jump transient around tick 1831 healed long before the 4500
-    // splice, yet the max stayed non-zero). The prominent DRIFT banner must
-    // NOT use this; it uses the splice-point (endpoint) drift below.
-    cached_max_drift_x: f32,
-    cached_max_drift_z: f32,
-    // F12/CONT verdict: drift at the `continue_from_frame` splice tick once
-    // playback covers it, recomputed idempotently by `scan_drift`. Zero /
-    // None until covered. The banner verdicts on this, never on the head.
-    cached_splice_drift_x: f32,
-    cached_splice_drift_z: f32,
-    cached_splice_tick: Option<usize>,
-    last_drift_scan_count: usize,
-    /// Gate-aligned (play_base, rec_base) latched by `scan_drift`.
-    drift_aligned_bases: Option<(usize, usize)>,
-    /// `arm_generation` the drift latch was taken under (see `scan_drift`).
-    drift_latch_arm_generation: u32,
-    /// First recording tick with a non-zero X/Z difference in this PLAY.
-    drift_first_tick: Option<usize>,
+    drift_tracker: drift_scan::DriftTracker,
     last_logged_drift_level: u8, // 0=none, 1=any, 2=>=1.0, 3=>=5.0
 
     // Cached plot data (avoid per-frame Vec allocation)
@@ -1049,8 +261,7 @@ impl TasApp {
         };
 
         let settings = settings::Settings::load();
-        // v2 file-per-entry history store. Open (loads existing), else migrate
-        // the legacy history.json once (with a safety backup).
+        // File-per-entry history store.
         let history_cap = settings.history_cap.max(1);
         let mut history = RecordingHistory::new(history_cap);
         let history_dir = history_store_v2::default_history_dir();
@@ -1060,36 +271,14 @@ impl TasApp {
                 // Entries load lazily: a restore reads its blob from here.
                 history.set_blob_dir(history_dir.clone());
                 if load.entries.is_empty() {
-                    // Even with NO entries, honor the store's computed
-                    // next_entry_id and surface its warnings. A valid empty
-                    // manifest, or a corrupt manifest that preserved blobs,
-                    // yields a high floor; without adopting it the next new
-                    // entry restarts at id 1 and collides with a preserved blob.
+                    // Preserve the computed id floor even for an empty or
+                    // damaged manifest so a new entry cannot reuse a blob id.
                     history.adopt_id_floor(load.next_entry_id);
-                    for w in &load.warnings {
-                        history_notices.push(format!("History: {}", w));
-                    }
-                    // Possibly fresh — migrate legacy history.json once. No-ops
-                    // if a v2 manifest already exists or there's no legacy data.
-                    match history_store_v2::migrate_legacy(&history_dir) {
-                        Ok(Some((backup, persisted))) => match history.apply_persisted(persisted) {
-                            Ok(()) => history_notices.push(format!(
-                                "Migrated legacy history ({} entries) → {} (backup: {})",
-                                history.len(),
-                                history_dir.display(),
-                                backup.display()
-                            )),
-                            Err(e) => history_notices
-                                .push(format!("Legacy migration parse failed: {}", e)),
-                        },
-                        Ok(None) => {}
-                        Err(e) => history_notices.push(format!("Legacy migration skipped: {}", e)),
-                    }
                 } else {
-                    for w in &load.warnings {
-                        history_notices.push(format!("History: {}", w));
-                    }
                     history.apply_loaded(load.entries, load.current_entry_id, load.next_entry_id);
+                }
+                for warning in load.warnings {
+                    history_notices.push(format!("History: {}", warning));
                 }
                 history_notices.push(format!("History store: {}", history_dir.display()));
                 Some(writer)
@@ -1165,7 +354,6 @@ impl TasApp {
                 Err(err) => recovery_notice = Some(format!("Crash recovery check failed: {}", err)),
             }
         }
-        let log_file = open_session_log_file(&history_dir);
         let mut app = Self {
             shared,
             connect_error,
@@ -1178,19 +366,13 @@ impl TasApp {
             last_queued_revision: 0,
             last_failed_revision: 0,
             history_retry_after: None,
-            frame_prof: FrameProfAccum {
-                enabled: std::env::var_os("TAS_UI_PROFILE").is_some_and(|v| v == "1"),
-                ..Default::default()
-            },
             last_reconnect_attempt: std::time::Instant::now(),
             loaded_physics: None,
             loaded_rider: None,
             history_cap,
             recovery_store,
             recovery_writer: recording::RecoveryWriter::new(),
-            log_lines: Vec::new(),
-            log_file,
-            log_lines_persisted: 0,
+            log_lines: ui_log::UiLog::new(&history_dir),
             timeline_view: timeline::TimelineView::default(),
             timeline_edit: timeline::TimelineEdit::default(),
             pending_input_edit: None,
@@ -1199,7 +381,6 @@ impl TasApp {
             continue_from_frame: 0,
             continue_from_text: "0".to_string(),
             playback_speed: normalize_playback_speed(settings.playback_speed),
-            step_mode: false,
             show_debug_drift: settings.show_debug_drift,
             show_history: settings.show_history,
             show_log: settings.show_log,
@@ -1216,15 +397,7 @@ impl TasApp {
             finish_scan_cursor: 0,
             finished_at_tick: None,
             finished_hud_cs: None,
-            cached_max_drift_x: 0.0,
-            cached_max_drift_z: 0.0,
-            cached_splice_drift_x: 0.0,
-            cached_splice_drift_z: 0.0,
-            cached_splice_tick: None,
-            last_drift_scan_count: 0,
-            drift_aligned_bases: None,
-            drift_latch_arm_generation: 0,
-            drift_first_tick: None,
+            drift_tracker: drift_scan::DriftTracker::default(),
             last_logged_drift_level: 0,
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
@@ -1257,11 +430,8 @@ impl TasApp {
             app.pico.auto_detect()
         };
         for msg in detect_logs {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            app.log_lines.push(format!("[{}] {}", ts, msg));
+            app.log_lines.push(msg);
         }
-        // Pico auto-detected but panel hidden by default (use View menu to show)
-        let _ = app.pico.auto_detected;
         for msg in history_notices {
             app.push_log(&msg);
         }
@@ -1287,7 +457,9 @@ impl TasApp {
                     return Err("E2E startup requires an isolated SSB_INSPECT_DATA_DIR".into());
                 }
                 let splice = std::env::var("SSB_INSPECT_E2E_SPLICE")
-                    .map_err(|e| e.to_string())?.parse::<u32>().map_err(|e| e.to_string())?;
+                    .map_err(|e| e.to_string())?
+                    .parse::<u32>()
+                    .map_err(|e| e.to_string())?;
                 app.prepare_e2e_recording(std::path::Path::new(&path), splice)
             })();
             if let Err(error) = setup {
@@ -1309,14 +481,22 @@ impl TasApp {
         if splice == 0 || splice > metadata.recorded_count {
             return Err("Splice outside recording".into());
         }
-        tas_shared::level::check_recording_matches_live(&path.to_string_lossy(), shared.state().level_id)?;
-        if !recording::load_recording_path(shared.state_mut(), &mut self.segment_tracker, &mut self.log_lines, path) {
+        tas_shared::level::check_recording_matches_live(
+            &path.to_string_lossy(),
+            shared.state().level_id,
+        )?;
+        if !recording::load_recording_path(
+            shared.state_mut(),
+            &mut self.segment_tracker,
+            &mut self.log_lines,
+            path,
+        ) {
             return Err("Could not load UI fixture".into());
         }
         self.loaded_physics = metadata.physics_label();
         self.loaded_rider = metadata.rider_label();
         self.history.push_loaded_snapshot(shared.state(), path);
-        self.apply_transport_action(transport::Action::SetContinueFrame(splice), "E2E");
+        self.apply_transport_action(transport::Action::SetContinueFrame(splice));
         Ok(())
     }
 
@@ -1355,11 +535,10 @@ impl TasApp {
             .and_then(|e| e.physics.clone());
         if let (Some(stamp), Some(live)) = (stamp.as_deref(), self.history.live_physics()) {
             if stamp != live {
-                let ts = chrono::Local::now().format("%H:%M:%S");
                 self.log_lines.push(format!(
-                    "[{}] WARNING: this take was recorded under {} but the game is running {}: \
+                    "WARNING: this take was recorded under {} but the game is running {}: \
                      the physics round differently, a replay will not be bit-exact",
-                    ts, stamp, live
+                    stamp, live
                 ));
             }
         }
@@ -1372,11 +551,10 @@ impl TasApp {
             .and_then(|e| e.rider.clone());
         if let (Some(stamp), Some(live)) = (rider.as_deref(), self.history.live_rider()) {
             if stamp != live {
-                let ts = chrono::Local::now().format("%H:%M:%S");
                 self.log_lines.push(format!(
-                    "[{}] WARNING: this take was recorded as {} but the rider is {}: \
+                    "WARNING: this take was recorded as {} but the rider is {}: \
                      a different character or stance has different physics, a replay will not line up",
-                    ts, stamp, live
+                    stamp, live
                 ));
             }
         }
@@ -1384,17 +562,7 @@ impl TasApp {
     }
 
     fn push_log(&mut self, msg: &str) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        self.log_lines.push(format!("[{}] {}", ts, msg));
-        if self.log_lines.len() > 500 {
-            // Drain the oldest 100 entries. The on-disk log already has
-            // them (flush_log_lines_to_file is called before any drain
-            // could be hit on the same frame), so we only need to keep
-            // the persisted-cursor coherent.
-            let drained = 100;
-            self.log_lines.drain(..drained);
-            self.log_lines_persisted = self.log_lines_persisted.saturating_sub(drained);
-        }
+        self.log_lines.push(msg);
     }
 
     /// Append any newly-pushed log lines to the session log file. Called
@@ -1402,29 +570,7 @@ impl TasApp {
     /// (couldn't open at start) this is a no-op — the in-memory log
     /// remains the only record.
     fn flush_log_lines_to_file(&mut self) {
-        use std::io::Write;
-        let Some(file) = self.log_file.as_mut() else {
-            return;
-        };
-        if self.log_lines_persisted >= self.log_lines.len() {
-            return;
-        }
-        for line in &self.log_lines[self.log_lines_persisted..] {
-            // Best-effort: a single write failure shouldn't crash the
-            // UI. The on-disk log may end up missing entries but that's
-            // strictly better than panicking.
-            let _ = writeln!(file, "{}", line);
-        }
-        let _ = file.flush();
-        self.log_lines_persisted = self.log_lines.len();
-    }
-
-    #[cfg(test)]
-    fn begin_cont_catchup(&mut self) {
-        if self.cont_catchup_speed.is_none() {
-            self.cont_catchup_speed = Some(self.playback_speed);
-        }
-        self.playback_speed = self.cont_catchup_multiplier;
+        self.log_lines.flush_to_file();
     }
 
     fn clear_cont_catchup(&mut self) {
@@ -1471,14 +617,14 @@ impl TasApp {
         let rec0 = state.rec_coords[0];
         Some(tas_shared::transport::BucketTarget {
             expected_start_bits: [rec0[0].to_bits(), rec0[1].to_bits(), rec0[2].to_bits()],
-            expected_first_moving: recording::detect_first_moving(
+            expected_first_moving: tas_shared::cont::detect_first_moving(
                 &state.rec_coords,
                 state.recorded_count,
             ),
         })
     }
 
-    fn send_action_command(&mut self, command: TasCommand, ts: &str) {
+    fn send_action_command(&mut self, command: TasCommand) {
         if command == TasCommand::Stop {
             self.clear_cont_catchup();
             // reset_continue_runtime_state also cancels any in-flight
@@ -1489,7 +635,7 @@ impl TasApp {
         if let Some(shared) = self.shared.as_mut() {
             shared.send_command(command);
         }
-        self.log_lines.push(format!("[{}] Sent: {:?}", ts, command));
+        self.log_lines.push(format!("Sent: {:?}", command));
     }
 
     /// Stop any active REC/PLAY and wait (bounded) for the DLL to reach OFF
@@ -1501,7 +647,7 @@ impl TasApp {
     /// than overwriting the recording buffer if the bounded wait expires. The
     /// file dialog that precedes a load already blocked far longer, so a
     /// sub-frame spin here is unnoticeable.
-    fn stop_active_session_for_load(&mut self, ts: impl std::fmt::Display) -> bool {
+    fn stop_active_session_for_load(&mut self) -> bool {
         self.detach_input_editor();
         let (mode, command_idle) = self
             .shared
@@ -1513,10 +659,8 @@ impl TasApp {
             return true;
         }
         let was_rec = mode == TasMode::Rec as u32;
-        let ts = ts.to_string();
-        self.log_lines
-            .push(format!("[{}] Stopping active session before load", ts));
-        self.send_action_command(TasCommand::Stop, &ts);
+        self.log_lines.push("Stopping active session before load");
+        self.send_action_command(TasCommand::Stop);
         // Spin up to ~250ms for the DLL's cycle hook to process CMD_STOP and
         // flip to OFF (typically 1-2 cycles, ~7-14ms).
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
@@ -1540,10 +684,9 @@ impl TasApp {
                 .unwrap_or(true);
         }
         if !stopped {
-            self.log_lines.push(format!(
-                "[{}] Load/restore refused: Stop was not acknowledged; recording buffer unchanged",
-                ts
-            ));
+            self.log_lines.push(
+                "Load/restore refused: Stop was not acknowledged; recording buffer unchanged",
+            );
             return false;
         }
         // Finalize the just-stopped recording into history NOW, before the
@@ -1654,10 +797,10 @@ impl TasApp {
     /// path and the transport-bar button path so the two can never diverge. (The
     /// button path used to inline its own copy — including a hand-rolled
     /// first-moving scan — which silently bypassed `detect_first_moving`.)
-    fn apply_transport_action(&mut self, cmd: transport::Action, ts: &str) {
+    fn apply_transport_action(&mut self, cmd: transport::Action) {
         match cmd {
-            transport::Action::Send(c) => self.send_action_command(c, ts),
-            transport::Action::RestartThen(c) => self.queue_restart_then(c, ts),
+            transport::Action::Send(c) => self.send_action_command(c),
+            transport::Action::RestartThen(c) => self.queue_restart_then(c),
             // Undo/Redo overwrite the WHOLE shared input/coord buffer, exactly
             // like a history-row restore — so they need the same guard. The
             // panel path stops an active REC/PLAY first (see HistoryAction::
@@ -1665,25 +808,23 @@ impl TasApp {
             // bulk-copy over it; Ctrl+Z did not, and its buttons are
             // mode-independent, so undo during REC raced the DLL writer.
             transport::Action::Undo => {
-                if self.stop_active_session_for_load(ts) {
+                if self.stop_active_session_for_load() {
                     if let Some(snap) = self.history.undo() {
                         if let Some(shared) = self.shared.as_mut() {
                             snap.restore_to(shared.state_mut());
                         }
-                        self.log_lines
-                            .push(format!("[{}] Undo: restored previous recording", ts));
+                        self.log_lines.push("Undo: restored previous recording");
                         self.note_restored_physics();
                     }
                 }
             }
             transport::Action::Redo => {
-                if self.stop_active_session_for_load(ts) {
+                if self.stop_active_session_for_load() {
                     if let Some(snap) = self.history.redo() {
                         if let Some(shared) = self.shared.as_mut() {
                             snap.restore_to(shared.state_mut());
                         }
-                        self.log_lines
-                            .push(format!("[{}] Redo: restored next recording", ts));
+                        self.log_lines.push("Redo: restored next recording");
                         self.note_restored_physics();
                     }
                 }
@@ -1710,20 +851,15 @@ impl TasApp {
                 if let Some(shared) = self.shared.as_mut() {
                     shared.state_mut().cont_resume_speed = spd;
                 }
-                self.log_lines
-                    .push(format!("[{}] Resume speed: {}x", ts, spd));
-            }
-            transport::Action::StepOne => {
-                self.log_lines
-                    .push(format!("[{}] Step one frame (requires DLL support)", ts));
+                self.log_lines.push(format!("Resume speed: {}x", spd));
             }
             transport::Action::Log(msg) => {
-                self.log_lines.push(format!("[{}] {}", ts, msg));
+                self.log_lines.push(msg);
             }
         }
     }
 
-    fn queue_restart_then(&mut self, command: TasCommand, ts: &str) {
+    fn queue_restart_then(&mut self, command: TasCommand) {
         // Debounce overlapping cycles: a transport cycle (REC/PLAY/CONT
         // restart→arm) is already in flight, so a second F9/F10/F12 press
         // would clobber the single-u32 command slot mid-sequence and could
@@ -1732,8 +868,8 @@ impl TasApp {
         // current cycle finishes.
         if self.cont_controller.is_some() {
             self.log_lines.push(format!(
-                "[{}] {:?} ignored: a restart/arm cycle is already in progress",
-                ts, command
+                "{:?} ignored: a restart/arm cycle is already in progress",
+                command
             ));
             return;
         }
@@ -1752,8 +888,8 @@ impl TasApp {
             .unwrap_or(false);
         if !cycle_ticking || !in_level {
             self.log_lines.push(format!(
-                "[{}] {:?} ignored: the game is in a menu / paused - enter a level first",
-                ts, command
+                "{:?} ignored: the game is in a menu / paused - enter a level first",
+                command
             ));
             return;
         }
@@ -1772,17 +908,13 @@ impl TasApp {
                 .map(|s| s.state().recorded_count)
                 .unwrap_or(0);
             if recorded == 0 {
-                self.log_lines.push(format!(
-                    "[{}] CONT ignored: no recording loaded (recorded_count=0)",
-                    ts
-                ));
+                self.log_lines
+                    .push("CONT ignored: no recording loaded (recorded_count=0)");
                 return;
             }
             if self.continue_from_frame == 0 {
-                self.log_lines.push(format!(
-                    "[{}] CONT ignored: continue_from_frame=0 — press PLAY instead",
-                    ts
-                ));
+                self.log_lines
+                    .push("CONT ignored: continue_from_frame=0 — press PLAY instead");
                 return;
             }
             // Cave2 accepts continue_from_frame == recorded_count (= play
@@ -1793,8 +925,8 @@ impl TasApp {
             // press CONT again to redo the same prefix.
             if self.continue_from_frame > recorded {
                 self.log_lines.push(format!(
-                    "[{}] CONT ignored: continue_from_frame={} > recorded_count={}",
-                    ts, self.continue_from_frame, recorded
+                    "CONT ignored: continue_from_frame={} > recorded_count={}",
+                    self.continue_from_frame, recorded
                 ));
                 return;
             }
@@ -1809,7 +941,7 @@ impl TasApp {
                 self.loaded_rider.as_deref(),
                 self.history.live_rider(),
             ) {
-                self.log_lines.push(format!("[{}] WARNING: {}", ts, advice));
+                self.log_lines.push(format!("WARNING: {}", advice));
             }
         }
         let arm = match command {
@@ -1892,8 +1024,8 @@ impl TasApp {
                 );
                 if n > 0 {
                     self.log_lines.push(format!(
-                        "[{}] WARNING: {} recorded input frame(s) in the {} frames before the gate differ from the gate mask; alignment replays them AS the gate mask",
-                        ts, n, tas_shared::cont::GATE_ALIGN_PRE_GATE_LEAD
+                        "WARNING: {} recorded input frame(s) in the {} frames before the gate differ from the gate mask; alignment replays them AS the gate mask",
+                        n, tas_shared::cont::GATE_ALIGN_PRE_GATE_LEAD
                     ));
                 }
             }
@@ -1962,8 +1094,8 @@ impl TasApp {
             String::new()
         };
         self.log_lines.push(format!(
-            "[{}] In-process restart → {:?}{} (speed {}x)",
-            ts, command, resume_at, self.playback_speed
+            "In-process restart → {:?}{} (speed {}x)",
+            command, resume_at, self.playback_speed
         ));
     }
 
@@ -2157,40 +1289,6 @@ impl TasApp {
         }
     }
 
-    #[cfg(test)]
-    fn prepare_send_action(&mut self, command: TasCommand) {
-        if command == TasCommand::Stop {
-            self.clear_cont_catchup();
-            self.reset_continue_runtime_state();
-        }
-    }
-
-    #[cfg(test)]
-    fn prepare_restart_action(&mut self, command: TasCommand) {
-        if command == TasCommand::ArmContinue {
-            self.begin_cont_catchup();
-        } else {
-            self.clear_cont_catchup();
-        }
-        if command == TasCommand::ArmRec {
-            self.playback_speed = DEFAULT_PLAYBACK_SPEED;
-        }
-        match command {
-            TasCommand::ArmRec => {
-                self.pending_session_kind = Some(RecordingSessionKind::Rec);
-                self.pending_continue_start_tick = None;
-            }
-            TasCommand::ArmContinue => {
-                self.pending_session_kind = Some(RecordingSessionKind::Continue);
-                self.pending_continue_start_tick = Some(self.continue_from_frame);
-            }
-            _ => {
-                self.pending_session_kind = None;
-                self.pending_continue_start_tick = None;
-            }
-        }
-    }
-
     /// Clear the crash-recovery checkpoint, but ONLY after the history it
     /// represents is durably committed. Mirrors the startup recovery ordering:
     /// persist → flush (which now reports the real durability result) → clear.
@@ -2234,6 +1332,11 @@ impl TasApp {
             return;
         };
 
+        for error in writer.take_errors() {
+            self.log_lines
+                .push(format!("History persistence failed: {error}"));
+        }
+
         self.last_persisted_revision = self.last_persisted_revision.max(writer.durable_revision());
         // Takes the writer has committed no longer need a resident copy.
         for (id, blob) in writer.take_durable_blobs() {
@@ -2262,7 +1365,6 @@ impl TasApp {
         {
             return;
         }
-        let _t = std::time::Instant::now();
         // UI-thread cost is only the clone; the worker does serialize + disk.
         let entries = self.history.to_stored_entries();
         let current = self.history.current_entry_id();
@@ -2282,14 +1384,6 @@ impl TasApp {
         self.last_failed_revision = 0;
         self.last_queued_revision = revision;
         self.history_retry_after = None;
-        let dt = _t.elapsed();
-        if dt.as_millis() > 30 {
-            self.log_lines.push(format!(
-                "[perf] history persist (ui clone+handoff): {}ms ({} entries)",
-                dt.as_millis(),
-                self.history.len()
-            ));
-        }
     }
 
     /// Discard editors and queued gestures when their recording is replaced.
@@ -2326,13 +1420,16 @@ impl TasApp {
         if mode != TasMode::Off as u32 {
             if !self.pending_edit_autostop {
                 self.pending_edit_autostop = true;
-                self.log_lines
-                    .push("[script] stopping run to apply edit…".into());
-                self.send_action_command(TasCommand::Stop, "auto");
+                self.log_lines.push("[script] stopping run to apply edit…");
+                self.send_action_command(TasCommand::Stop);
             }
             return;
         }
-        if self.shared.as_ref().is_some_and(|shared| !shared.command_idle()) {
+        if self
+            .shared
+            .as_ref()
+            .is_some_and(|shared| !shared.command_idle())
+        {
             return;
         }
         self.pending_edit_autostop = false;
@@ -2372,7 +1469,8 @@ impl TasApp {
                 let n = events.len();
                 self.pending_input_edit =
                     Some((events, true, "Loaded inputs from script".to_string()));
-                self.log_lines.push(format!("[script] reloaded {} inputs", n));
+                self.log_lines
+                    .push(format!("[script] reloaded {} inputs", n));
             }
             Err(e) => self.log_lines.push(format!("[script] reload failed: {e}")),
         }
@@ -2478,10 +1576,13 @@ impl TasApp {
         // this checkpoint ever comes back, it comes back during startup — when
         // nothing has read the live level yet — so asking then is too late.
         let level = self.level_for_save().map(str::to_string);
-        let live_stamps = self
-            .shared
-            .as_ref()
-            .map(|s| (s.fpu_control_word(), s.renderer_id(), tas_shared::rider_pair(s.state())));
+        let live_stamps = self.shared.as_ref().map(|s| {
+            (
+                s.fpu_control_word(),
+                s.renderer_id(),
+                tas_shared::rider_pair(s.state()),
+            )
+        });
         let maybe_session = {
             let Some(session) = self.active_recording_session.as_mut() else {
                 return;
@@ -2520,7 +1621,6 @@ impl TasApp {
             return;
         };
 
-        let _t = std::time::Instant::now();
         // A session the finish-line watch stopped is labelled by its race
         // time ("Finish 0:53.34", flag in the panel), not by its length. The
         // HUD timer froze at the line; when the DLL's race-timer feed is
@@ -2547,7 +1647,7 @@ impl TasApp {
                     level_code,
                 );
                 let first_moving =
-                    recording::detect_first_moving(snapshot.rec_coords.as_ref(), end_tick);
+                    tas_shared::cont::detect_first_moving(snapshot.rec_coords.as_ref(), end_tick);
                 recording::FinishStamp {
                     cs: recording::geometry_race_time_cs(tick, start, first_moving),
                     exact: false,
@@ -2565,14 +1665,6 @@ impl TasApp {
             session_context.end_tick,
             finish,
         );
-        let dt = _t.elapsed();
-        if dt.as_millis() > 30 {
-            self.log_lines.push(format!(
-                "[perf] history.push_snapshot: {}ms",
-                dt.as_millis()
-            ));
-        }
-        let _ = (snapshot, session_context);
         // Make the recording DURABLE in history BEFORE clearing the recovery
         // checkpoint — otherwise a crash between "pushed to in-memory history"
         // and "background writer committed" would lose it (checkpoint gone,
@@ -2617,9 +1709,9 @@ impl TasApp {
                 // mapping for days: repainting at full rate against a stale
                 // MODE_PLAY, re-sending STOP every 2 s, and leaking until it
                 // burned most of a core (2026-09-02 post-mortem).
-                if self.stale_frame_ticks % 5 == 0 {
+                if self.stale_frame_ticks.is_multiple_of(5) {
                     // Check if Supreme.exe is actually running
-                    if !is_supreme_running() {
+                    if !win32::is_supreme_running() {
                         self.push_log("Game process not found — disconnecting shared memory");
                         self.shared = None;
                         self.detach_input_editor();
@@ -2651,26 +1743,10 @@ impl TasApp {
     /// Edge state is updated every frame regardless of focus so we
     /// never strand on a "was pressed last time we looked" entry after
     /// a focus change while a key was held.
-    #[cfg(windows)]
-    #[allow(clippy::upper_case_acronyms)] // Match Win32 FFI type names.
     fn poll_global_shortcuts(&mut self) -> Vec<transport::Action> {
-        use std::ffi::c_void;
-        type HWND = *mut c_void;
-        type DWORD = u32;
-        const VK_F9: i32 = 0x78;
-        const VK_F10: i32 = 0x79;
-        const VK_F11: i32 = 0x7A;
-        const VK_F12: i32 = 0x7B;
-
-        extern "system" {
-            fn GetAsyncKeyState(vk: i32) -> i16;
-            fn GetForegroundWindow() -> HWND;
-            fn GetWindowThreadProcessId(hwnd: HWND, pid: *mut DWORD) -> DWORD;
-        }
-
         // Step 1: read current pressed state for all four keys.
-        let now: [bool; 4] = [VK_F9, VK_F10, VK_F11, VK_F12]
-            .map(|vk| unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 });
+        let now: [bool; 4] =
+            [win32::VK_F9, win32::VK_F10, win32::VK_F11, win32::VK_F12].map(win32::key_is_down);
         // Step 2: compute edges and update cache (always — see doc comment).
         let edges = compute_global_key_edges(now, &mut self.prev_global_keys);
         // Short-circuit if no key transitioned this frame.
@@ -2684,20 +1760,14 @@ impl TasApp {
         // PID only persists across a same-session game restart that doesn't
         // tear down shared memory — rare and benign (the PID just won't match).
         let game_pid = self.game_pid_cached.or_else(|| {
-            let resolved = find_supreme_pid();
+            let resolved = win32::find_supreme_pid();
             self.game_pid_cached = resolved;
             resolved
         });
         let Some(game_pid) = game_pid else {
             return Vec::new();
         };
-        let hwnd = unsafe { GetForegroundWindow() };
-        if hwnd.is_null() {
-            return Vec::new();
-        }
-        let mut fg_pid: DWORD = 0;
-        unsafe { GetWindowThreadProcessId(hwnd, &mut fg_pid) };
-        if fg_pid != game_pid {
+        if win32::foreground_window_pid() != Some(game_pid) {
             return Vec::new();
         }
 
@@ -2723,12 +1793,6 @@ impl TasApp {
             actions.push(transport::Action::Log("Global F12 (in-game): CONT".into()));
         }
         actions
-    }
-
-    /// Non-Windows shim so the call site doesn't need conditional compilation.
-    #[cfg(not(windows))]
-    fn poll_global_shortcuts(&mut self) -> Vec<transport::Action> {
-        Vec::new()
     }
 
     /// Process keyboard shortcuts. Returns actions to execute.
@@ -2782,17 +1846,6 @@ impl TasApp {
                 actions.push(transport::Action::Log("Shortcut: F12 CONT".into()));
             }
 
-            // F8: capture a screenshot of the egui framebuffer to disk.
-            // Used for remote debugging — Windows GDI APIs can't read
-            // wgpu-rendered windows when they're occluded by another
-            // window, but egui's own screenshot mechanism runs through
-            // the GPU pipeline and grabs the actual rendered content.
-            // The result is written to a fixed path; the caller (e.g.
-            // an automation script) reads the file after a frame or two.
-            if input.key_pressed(egui::Key::F8) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
-                actions.push(transport::Action::Log("F8: screenshot requested".into()));
-            }
             // Skip remaining shortcuts if text input has focus
             if any_text_focus {
                 return;
@@ -2802,11 +1855,6 @@ impl TasApp {
             if input.key_pressed(egui::Key::Space) {
                 actions.push(transport::Action::Send(TasCommand::Stop));
                 actions.push(transport::Action::Log("Shortcut: Space STOP".into()));
-            }
-
-            // Period: Step forward one frame
-            if input.key_pressed(egui::Key::Period) {
-                actions.push(transport::Action::StepOne);
             }
 
             // Ctrl+Z: Undo (check raw events — egui may consume key_pressed for built-in undo)
@@ -2936,8 +1984,7 @@ impl TasApp {
         let Some(path) = recording::pick_recording_path(level_id) else {
             return;
         };
-        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-        if !self.stop_active_session_for_load(&ts) {
+        if !self.stop_active_session_for_load() {
             return;
         }
         // Open bypassed the per-level guarantee entirely: the dialog merely
@@ -2956,8 +2003,7 @@ impl TasApp {
         if let Err(msg) =
             tas_shared::level::check_recording_matches_live(&path.to_string_lossy(), live_id)
         {
-            self.log_lines
-                .push(format!("[{}] Load refused: {}", ts, msg));
+            self.log_lines.push(format!("Load refused: {}", msg));
             return;
         }
         if let Some(shared) = self.shared.as_mut() {
@@ -2975,7 +2021,7 @@ impl TasApp {
                 self.loaded_rider = meta.as_ref().and_then(|m| m.rider_label());
                 let _ = self.history.push_loaded_snapshot(shared.state(), &path);
                 if shared.state().recorded_count > 0 {
-                    self.queue_restart_then(TasCommand::ArmPlay, &ts);
+                    self.queue_restart_then(TasCommand::ArmPlay);
                 }
             }
         }
@@ -3012,10 +2058,8 @@ impl eframe::App for TasApp {
         if !self.dark_title_bar_set {
             self.dark_title_bar_set = true;
             ctx.set_theme(egui::Theme::Dark);
-            set_dark_title_bar("SSB Inspect");
+            win32::set_dark_title_bar("SSB Inspect");
         }
-
-        let mut prof = FrameProf::start(self.frame_prof.enabled);
 
         // Persist any new log lines added since last frame to the on-disk
         // session log. Done first so a panic later in the frame still
@@ -3032,30 +2076,6 @@ impl eframe::App for TasApp {
         // the guarantee: a per-frame fact has to be established before the frame
         // consumes it.
         self.sync_live_level();
-
-        // If a screenshot was requested last frame (via F8), the encoded
-        // ColorImage arrives in this frame's raw events. Walk them and
-        // write any screenshots to disk. egui's screenshot path goes
-        // through the GPU pipeline, so it works even when the window
-        // is occluded by another window (unlike GDI PrintWindow which
-        // returns black for wgpu-rendered windows).
-        let screenshots: Vec<std::sync::Arc<egui::ColorImage>> = ctx.input(|i| {
-            i.raw
-                .events
-                .iter()
-                .filter_map(|e| match e {
-                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                    _ => None,
-                })
-                .collect()
-        });
-        for image in screenshots {
-            let path = std::env::temp_dir().join("tas_ui_screenshot.png");
-            match save_color_image_as_png(&image, &path) {
-                Ok(()) => self.push_log(&format!("Screenshot written to {}", path.display())),
-                Err(err) => self.push_log(&format!("Screenshot save failed: {}", err)),
-            }
-        }
 
         // Check game health (crash detection) — also samples cycle activity.
         self.check_game_health();
@@ -3081,17 +2101,15 @@ impl eframe::App for TasApp {
             // acknowledges it because Supreme::Cycle is not running.
             let stop_pending = shared.stop_pending();
             if should_request_auto_stop(racing, frozen, debounced, stop_pending) {
-                let ts = chrono::Local::now().format("%H:%M:%S").to_string();
                 self.log_lines.push(format!(
-                    "[{}] Auto-stopped: left the level (game cycle stopped while {})",
-                    ts,
+                    "Auto-stopped: left the level (game cycle stopped while {})",
                     if mode == TasMode::Rec as u32 {
                         "recording"
                     } else {
                         "playing"
                     }
                 ));
-                self.send_action_command(TasCommand::Stop, &ts);
+                self.send_action_command(TasCommand::Stop);
                 // Debounce the re-fire on its OWN timestamp. This used to
                 // reset cycle_advance_at, which also told the transport gate
                 // "the engine is ticking" for 400ms — at a frozen menu, i.e.
@@ -3157,15 +2175,9 @@ impl eframe::App for TasApp {
                 }
                 // REC stopped (mode went from REC to OFF)
                 if self.last_mode == 1 && current_mode == 0 {
-                    let _t = std::time::Instant::now();
                     self.segment_tracker.on_rec_stop(recorded);
                     if let Some(snap) = state_snapshot.as_ref() {
                         self.finalize_recording_session(snap, recorded);
-                    }
-                    let dt = _t.elapsed();
-                    if dt.as_millis() > 30 {
-                        self.log_lines
-                            .push(format!("[perf] REC-stop finalize: {}ms", dt.as_millis()));
                     }
                 }
                 self.last_mode = current_mode;
@@ -3223,12 +2235,11 @@ impl eframe::App for TasApp {
                                 format!(" (race time {})", recording::format_recording_duration(cs))
                             })
                             .unwrap_or_default();
-                        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
                         self.log_lines.push(format!(
-                            "[{}] \u{1F3C1} Finish line crossed at tick {}{} — recording stopped",
-                            ts, tick, hud
+                            "\u{1F3C1} Finish line crossed at tick {}{} — recording stopped",
+                            tick, hud
                         ));
-                        self.apply_transport_action(transport::Action::Send(TasCommand::Stop), &ts);
+                        self.apply_transport_action(transport::Action::Send(TasCommand::Stop));
                     }
                 }
             }
@@ -3244,7 +2255,6 @@ impl eframe::App for TasApp {
         let mut shortcut_actions = self.handle_shortcuts(ctx);
         shortcut_actions.extend(self.poll_global_shortcuts());
 
-        prof.lap("pre");
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -3266,17 +2276,6 @@ impl eframe::App for TasApp {
                     if ui.button("Load Recording...  Ctrl+O").clicked() {
                         ui.close_menu();
                         self.load_recording_flow();
-                    }
-                    ui.separator();
-                    if ui.button("Dump Diagnostics...").clicked() {
-                        ui.close_menu();
-                        if let Some(ref shared) = self.shared {
-                            recording::dump_diagnostics(
-                                shared.state(),
-                                (self.cached_max_drift_x, self.cached_max_drift_z),
-                                &mut self.log_lines,
-                            );
-                        }
                     }
                     ui.separator();
                     // Settings — moved out of the transport row to save
@@ -3341,9 +2340,7 @@ impl eframe::App for TasApp {
                 .resizable(true)
                 .default_height(100.0)
                 .show(ctx, |ui| {
-                    prof.lap("menu");
                     log_panel::show(ui, &mut self.log_lines);
-                    prof.lap("log_panel");
                 });
         }
 
@@ -3446,7 +2443,6 @@ impl eframe::App for TasApp {
             .as_ref()
             .map(|_| history_store_v2::default_history_dir());
         let mut open_history_dir = false;
-        prof.lap("side_rest");
         if self.show_history {
             egui::SidePanel::right("history_panel")
                 .resizable(true)
@@ -3496,9 +2492,7 @@ impl eframe::App for TasApp {
                         .as_ref()
                         .map(|s| s.state().game_in_game != 0)
                         .unwrap_or(false);
-                    prof.lap("history_hdr");
                     history_actions = history::show(ui, &self.history, in_menu, game_flag);
-                    prof.lap("history_rows");
                 });
         }
 
@@ -3517,7 +2511,6 @@ impl eframe::App for TasApp {
 
         // Process history panel restores
         if !history_actions.is_empty() {
-            let ts = chrono::Local::now().format("%H:%M:%S");
             for action in history_actions {
                 match action {
                     history::HistoryAction::Restore(idx) => {
@@ -3533,7 +2526,7 @@ impl eframe::App for TasApp {
                         // oldest entry and shift positional indices — so a
                         // post-stop restore_index(idx) could target the wrong row.
                         let target_id = self.history.entries().get(idx).map(|e| e.entry_id);
-                        if !self.stop_active_session_for_load(&ts) {
+                        if !self.stop_active_session_for_load() {
                             continue;
                         }
                         let idx = target_id
@@ -3548,9 +2541,8 @@ impl eframe::App for TasApp {
                         // nothing: a click that silently no-ops reads as a bug.
                         if !self.history.entry_on_current_level(idx) {
                             self.log_lines.push(format!(
-                                "[{}] History restore refused: that entry is not for the \
+                                "History restore refused: that entry is not for the \
                                  current track ({})",
-                                ts,
                                 self.history.live_level().unwrap_or("resolving")
                             ));
                             continue;
@@ -3567,8 +2559,7 @@ impl eframe::App for TasApp {
                                     .get(idx)
                                     .map(|entry| entry.label.clone())
                                     .unwrap_or_else(|| format!("Entry {}", idx + 1));
-                                self.log_lines
-                                    .push(format!("[{}] History restore: {}", ts, label));
+                                self.log_lines.push(format!("History restore: {}", label));
                                 self.note_restored_physics();
                                 // Fit the timeline to the whole loaded recording.
                                 self.timeline_view.fit(count);
@@ -3593,15 +2584,13 @@ impl eframe::App for TasApp {
 
         // Apply shortcut actions to shared state (same dispatch as the buttons).
         for cmd in shortcut_actions {
-            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-            self.apply_transport_action(cmd, &ts);
+            self.apply_transport_action(cmd);
         }
 
         // Apply any input edit the timeline produced last frame.
         self.poll_script_file();
         self.apply_pending_input_edit();
 
-        prof.lap("history_actions");
         // Main central area
         egui::CentralPanel::default().show(ctx, |ui| {
             // Transport bar at top
@@ -3636,18 +2625,19 @@ impl eframe::App for TasApp {
                     && self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400);
                 transport::show(
                     ui,
-                    mode,
-                    recorded,
-                    &mut self.continue_from_frame,
-                    &mut self.continue_from_text,
-                    &mut self.playback_speed,
-                    &mut self.cont_catchup_multiplier,
-                    &mut self.step_mode,
-                    &self.history,
-                    shared.state(),
-                    self.cont_catchup_speed.is_some(),
-                    resume_speed,
-                    arming_allowed,
+                    transport::TransportProps {
+                        mode,
+                        recorded,
+                        continue_from: &mut self.continue_from_frame,
+                        continue_from_text: &mut self.continue_from_text,
+                        playback_speed: &mut self.playback_speed,
+                        cont_catchup_speed: self.cont_catchup_multiplier,
+                        history: &self.history,
+                        state: shared.state(),
+                        catchup_active: self.cont_catchup_speed.is_some(),
+                        resume_speed,
+                        arming_allowed,
+                    },
                 )
             } else {
                 Vec::new()
@@ -3660,8 +2650,7 @@ impl eframe::App for TasApp {
             // replacing the button path's old hand-rolled first-moving scan, and
             // also fixes the button PLAY path to reset continue_from_frame.
             for cmd in cmds {
-                let ts = chrono::Local::now().format("%H:%M:%S").to_string();
-                self.apply_transport_action(cmd, &ts);
+                self.apply_transport_action(cmd);
             }
 
             if let Some(ref mut shared) = self.shared {
@@ -3706,250 +2695,26 @@ impl eframe::App for TasApp {
 
                 ui.separator();
 
-                // Status block
                 let state = shared.state();
-                let mode_color = match state.mode_enum() {
-                    TasMode::Off => egui::Color32::GRAY,
-                    TasMode::Rec => egui::Color32::from_rgb(255, 80, 80),
-                    TasMode::Play => egui::Color32::from_rgb(80, 200, 80),
-                };
-                let play_pos = state.playback_pos;
-                let rec_count = state.recorded_count;
-                let headline = match state.mode_enum() {
-                    TasMode::Play if play_pos > 0 && rec_count > 0 => {
-                        let pct = (play_pos as f64 / rec_count as f64 * 100.0).min(100.0);
-                        format!(
-                            "{} {} / {} ticks ({:.0}%)",
-                            state.mode_str(),
-                            play_pos,
-                            rec_count,
-                            pct
-                        )
-                    }
-                    TasMode::Rec if rec_count > 0 => {
-                        format!("{} {} ticks", state.mode_str(), rec_count)
-                    }
-                    _ => state.mode_str().to_string(),
-                };
-                let vx = state.velocity_x as f64;
-                let vy = state.velocity_y as f64;
-                let vz = state.velocity_z as f64;
-                let speed_kmh = (vx * vx + vy * vy + vz * vz).sqrt() * 360.0;
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    // FIXED WIDTH. The card is split by information cadence:
-                    // live transport + clock, stable run context, then live
-                    // telemetry. Its dimensions do not shift as values change.
-                    let card_w = STATUS_CARD_WIDTH.min(ui.available_width());
-                    ui.set_min_width(card_w);
-                    ui.set_max_width(card_w);
-
-                    // game_in_game (exe+0x8895C) freezes at its last value when
-                    // Supreme::Cycle stops, so require a ticking cycle too.
-                    let cycle_ticking =
-                        self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400);
-                    let in_game = state.game_in_game != 0 && cycle_ticking;
-                    let card_level =
-                        tas_shared::resolved_level_id(state).and_then(level_name_from_id);
-                    let live_physics = tas_shared::physics_mode_label(
-                        state.renderer_id,
-                        state.fpu_control_word,
-                    );
-                    let live_rider =
-                        tas_shared::rider_label(state.rider_character, state.rider_stance);
-                    let (race_cs, race_start) = tas_shared::race_pair(state);
-
-                    // Primary dynamic row: transport on the left, race clock
-                    // on the right. Preserve the existing flag and stopwatch.
-                    ui.horizontal(|ui| {
-                        ui.colored_label(
-                            mode_color,
-                            egui::RichText::new(headline.clone()).strong().size(16.0),
-                        );
-                        // Finish flag: the last recording ended by crossing
-                        // the finish line (auto-stopped at that tick).
-                        if let Some(t) = self.finished_at_tick {
-                            ui.label(egui::RichText::new("\u{1F3C1}").size(16.0))
-                                .on_hover_text(format!(
-                                "Recording crossed the finish line at tick {} and was auto-stopped",
-                                t
-                            ));
-                        }
-                        if race_cs != u32::MAX {
-                            let t = format!(
-                                "\u{23F1} {:01}:{:02}.{:02}",
-                                race_cs / 6000,
-                                (race_cs % 6000) / 100,
-                                race_cs % 100
-                            );
-                            let clock_color = if self.finished_at_tick.is_some() {
-                                egui::Color32::from_rgb(235, 205, 90)
-                            } else {
-                                egui::Color32::from_gray(170)
-                            };
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        egui::RichText::new(t).color(clock_color).size(12.0),
-                                    )
-                                    .on_hover_text(format!(
-                                        "Exact race time (from the HUD). start_ts={} — the gate \
-                                         clock value (F5 spawn-lottery metric)",
-                                        race_start
-                                    ));
-                                },
-                            );
-                        }
-                    });
-
-                    // Stable run context: map, physics mode, and rider/stance.
-                    // Mismatch details live on the small warning icons.
-                    ui.horizontal_wrapped(|ui| {
-                        if in_game {
-                            let level = card_level.unwrap_or("Level resolving…");
-                            ui.label(
-                                egui::RichText::new(format!("\u{1F3AE} {}", level))
-                                    .color(egui::Color32::from_rgb(90, 200, 120))
-                                    .size(12.0),
-                            )
-                            .on_hover_text("Current level");
-                        }
-                        if let Some(live) = live_physics.as_deref() {
-                            let mismatch = self
-                                .loaded_physics
-                                .as_deref()
-                                .is_some_and(|stamp| stamp != live);
-                            ui.label(
-                                egui::RichText::new(live)
-                                    .color(egui::Color32::from_gray(150))
-                                    .size(12.0),
-                            )
-                                .on_hover_text(
-                                    "Renderer / x87 precision the game thread runs the \
-                                     physics at (DirectX 6/7 = 24-bit, OpenGL = 53-bit). \
-                                     A take recorded under the other mode rounds \
-                                     differently and will not replay bit-exact.",
-                                );
-                            if mismatch {
-                                ui.label(
-                                    egui::RichText::new("\u{26A0}")
-                                        .color(egui::Color32::from_rgb(255, 140, 60))
-                                        .size(12.0),
-                                )
-                                .on_hover_text(format!(
-                                    "Physics mismatch\nLive: {}\nTake: {}",
-                                    live,
-                                    self.loaded_physics.as_deref().unwrap_or("?")
-                                ));
-                            }
-                        }
-                        if let Some(live) = live_rider.as_deref() {
-                            let mismatch = self
-                                .loaded_rider
-                                .as_deref()
-                                .is_some_and(|stamp| stamp != live);
-                            ui.label(
-                                egui::RichText::new(live)
-                                    .color(egui::Color32::from_gray(150))
-                                    .size(12.0),
-                            )
-                                .on_hover_text(
-                                    "Character and stance the human rider is using. The \
-                                     physics differ per character and per stance, so a take \
-                                     recorded as another rider will not line up.",
-                                );
-                            if mismatch {
-                                ui.label(
-                                    egui::RichText::new("\u{26A0}")
-                                        .color(egui::Color32::from_rgb(255, 140, 60))
-                                        .size(12.0),
-                                )
-                                .on_hover_text(format!(
-                                    "Rider mismatch\nLive: {}\nTake: {}",
-                                    live,
-                                    self.loaded_rider.as_deref().unwrap_or("?")
-                                ));
-                            }
-                        }
-                    });
-
-                    ui.separator();
-                    ui.label(format!(
-                        "Pos: ({:.1}, {:.1}, {:.1})    Speed: {:.1} km/h",
-                        state.player_x, state.player_y, state.player_z, speed_kmh
-                    ));
-                    ui.label(format!(
-                        "Vel: ({:.2}, {:.2}, {:.2})",
-                        state.velocity_x, state.velocity_y, state.velocity_z
-                    ));
-                });
+                let cycle_ticking =
+                    self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400);
+                status::status_card(
+                    ui,
+                    state,
+                    &status::StatusProps {
+                        in_game: state.game_in_game != 0 && cycle_ticking,
+                        finished_at_tick: self.finished_at_tick,
+                        loaded_physics: self.loaded_physics.as_deref(),
+                        loaded_rider: self.loaded_rider.as_deref(),
+                    },
+                );
 
                 ui.separator();
 
-                // Show only drift established from a valid active PLAY session.
-                // `scan_drift` ignores stale OFF/history data and waits for the
-                // live gate before assessing an aligned PLAY or CONT prefix.
-                // For a CONT the verdict is the splice-tick agreement only
-                // (UI break at 4500): mid-prefix transients never banner. A
-                // plain PLAY has no splice, so any divergence banners.
-                // Historical maxima stay in the debug graph + session log.
-                let splice = cont_verdict_boundary(state);
-                let (verdict_dx, verdict_dz) = if splice != 0 {
-                    (self.cached_splice_drift_x, self.cached_splice_drift_z)
-                } else {
-                    (self.cached_max_drift_x, self.cached_max_drift_z)
-                };
-                let verdict_drift = verdict_dx.max(verdict_dz);
-                if should_show_drift_banner(
-                    state,
-                    self.drift_latch_arm_generation,
-                    self.drift_first_tick,
-                    self.cached_splice_tick,
-                    self.cached_splice_drift_x
-                        .max(self.cached_splice_drift_z),
-                    self.cached_max_drift_x.max(self.cached_max_drift_z),
-                ) {
-                    let (bg, text, msg) = if verdict_drift >= 1.0 {
-                        (
-                            egui::Color32::from_rgb(180, 30, 30),
-                            egui::Color32::WHITE,
-                            format!("{}  (X={:.6}  Z={:.6})",
-                                if splice != 0 { "CONT SPLICE MISMATCH" } else { "DRIFT DETECTED: TAS INVALID" },
-                                verdict_dx, verdict_dz),
-                        )
-                    } else {
-                        (
-                            egui::Color32::from_rgb(180, 140, 20),
-                            egui::Color32::BLACK,
-                            format!("{}  (X={:.9}  Z={:.9})",
-                                if splice != 0 { "CONT SPLICE MISMATCH" } else { "DRIFT WARNING" },
-                                verdict_dx, verdict_dz),
-                        )
-                    };
-                    egui::Frame::none()
-                        .fill(bg)
-                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
-                        .rounding(4.0)
-                        .show(ui, |ui: &mut egui::Ui| {
-                            ui.label(egui::RichText::new(msg).color(text).strong().size(16.0));
-                        });
-                    ui.separator();
-                }
+                status::drift_banner(ui, state, &self.drift_tracker);
 
-                // Timeline header: human time at a glance and the text editor
-                // route as a primary action. Exact tick units stay in the
-                // timeline ruler and raw edit controls.
-                let total_time = timeline::format_time(state.recorded_count);
-                let current_time = match state.mode_enum() {
-                    TasMode::Play => Some(timeline::format_time(
-                        state.playback_pos.min(state.recorded_count),
-                    )),
-                    TasMode::Rec => Some(total_time.clone()),
-                    TasMode::Off => None,
-                };
-                let time_summary = current_time
-                    .map(|current| format!("{} / {}", current, total_time))
-                    .unwrap_or_else(|| format!("{} total", total_time));
+                let open_text_script =
+                    status::timeline_header(ui, state, self.script_watch.is_some());
                 // Keep the game-clock origin after the course unloads. The
                 // selected history entry describes the recording itself and
                 // is therefore a better fallback than the current menu state.
@@ -3959,41 +2724,6 @@ impl eframe::App for TasApp {
                     .and_then(|i| self.history.entries().get(i))
                     .and_then(|entry| entry.level.as_deref())
                     .or(self.last_resolved_level.as_deref());
-                let mut open_text_script = false;
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Input Timeline").strong());
-                    ui.label(
-                        egui::RichText::new(time_summary)
-                            .monospace()
-                            .size(12.0)
-                            .color(egui::Color32::from_gray(165)),
-                    );
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            let button = egui::Button::new(
-                                egui::RichText::new("↗ Text Script")
-                                    .strong()
-                                    .color(egui::Color32::from_gray(220)),
-                            )
-                            .fill(ui.visuals().widgets.inactive.weak_bg_fill)
-                            .stroke(egui::Stroke::new(
-                                1.0_f32,
-                                egui::Color32::from_rgb(62, 86, 110),
-                            ));
-                            open_text_script = ui
-                                .add_enabled(state.recorded_count > 0, button)
-                                .on_hover_text(
-                                    "Write a .tas file and open it; edits reload on save",
-                                )
-                                .clicked();
-                            if self.script_watch.is_some() {
-                                ui.weak("watching .tas");
-                            }
-                        },
-                    );
-                });
-                prof.lap("central_pre");
                 let tl_outcome = timeline::show(
                     ui,
                     state,
@@ -4015,38 +2745,36 @@ impl eframe::App for TasApp {
 
                 // Text-script route: poll_script_file reloads it on save.
                 if open_text_script {
-                        let total = state.recorded_count;
-                        let events = input_script::runs_from_log(&state.input_log, total);
-                        let timer =
-                            recording::detect_first_moving(&state.rec_coords, total).unwrap_or(0);
-                        let script = input_script::events_to_script(&events, timer);
-                        let path = script_watch::ScriptWatch::fresh_path();
-                        match std::fs::write(&path, &script) {
-                            Ok(()) => {
-                                #[cfg(windows)]
-                                {
-                                    let _ = std::process::Command::new("cmd")
-                                        .arg("/C")
-                                        .arg("start")
-                                        .arg("")
-                                        .arg(&path)
-                                        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                                        .spawn();
-                                }
-                                self.script_watch = Some(script_watch::ScriptWatch::new(
-                                    path.clone(), script,
-                                ));
-                                self.log_lines.push(format!(
-                                    "[script] opened {} ({} inputs); edits reload on save",
-                                    path.display(),
-                                    events.len()
-                                ));
+                    let total = state.recorded_count;
+                    let events = input_script::runs_from_log(&state.input_log, total);
+                    let timer = tas_shared::cont::detect_first_moving(&state.rec_coords, total)
+                        .unwrap_or(0);
+                    let script = input_script::events_to_script(&events, timer);
+                    let path = script_watch::ScriptWatch::fresh_path();
+                    match std::fs::write(&path, &script) {
+                        Ok(()) => {
+                            #[cfg(windows)]
+                            {
+                                let _ = std::process::Command::new("cmd")
+                                    .arg("/C")
+                                    .arg("start")
+                                    .arg("")
+                                    .arg(&path)
+                                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                                    .spawn();
                             }
-                            Err(e) => self.log_lines.push(format!("[script] write failed: {e}")),
+                            self.script_watch =
+                                Some(script_watch::ScriptWatch::new(path.clone(), script));
+                            self.log_lines.push(format!(
+                                "[script] opened {} ({} inputs); edits reload on save",
+                                path.display(),
+                                events.len()
+                            ));
                         }
+                        Err(e) => self.log_lines.push(format!("[script] write failed: {e}")),
+                    }
                 }
 
-                prof.lap("timeline");
                 if self.show_debug_drift {
                     ui.separator();
                     ui.label(egui::RichText::new("Debug drift").strong());
@@ -4087,76 +2815,50 @@ impl eframe::App for TasApp {
                     });
                 }
 
-                // Incremental max drift scanner. It is invoked every UI frame,
-                // but only assesses an active PLAY. The banner above and Debug
-                // drift panel read its cache; no zero-drift status line is
-                // shown because it adds noise.
-                {
-                    // Gate-aligned replays are correct when
-                    // play[live_gate+k] == rec[rec_gate+k]; comparing raw
-                    // indices there reports the alignment shift itself as
-                    // drift - a false DRIFT banner on a bit-exact replay.
-                    // Scan gate-relative pairs when aligned and wait for the
-                    // live gate before judging them. Near-gate CONT has no gate
-                    // alignment and is intentionally compared at raw indices.
-                    let prev_dx = self.cached_max_drift_x;
-                    let prev_dz = self.cached_max_drift_z;
-                    let prev_splice = self.cached_splice_tick;
-                    let (count, reset) = scan_drift(
-                        state,
-                        &mut self.cached_max_drift_x,
-                        &mut self.cached_max_drift_z,
-                        &mut self.cached_splice_drift_x,
-                        &mut self.cached_splice_drift_z,
-                        &mut self.cached_splice_tick,
-                        &mut self.last_drift_scan_count,
-                        &mut self.drift_aligned_bases,
-                        &mut self.drift_latch_arm_generation,
-                        &mut self.drift_first_tick,
-                    );
-                    if reset {
-                        self.last_logged_drift_level = 0;
-                    }
-                    let (prev_dx, prev_dz) = if reset { (0.0, 0.0) } else { (prev_dx, prev_dz) };
+                let previous = (
+                    self.drift_tracker.max_dx,
+                    self.drift_tracker.max_dz,
+                    self.drift_tracker.splice_tick,
+                );
+                let (count, reset) = self.drift_tracker.scan(state);
+                if reset {
+                    self.last_logged_drift_level = 0;
+                }
 
-                    let max_d = self.cached_max_drift_x.max(self.cached_max_drift_z);
-                    let new_level = if max_d >= 5.0 {
-                        3
-                    } else if max_d >= 1.0 {
-                        2
-                    } else if max_d > 0.0 {
-                        1
-                    } else {
-                        0
-                    };
-                    if state.mode == TasMode::Play as u32
-                        && new_level > self.last_logged_drift_level
-                    {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
+                let max_drift = self.drift_tracker.max_drift();
+                let new_level = if max_drift >= 5.0 {
+                    3
+                } else if max_drift >= 1.0 {
+                    2
+                } else if max_drift > 0.0 {
+                    1
+                } else {
+                    0
+                };
+                if state.mode == TasMode::Play as u32 && new_level > self.last_logged_drift_level {
+                    self.log_lines.push(format!(
+                        "{} first at tick {}: max X={:.9} Z={:.9} (was X={:.9} Z={:.9})",
+                        if state.continue_from_frame != 0 {
+                            "CONT prefix difference"
+                        } else {
+                            "DRIFT"
+                        },
+                        self.drift_tracker.first_drift_tick.unwrap_or(count),
+                        self.drift_tracker.max_dx,
+                        self.drift_tracker.max_dz,
+                        if reset { 0.0 } else { previous.0 },
+                        if reset { 0.0 } else { previous.1 },
+                    ));
+                    self.last_logged_drift_level = new_level;
+                }
+                if (state.mode == TasMode::Play as u32 || state.mode == TasMode::Rec as u32)
+                    && (reset || previous.2.is_none())
+                {
+                    if let Some(tick) = self.drift_tracker.splice_tick {
                         self.log_lines.push(format!(
-                            "[{}] {} first at tick {}: max X={:.9} Z={:.9} (was X={:.9} Z={:.9})",
-                            ts,
-                            if state.continue_from_frame != 0 { "CONT prefix difference" } else { "DRIFT" },
-                            self.drift_first_tick.unwrap_or(count),
-                            self.cached_max_drift_x,
-                            self.cached_max_drift_z,
-                            prev_dx,
-                            prev_dz
+                            "CONT splice {tick}: X={:.9} Z={:.9}",
+                            self.drift_tracker.splice_dx, self.drift_tracker.splice_dz
                         ));
-                        self.last_logged_drift_level = new_level;
-                    }
-                    // One-shot splice verdict log: the F12/CONT decision point.
-                    if (state.mode == TasMode::Play as u32 || state.mode == TasMode::Rec as u32)
-                        && (reset || prev_splice.is_none()) {
-                        if let Some(tick) = self.cached_splice_tick {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            self.log_lines.push(format!(
-                                "[{}] CONT splice {tick}: X={:.9} Z={:.9}",
-                                ts,
-                                self.cached_splice_drift_x,
-                                self.cached_splice_drift_z
-                            ));
-                        }
                     }
                 }
 
@@ -4173,7 +2875,6 @@ impl eframe::App for TasApp {
             }
         });
 
-        prof.lap("central_rest");
         // Poll DLL log ring buffer
         if let Some(ref shared) = self.shared {
             use tas_shared::TasLogSeverity;
@@ -4186,20 +2887,14 @@ impl eframe::App for TasApp {
                     TasLogSeverity::Warn => "[DLL:WARN]",
                     TasLogSeverity::Error => "[DLL:ERR]",
                 };
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                self.log_lines.push(format!("[{}] {} {}", ts, prefix, text));
+                self.log_lines.push(format!("{} {}", prefix, text));
             }
         }
 
-        prof.lap("dll_log");
         for w in self.history.take_warnings() {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            self.log_lines.push(format!("[{}] History: {}", ts, w));
+            self.log_lines.push(format!("History: {}", w));
         }
         self.persist_history_if_needed();
-        prof.lap("persist");
-        self.frame_prof
-            .record(prof, _frame.info().cpu_usage, &mut self.log_lines);
 
         // AUTO-REFRESH, but only as fast as there is something to show.
         //
@@ -4238,54 +2933,14 @@ impl eframe::App for TasApp {
     }
 }
 
-/// Check if Supreme.exe (or Supreme_v1.035.exe) is running.
-#[cfg(windows)]
-fn is_supreme_running() -> bool {
-    // In-process Toolhelp walk (same name set as the global-shortcut PID
-    // lookup). This runs from the UI thread every 5 stale seconds, i.e. the
-    // whole time the game sits at a menu; the previous implementation spawned
-    // `tasklist` twice per call, a ~100 ms stall each time.
-    find_supreme_pid().is_some()
-}
-
-#[cfg(not(windows))]
-fn is_supreme_running() -> bool {
-    false
-}
-
 fn open_in_file_browser(path: &std::path::Path) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        std::process::Command::new("explorer")
-            .arg(path)
-            .spawn()
-            .map_err(|e| format!("failed to launch explorer: {}", e))?;
-        return Ok(());
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(path)
-            .spawn()
-            .map_err(|e| format!("failed to launch open: {}", e))?;
-        return Ok(());
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn()
-            .map_err(|e| format!("failed to launch xdg-open: {}", e))?;
-        return Ok(());
-    }
-
-    #[allow(unreachable_code)]
-    Err("opening folders is not supported on this platform".to_string())
+    std::process::Command::new("explorer")
+        .arg(path)
+        .spawn()
+        .map_err(|e| format!("failed to launch explorer: {}", e))?;
+    Ok(())
 }
 
-#[allow(clippy::upper_case_acronyms)] // Match Win32 FFI type names.
 fn main() -> eframe::Result {
     // Reject unsafe automation setup before opening any user history/settings.
     if std::env::var_os("SSB_INSPECT_E2E_RECORDING").is_some()
@@ -4294,38 +2949,11 @@ fn main() -> eframe::Result {
         eprintln!("UI E2E setup requires an isolated SSB_INSPECT_DATA_DIR");
         std::process::exit(1);
     }
-    // Dev harness: render just the input timeline with real recording data
-    // and screenshot it (no game/DLL needed). Skips the single-instance
-    // guard so it runs alongside a live SSB Inspect.
-    if std::env::args().any(|a| a == "--timeline-preview") {
-        return run_timeline_preview();
-    }
-
-    // Single-instance guard via named mutex (cross-platform crate, uses Windows mutex underneath).
-    // SSB_INSPECT_ALLOW_MULTI=1 skips it for diagnostics (e.g. profiling a
-    // second build against a copied SSB_INSPECT_DATA_DIR while the deployed
-    // instance keeps running).
-    let allow_multi = std::env::var_os("SSB_INSPECT_ALLOW_MULTI").is_some_and(|v| v == "1");
+    // Single-instance guard via a named Windows mutex.
     let instance = single_instance::SingleInstance::new("SSBInspect").unwrap();
-    if !allow_multi && !instance.is_single() {
+    if !instance.is_single() {
         eprintln!("SSB Inspect is already running.");
-        #[cfg(windows)]
-        unsafe {
-            use std::ffi::c_void;
-            type HWND = *mut c_void;
-            extern "system" {
-                fn FindWindowW(class: *const u16, title: *const u16) -> HWND;
-                fn SetForegroundWindow(hwnd: HWND) -> i32;
-            }
-            let title: Vec<u16> = "SSB Inspect"
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
-            let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
-            if !hwnd.is_null() {
-                SetForegroundWindow(hwnd);
-            }
-        }
+        win32::focus_window_titled("SSB Inspect");
         std::process::exit(0);
     }
 
@@ -4404,11 +3032,12 @@ mod tests {
         let old_path = crate::script_watch::ScriptWatch::fresh_path();
         std::fs::write(&old_path, "1-5 press left").unwrap();
         app.script_watch = Some(crate::script_watch::ScriptWatch::new(
-            old_path.clone(), "1-5 press left".into(),
+            old_path.clone(),
+            "1-5 press left".into(),
         ));
         app.pending_input_edit = Some((Vec::new(), true, "old script".into()));
         app.pending_edit_autostop = true;
-        assert!(app.stop_active_session_for_load("test"));
+        assert!(app.stop_active_session_for_load());
         std::fs::write(&old_path, "2-9 press shift").unwrap();
         app.poll_script_file();
         assert!(app.script_watch.is_none());
@@ -4467,18 +3096,12 @@ mod tests {
             last_queued_revision: 0,
             last_failed_revision: 0,
             history_retry_after: None,
-            frame_prof: FrameProfAccum {
-                enabled: std::env::var_os("TAS_UI_PROFILE").is_some_and(|v| v == "1"),
-                ..Default::default()
-            },
             last_reconnect_attempt: std::time::Instant::now(),
             loaded_physics: None,
             loaded_rider: None,
             history_cap: 64,
             recovery_store: None,
-            log_lines: Vec::new(),
-            log_file: None,
-            log_lines_persisted: 0,
+            log_lines: ui_log::UiLog::default(),
             finish_scan_cursor: 0,
             finished_at_tick: None,
             finished_hud_cs: None,
@@ -4490,7 +3113,6 @@ mod tests {
             continue_from_frame: 0,
             continue_from_text: "0".to_string(),
             playback_speed: 1.0,
-            step_mode: false,
             show_debug_drift: false,
             show_history: false,
             show_log: false,
@@ -4504,15 +3126,7 @@ mod tests {
             cont_catchup_multiplier: 12.0,
             cont_cycle_label: "CONT",
             log_read_cursor: 0,
-            cached_max_drift_x: 0.0,
-            cached_max_drift_z: 0.0,
-            cached_splice_drift_x: 0.0,
-            cached_splice_drift_z: 0.0,
-            cached_splice_tick: None,
-            last_drift_scan_count: 0,
-            drift_aligned_bases: None,
-            drift_latch_arm_generation: 0,
-            drift_first_tick: None,
+            drift_tracker: drift_scan::DriftTracker::default(),
             last_logged_drift_level: 0,
             drift_cache: drift::DriftCache::default(),
             trajectory_cache: trajectory::TrajectoryCache::default(),
@@ -4663,15 +3277,6 @@ mod tests {
         assert!(action_has_log(&actions, "Redo"), "Ctrl+Y must log Redo");
     }
 
-    #[test]
-    fn shortcut_period_steps() {
-        let mut app = test_app();
-        let actions = press_key(&mut app, Key::Period, Modifiers::NONE);
-        assert!(actions
-            .iter()
-            .any(|a| matches!(a, transport::Action::StepOne)));
-    }
-
     // ===== Timeline zoom (keyboard +/-) =====
 
     #[test]
@@ -4737,149 +3342,6 @@ mod tests {
         assert!((normalize_playback_speed(0.01) - 1.0).abs() < 0.001);
         assert!((normalize_playback_speed(0.05) - 1.0).abs() < 0.001);
         assert!((normalize_playback_speed(4.0) - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn arm_rec_resets_speed_to_default() {
-        let mut app = test_app();
-        app.playback_speed = 4.0;
-        app.prepare_restart_action(TasCommand::ArmRec);
-        assert!((app.playback_speed - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn settings_speed_uses_pre_catchup_value() {
-        let mut app = test_app();
-        app.playback_speed = 12.0;
-        app.cont_catchup_speed = Some(2.0);
-        assert!((app.playback_speed_for_settings() - 2.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn playback_speed_can_be_set_to_extremes() {
-        let mut app = test_app();
-        app.playback_speed = 0.25;
-        assert!((app.playback_speed - 0.25).abs() < 0.001);
-        app.playback_speed = 4.0;
-        assert!((app.playback_speed - 4.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn playback_speed_syncs_to_shared_state() {
-        // Verify that TasSharedState has the playback_speed field
-        // and it can accept the expected range of values
-        let mut state = tas_shared::zeroed_boxed();
-        state.playback_speed = 0.25;
-        assert!((state.playback_speed - 0.25).abs() < f32::EPSILON);
-        state.playback_speed = 4.0;
-        assert!((state.playback_speed - 4.0).abs() < f32::EPSILON);
-        // Default (zeroed) speed is 0.0 — Cave 5 interprets 0.0 as 1.0x
-        let fresh = tas_shared::zeroed_boxed();
-        assert_eq!(fresh.playback_speed, 0.0);
-    }
-
-    /// Regression: STOP must cancel any queued restart sequence. Without
-    /// this, pressing STOP after a CONT/PLAY click but before the polling
-    /// loop fires `pending_after_restart` would leave the queued command
-    /// in place — the next poll then "completes" the restart and
-    /// silently starts recording/playback. STOP must mean STOP.
-    #[test]
-    fn stop_cancels_queued_restart() {
-        let mut app = test_app();
-        // Simulate a CONT being queued: a restart/arm cycle is in flight.
-        app.cont_controller = Some(tas_shared::transport::TransportController::new(
-            tas_shared::transport::ArmConfig {
-                arm: tas_shared::transport::Arm::Continue,
-                catchup_speed: 12.0,
-                continue_from_frame: 100,
-                gate_align_rec: 0,
-                target: None,
-                max_retries: 30,
-                resume_speed: 0.0,
-                predict_bucket: true,
-            },
-        ));
-        app.prepare_send_action(TasCommand::Stop);
-        assert!(
-            app.cont_controller.is_none(),
-            "STOP must cancel the in-flight restart/arm cycle"
-        );
-    }
-
-    #[test]
-    fn cont_stop_play_clears_catchup_state() {
-        let mut app = test_app();
-        app.playback_speed = 1.0;
-        app.cont_catchup_multiplier = 12.0;
-
-        app.prepare_restart_action(TasCommand::ArmContinue);
-        assert_eq!(app.cont_catchup_speed, Some(1.0));
-        assert!((app.playback_speed - 12.0).abs() < 0.001);
-
-        app.prepare_send_action(TasCommand::Stop);
-        assert!(app.cont_catchup_speed.is_none());
-        assert!((app.playback_speed - 1.0).abs() < 0.001);
-
-        app.prepare_restart_action(TasCommand::ArmPlay);
-        assert!(app.cont_catchup_speed.is_none());
-        assert!((app.playback_speed - 1.0).abs() < 0.001);
-        assert!(app.pending_session_kind.is_none());
-    }
-
-    /// Regression: after a CONT cycle finishes (the PLAY→REC mode flip
-    /// clears the catch-up state and restores playback_speed to its
-    /// pre-catchup value), pressing CONT again must re-engage the catch-
-    /// up multiplier — the second press shouldn't run at 1×.
-    ///
-    /// The bug we're fending off: clear_cont_catchup leaves
-    /// cont_catchup_speed=None and playback_speed=1.0; if the next
-    /// CONT-press path forgets to apply the multiplier, the user sees
-    /// "first cont catches up, second cont crawls at native speed".
-    #[test]
-    fn second_cont_press_reengages_catchup() {
-        let mut app = test_app();
-        app.playback_speed = 1.0;
-        app.cont_catchup_multiplier = 32.0;
-
-        // ---- First CONT press ----
-        app.prepare_restart_action(TasCommand::ArmContinue);
-        assert_eq!(app.cont_catchup_speed, Some(1.0));
-        assert!(
-            (app.playback_speed - 32.0).abs() < 0.001,
-            "First CONT press should set playback_speed = 32, got {}",
-            app.playback_speed
-        );
-
-        // Simulate the PLAY→REC mode flip at splice frame: the runtime
-        // mode-transition path calls clear_cont_catchup, restoring
-        // playback_speed to its saved pre-catchup value.
-        app.clear_cont_catchup();
-        assert!(app.cont_catchup_speed.is_none());
-        assert!(
-            (app.playback_speed - 1.0).abs() < 0.001,
-            "After REC start, playback_speed should be restored to 1.0, got {}",
-            app.playback_speed
-        );
-
-        // Simulate user pressing STOP (REC→OFF). State should remain
-        // at 1.0 (already restored) with no catchup tracking.
-        app.prepare_send_action(TasCommand::Stop);
-        assert!(app.cont_catchup_speed.is_none());
-        assert!((app.playback_speed - 1.0).abs() < 0.001);
-
-        // ---- Second CONT press ----
-        // This is the regression target: must re-engage the multiplier.
-        app.prepare_restart_action(TasCommand::ArmContinue);
-        assert_eq!(
-            app.cont_catchup_speed,
-            Some(1.0),
-            "Second CONT press should save the current 1.0 speed for later restore"
-        );
-        assert!(
-            (app.playback_speed - 32.0).abs() < 0.001,
-            "Second CONT press must re-apply the catchup multiplier (32), got {}",
-            app.playback_speed
-        );
     }
 
     /// The global-shortcut edge detector must fire exactly once per
@@ -4964,7 +3426,7 @@ mod tests {
         // No shared memory set, so recorded_count is implicitly 0 (the
         // helper returns 0 via the unwrap_or fallback). queue_restart_then
         // should bail before touching catchup state.
-        app.queue_restart_then(TasCommand::ArmContinue, "test");
+        app.queue_restart_then(TasCommand::ArmContinue);
         assert!(
             app.cont_catchup_speed.is_none(),
             "CONT without recording must not engage catchup speed"
@@ -4978,104 +3440,6 @@ mod tests {
             app.cont_controller.is_none(),
             "CONT without recording must not arm a controller"
         );
-    }
-
-    /// The CONT catchup slider must allow speeds up to the
-    /// per-frame-overhead ceiling. The catch-up saturates the game's 64
-    /// ticks/frame cap at ~77×+, so the slider's 128× headroom covers the
-    /// useful range; capping it lower would silently throttle long splices.
-    /// Also locks the default of 96× — full-speed (past cap saturation) and,
-    /// since the splice resume is now frame-exact at any speed, chosen for
-    /// bucket-lottery reliability over 128×.
-    #[test]
-    fn cont_catchup_settings_default_and_range() {
-        use crate::settings::Settings;
-        let s = Settings::default();
-        assert!(
-            (s.cont_catchup_speed - 256.0).abs() < f32::EPSILON,
-            "Default catchup must be 256×, got {}",
-            s.cont_catchup_speed
-        );
-        // Verify a 384× setting round-trips through settings without
-        // clamping or rounding (the slider max / top of the usable range).
-        let s = Settings {
-            cont_catchup_speed: 384.0,
-            ..Settings::default()
-        };
-        assert!(
-            (s.cont_catchup_speed - 384.0).abs() < f32::EPSILON,
-            "Settings must allow 384× catchup for power users"
-        );
-    }
-
-    // ===== Crash detection =====
-
-    #[test]
-    fn crash_detection_no_shared_is_noop() {
-        let mut app = test_app();
-        // Should not panic when shared is None
-        app.check_game_health();
-        assert_eq!(app.stale_frame_ticks, 0);
-    }
-
-    #[test]
-    fn crash_detection_stale_frame_increments_without_shared() {
-        // Without shared memory, stale_frame_ticks should never increment
-        let mut app = test_app();
-        app.last_health_check = std::time::Instant::now() - std::time::Duration::from_secs(2);
-        app.check_game_health();
-        assert_eq!(
-            app.stale_frame_ticks, 0,
-            "No shared = no stale tick increment"
-        );
-    }
-
-    // ===== Panel toggle defaults =====
-
-    #[test]
-    fn panel_defaults() {
-        let app = test_app();
-        assert!(!app.show_debug_drift);
-        assert!(!app.show_pico_panel);
-        assert!(!app.show_history);
-    }
-
-    #[test]
-    fn panel_toggles_persist() {
-        let mut app = test_app();
-        app.show_debug_drift = true;
-        app.show_history = true;
-        assert!(app.show_debug_drift);
-        assert!(app.show_history);
-    }
-
-    // ===== Segment tracker mode transitions =====
-
-    #[test]
-    fn segment_tracker_integration_rec_stop_cycle() {
-        let mut app = test_app();
-        // Simulate mode transition OFF -> REC
-        app.segment_tracker.on_rec_start(0);
-        // Simulate REC -> OFF
-        app.segment_tracker.on_rec_stop(100);
-        assert_eq!(app.segment_tracker.segments.len(), 1);
-        assert_eq!(app.segment_tracker.segments[0].start_tick, 0);
-        assert_eq!(app.segment_tracker.segments[0].end_tick, 100);
-    }
-
-    #[test]
-    fn segment_tracker_multi_segment_rec_cont() {
-        let mut app = test_app();
-        // First segment
-        app.segment_tracker.on_rec_start(0);
-        app.segment_tracker.on_rec_stop(200);
-        // Continue from 200
-        app.segment_tracker.on_rec_start(200);
-        app.segment_tracker.on_rec_stop(500);
-
-        assert_eq!(app.segment_tracker.segments.len(), 2);
-        assert_eq!(app.segment_tracker.segments[1].start_tick, 200);
-        assert_eq!(app.segment_tracker.segments[1].end_tick, 500);
     }
 
     fn state_with_recorded_count(recorded_count: u32) -> Box<TasSharedState> {
@@ -5162,422 +3526,5 @@ mod tests {
     fn cont_controller_initially_none() {
         let app = test_app();
         assert!(app.cont_controller.is_none());
-    }
-
-    // ===== Incremental drift cache =====
-
-    #[test]
-    fn drift_cache_matches_full_scan() {
-        let mut app = test_app();
-
-        // Heap-allocate: TasSharedState is ~1.5MB, too large for stack
-        let mut state: Box<TasSharedState> = unsafe {
-            Box::from_raw(Box::into_raw(
-                vec![0u8; std::mem::size_of::<TasSharedState>()].into_boxed_slice(),
-            ) as *mut TasSharedState)
-        };
-        state.recorded_count = 100;
-        state.playback_pos = 100;
-
-        // Set some coords with known drift
-        for i in 0..100usize {
-            state.rec_coords[i] = [i as f32, 0.0, i as f32 * 2.0];
-            state.play_coords[i] = [i as f32 + 0.5, 0.0, i as f32 * 2.0 + 1.0];
-        }
-        // Spike at index 50
-        state.play_coords[50][0] = state.rec_coords[50][0] + 7.5;
-        state.play_coords[50][2] = state.rec_coords[50][2] + 3.25;
-
-        // Run incremental scan
-        let count = (state.playback_pos as usize).min(state.recorded_count as usize);
-        for i in app.last_drift_scan_count..count {
-            let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
-            if d > app.cached_max_drift_x {
-                app.cached_max_drift_x = d;
-            }
-            let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
-            if d > app.cached_max_drift_z {
-                app.cached_max_drift_z = d;
-            }
-        }
-        app.last_drift_scan_count = count;
-
-        // Full scan for comparison
-        let (mut full_dx, mut full_dz) = (0.0f32, 0.0f32);
-        for i in 0..count {
-            let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
-            if d > full_dx {
-                full_dx = d;
-            }
-            let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
-            if d > full_dz {
-                full_dz = d;
-            }
-        }
-
-        assert_eq!(app.cached_max_drift_x, full_dx);
-        assert_eq!(app.cached_max_drift_z, full_dz);
-        assert_eq!(app.cached_max_drift_x, 7.5);
-        assert_eq!(app.cached_max_drift_z, 3.25);
-    }
-
-    #[test]
-    fn drift_cache_resets_on_playback_restart() {
-        let mut app = test_app();
-
-        // First playback: 50 frames with drift
-        app.cached_max_drift_x = 5.0;
-        app.cached_max_drift_z = 3.0;
-        app.last_drift_scan_count = 50;
-
-        // Playback restarts (count drops to 0)
-        let new_count: usize = 0;
-        if new_count < app.last_drift_scan_count {
-            app.cached_max_drift_x = 0.0;
-            app.cached_max_drift_z = 0.0;
-            app.last_drift_scan_count = 0;
-        }
-
-        assert_eq!(app.cached_max_drift_x, 0.0);
-        assert_eq!(app.cached_max_drift_z, 0.0);
-        assert_eq!(app.last_drift_scan_count, 0);
-    }
-
-    #[test]
-    fn drift_scan_keeps_gate_alignment_after_the_dll_clears_it() {
-        // Forest Easy, 2026-09-02: a no-ghost recording (gate 299) replayed
-        // with three Time Attack ghosts loaded (gate 287) was bit-exact pair
-        // for pair, but the DLL zeroes gate_index / gate_align_rec when the
-        // replay completes and the raw re-scan then logged "DRIFT Z=2.5".
-        let mut app = test_app();
-        let mut state: Box<TasSharedState> = unsafe {
-            Box::from_raw(Box::into_raw(
-                vec![0u8; std::mem::size_of::<TasSharedState>()].into_boxed_slice(),
-            ) as *mut TasSharedState)
-        };
-        state.recorded_count = 400;
-        for i in 0..400usize {
-            state.rec_coords[i] = [0.0, 0.0, i.saturating_sub(299) as f32];
-        }
-        for i in 0..400usize {
-            state.play_coords[i] = [0.0, 0.0, i.saturating_sub(287) as f32];
-        }
-        let scan = |app: &mut TasApp, state: &TasSharedState| {
-            scan_drift(
-                state,
-                &mut app.cached_max_drift_x,
-                &mut app.cached_max_drift_z,
-                &mut app.cached_splice_drift_x,
-                &mut app.cached_splice_drift_z,
-                &mut app.cached_splice_tick,
-                &mut app.last_drift_scan_count,
-                &mut app.drift_aligned_bases,
-                &mut app.drift_latch_arm_generation,
-                &mut app.drift_first_tick,
-            )
-        };
-
-        // Mid-replay, aligned: no drift.
-        state.mode = TasMode::Play as u32;
-        state.playback_pos = 380;
-        state.gate_index = 287;
-        state.gate_align_rec = 299;
-        scan(&mut app, &state);
-        assert_eq!(app.drift_aligned_bases, Some((287, 299)));
-        assert_eq!(app.cached_max_drift_z, 0.0, "aligned replay is drift-free");
-
-        // Playback completes: the DLL clears both gate fields.
-        state.mode = TasMode::Off as u32;
-        state.playback_pos = 388;
-        state.gate_index = 0;
-        state.gate_align_rec = 0;
-        let (_, reset) = scan(&mut app, &state);
-        assert!(!reset, "completion must not restart the scan from raw indices");
-        assert_eq!(app.drift_aligned_bases, Some((287, 299)));
-        assert_eq!(
-            app.cached_max_drift_z, 0.0,
-            "the latched alignment survives completion (this was the false DRIFT banner)"
-        );
-
-        // A fresh aligned session resets immediately, then waits for its own
-        // live gate instead of comparing raw countdown indices.
-        state.mode = TasMode::Play as u32;
-        state.playback_pos = 100;
-        state.gate_align_rec = 299;
-        state.arm_generation += 1;
-        let (count, reset) = scan(&mut app, &state);
-        assert!(app.drift_aligned_bases.is_none());
-        assert!(reset);
-        assert_eq!(count, 0);
-        assert_eq!(app.cached_max_drift_z, 0.0, "pre-gate countdown is not drift");
-
-        // Once this attempt's gate arrives, aligned comparison starts cleanly.
-        state.playback_pos = 380;
-        state.gate_index = 287;
-        state.gate_align_rec = 299;
-        scan(&mut app, &state);
-        assert_eq!(app.drift_aligned_bases, Some((287, 299)));
-
-        // A new arm between two polls always drops the latch and maxima.
-        app.cached_max_drift_z = 7.0;
-        state.gate_index = 0;
-        state.arm_generation += 1;
-        let (_, reset) = scan(&mut app, &state);
-        assert!(reset, "a new arm restarts the drift scan");
-        assert!(app.drift_aligned_bases.is_none(), "the previous attempt bases are gone");
-        assert_eq!(app.cached_max_drift_z, 0.0);
-    }
-
-    #[test]
-    fn drift_scan_ignores_stale_playback_while_off() {
-        let mut app = test_app();
-        let mut state = tas_shared::zeroed_boxed();
-        state.mode = TasMode::Off as u32;
-        state.recorded_count = 20;
-        state.playback_pos = 20;
-        for i in 0..20 {
-            state.rec_coords[i] = [1000.0, 0.0, 2000.0];
-            state.play_coords[i] = [0.0, 0.0, 0.0];
-        }
-
-        let (count, _) = scan_drift(
-            &state,
-            &mut app.cached_max_drift_x,
-            &mut app.cached_max_drift_z,
-            &mut app.cached_splice_drift_x,
-            &mut app.cached_splice_drift_z,
-            &mut app.cached_splice_tick,
-            &mut app.last_drift_scan_count,
-            &mut app.drift_aligned_bases,
-            &mut app.drift_latch_arm_generation,
-            &mut app.drift_first_tick,
-        );
-
-        assert_eq!(count, 0);
-        assert_eq!(app.cached_max_drift_x, 0.0);
-        assert_eq!(app.cached_max_drift_z, 0.0);
-        assert_eq!(app.drift_first_tick, None);
-    }
-
-    #[test]
-    fn drift_scan_records_the_actual_first_drift_tick() {
-        let mut app = test_app();
-        let mut state = tas_shared::zeroed_boxed();
-        state.mode = TasMode::Play as u32;
-        state.recorded_count = 10;
-        state.playback_pos = 10;
-        state.play_coords[4][0] = 0.25;
-        state.play_coords[8][2] = 3.0;
-
-        scan_drift(
-            &state,
-            &mut app.cached_max_drift_x,
-            &mut app.cached_max_drift_z,
-            &mut app.cached_splice_drift_x,
-            &mut app.cached_splice_drift_z,
-            &mut app.cached_splice_tick,
-            &mut app.last_drift_scan_count,
-            &mut app.drift_aligned_bases,
-            &mut app.drift_latch_arm_generation,
-            &mut app.drift_first_tick,
-        );
-
-        assert_eq!(app.drift_first_tick, Some(4));
-        assert_eq!(app.cached_max_drift_x, 0.25);
-        assert_eq!(app.cached_max_drift_z, 3.0);
-    }
-
-    #[test]
-    fn cont_drift_banner_requires_current_measured_divergence() {
-        let mut app = test_app();
-        let mut state = tas_shared::zeroed_boxed();
-        state.mode = TasMode::Play as u32;
-        state.continue_from_frame = 8;
-        state.recorded_count = 10;
-        state.playback_pos = 10;
-        state.arm_generation = 41;
-
-        let scan = |app: &mut TasApp, state: &TasSharedState| {
-            scan_drift(
-                state,
-                &mut app.cached_max_drift_x,
-                &mut app.cached_max_drift_z,
-                &mut app.cached_splice_drift_x,
-                &mut app.cached_splice_drift_z,
-                &mut app.cached_splice_tick,
-                &mut app.last_drift_scan_count,
-                &mut app.drift_aligned_bases,
-                &mut app.drift_latch_arm_generation,
-                &mut app.drift_first_tick,
-            )
-        };
-        let banner = |app: &TasApp, state: &TasSharedState| {
-            should_show_drift_banner(
-                state,
-                app.drift_latch_arm_generation,
-                app.drift_first_tick,
-                app.cached_splice_tick,
-                app.cached_splice_drift_x
-                    .max(app.cached_splice_drift_z),
-                app.cached_max_drift_x.max(app.cached_max_drift_z),
-            )
-        };
-
-        // Exact replay: splice covered, zero drift, no banner.
-        scan(&mut app, &state);
-        assert_eq!(app.cached_splice_tick, Some(8));
-        assert_eq!(app.cached_splice_drift_x, 0.0);
-        assert!(!banner(&app, &state));
-
-        // Divergence PAST the splice (playback head inside a transient) must
-        // NOT banner: the verdict point is clean. A head-based check would
-        // flicker here — this was the "banner shows up twice" report.
-        state.play_coords[9][0] = 0.5;
-        state.arm_generation += 1;
-        scan(&mut app, &state);
-        assert_eq!(app.drift_first_tick, Some(9));
-        assert!(app.cached_max_drift_x > 0.0, "history keeps the transient");
-        assert_eq!(app.cached_splice_tick, Some(8));
-        assert_eq!(app.cached_splice_drift_x, 0.0);
-        assert!(!banner(&app, &state));
-
-        // A divergence AT the splice point is still reported.
-        state.play_coords[9][0] = 0.0;
-        state.play_coords[7][0] = 0.5;
-        state.arm_generation += 1;
-        scan(&mut app, &state);
-        assert_eq!(app.cached_splice_tick, Some(8));
-        assert_eq!(app.cached_splice_drift_x, 0.5);
-        assert!(banner(&app, &state));
-
-        // UI break at 4500: an earlier transient that heals before the splice
-        // must NOT banner either.
-        state.play_coords[7][0] = 0.0;
-        state.play_coords[4][0] = 0.5;
-        state.arm_generation += 1;
-        scan(&mut app, &state);
-        assert_eq!(app.drift_first_tick, Some(4));
-        assert!(app.cached_max_drift_x > 0.0, "history keeps the transient");
-        assert_eq!(app.cached_splice_tick, Some(8));
-        assert_eq!(app.cached_splice_drift_x, 0.0);
-        assert!(!banner(&app, &state));
-
-        // Before the next frame's scan, the next arm must not flash the prior
-        // attempt's warning.
-        state.arm_generation += 1;
-        assert!(!banner(&app, &state));
-    }
-
-    #[test]
-    fn cont_banner_stays_clear_while_head_crosses_a_transient() {
-        // Live-UI regression: the UI scans every frame while the 256x prefix
-        // replay advances, so the playback head spends polls inside
-        // transients. A head-based verdict flickers the banner mid-replay
-        // (the "shows up two times" report); the splice verdict must stay
-        // clear at every step until the splice itself is covered.
-        let mut app = test_app();
-        let mut state = tas_shared::zeroed_boxed();
-        state.mode = TasMode::Play as u32;
-        state.continue_from_frame = 8;
-        state.recorded_count = 10;
-        state.arm_generation = 7;
-        // Transient at pair 4 that heals; splice pair 8 exact.
-        state.play_coords[4][0] = 0.5;
-
-        let scan = |app: &mut TasApp, state: &TasSharedState| {
-            scan_drift(
-                state,
-                &mut app.cached_max_drift_x,
-                &mut app.cached_max_drift_z,
-                &mut app.cached_splice_drift_x,
-                &mut app.cached_splice_drift_z,
-                &mut app.cached_splice_tick,
-                &mut app.last_drift_scan_count,
-                &mut app.drift_aligned_bases,
-                &mut app.drift_latch_arm_generation,
-                &mut app.drift_first_tick,
-            )
-        };
-        let banner = |app: &TasApp, state: &TasSharedState| {
-            should_show_drift_banner(
-                state,
-                app.drift_latch_arm_generation,
-                app.drift_first_tick,
-                app.cached_splice_tick,
-                app.cached_splice_drift_x
-                    .max(app.cached_splice_drift_z),
-                app.cached_max_drift_x.max(app.cached_max_drift_z),
-            )
-        };
-
-        // Step the head through the prefix the way live polls observe it:
-        // before, at, and past the transient, then at the splice.
-        for playback_pos in [5u32, 6, 8, 9, 10] {
-            state.playback_pos = playback_pos;
-            scan(&mut app, &state);
-            assert!(
-                !banner(&app, &state),
-                "no banner with head at {playback_pos}"
-            );
-        }
-        assert_eq!(app.drift_first_tick, Some(4), "transient still diagnosed");
-        assert!(app.cached_max_drift_x > 0.0, "history keeps the transient");
-        assert_eq!(app.cached_splice_tick, Some(8));
-        assert_eq!(app.cached_splice_drift_x, 0.0);
-    }
-
-    #[test]
-    fn drift_cache_incremental_accumulates() {
-        let mut app = test_app();
-
-        // First batch: frames 0..10 with small drift
-        // Heap-allocate: TasSharedState is ~1.5MB, too large for stack
-        let mut state: Box<TasSharedState> = unsafe {
-            Box::from_raw(Box::into_raw(
-                vec![0u8; std::mem::size_of::<TasSharedState>()].into_boxed_slice(),
-            ) as *mut TasSharedState)
-        };
-        state.recorded_count = 20;
-        state.playback_pos = 10;
-        for i in 0..20usize {
-            state.rec_coords[i] = [0.0, 0.0, 0.0];
-            state.play_coords[i] = [0.1, 0.0, 0.2];
-        }
-        // Spike in second batch
-        state.play_coords[15] = [9.9, 0.0, 8.8];
-
-        // Scan first batch
-        let count1 = 10usize;
-        for i in app.last_drift_scan_count..count1 {
-            let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
-            if d > app.cached_max_drift_x {
-                app.cached_max_drift_x = d;
-            }
-            let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
-            if d > app.cached_max_drift_z {
-                app.cached_max_drift_z = d;
-            }
-        }
-        app.last_drift_scan_count = count1;
-
-        assert!((app.cached_max_drift_x - 0.1).abs() < 0.001);
-        assert!((app.cached_max_drift_z - 0.2).abs() < 0.001);
-
-        // Scan second batch (frames 10..20)
-        let count2 = 20usize;
-        for i in app.last_drift_scan_count..count2 {
-            let d = (state.play_coords[i][0] - state.rec_coords[i][0]).abs();
-            if d > app.cached_max_drift_x {
-                app.cached_max_drift_x = d;
-            }
-            let d = (state.play_coords[i][2] - state.rec_coords[i][2]).abs();
-            if d > app.cached_max_drift_z {
-                app.cached_max_drift_z = d;
-            }
-        }
-        app.last_drift_scan_count = count2;
-
-        assert!((app.cached_max_drift_x - 9.9).abs() < 0.001);
-        assert!((app.cached_max_drift_z - 8.8).abs() < 0.001);
     }
 }
