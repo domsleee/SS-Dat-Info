@@ -56,19 +56,10 @@ Run these from the repository root. They read files, not the live game.
 
 | Tool | Purpose |
 | --- | --- |
-| `tools/pe_inspect.py FILE sections` | Image layout and section permissions |
-| `tools/pe_inspect.py FILE imports` | Imported DLLs |
-| `tools/pe_inspect.py FILE exports --filter Time Clock Tick` | Exports, optionally filtered by name |
-| `tools/pe_inspect.py FILE disasm 3b10 3d10 --stop-at-ret` | x86/x64 disassembly; hexadecimal RVAs, exclusive end |
-| `tools/pe_inspect.py FILE callers 3940` | x86 call/jump byte-scan candidates and raw pointers |
 | `tools/level_points.py generate start` | Rust start-line table; also `finish` and `spawn` |
 | `tools/level_points.py inspect start` | Marker positions/orientations; `finish` includes object counts |
 
-Prefix the tool paths above with `python TAS/`. PE inspection requires `pefile`;
-disassembly additionally requires `capstone`. Install with
-`python -m pip install pefile capstone`. The caller scan reports every byte
-pattern that decodes as a call or jump to the target, so confirm each hit in
-the disassembly.
+Prefix the tool paths above with `python TAS/`.
 
 Level tools default to the repository's `analyze/src/LevelData/levelData.json`;
 override with `--input PATH` before the subcommand. Generated tables go to stdout.
@@ -76,8 +67,9 @@ Practice rows in `tas_ui/src/start_line.rs` are maintained by hand because the
 JSON has no Practice data. Spawn output also reports shared clusters, which must
 not be classified as a unique level.
 
-`tools/keys.ps1 -Keys "ESC,DOWN,ENTER"` sends scan-code key presses to the game
-window; `dialog-e2e` uses it for its quit sequence. `tools/test_dll_hidden.ps1`
+`tools/keys.ps1 -Keys "ESC"` sends a scan-code key press to the game window;
+`dialog-e2e` uses it to open the pause menu (navigation after that goes through
+the menu protocol). `tools/test_dll_hidden.ps1`
 compiles and runs the C++ policy tests with hidden windows so they cannot take
 focus from the game. The Pico firmware and its deployment have their own
 [README](pico/README.md).

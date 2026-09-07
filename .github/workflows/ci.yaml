@@ -115,3 +115,26 @@ jobs:
       - name: Test TAS native policies
         shell: pwsh
         run: ./TAS/tools/test_dll_hidden.ps1
+      - name: Build TAS Rust binaries for staging
+        run: cd TAS && cargo build --release
+      - name: Build injector (TAS payload)
+        shell: pwsh
+        run: |
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          & "$vsPath\MSBuild\Current\Bin\MSBuild.exe" Display_Config/Display_Config_Resources/Injector/Injector.vcxproj /v:minimal /p:Configuration=Release /m
+      - name: Stage and validate TAS payload layout
+        shell: pwsh
+        run: |
+          $tas = 'payload/Display_Config_Resources/TAS'
+          New-Item -ItemType Directory -Force $tas | Out-Null
+          Copy-Item TAS/TAS_Helper/Release/TAS_Helper.dll "$tas/"
+          Copy-Item TAS/target/release/tas_ui.exe "$tas/"
+          Copy-Item TAS/target/release/tas_test.exe "$tas/"
+          Copy-Item Display_Config/Display_Config_Resources/Injector/Release/Injector.exe 'payload/Display_Config_Resources/'
+          foreach ($f in @(
+            'payload/Display_Config_Resources/TAS/TAS_Helper.dll',
+            'payload/Display_Config_Resources/TAS/tas_ui.exe',
+            'payload/Display_Config_Resources/TAS/tas_test.exe',
+            'payload/Display_Config_Resources/Injector.exe')) {
+            if (-not (Test-Path $f)) { throw "payload missing: $f" }
+          }

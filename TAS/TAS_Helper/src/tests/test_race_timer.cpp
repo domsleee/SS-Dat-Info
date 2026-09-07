@@ -32,10 +32,9 @@ static Verdict RunLine(Table& t, uint32_t line, uint32_t& clk, uint32_t& tick, i
 int main() {
     std::printf("race_timer tests:\n");
     {
-        // tick_driven_expiry (codex 2026-09-03): a finished race's line is
-        // still latched when the HUD is torn down; nothing samples any more
-        // and game_in_game stays 1 at the menu, so the eviction must be
-        // driven by the clock tick, not by the next sample.
+        // A finished race's line stays latched when the HUD is torn down;
+        // nothing samples any more and game_in_game stays 1 at the menu,
+        // so eviction is driven by the clock tick, not the next sample.
         Table t;
         uint32_t clk = 100, tick = STALE_TICKS + 1;
         Verdict v = RunLine(t, 0x1000, clk, tick, LOCK_FRAMES + 2);

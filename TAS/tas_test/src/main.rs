@@ -5,7 +5,6 @@
 //! exits 0 on pass, 1 on fail and 2 on a command-line error.
 
 mod acceptance;
-mod benchmark;
 mod catchup_speed;
 mod certificate;
 mod cli;
@@ -208,20 +207,6 @@ const MODES: &[Mode] = &[
         run: |args| {
             let flags = parse(args, &[flag("--iterations", Some("-n"))], 0);
             play_judge::run(num(&flags, "--iterations", 5))
-        },
-    },
-    Mode {
-        name: "benchmark",
-        usage: "[--repeats N] [--frames N]",
-        summary: "Per-hook __rdtsc timings over fixed frame windows; informational",
-        run: |args| {
-            let flags = parse(args, &[flag("--repeats", Some("-n")), flag("--frames", Some("-f"))], 0);
-            let defaults = benchmark::BenchmarkConfig::default();
-            let config = benchmark::BenchmarkConfig {
-                repeats: num(&flags, "--repeats", defaults.repeats),
-                measure_frames: num(&flags, "--frames", defaults.measure_frames),
-            };
-            report(benchmark::run(config).map(|_| ()), "BENCHMARK FAILED")
         },
     },
     Mode {

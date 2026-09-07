@@ -27,16 +27,8 @@ pub struct LoadedRecording {
 }
 
 pub fn load_tasrec(path: &std::path::Path) -> Result<LoadedRecording, String> {
-    let data = std::fs::read(path).map_err(|e| format!("read: {}", e))?;
-    if data.len() < 4 {
-        return Err("File too small".into());
-    }
-
-    let meta_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    if data.len() < 4 + meta_len {
-        return Err("Truncated metadata".into());
-    }
-
+    let data = tas_codec::read_bounded(path)?;
+    let meta_len = tas_codec::header_meta_len(&data)?;
     let meta_json = std::str::from_utf8(&data[4..4 + meta_len]).map_err(|e| format!("{}", e))?;
     let raw_meta: Value = serde_json::from_str(meta_json).map_err(|e| format!("{}", e))?;
     let meta: RecordingMetadata =
@@ -47,39 +39,14 @@ pub fn load_tasrec(path: &std::path::Path) -> Result<LoadedRecording, String> {
         return Err(format!("Recording too long: {} ticks", count));
     }
 
-    let input_start = 4 + meta_len;
-    let input_end = input_start + count;
-    if data.len() < input_end {
-        return Err("Truncated input log".into());
-    }
-
-    let input_log = data[input_start..input_end].to_vec();
-
-    let coords_start = input_end;
-    let coords_size = count * 3 * 4;
-    let mut rec_coords = vec![[0.0f32; 3]; count];
-
-    if data.len() >= coords_start + coords_size {
-        let mut offset = coords_start;
-        for coord in rec_coords.iter_mut() {
-            for val in coord.iter_mut() {
-                *val = f32::from_le_bytes([
-                    data[offset],
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                ]);
-                offset += 4;
-            }
-        }
-    } else {
-        return Err("Truncated rec_coords".into());
-    }
+    // The harness replays coordinates: a file without them is unusable here
+    // (the UI loads such legacy files with zeroed coords instead).
+    let body = tas_codec::decode_body(&data, meta_len, count, true)?;
 
     Ok(LoadedRecording {
         count: meta.recorded_count,
-        input_log,
-        rec_coords,
+        input_log: body.input_log,
+        rec_coords: body.rec_coords,
         meta,
         raw_meta,
     })
@@ -91,30 +58,9 @@ pub fn save_tasrec(
     input_log: &[u8],
     rec_coords: &[[f32; 3]],
 ) -> Result<(), String> {
-    if input_log.len() != rec_coords.len() {
-        return Err(format!(
-            "input/coord length mismatch: {} inputs vs {} coords",
-            input_log.len(),
-            rec_coords.len()
-        ));
-    }
-
     let meta_json = serde_json::to_string_pretty(meta).map_err(|e| format!("{}", e))?;
-    let meta_bytes = meta_json.as_bytes();
-    let meta_len = meta_bytes.len() as u32;
-
-    let mut data =
-        Vec::with_capacity(4 + meta_bytes.len() + input_log.len() + rec_coords.len() * 12);
-    data.extend_from_slice(&meta_len.to_le_bytes());
-    data.extend_from_slice(meta_bytes);
-    data.extend_from_slice(input_log);
-    for coord in rec_coords {
-        for value in coord {
-            data.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-
-    std::fs::write(path, data).map_err(|e| format!("{}", e))
+    let data = tas_codec::encode(meta_json.as_bytes(), input_log, rec_coords)?;
+    tas_codec::save_atomic(path, &data)
 }
 
 /// Write loaded recording into shared memory state.

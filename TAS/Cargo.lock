@@ -2730,6 +2730,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tas_codec"
+version = "0.1.0"
+dependencies = [
+ "tas_shared",
+]
+
+[[package]]
 name = "tas_shared"
 version = "0.1.0"
 
@@ -2739,6 +2746,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tas_codec",
  "tas_shared",
 ]
 
@@ -2755,6 +2763,7 @@ dependencies = [
  "serde_json",
  "serialport",
  "single-instance",
+ "tas_codec",
  "tas_shared",
 ]
 

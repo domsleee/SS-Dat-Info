@@ -11,25 +11,11 @@ pub fn validate_zero_drift_config(state: &TasSharedState) -> Vec<String> {
     warnings
 }
 
-pub fn show(ui: &mut egui::Ui, state: &mut TasSharedState) {
+pub fn show(ui: &mut egui::Ui, state: &TasSharedState) {
     ui.heading("Config");
 
-    egui::Grid::new("config_grid")
-        .num_columns(2)
-        .spacing([8.0, 4.0])
-        .show(ui, |ui| {
-            ui.label("force_fixed_tick:");
-            let mut fft = state.force_fixed_tick as i32;
-            if ui
-                .add(egui::DragValue::new(&mut fft).range(0..=10))
-                .changed()
-            {
-                state.force_fixed_tick = fft as u32;
-            }
-            ui.end_row();
-        });
-
-    // Proven zero-drift config validation
+    // Proven zero-drift config validation (read-only: arming always resets
+    // force_fixed_tick, so a knob here could only warn about itself).
     let warnings = validate_zero_drift_config(state);
 
     if warnings.is_empty() {

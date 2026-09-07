@@ -7,8 +7,12 @@ supreme_folder := 'T:\Games\SupremeORIG'
 export SUPREME_FOLDER := supreme_folder
 dc_profile := 'release'
 
-[parallel]
-all: display_config tas
+# Full build through one graph: Display_Config's `tas_helper` already builds
+# and stages TAS (DLL + UI). Listing root `tas` here too would launch a
+# second MSBuild on the same vcxproj/outputs from a separate Just process
+# (no cross-process dedup) while Cargo serializes only itself. Standalone
+# `just tas` stays for development.
+all: display_config
 
 display_config:
     cd Display_Config && just --set dc_profile {{dc_profile}} all

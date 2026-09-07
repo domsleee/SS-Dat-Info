@@ -2,7 +2,7 @@
 //!
 //! | Gate | Check                | Pass condition                               |
 //! |------|----------------------|----------------------------------------------|
-//! | 0    | Z-coordinate ref     | 18 reference frames (50-900) match expected  |
+//! | 0    | Z-coord capture      | 18 reference frames (50-900) non-zero Z      |
 //! | 1    | REC movement         | transitions > 0, firstInput != -1            |
 //! | 2    | PLAY movement        | steering visibly works (coord deltas present) |
 //! | 3    | Zero drift           | maxDriftX/Y/Z all == 0.0 (all three axes)     |
@@ -80,7 +80,7 @@ fn gate0_reference_frames(count: usize) -> Vec<usize> {
 pub fn run_gates(state: &TasSharedState, rec_count: u32) -> GateAssessment {
     let n = rec_count as usize;
 
-    // Gate 0: Z-coordinate reference — check that REC coords are captured (non-zero at reference frames)
+    // Gate 0: Z-coordinate capture — check that REC coords were populated (non-zero Z at reference frames)
     let reference_frames = gate0_reference_frames(n);
     let ref_total = reference_frames.len();
     let ref_ok = reference_frames
@@ -90,7 +90,7 @@ pub fn run_gates(state: &TasSharedState, rec_count: u32) -> GateAssessment {
     let gate0_pass = ref_total > 0 && ref_ok == ref_total;
     let gate0 = GateResult {
         gate: 0,
-        name: "Z-coord reference",
+        name: "Z-coord capture",
         passed: gate0_pass,
         detail: format!("{}/{} reference frames have non-zero Z", ref_ok, ref_total),
     };
