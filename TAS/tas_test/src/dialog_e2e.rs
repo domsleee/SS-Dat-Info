@@ -113,7 +113,7 @@ fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str)
             "  [{}] WARNING: Pico Escape failed — falling back to PostMessage Enter",
             label
         );
-        harness::dismiss_save_dialog_pub();
+        harness::dismiss_save_dialog();
     }
 
     let mut prev = client.state().tick_count;

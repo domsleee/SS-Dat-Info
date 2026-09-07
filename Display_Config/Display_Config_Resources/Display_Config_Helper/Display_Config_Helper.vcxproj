@@ -13,9 +13,9 @@
   <ItemGroup>
     <ClInclude Include="src\disableDirectInput.hpp" />
     <ClInclude Include="src\customInput.hpp" />
-    <ClInclude Include="src\external\json.hpp" />
-    <ClInclude Include="src\external\safetyhook.hpp" />
-    <ClInclude Include="src\external\Zydis.h" />
+    <ClInclude Include="..\..\..\third_party\json\json.hpp" />
+    <ClInclude Include="..\..\..\third_party\safetyhook\safetyhook.hpp" />
+    <ClInclude Include="..\..\..\third_party\safetyhook\Zydis.h" />
     <ClInclude Include="src\fixes.hpp" />
     <ClInclude Include="src\globalState.hpp" />
     <ClInclude Include="src\helper.hpp" />
@@ -27,8 +27,8 @@
     <ClInclude Include="src\stdafx.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\external\safetyhook.cpp" />
-    <ClCompile Include="src\external\Zydis.c" />
+    <ClCompile Include="..\..\..\third_party\safetyhook\safetyhook.cpp" />
+    <ClCompile Include="..\..\..\third_party\safetyhook\Zydis.c" />
     <ClCompile Include="src\main.cc" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
@@ -70,6 +70,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\..\..\third_party\safetyhook;$(ProjectDir)..\..\..\third_party\json;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
@@ -86,6 +87,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\..\..\third_party\safetyhook;$(ProjectDir)..\..\..\third_party\json;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>

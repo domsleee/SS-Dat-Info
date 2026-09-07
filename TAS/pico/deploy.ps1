@@ -1,17 +1,11 @@
-# deploy.ps1 - flash this repo's Pico firmware onto the board.
-#
-# The point of this script is that the REPO is the source of truth, not the
-# device. Drag-and-drop editing is how the firmware ended up existing only on a
-# flash drive and in one uncommitted file, with the committed version missing
-# Escape entirely for months.
+# deploy.ps1 - flash this repo's Pico firmware (code.py, boot.py) onto the board.
 #
 #   .\TAS\pico\deploy.ps1              # find CIRCUITPY, show diff, ask, copy
 #   .\TAS\pico\deploy.ps1 -Check       # compare only, change nothing
 #   .\TAS\pico\deploy.ps1 -Force       # skip the confirmation
 #
-# Run -Check before a test session. If it reports a difference, something edited
-# the board behind the repo's back and the next test run is not running what you
-# think it is.
+# Run -Check before a test session: a difference means the board is not running
+# the committed firmware.
 
 param(
     [switch]$Check,
@@ -38,8 +32,7 @@ if (-not $dest) {
 }
 Write-Host "CIRCUITPY: $dest"
 
-# code.py and boot.py only. test.py is a HOST-side tool (it drives the board over
-# serial from the PC) and must NOT be copied to the device.
+# test.py runs on the PC and is not copied.
 $files = @('code.py', 'boot.py')
 $differs = @()
 
@@ -51,8 +44,8 @@ foreach ($f in $files) {
         $differs += $f
         continue
     }
-    # Byte compare rather than Get-FileHash: that cmdlet needs PowerShell 4.0+,
-    # and this must run under whatever `powershell` happens to be on PATH.
+    # Byte compare: Get-FileHash needs PowerShell 4.0+ and this runs under
+    # whatever `powershell` is on PATH.
     $ba = [System.IO.File]::ReadAllBytes($a)
     $bb = [System.IO.File]::ReadAllBytes($b)
     $same = $ba.Length -eq $bb.Length
@@ -77,15 +70,13 @@ if ($differs.Count -eq 0) {
 if ($Check) {
     Write-Host ""
     Write-Host "Device does NOT match the repo: $($differs -join ', ')" -ForegroundColor Red
-    Write-Host "Diff it before assuming the repo is the newer side - the board has"
-    Write-Host "historically carried fixes that were never committed."
+    Write-Host "Run without -Check to copy the repo's files to the board."
     exit 2
 }
 
 if (-not $Force) {
     Write-Host ""
     Write-Host "About to overwrite on ${dest}: $($differs -join ', ')" -ForegroundColor Yellow
-    Write-Host "If the DEVICE has changes the repo does not, they are lost. Diff first."
     $ans = Read-Host "Type 'yes' to copy"
     if ($ans -ne 'yes') { Write-Host "Aborted."; exit 1 }
 }

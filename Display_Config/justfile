@@ -26,27 +26,12 @@ display_config_helper:
     cp .\Display_Config_Resources\Display_Config_Helper\Release\Display_Config_Helper.dll ./output/Display_Config_Resources/; \
     cp .\Display_Config_Resources\Injector\Release\Injector.exe ./output/Display_Config_Resources/
 
+# Stage TAS_Helper.dll and tas_ui.exe where the launcher's "Enable TAS" injects from.
+# The root justfile owns both builds.
 tas_helper:
-    # Stage TAS_Helper.dll AND tas_ui.exe into
-    # Display_Config_Resources/TAS so the "Enable TAS" checkbox in
-    # Display_Config has both the injectable DLL and the controller UI.
-    # Without staging tas_ui.exe, run_tas_inject silently skips launching
-    # SSB Inspect and the user gets a DLL with no controller.
-    $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath; \
-    $msbuild = "$vsPath\MSBuild\Current\Bin\MSBuild.exe"; \
-    & $msbuild ..\TAS\TAS_Helper\TAS_Helper.vcxproj /v:minimal /p:Configuration=Release /p:Platform=Win32; \
-    # Build tas_ui from source rather than checking for a pre-existing
-    # binary. The previous "skip if missing" branch turned a clean
-    # build into a silent half-install — the DLL got copied but the
-    # UI didn't, leaving Enable TAS broken.
-    Push-Location ..\TAS; \
-    cargo build --release --bin tas_ui; \
-    $rust_ok = $LASTEXITCODE -eq 0; \
-    Pop-Location; \
-    if (-not $rust_ok) { Write-Error "tas_helper: cargo build --release --bin tas_ui failed"; exit 1 }; \
-    if (!(Test-Path ./output)) { mkdir output > $null }; \
-    if (!(Test-Path ./output/Display_Config_Resources)) { mkdir ./output/Display_Config_Resources > $null }; \
-    if (!(Test-Path ./output/Display_Config_Resources/TAS)) { mkdir ./output/Display_Config_Resources/TAS > $null }; \
+    just --justfile ../justfile tas; \
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; \
+    New-Item -ItemType Directory -Force ./output/Display_Config_Resources/TAS | Out-Null; \
     cp ..\TAS\TAS_Helper\Release\TAS_Helper.dll ./output/Display_Config_Resources/TAS/; \
     cp ..\TAS\target\release\tas_ui.exe ./output/Display_Config_Resources/TAS/
 

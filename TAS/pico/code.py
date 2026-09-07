@@ -58,51 +58,48 @@ while True:
     try:
         if serial and serial.in_waiting > 0:
             data = serial.read(serial.in_waiting)
-            if not data:
-                continue
 
-            # only process the last byte (most recent command)
-            cmd = data[-1]
-            last_rx_time = time.monotonic()
-
-            if cmd == 0xFD:
-                # Soft USB reconnect: toggle D+ pullup to simulate unplug/replug.
-                # Recovers dead HID without full MCU reset. COM port reopens on
-                # same port number. Takes ~2s total (disconnect + re-enumeration).
-                kbd.release_all()
-                current_mask = 0
-                _usb_disconnect_reconnect()
-                # After reconnect, TinyUSB re-enumerates. Reinit keyboard.
-                time.sleep(2)  # let host finish enumeration
-                kbd = Keyboard(usb_hid.devices)
-                serial = usb_cdc.data
-                continue
-
-            if cmd == 0xFE:
-                # Hard reset: D+ pullup disconnect then full MCU reset.
-                # More aggressive than 0xFD — resets all CircuitPython state.
-                kbd.release_all()
-                _usb_disconnect_reconnect()
-                time.sleep(0.2)
-                microcontroller.reset()
-                # never reached
-
-            if cmd == 0xFF:
-                kbd.release_all()
-                current_mask = 0
-                continue
-
-            changed = current_mask ^ cmd
-            for i in range(8):
-                bit = 1 << i
-                if changed & bit:
-                    if cmd & bit:
-                        kbd.press(BIT_TO_KEY[i])
-                    else:
-                        kbd.release(BIT_TO_KEY[i])
-            current_mask = cmd
-    except Exception:
+            # The host writes a byte only when the mask changes, so every byte
+            # is an edge. Process all of them in order: a press and release
+            # that arrive in one read must both happen, and a control byte
+            # must not swallow the mask that follows it.
+            for cmd in data:
+                if cmd == 0xFD:
+                    # Soft USB reconnect: toggle D+ pullup to simulate unplug/replug.
+                    # Recovers dead HID without full MCU reset. COM port reopens on
+                    # same port number. Takes ~2s total (disconnect + re-enumeration).
+                    kbd.release_all()
+                    current_mask = 0
+                    _usb_disconnect_reconnect()
+                    # After reconnect, TinyUSB re-enumerates. Reinit keyboard.
+                    time.sleep(2)  # let host finish enumeration
+                    kbd = Keyboard(usb_hid.devices)
+                    serial = usb_cdc.data
+                elif cmd == 0xFE:
+                    # Hard reset: D+ pullup disconnect then full MCU reset.
+                    # More aggressive than 0xFD — resets all CircuitPython state.
+                    kbd.release_all()
+                    _usb_disconnect_reconnect()
+                    time.sleep(0.2)
+                    microcontroller.reset()
+                    # never reached
+                elif cmd == 0xFF:
+                    kbd.release_all()
+                    current_mask = 0
+                else:
+                    changed = current_mask ^ cmd
+                    for i in range(8):
+                        bit = 1 << i
+                        if changed & bit:
+                            if cmd & bit:
+                                kbd.press(BIT_TO_KEY[i])
+                            else:
+                                kbd.release(BIT_TO_KEY[i])
+                    current_mask = cmd
+                last_rx_time = time.monotonic()
+    except Exception as e:
         # Keep HID alive even if a transient serial/USB error occurs.
+        print("code.py: releasing all keys after", repr(e))
         kbd.release_all()
         current_mask = 0
         time.sleep(0.05)

@@ -5,9 +5,8 @@
 #include "../game_addresses.hpp"
 #include "../menu_model.hpp"
 #include "../rider_identity_parse.hpp"
-#include "../external/safetyhook.hpp"
+#include <safetyhook.hpp>
 #include <format>
-#include <string>
 
 // Menu state, read from the MENU OBJECTS - and ONLY on the menu thread.
 //
@@ -17,16 +16,16 @@
 //     the page-name std::string). Records the page id the game is switching to
 //     (menu thread). Nothing is published from here: at entry the OLD page is
 //     still installed, so a snapshot taken now would pair the new name with
-//     the old items (codex review 2026-09-04).
+//     the old items.
 //   UI_Menu::Execute(float)     RVA 0x1A680, called every frame from Menu::Paint
 //     while a menu is shown, ECX = UI_Menu. THE producer: it walks the current
 //     page's items (field reads + the game's own Get_Active_Component /
 //     Want_Focus), publishes screen + selector + document together under
 //     menu_seq, and executes pending agent commands through the game's own
 //     entry points. Everything that touches a UI object happens here, on the
-//     thread that owns those objects, never on the worker (codex review
-//     2026-09-04: a worker-side traversal raced page teardown; a vtable inside
-//     a UI image proves nothing about liveness).
+//     thread that owns those objects, never on the worker: a worker-side
+//     traversal races page teardown, and a vtable inside a UI image proves
+//     nothing about liveness.
 //
 // The level-scan worker only does housekeeping: it clears the document when
 // Execute stops heartbeating (a level, a load, the in-game pause menu - none
@@ -67,9 +66,9 @@ using menumodel::kMaxItems;
 // An MSVC6 std::string object at `obj` ({allocator, char* ptr, size,
 // capacity}). The whole header is read first and bounds-checked WITHOUT
 // arithmetic on the length (riderparse::StringHeaderUsable: len < cap and
-// capacity >= len) - a torn header with size 0xFFFFFFFF used to pass a
-// `len + 1 > cap` test by wrapping and would have run off the output buffer
-// (codex review 2026-09-04). Printable ASCII only.
+// capacity >= len): a torn header with size 0xFFFFFFFF passes a
+// `len + 1 > cap` test by wrapping and runs off the output buffer.
+// Printable ASCII only.
 static bool ReadMenuString(uint32_t obj, char* out, uint32_t cap) {
     if (obj < 0x10000 || cap == 0) return false;
     __try {
@@ -96,18 +95,17 @@ static bool IsIdLike(const char* s) { return s[0] == 'I' && s[1] == 'D' && s[2] 
 // PUBLISHING: screen + selector + document go out TOGETHER under menu_seq.
 // Two writers exist (the menu thread's snapshot, the worker's clear), so the
 // section is serialized by g_pubLock and the seqlock never sees two writers.
+// Runs inside the Execute hook: fixed buffers, no allocation, no file log.
 // ---------------------------------------------------------------------------
 inline SRWLOCK g_pubLock = SRWLOCK_INIT;
-inline std::string g_lastDoc;   // what shm holds (under g_pubLock)
+inline char g_lastDoc[TAS_MENU_DOC_MAX] = {};   // what shm holds (under g_pubLock)
 
-static void Publish(const char* screen, uint32_t selector, const std::string& doc) {
+// `doc` fits TAS_MENU_DOC_MAX including its NUL (BuildDoc's cap).
+static void Publish(const char* screen, uint32_t selector, const char* doc) {
     if (!g_state) return;
-    if (doc.size() + 1 > TAS_MENU_DOC_MAX) {
-        Log(std::format("Menu state: document too large ({} bytes) - not published", doc.size()));
-        return;
-    }
     AcquireSRWLockExclusive(&g_pubLock);
-    const bool changed = doc != g_lastDoc || strncmp(g_state->menu_screen, screen, TAS_MENU_SCREEN_MAX) != 0 ||
+    const bool changed = strcmp(doc, g_lastDoc) != 0 ||
+                         strncmp(g_state->menu_screen, screen, TAS_MENU_SCREEN_MAX) != 0 ||
                          g_state->menu_selector != selector;
     if (changed) {
         InterlockedIncrement((volatile LONG*)&g_state->menu_seq);   // odd: writing
@@ -115,15 +113,16 @@ static void Publish(const char* screen, uint32_t selector, const std::string& do
         for (; screen[i] && i < TAS_MENU_SCREEN_MAX - 1; i++) g_state->menu_screen[i] = screen[i];
         g_state->menu_screen[i] = 0;
         g_state->menu_selector = selector;
-        memcpy(g_state->menu_doc, doc.c_str(), doc.size() + 1);
+        const size_t n = strlen(doc) + 1;
+        memcpy(g_state->menu_doc, doc, n);
         InterlockedIncrement((volatile LONG*)&g_state->menu_seq);   // even: stable
-        g_lastDoc = doc;
+        memcpy(g_lastDoc, doc, n);
     }
     ReleaseSRWLockExclusive(&g_pubLock);
 }
 
 // No menu on screen: nothing published at all.
-inline void Clear() { Publish("", 0xFFFFFFFFu, std::string()); }
+inline void Clear() { Publish("", 0xFFFFFFFFu, ""); }
 
 // ---------------------------------------------------------------------------
 // The MENU MODEL - field reads of the UIT objects (UIT.c / main_menu.c /
@@ -298,8 +297,8 @@ static void Snapshot(uint32_t uiMenu, bool force) {
     if (!ReadMenu(uiMenu, snap)) {
         // The page is known but its items are not capturable right now (a
         // transition, nothing focused): publish the screen and NO document -
-        // never a valid-looking empty page (codex review 2026-09-04).
-        Publish(g_screen, 0xFFFFFFFFu, std::string());
+        // never a valid-looking empty page.
+        Publish(g_screen, 0xFFFFFFFFu, "");
         return;
     }
     // The items' parent container carries the PAGE ID as its name (verified
@@ -309,7 +308,12 @@ static void Snapshot(uint32_t uiMenu, bool force) {
     // the fallback for a layout whose items sit in an unnamed sub-container.
     char cname[TAS_MENU_SCREEN_MAX];
     if (ReadMenuString(snap.container + 0x10, cname, sizeof cname) && IsIdLike(cname)) memcpy(g_screen, cname, sizeof cname);
-    Publish(g_screen, snap.selector, menumodel::BuildDoc(snap, g_screen));
+    // Menu thread only, so one static buffer serves every snapshot. A document
+    // that does not fit is published as "screen, no document", like a
+    // transition.
+    static char doc[TAS_MENU_DOC_MAX];
+    const uint32_t n = menumodel::BuildDoc(snap, g_screen, doc, sizeof doc);
+    Publish(g_screen, n ? snap.selector : 0xFFFFFFFFu, doc);
     DumpIfChanged(snap);
 }
 
@@ -326,7 +330,7 @@ static void Snapshot(uint32_t uiMenu, bool force) {
 // the page moved on; one command is outstanding at a time (the agent side
 // refuses to submit while seq != ack); a command nobody can consume - no
 // menu executing - is EXPIRED by the worker after 3 s, so nothing stays armed
-// to fire on a later page (codex review 2026-09-04).
+// to fire on a later page.
 // ---------------------------------------------------------------------------
 using MenuAction = void(__fastcall*)(uint32_t);
 using RequestFocusFn = void(__fastcall*)(uint32_t, uint32_t);
@@ -411,7 +415,20 @@ static bool ConsumeCommand(uint32_t uiMenu) {
         const uint32_t kind = g_state->menu_cmd_kind;
         const uint32_t result = RunCommandGuarded(uiMenu, kind, target, screen);
         Answer(seq, result);
-        Log(std::format("Menu cmd #{}: kind={} target='{}' page='{}' -> {}", seq, kind, target, screen, result));
+        // Ring log, not the file log: this runs inside the Execute hook.
+        char msg[TAS_LOG_ENTRY_SIZE];
+        menumodel::TextWriter w{msg, sizeof msg};
+        w.Put("Menu cmd #");
+        w.PutU32(seq);
+        w.Put(": kind=");
+        w.PutU32(kind);
+        w.Put(" target='");
+        w.Put(target);
+        w.Put("' page='");
+        w.Put(screen);
+        w.Put("' -> ");
+        w.PutU32(result);
+        LogRing(g_state, LOG_INFO, w.Finish());
         ran = true;
     }
     ReleaseSRWLockExclusive(&g_cmdLock);

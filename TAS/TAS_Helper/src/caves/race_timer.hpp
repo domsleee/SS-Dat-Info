@@ -2,7 +2,7 @@
 #include "../stdafx.h"
 #include "../log.hpp"
 #include "../game_addresses.hpp"
-#include "../external/safetyhook.hpp"
+#include <safetyhook.hpp>
 #include "../shared_state.hpp"
 #include "../race_timer_table.hpp"
 #include "menu_state.hpp"
@@ -23,8 +23,8 @@
 // fresh sample) - the table logic lives in race_timer_table.hpp (pure,
 // unit-tested): the PLAYER line is the one whose parsed cs ADVANCES, it is
 // LATCHED once locked, and lines that stop being sampled are evicted (a menu
-// trip rebuilds the HUD; game_in_game never drops at the menu, so the old
-// epoch-reset never fired and dead lines made every later race "ambiguous").
+// trip rebuilds the HUD without dropping game_in_game, so dead lines cannot
+// be cleared on that flag).
 // We publish:
 //   race_time_cs  = exact on-screen race time, centiseconds (u32::MAX = idle)
 //   race_start_ts = 16-bit gate-cross clock value (F5 spawn-lottery metric)
@@ -60,7 +60,7 @@ static inline uint16_t ReadClk() {
 static void Publish(uint32_t cs, uint32_t start, const char* reason) {
     if (!g_state) return;
     // The pair goes out under race_seq so a reader never sees a new time with
-    // the previous start stamp (codex review 2026-09-03). Game thread only.
+    // the previous start stamp. Game thread only.
     if (g_state->race_time_cs != cs || g_state->race_start_ts != start) {
         InterlockedIncrement((volatile LONG*)&g_state->race_seq);   // odd: writing
         g_state->race_time_cs = cs;
@@ -108,9 +108,7 @@ static bool ReadText(uint32_t textObj, char out[24], int& len) {
     }
 }
 
-// Hook of SR_UIT Append_Text: classify on each fresh time-like sample. (Menu
-// screen detection moved to menu_state.hpp - it reads the menu OBJECT, not the
-// render text.)
+// Hook of SR_UIT Append_Text: classify on each fresh time-like sample.
 static void AptCb(SafetyHookContext& ctx) {
     char buf[24]; int len;
     if (!ReadText((uint32_t)ctx.edx, buf, len)) return;
@@ -128,15 +126,13 @@ static void AptCb(SafetyHookContext& ctx) {
     Publish(v.cs, v.start, v.reason);
 }
 
-// Once per clock tick: staleness clock, menu epoch reset (game_in_game
-// 1 -> 0) + periodic diag.
+// Once per clock tick: staleness clock, epoch reset on a game_in_game 1 -> 0
+// edge (a level torn down while the clock still ticks) + periodic diag.
 static void TickCb(SafetyHookContext&) {
     if (!g_state) return;
     g_tickNow++;
-    // A running level clears the menu title. TickCb runs only in-game (the
-    // engine cycle - and this clock tick with it - is frozen at menus), so a
-    // menu title published by AptCb persists at the menu and is wiped the
-    // moment a level's clock starts ticking.
+    // A ticking clock means a level is running and no menu is on screen (the
+    // engine cycle - and this clock tick with it - is frozen at menus).
     if (g_state->game_in_game) menustate::ClearForLevel();
     int inGame = g_state->game_in_game ? 1 : 0;
     if (inGame == 0) {
@@ -149,8 +145,8 @@ static void TickCb(SafetyHookContext&) {
     // race keeps its frozen time published for as long as the line is still
     // appended, but once the HUD is torn down nothing samples any more - and
     // game_in_game does NOT drop at the menu, so without this the last time
-    // stayed published forever (codex review 2026-09-03). Eight compares per
-    // tick; eviction unlatches the player line, which blanks the feed.
+    // would stay published forever. Eight compares per tick; eviction
+    // unlatches the player line, which blanks the feed.
     if (inGame && g_table.Evict(g_tickNow) > 0 && g_table.playerLine == 0 && g_lastPub != MAXU) {
         Publish(MAXU, MAXU, "stale");
     }

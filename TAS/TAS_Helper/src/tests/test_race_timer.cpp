@@ -11,20 +11,10 @@
 //     game_in_game never drops at the menu, so the epoch reset never fired.
 
 #include "../race_timer_table.hpp"
+#include "check.hpp"
 #include <cstdio>
 
 using namespace racetimer;
-
-static int g_failures = 0;
-
-static void check(bool cond, const char* name) {
-    if (cond) {
-        std::printf("  ok   %s\n", name);
-    } else {
-        std::printf("  FAIL %s\n", name);
-        g_failures++;
-    }
-}
 
 // A live race on `line`: the HUD is appended once per clock tick, the timer
 // advances one centisecond per tick from `startClk`. Returns the last verdict.
@@ -178,10 +168,5 @@ int main() {
         check(t.Classify().cs == MAXU, "nothing to publish after a reset");
     }
 
-    if (g_failures == 0) {
-        std::printf("ALL PASS\n");
-        return 0;
-    }
-    std::printf("%d FAILED\n", g_failures);
-    return 1;
+    return FinishTests();
 }

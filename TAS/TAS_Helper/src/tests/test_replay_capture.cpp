@@ -1,52 +1,21 @@
 // Unit tests for the replay-recorder capture policy (replay_capture_policy.hpp).
-// Pure logic, no Windows/hook deps — compile + run standalone:
-//   just test_dll      (from repo root)
-// or:
-//   cl /EHsc /std:c++17 /Fe:test_replay_capture.exe test_replay_capture.cpp && test_replay_capture.exe
+// Pure logic, no Windows/hook deps; built and run by TAS/tools/test_dll_hidden.ps1.
 //
-// Regressions from 2026-09-02 (Forest Easy):
+// Two live regressions pin the policy:
 //   ghost_restart_recreates_recorder_mid_play - with Time Attack ghosts an F5
 //     restart rebuilds the player set; the human's recorder/player come back at
-//     NEW addresses while a judged PLAY is active. The original policy froze
-//     the pointer for the whole run and kept reading a dead object: every PLAY
-//     mismatched at gate+0 and rerolled forever.
+//     NEW addresses while a judged PLAY is active, so the cached pointer must
+//     follow the re-created human recorder instead of reading a dead object.
 //   transient_pushers_never_hijack - around a restart, ghost / AI / garbage
-//     recorders push on some frames. "Follow the last pusher" adopted them and
-//     FE without ghosts went from ~0 to 5-13 rerolls per PLAY.
-// The identity check (the owner is a plain `Player` still linked to the recorder) resolves
-// both; the pre-fix policies are kept here only so the regressions are
-// demonstrable.
+//     recorders push on some frames and must never be adopted.
+// Both follow from the identity check: the owner is a plain `Player` still
+// linked to the recorder.
 
 #include "../replay_capture_policy.hpp"
 #include "../replay_identity.hpp"
+#include "check.hpp"
 #include <cstdio>
 #include <map>
-
-static int g_failures = 0;
-
-static void check(bool cond, const char* name) {
-    if (cond) {
-        std::printf("  ok   %s\n", name);
-    } else {
-        std::printf("  FAIL %s\n", name);
-        g_failures++;
-    }
-}
-
-// Pre-fix policy #1: freeze while REC/PLAY.
-static bool FreezeAdopt(bool mode_off, uint32_t incoming, uint32_t& cached) {
-    if (mode_off || cached == 0) {
-        cached = incoming;
-        return true;
-    }
-    return false;
-}
-// Pre-fix policy #2: follow the last pusher.
-static bool LastPusherAdopt(uint32_t incoming, uint32_t& cached) {
-    if (incoming == 0 || incoming == cached) return false;
-    cached = incoming;
-    return true;
-}
 
 int main() {
     std::printf("replay_capture tests:\n");
@@ -56,10 +25,9 @@ int main() {
                        GARBAGE_OWNER_REC = 0x0C460630;
 
     {
-        // same_address_reuse_is_caught (codex 2026-09-03): F5 frees the human's
-        // recorder and the allocator hands the SAME address to a ghost. The
-        // address-change gate never re-classified it; revalidation on every
-        // push of the cached address does.
+        // same_address_reuse_is_caught: F5 frees the human's recorder and the
+        // allocator hands the SAME address to a ghost. An address-change gate
+        // cannot see that; revalidation on every push of the cached address does.
         ReplayCaptureState st;
         check(ReplayCaptureAdopt(OFF, HUMAN_A, HUMAN, st) && st.cached == HUMAN_A, "reuse: human adopted");
         check(!ReplayCaptureRevalidate(true, st) && st.cached == HUMAN_A && st.dropped == 0,
@@ -94,10 +62,6 @@ int main() {
         }
         check(!any && st.cached == HUMAN_A, "transient_pushers_never_hijack: ghost / garbage pushers ignored");
         check(st.rejected == 100, "each ignored pusher is counted (diagnostic)");
-
-        uint32_t last = HUMAN_A;
-        LastPusherAdopt(GHOST, last);
-        check(last == GHOST, "pre-fix 'last pusher' policy would follow the ghost (documents the bug)");
     }
     {
         // ghost_restart_recreates_recorder_mid_play: REC on HUMAN_A, the PLAY
@@ -108,11 +72,6 @@ int main() {
               "ghost_restart_recreates_recorder_mid_play: re-created human recorder adopted mid-run");
         check(st.changes_while_active == 1, "mid-run re-creations are counted (diagnostic)");
         check(!ReplayCaptureAdopt(ACTIVE, HUMAN_B, HUMAN, st), "steady state: no churn while it stays put");
-
-        uint32_t frozen = 0;
-        FreezeAdopt(OFF, HUMAN_A, frozen);
-        check(!FreezeAdopt(ACTIVE, HUMAN_B, frozen) && frozen == HUMAN_A,
-              "pre-fix 'freeze' policy would keep the dead recorder (documents the bug)");
     }
     {
         ReplayCaptureState st;
@@ -126,12 +85,8 @@ int main() {
 
     {
         // Owner classification against a fake process image. Layout as in the
-        // live game (2026-09-02 afternoon scan, Forest Easy Time Attack):
-        // recorder+0x84 -> owner, owner+0x14C -> recorder, [owner] = vtable.
-        // The first identity test ([[owner+0x1B8]+0x590] == keyboard object)
-        // was a heap-adjacency artifact and matched NOTHING in a fresh process
-        // - the DLL then recorded all-zero coordinates and a zero-vs-zero judge
-        // "passed". Class identity has no offset to get wrong.
+        // live game: recorder+0x84 -> owner, owner+0x14C -> recorder,
+        // [owner] = vtable. Class identity has no offset to get wrong.
         std::map<uint32_t, uint32_t> mem;
         auto read = [&](uint32_t a) -> uint32_t {
             auto it = mem.find(a);
@@ -175,10 +130,5 @@ int main() {
               "identity: kind names for the ring log");
     }
 
-    if (g_failures == 0) {
-        std::printf("ALL PASS\n");
-        return 0;
-    }
-    std::printf("%d FAILED\n", g_failures);
-    return 1;
+    return FinishTests();
 }

@@ -4,7 +4,7 @@
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
 #include "../input_gate.hpp"
-#include "../external/safetyhook.hpp"
+#include <safetyhook.hpp>
 
 // Cave 1D: BB3B10 observer notification gate at HMG+3B10.
 //
@@ -59,7 +59,7 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
         // reaches BB3B10), so this is a backstop: if any real observer call
         // slips through during a Continue, drop it so it can't perturb the
         // spawn. NOT pause-exempt (the F5 reload stalls the cycle).
-        if (s->cont_suppress_input && keyIndex != GameAddresses::BB3B10_ESC) {
+        if (s->cont_suppress_input && keyIndex != GameAddresses::KEY_ESC) {
             s->bb3b10_block_count++;
             PerfSample(s->perf_cave1d, __rdtsc() - t0);
             return;
@@ -75,7 +75,7 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
         //    OWN navigation (arrows/enter) is observer-driven — without this
         //    the menu opens but can't be operated during REC.
         if (s->mode == MODE_REC
-            && keyIndex != GameAddresses::BB3B10_ESC && !gamePaused) {
+            && keyIndex != GameAddresses::KEY_ESC && !gamePaused) {
             s->bb3b10_block_count++;
             PerfSample(s->perf_cave1d, __rdtsc() - t0);
             return;

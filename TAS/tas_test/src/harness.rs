@@ -1,33 +1,27 @@
-//! Shared test harness scaffolding — F5 restart, wait helpers, liveness checks.
-//!
-//! Ported from _full_drift_test.lua and the existing main.rs helpers.
+//! Shared live-game scaffolding: Pico input, F5 restarts, wait/poll helpers,
+//! session liveness, and the locator for the committed recording fixtures.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 
-/// Pico HID COM port. Override with `TAS_PICO_PORT` env var (default: COM7).
+use crate::win32;
+
+/// Pico HID COM port. Override with `TAS_PICO_PORT` (default COM7).
 pub fn pico_port() -> String {
     std::env::var("TAS_PICO_PORT").unwrap_or_else(|_| "COM7".into())
 }
 
-/// Release every Pico key. `0xFF` is the firmware's "all up" mask.
+/// Release every Pico key (`0xFF` is the firmware's "all up" mask).
 ///
-/// The device is a Pico 2 running CircuitPython (VID_2E8A PID_000B) which
-/// enumerates a real HID Keyboard collection alongside this CDC port, so a mask
-/// byte presses actual keys and they stay pressed until a later byte clears them.
-///
-/// This is defence in depth rather than the only thing standing between us and a
-/// stuck key: the firmware already self-protects, releasing everything if it goes
-/// 500ms without a command (`TIMEOUT_S` in code.py). So a run killed between a
-/// press and its release cannot leave a key down for longer than that. What this
-/// call buys is releasing NOW instead of up to half a second later, and a defined
-/// starting state that does not depend on how the previous run died.
-///
-/// Best effort: if the port will not open there is nothing to release.
+/// The firmware's own 500 ms watchdog would release them anyway; this makes the
+/// starting state explicit and reports whether the device is reachable before a
+/// test leans on it. Best effort: if the port will not open there is nothing to
+/// release.
 pub fn pico_release_all() -> bool {
     let com_path = format!("\\\\.\\{}", pico_port());
     match std::fs::OpenOptions::new().write(true).open(&com_path) {
@@ -36,12 +30,9 @@ pub fn pico_release_all() -> bool {
     }
 }
 
-/// Holds the Pico port open for a press/release pair and guarantees the release.
-///
-/// `Drop` runs on early return, on `?`, and while a panic unwinds, so the only
-/// way to leave a key down is for the process to be killed outright — which is
-/// what the startup release in `ensure_game_running` is for. Between the two,
-/// a held key cannot outlive the code that pressed it.
+/// Holds the Pico port open for a press/release pair and guarantees the release:
+/// `Drop` runs on early return, `?` and panic unwind, so a held key cannot
+/// outlive the code that pressed it.
 pub struct PicoKeys {
     port: std::fs::File,
     port_name: String,
@@ -85,52 +76,32 @@ impl Drop for PicoKeys {
 
 /// How long to wait after F5 for the game to restart loading.
 const F5_SETTLE_MS: u64 = 4000;
-/// Frames to wait for physics stabilization after restart.
+/// Frames to wait for physics stabilization after an F5 restart.
 const STABILIZE_FRAMES: u32 = 500;
-/// Timeout waiting for in-process restart state machine to finish.
+/// Timeout for the in-process restart state machine.
 const RESTART_TIMEOUT_SECS: u64 = 15;
 /// Playback timeout (long enough for 65536 frames at ~50fps unfocused).
 const PLAYBACK_TIMEOUT_SECS: u64 = 120;
-/// Early CONT anchor frame used to reject countdown/start-phase mismatches.
-const CONT_ANCHOR_FRAME: u32 = 250;
-/// Timeout waiting to reach the early CONT anchor frame.
-const CONT_ANCHOR_TIMEOUT_SECS: u64 = 10;
-/// Default retry budget for finding a matching F5 starting bucket. Acceptance
-/// observed up to 13 retries in 15 trials; 60 covers the observed tail with
-/// margin and is the standard regression suite budget.
+/// Time allowed at 1x for a CONT replay to reach the bucket judge point.
+const JUDGE_TIMEOUT_SECS: u64 = 10;
+/// Retry budget for landing a matching F5 start bucket. Acceptance has needed
+/// up to 13; 60 covers that tail with margin.
 pub const START_MATCH_RETRIES: u32 = 60;
 
-/// Focus the Supreme Snowboarding window.
+/// Bring the game window to the front. Best effort: a missing window is left alone.
 pub fn focus_game() {
-    let _ = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            r#"
-            $wshell = New-Object -ComObject wscript.shell
-            $procs = Get-Process Supreme* -ErrorAction SilentlyContinue
-            if ($procs) { $wshell.AppActivate($procs[0].Id) | Out-Null }
-        "#,
-        ])
-        .output();
+    if let Some(hwnd) = win32::find_game_window() {
+        win32::bring_to_front(hwnd);
+    }
     thread::sleep(Duration::from_millis(200));
 }
 
-/// Send Escape to the game via the Pico HID (bit 7 in the input-mask
-/// protocol — added to firmware alongside the existing LRUD/JUMP/SHIFT/F5
-/// bits). The Pico is a real USB HID keyboard so the keystroke updates the
-/// OS keyboard state and reaches Supreme's pause handler. The fallback
-/// keybd_event path is kept for development environments without the Pico,
-/// but synthetic input does not engage the game's pause and the
-/// `escape-speedup` test will report "pause didn't engage" in that mode.
+/// Send Escape through the Pico (mask bit 7). The Pico is a real HID keyboard,
+/// so the press reaches the game's pause handler; the synthetic fallback for
+/// machines without one generally does not.
 pub fn send_escape() -> bool {
     focus_game();
     if let Some(mut keys) = PicoKeys::open() {
-        // Bit 7 = Escape per the updated Pico firmware (BIT_TO_KEY[7] = Keycode.ESCAPE).
-        // Report failure if the press did not land, rather than returning true
-        // and leaving the caller to blame the game for "pause didn't engage".
-        // The release is PicoKeys::drop's job, so it happens even if we return
-        // early or panic in between.
         if !keys.send(0x80) {
             eprintln!(
                 "  WARNING: Pico on {} opened but the Escape press failed to write",
@@ -142,113 +113,38 @@ pub fn send_escape() -> bool {
         println!("  Escape sent via Pico ({})", keys.port_name());
         return true;
     }
-
-    // Fallback for machines without the Pico: synthetic key event. The game
-    // typically ignores this (game polls hardware state via DirectInput),
-    // but it's better than nothing.
     eprintln!(
         "  WARNING: Pico not available on {} — falling back to keybd_event (likely won't pause the game)",
         pico_port()
     );
-    let script = r#"
-Add-Type @'
-using System; using System.Runtime.InteropServices;
-public class K { [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra); }
-'@
-$VK_ESCAPE = 0x1B
-$SCAN_ESCAPE = 0x01
-$KEYEVENTF_EXTENDEDKEY = 0x0001
-$KEYEVENTF_KEYUP = 0x0002
-$KEYEVENTF_SCANCODE = 0x0008
-[K]::keybd_event($VK_ESCAPE, $SCAN_ESCAPE, $KEYEVENTF_EXTENDEDKEY -bor $KEYEVENTF_SCANCODE, [UIntPtr]::Zero)
-Start-Sleep -Milliseconds 80
-[K]::keybd_event($VK_ESCAPE, $SCAN_ESCAPE, $KEYEVENTF_EXTENDEDKEY -bor $KEYEVENTF_KEYUP -bor $KEYEVENTF_SCANCODE, [UIntPtr]::Zero)
-"#;
-    Command::new("powershell")
-        .args(["-NoProfile", "-Command", script])
-        .output()
-        .is_ok()
+    win32::tap_key(win32::VK_ESCAPE, Duration::from_millis(80));
+    true
 }
 
-/// Send Enter to the game to dismiss the post-run "Save attempt" dialog.
+/// Post Enter to the game window to dismiss the post-run "Save attempt" dialog.
 ///
-/// The dialog only appears after some run completions, but Enter is harmless
-/// when it isn't up. Without dismissing it, the next F5 lands on the dialog
-/// and gets eaten instead of triggering a real restart, which shifts the F5
-/// match buckets by one cycle and breaks playback start matching.
-///
-/// Uses PostMessage to the game's main HWND rather than SendKeys, since
-/// SendKeys depends on focus restoration via WScript.Shell.AppActivate which
-/// silently fails when the game has a child modal dialog up (the very state
-/// we're trying to dismiss). PostMessage delivers the keystroke directly to
-/// the target window regardless of focus.
-/// Public wrapper so a test can dismiss the dialog at a moment IT chooses.
-pub fn dismiss_save_dialog_pub() {
-    dismiss_save_dialog();
-}
-
-fn dismiss_save_dialog() {
-    if let Some(hwnd) = find_supreme_hwnd() {
-        #[allow(non_snake_case)]
-        let WM_KEYDOWN: u32 = 0x0100;
-        #[allow(non_snake_case)]
-        let WM_KEYUP: u32 = 0x0101;
-        #[allow(non_snake_case)]
-        let VK_RETURN: usize = 0x0D;
-        let script = format!(
-            r#"
-Add-Type @'
-using System; using System.Runtime.InteropServices;
-public class W {{ [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l); }}
-'@
-[W]::PostMessage([IntPtr]::new({h}), {kd}, [IntPtr]::new({vk}), [IntPtr]::Zero) | Out-Null
-Start-Sleep -Milliseconds 30
-[W]::PostMessage([IntPtr]::new({h}), {ku}, [IntPtr]::new({vk}), [IntPtr]::Zero) | Out-Null
-"#,
-            h = hwnd,
-            kd = WM_KEYDOWN,
-            ku = WM_KEYUP,
-            vk = VK_RETURN,
-        );
-        let _ = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .output();
+/// PostMessage needs no focus, so it reaches the modal dialog that blocks focus
+/// changes. Without this the next F5 lands on the dialog and gets eaten, which
+/// shifts the F5 bucket alignment by a cycle. Harmless when no dialog is up.
+pub fn dismiss_save_dialog() {
+    if let Some(hwnd) = win32::find_game_window() {
+        win32::post_key(hwnd, win32::VK_RETURN, Duration::from_millis(30));
     }
     thread::sleep(Duration::from_millis(150));
 }
 
-/// Ensure there is no competing shared-memory writer (`tas_ui`) while running
-/// deterministic `tas_test` runtime flows.
-///
-/// `tas_ui` and `tas_test` concurrently writing command fields can cause
-/// intermittent ARM_CONTINUE mode=0 failures unrelated to core replay logic.
+/// Kill any `tas_ui`: two writers on the single-slot command channel cause
+/// intermittent ARM_CONTINUE mode=0 failures. Returns how many were stopped.
 pub fn stop_competing_tas_ui_writer() -> u32 {
-    let script = r#"
-        $p = Get-Process -Name tas_ui -ErrorAction SilentlyContinue
-        if ($p) {
-            $count = @($p).Count
-            $p | Stop-Process -Force
-            Write-Output ("killed:{0}" -f $count)
-        } else {
-            Write-Output "none"
-        }
-    "#;
-    if let Ok(output) = Command::new("powershell")
-        .args(["-NoProfile", "-Command", script])
-        .output()
-    {
-        let out = String::from_utf8_lossy(&output.stdout);
-        let msg = out.trim();
-        if let Some(count) = msg.strip_prefix("killed:") {
-            println!("  Stopped competing tas_ui writer(s): {}", count.trim());
-            return count.trim().parse::<u32>().unwrap_or(1);
-        }
+    let stopped = kill_image("tas_ui.exe", None);
+    if stopped > 0 {
+        println!("  Stopped competing tas_ui writer(s): {stopped}");
     }
-    0
+    stopped
 }
 
-/// Ensure `tas_test` owns the shared-memory command surface before running
-/// speed-sensitive runtime checks.
+/// Ensure `tas_test` owns the shared-memory command surface before a
+/// speed-sensitive mode runs.
 pub fn ensure_exclusive_runtime_ownership(client: &mut TasSharedMemoryClient, failure_hint: &str) {
     let stopped_writers = stop_competing_tas_ui_writer();
     stop(client);
@@ -273,48 +169,14 @@ pub fn ensure_exclusive_runtime_ownership(client: &mut TasSharedMemoryClient, fa
     thread::sleep(Duration::from_millis(100));
 }
 
-/// Find the Supreme window handle via PowerShell.
-fn find_supreme_hwnd() -> Option<isize> {
-    let output = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            r#"(Get-Process Supreme -EA SilentlyContinue | Where {$_.Name -notmatch 'service'} | Select -First 1).MainWindowHandle"#,
-        ])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&output.stdout);
-    s.trim().parse::<isize>().ok().filter(|&h| h != 0)
-}
-
 /// Send F5 via PostMessage (no focus required).
 fn send_f5_postmessage() {
-    if let Some(hwnd) = find_supreme_hwnd() {
-        #[allow(non_snake_case)]
-        let WM_KEYDOWN: u32 = 0x0100;
-        #[allow(non_snake_case)]
-        let WM_KEYUP: u32 = 0x0101;
-        #[allow(non_snake_case)]
-        let VK_F5: usize = 0x74;
-        // Use PowerShell to call PostMessage since we can't link user32 from pure Rust easily
-        let script = format!(
-            r#"
-            Add-Type @'
-using System; using System.Runtime.InteropServices;
-public class W {{ [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l); }}
-'@
-            [W]::PostMessage([IntPtr]::new({}), {}, [IntPtr]::new({}), [IntPtr]::Zero) | Out-Null
-            Start-Sleep -Milliseconds 50
-            [W]::PostMessage([IntPtr]::new({}), {}, [IntPtr]::new({}), [IntPtr]::Zero) | Out-Null
-            "#,
-            hwnd, WM_KEYDOWN, VK_F5, hwnd, WM_KEYUP, VK_F5,
-        );
-        let _ = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .output();
-        println!("  F5 sent via PostMessage (hwnd={})", hwnd);
-    } else {
-        eprintln!("  ERROR: Cannot find Supreme window for PostMessage F5");
+    match win32::find_game_window() {
+        Some(hwnd) => {
+            win32::post_key(hwnd, win32::VK_F5, Duration::from_millis(50));
+            println!("  F5 sent via PostMessage (hwnd={:#x})", hwnd);
+        }
+        None => eprintln!("  ERROR: Cannot find Supreme window for PostMessage F5"),
     }
 }
 
@@ -324,8 +186,6 @@ pub fn send_f5_pico() {
     let port = pico_port();
     match PicoKeys::open() {
         Some(mut keys) => {
-            // Release is PicoKeys::drop's job — a panic or early return here can
-            // no longer leave F5 physically held.
             if !keys.send(0x40) {
                 eprintln!("  WARNING: Pico F5 press failed to write; using PostMessage fallback.");
                 drop(keys);
@@ -368,22 +228,16 @@ pub fn check_liveness(client: &TasSharedMemoryClient) -> bool {
     delta > 0
 }
 
-/// F5 restart + wait for stabilization. Returns true if successful.
-/// Uses double-F5: first F5 normalizes game state, second F5 produces
-/// the deterministic restart position. This ensures consistent starting
-/// positions regardless of what the game was doing before.
+/// Pico F5 restart + stabilization. Double-F5: the first normalizes game state,
+/// the second produces the deterministic restart position.
 pub fn restart_and_stabilize(client: &TasSharedMemoryClient) -> bool {
-    // Dismiss any post-run "Save attempt" dialog before F5 — otherwise the
-    // first F5 lands on the dialog and gets eaten, shifting bucket alignment.
     dismiss_save_dialog();
 
-    // First F5: normalize game state
     println!("  Sending F5 (normalize)...");
     send_f5_pico();
     thread::sleep(Duration::from_millis(F5_SETTLE_MS));
-    wait_frames(client, 100); // brief wait for game to restart
+    wait_frames(client, 100);
 
-    // Second F5: deterministic restart from normalized state
     println!("  Sending F5 (restart)...");
     send_f5_pico();
     thread::sleep(Duration::from_millis(F5_SETTLE_MS));
@@ -392,29 +246,12 @@ pub fn restart_and_stabilize(client: &TasSharedMemoryClient) -> bool {
     check_liveness(client)
 }
 
-/// In-process restart via CMD_RESTART + restart_state polling.
-///
-/// This matches the egui transport path (RestartThen) and avoids external
-/// focus/Pico timing variance from out-of-process F5 injection.
-pub fn restart_and_stabilize_inprocess(client: &mut TasSharedMemoryClient) -> bool {
-    // Dismiss any post-run "Save attempt" dialog before requesting restart.
-    // The in-process restart eventually invokes the game's F5 handler internally,
-    // which can also be intercepted by the dialog if it's up.
-    dismiss_save_dialog();
-
-    // Ensure a clean command state before requesting restart.
-    client.send_command(TasCommand::Stop);
-    thread::sleep(Duration::from_millis(50));
-
+/// Send CMD_RESTART and wait for cave2's restart machine to report done.
+pub fn restart_inprocess(client: &mut TasSharedMemoryClient) -> bool {
     client.reset_restart_state();
     client.send_command(TasCommand::Restart);
-
     let start = Instant::now();
-    loop {
-        let rs = client.restart_state();
-        if rs == 2 {
-            break;
-        }
+    while client.restart_state() != 2 {
         if start.elapsed() > Duration::from_secs(RESTART_TIMEOUT_SECS) {
             eprintln!(
                 "  ERROR: In-process restart timeout (restart_state={})",
@@ -424,19 +261,29 @@ pub fn restart_and_stabilize_inprocess(client: &mut TasSharedMemoryClient) -> bo
         }
         thread::sleep(Duration::from_millis(20));
     }
-
     client.reset_restart_state();
+    true
+}
+
+/// In-process restart (CMD_RESTART), the path tas_ui's transport uses. The
+/// dialog dismissal matters here too: the restart invokes the game's own F5
+/// handler, which the dialog intercepts.
+pub fn restart_and_stabilize_inprocess(client: &mut TasSharedMemoryClient) -> bool {
+    dismiss_save_dialog();
+    client.send_command(TasCommand::Stop);
+    thread::sleep(Duration::from_millis(50));
+    if !restart_inprocess(client) {
+        return false;
+    }
     println!(
         "  In-process restart stabilized at frame {}",
         client.frame_count_volatile()
     );
-    // restart_state==2 is set BY cave2's restart machine, which only runs inside
-    // the Supreme::Cycle hook — so reaching it already proves the game is alive
-    // and cave2 is firing. Do NOT call check_liveness here: its 500ms sleep
-    // burned ~50 frames of the 3s spawn countdown before the caller could arm,
-    // which is why CONT/REC captured play_coords[0] ~90 frames late (first-moving
-    // ~211 instead of ~300) and could never match recordings made by tas_ui
-    // (which arms immediately after the restart). Arm ASAP, like tas_ui.
+    // restart_state==2 is written by cave2 inside the Supreme::Cycle hook, so
+    // reaching it already proves the game is alive. Do NOT add a liveness sleep
+    // here: every frame spent between restart and arm pushes play_coords[0]
+    // later into the spawn countdown, and recordings made by tas_ui (which arms
+    // immediately) then never match.
     true
 }
 
@@ -575,25 +422,21 @@ pub fn restart_play_aligned_inprocess(client: &mut TasSharedMemoryClient) -> Opt
     }
 }
 
-/// Path to the `revive-supreme.nu` script used by [`ensure_game_running`].
-/// Override with the `REVIVE_SUPREME_SCRIPT` env var.
-fn revive_script_path() -> String {
-    std::env::var("REVIVE_SUPREME_SCRIPT").unwrap_or_else(|_| {
-        r"C:\Users\user\git\cheatengine-mcp-bridge\skills\revive-supreme\scripts\revive-supreme.nu"
-            .into()
-    })
+/// An environment variable the live launch path needs; no built-in default.
+fn required_env(name: &str) -> Result<String, String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("{name} is not set (needed to launch the game)"))
 }
 
-/// Launch Supreme Snowboarding via `revive-supreme.nu` with `NO_CE=1`.
-/// Returns true if the script exited successfully.
-///
-/// Sets `TAS_TEST_PID` so the revive script can skip killing us.
-fn run_revive() -> bool {
-    let script = revive_script_path();
+/// Launch Supreme Snowboarding via the `revive-supreme.nu` script with `NO_CE=1`.
+/// Sets `TAS_TEST_PID` so the script can skip killing us.
+fn run_revive(script: &str) -> bool {
     println!("Launching game via revive-supreme (NO_CE=1)...");
     println!("  Script: {}", script);
     match Command::new("nu")
-        .arg(&script)
+        .arg(script)
         .env("NO_CE", "1")
         .env("TAS_TEST_PID", std::process::id().to_string())
         .status()
@@ -614,37 +457,51 @@ fn run_revive() -> bool {
     }
 }
 
-/// Kill all running instances of Supreme Snowboarding and related processes.
-/// Excludes the current process so we don't kill ourselves.
-fn kill_game() {
-    let my_pid = std::process::id();
-    let script = format!(
-        r#"
-        $names = @('Supreme','Supreme_v1.035','display-config','Display_Config','tas_ui','tas_test')
-        $myPid = {}
-        foreach ($n in $names) {{
-            Get-Process -Name $n -ErrorAction SilentlyContinue |
-                Where-Object {{ $_.Id -ne $myPid }} |
-                Stop-Process -Force
-        }}
-        "#,
-        my_pid
-    );
-    let _ = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output();
+fn hide_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+}
+
+/// `taskkill` one image name; returns how many processes it terminated.
+/// Matches exact image names, and never `supreme-service.exe`.
+fn kill_image(image: &str, exclude_pid: Option<u32>) -> u32 {
+    let mut command = Command::new("taskkill");
+    command.args(["/F", "/IM", image, "/FI", "IMAGENAME ne supreme-service.exe"]);
+    if let Some(pid) = exclude_pid {
+        command.args(["/FI", &format!("PID ne {pid}")]);
+    }
+    hide_console(&mut command);
+    match command.output() {
+        Ok(out) => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|line| line.contains("PID"))
+            .count() as u32,
+        Err(_) => 0,
+    }
+}
+
+/// Kill every game, launcher and TAS process except ourselves.
+pub fn kill_game() {
+    let me = std::process::id();
+    for image in [
+        "Supreme.exe",
+        "Supreme_v1.035.exe",
+        "display-config.exe",
+        "Display_Config.exe",
+        "tas_ui.exe",
+        "tas_test.exe",
+    ] {
+        kill_image(image, Some(me));
+    }
     thread::sleep(Duration::from_millis(500));
 }
 
-/// Default game folder. Override with `SUPREME_FOLDER` env var.
-fn supreme_folder() -> String {
-    std::env::var("SUPREME_FOLDER").unwrap_or_else(|_| r"T:\Games\SupremeORIG".into())
-}
-
 /// Inject a DLL into the running Supreme.exe process via Injector.exe.
-fn inject_dll(label: &str, dll_path: &str) -> bool {
-    let base = supreme_folder();
-    let injector = format!(r"{}\Display_Config_Resources\Injector.exe", base);
+fn inject_dll(label: &str, dll_path: &str, supreme_folder: &str) -> bool {
+    let injector = format!(r"{}\Display_Config_Resources\Injector.exe", supreme_folder);
 
     println!("Injecting {}...", label);
     println!("  DLL: {}", dll_path);
@@ -665,22 +522,6 @@ fn inject_dll(label: &str, dll_path: &str) -> bool {
     }
 }
 
-/// Inject Display_Config_Helper.dll then TAS_Helper.dll into the running game.
-fn inject_all_dlls() -> bool {
-    let base = supreme_folder();
-    let dc_res = format!(r"{}\Display_Config_Resources", base);
-    let dc_helper = format!(r"{}\Display_Config_Helper.dll", dc_res);
-    let tas_helper = format!(r"{}\TAS\TAS_Helper.dll", dc_res);
-
-    if !inject_dll("Display_Config_Helper.dll", &dc_helper) {
-        return false;
-    }
-    // Give Display_Config_Helper time to initialize rendering hooks.
-    thread::sleep(Duration::from_secs(2));
-
-    inject_dll("TAS_Helper.dll", &tas_helper)
-}
-
 /// Check whether revive is suppressed via `NO_REVIVE=1` env var.
 fn no_revive() -> bool {
     std::env::var("NO_REVIVE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -688,16 +529,10 @@ fn no_revive() -> bool {
 
 /// Normalise `playback_speed` to 1.0 before a mode starts.
 ///
-/// `playback_speed` lives in shared memory and SURVIVES between tas_test runs.
-/// 13 modes set it; only 8 restore it. So running the suite back to back leaks
-/// speed from one mode into the next — e.g. `cont-splice-frame` finishes at its
-/// 0.25x record speed, and the next `rec-start` then captures 152 frames in its
-/// 6s window instead of ~600, never leaves the spawn countdown, and reports a
-/// degenerate recording. That is a wrong ANSWER, not just a slow run, and it
-/// depends on execution order.
-///
-/// Normalising at the single entry point makes every mode order-independent
-/// regardless of what ran before; modes that want another speed set it after.
+/// `playback_speed` lives in shared memory and survives between tas_test runs,
+/// and not every mode that sets it restores it. A leaked speed changes the next
+/// mode's answer (a 0.25x leftover records a quarter of the frames a 6 s window
+/// should hold), so every mode starts from 1.0 and sets its own speed after.
 fn normalize_playback_speed(client: &mut TasSharedMemoryClient) {
     let prev = client.state().playback_speed;
     if prev != 1.0 {
@@ -709,23 +544,19 @@ fn normalize_playback_speed(client: &mut TasSharedMemoryClient) {
     }
 }
 
-/// The track every mode assumes. `revive-supreme` navigates Time Attack ->
-/// Forest Easy, and the committed `.tasrec` baselines are all FE, so anything
-/// that records or replays is implicitly an FE test.
+/// The track every mode assumes: `revive-supreme` navigates to Forest Easy and
+/// the committed `.tasrec` baselines are all FE.
 const DEFAULT_EXPECTED_LEVEL: &str = "FE";
 
-/// How long to wait for the DLL's level-scan thread to publish a track. It
-/// re-scans about every 1.5s (level_scan.hpp), so this is several scans' worth.
+/// How long to wait for the DLL to publish a track. The scan runs on every load
+/// and menu trip, so a freshly revived session reads "unknown" only briefly.
 const LEVEL_SCAN_TIMEOUT_SECS: u64 = 12;
 
-/// Assert the game is actually on the expected track before any mode runs.
+/// Assert the game is on the expected track before any mode runs.
 ///
-/// Being on the wrong track is not a subtle failure, but it *looks* like one:
-/// the spawn is somewhere else entirely, so a replay's start matcher can never
-/// hit its target and simply burns its retry budget, while a fresh REC happily
-/// records meaningless coordinates from another map. Both read as a mysterious
-/// hang or an inexplicable drift number. Checking up front turns that into an
-/// immediate, accurate error.
+/// On the wrong track the spawn is on another map: a replay's start matcher can
+/// never hit and burns its retry budget, and a fresh REC records meaningless
+/// coordinates. Both read as a hang or a mystery drift, so check up front.
 ///
 /// `TAS_TEST_LEVEL` overrides the expected code (e.g. `AM`); `TAS_TEST_LEVEL=any`
 /// disables the check for deliberate off-track work.
@@ -737,14 +568,11 @@ pub fn verify_expected_level(client: &TasSharedMemoryClient) {
         return;
     }
 
-    // The scan only publishes while game_in_game, and only every ~1.5s, so a
-    // freshly revived session legitimately reads "unknown" for a moment. Poll.
     let start = Instant::now();
     let mut live = None;
     while start.elapsed() < Duration::from_secs(LEVEL_SCAN_TIMEOUT_SECS) {
-        // Go through the resolved-snapshot read, not raw level_id: during a
-        // level change level_id still holds the PREVIOUS track, and trusting it
-        // here would let a run start against the wrong course's baseline.
+        // Use the resolved snapshot, not raw level_id: during a level change
+        // level_id still holds the previous track.
         if let Some(code) =
             tas_shared::resolved_level_id(client.state()).and_then(tas_shared::level::code_from_id)
         {
@@ -772,10 +600,8 @@ pub fn verify_expected_level(client: &TasSharedMemoryClient) {
         None => {
             eprintln!(
                 "ERROR: could not identify the track after {}s — level_id stayed 0x{:08X}.\n  \
-                 That value means the game is NOT on one of the nine Time-Attack Tracks:\n  \
-                 it is at a menu, mid-teardown, or in a mode the scan does not cover\n  \
-                 (Halfpipe, Ramp). This run expects {}.\n  \
-                 Navigate into {} (or set TAS_TEST_LEVEL=any to bypass).",
+                 The game is at a menu, mid-teardown, or in a mode the scan does not cover.\n  \
+                 This run expects {}. Navigate into {} (or set TAS_TEST_LEVEL=any to bypass).",
                 LEVEL_SCAN_TIMEOUT_SECS,
                 client.state().level_id,
                 expected,
@@ -788,22 +614,15 @@ pub fn verify_expected_level(client: &TasSharedMemoryClient) {
 
 /// Ensure the game is running with hooks active.
 ///
-/// Default behaviour: if the game is already live, reuse it. If not, kill
-/// stale instances and run `revive-supreme.nu` to get a clean session.
-///
-/// Set `NO_REVIVE=1` to skip the automatic launch — `ensure_game_running`
-/// will then behave like the old `connect()` and exit if the game isn't up.
+/// If the game is already live, reuse it. Otherwise kill stale instances and
+/// launch a clean session through `REVIVE_SUPREME_SCRIPT`, then inject
+/// `TAS_Helper.dll` from `SUPREME_FOLDER`. `NO_REVIVE=1` refuses to launch and
+/// exits instead.
 pub fn ensure_game_running() -> TasSharedMemoryClient {
-    // Start every test from a known Pico state. The firmware's own 500ms watchdog
-    // means a previous run cannot really have left a key down by now, but this
-    // costs one byte, makes the starting state explicit rather than inferred, and
-    // logs whether the device is reachable at all before a test starts leaning on
-    // it — which is the failure that otherwise shows up as "pause didn't engage".
     if pico_release_all() {
         println!("  Pico: released all keys ({})", pico_port());
     }
 
-    // Fast path: game already up and hooks firing.
     if let Ok(c) = TasSharedMemoryClient::open() {
         if check_liveness(&c) {
             let s = c.state();
@@ -811,9 +630,8 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
                 "Game already live (version {}). Hooks: cave2={} cave1c={} cave1d={} cave5={}",
                 s.version, s.cave2_hooked, s.cave1c_hooked, s.cave1d_hooked, s.cave5_hooked
             );
-            // A reused session is exactly where the track can have drifted since
-            // the last run — check before any mode touches it. Same for a
-            // leftover playback_speed.
+            // A reused session is exactly where the track and playback_speed
+            // can have drifted since the last run.
             verify_expected_level(&c);
             let mut c = c;
             normalize_playback_speed(&mut c);
@@ -827,25 +645,36 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
     }
 
     println!("Game not live — launching fresh via revive-supreme...");
+    let (script, supreme_folder) = match (
+        required_env("REVIVE_SUPREME_SCRIPT"),
+        required_env("SUPREME_FOLDER"),
+    ) {
+        (Ok(script), Ok(folder)) => (script, folder),
+        (Err(error), _) | (_, Err(error)) => {
+            eprintln!("ERROR: {error}");
+            std::process::exit(1);
+        }
+    };
     kill_game();
 
-    if !run_revive() {
+    if !run_revive(&script) {
         eprintln!("ERROR: revive-supreme failed");
         std::process::exit(1);
     }
 
-    // revive-supreme launches Supreme.exe via Display_Config flow which injects
-    // Display_Config_Helper.dll automatically. We still need to inject TAS_Helper.dll.
+    // The launcher flow injects Display_Config_Helper.dll itself; TAS_Helper.dll
+    // is ours to inject.
     thread::sleep(Duration::from_secs(2));
 
-    let base = supreme_folder();
-    let tas_helper = format!(r"{}\Display_Config_Resources\TAS\TAS_Helper.dll", base);
-    if !inject_dll("TAS_Helper.dll", &tas_helper) {
+    let tas_helper = format!(
+        r"{}\Display_Config_Resources\TAS\TAS_Helper.dll",
+        supreme_folder
+    );
+    if !inject_dll("TAS_Helper.dll", &tas_helper, &supreme_folder) {
         eprintln!("ERROR: TAS_Helper.dll injection failed");
         std::process::exit(1);
     }
 
-    // Wait for TAS hooks to stabilize.
     thread::sleep(Duration::from_secs(3));
 
     match TasSharedMemoryClient::open() {
@@ -855,8 +684,6 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
                 "Connected after revive (version {}). Hooks: cave2={} cave1c={} cave1d={} cave5={}",
                 s.version, s.cave2_hooked, s.cave1c_hooked, s.cave1d_hooked, s.cave5_hooked
             );
-            // Even a fresh revive can land somewhere unexpected if the scripted
-            // menu navigation drifts, so verify rather than assume.
             verify_expected_level(&c);
             let mut c = c;
             normalize_playback_speed(&mut c);
@@ -919,16 +746,9 @@ pub fn print_status(client: &TasSharedMemoryClient) {
     );
 }
 
-/// Read current live player position from shared state.
-pub fn get_position(client: &TasSharedMemoryClient) -> [f32; 3] {
-    let s = client.state();
-    [s.player_x, s.player_y, s.player_z]
-}
-
-/// F5 restart + stabilize, then start PLAY and check if play_coords[0] matches target.
-/// No position forcing — relies on F5 producing deterministic restart positions.
-/// F5 produces ~3 quantized positions; retries until one matches naturally.
-/// Returns true if playback is running with correct start position.
+/// Pico F5 restart, then PLAY, retrying until play_coords[0] and the leading
+/// trajectory match the recording. F5 lands on one of a few quantized spawn
+/// buckets, so this rerolls until the right one comes up.
 pub fn restart_play_and_match(
     client: &mut TasSharedMemoryClient,
     target: [f32; 3],
@@ -937,10 +757,8 @@ pub fn restart_play_and_match(
     restart_play_and_match_with(client, target, max_retries, |c| restart_and_stabilize(c))
 }
 
-/// In-process restart variant of PLAY start matching.
-///
-/// Use this for file-backed replay flows so the restart semantics match the
-/// current egui transport path and file-backed CONT validation.
+/// In-process restart variant of PLAY start matching, for file-backed replays
+/// whose restart semantics must match the tas_ui transport path.
 pub fn restart_play_and_match_inprocess(
     client: &mut TasSharedMemoryClient,
     target: [f32; 3],
@@ -951,21 +769,13 @@ pub fn restart_play_and_match_inprocess(
     })
 }
 
-/// Number of leading PLAY frames whose positions must bit-identically match
-/// the recording's rec_coords for a start match to be accepted.
+/// Leading PLAY frames that must track the recording for a start match.
 ///
-/// Must be large enough to traverse any stationary phase at the start of a
-/// recording (e.g. a race-start countdown that's stationary for 200-300
-/// frames before motion begins). Recordings whose first N frames are
-/// stationary can trivially "match" any F5 bucket on a 10-frame check while
-/// having a totally wrong rotation/velocity — divergence only appears once
-/// physics activates and the recorded inputs start steering. 1000 frames
-/// covers all realistic countdowns plus several seconds of active gameplay,
-/// so any rotation/velocity mismatch surfaces inside the verification
-/// window. For F5-spawn recordings (acceptance/regression/reliability) the
-/// match passes within a few frames; for stationary-start recordings
-/// (load-from-disk in tas_ui) the snowboarder begins moving inside this
-/// window and the recorded inputs immediately surface any mismatch.
+/// Must span any stationary phase at the start of a recording (a race-start
+/// countdown holds still for 200-300 frames): on a 10-frame check a stationary
+/// prefix trivially matches any F5 bucket while the rotation/velocity is wrong,
+/// and the divergence only appears once physics activates. 1000 frames covers
+/// every realistic countdown plus several seconds of steered gameplay.
 const MATCH_VERIFY_FRAMES: u32 = 1000;
 
 fn restart_play_and_match_with<F>(
@@ -987,10 +797,8 @@ where
         }
 
         arm_play(client);
-        // Wait until playback_pos reaches MATCH_VERIFY_FRAMES (or end of
-        // recording). At 1x speed this is ~10s for 1000 frames; we poll
-        // rather than fixed-sleep so faster playback speeds finish sooner.
-        // Cap at 20s wall to bound retries.
+        // Poll until playback_pos reaches the verify window (or the end of the
+        // recording), capped at 20 s wall so retries stay bounded.
         let wait_until = MATCH_VERIFY_FRAMES.min(client.state().recorded_count);
         let wait_start = Instant::now();
         loop {
@@ -1021,15 +829,10 @@ where
             continue;
         }
 
-        // Frame-0 position matched. Verify the next few frames also track the
-        // recording — same position + same inputs produce the same trajectory
-        // under deterministic physics, MODULO the irreducible per-frame float
-        // noise (the game wiggles low bits each tick via __ftol/OpenGL). So we
-        // match within BUCKET_MATCH_EPSILON, NOT bit-for-bit: a bit-exact gate
-        // here rejected the correct bucket over a ~0.003 wiggle (observed:
-        // bit-identical through 320 frames, then dz=0.0029 at 321) and made
-        // refresh/CONT never land. This catches a wrong-rotation/velocity bucket
-        // (which diverges fast, well past epsilon) without that false reject.
+        // Frame 0 matched; the following frames must track the recording within
+        // BUCKET_MATCH_EPSILON, not bit-for-bit: the game wiggles low bits each
+        // tick, so a bit-exact gate rejects the correct bucket over a ~0.003
+        // blip, while a wrong-rotation bucket diverges far past epsilon.
         let eps = tas_shared::cont::BUCKET_MATCH_EPSILON;
         let frames_available = s
             .playback_pos
@@ -1095,10 +898,8 @@ pub fn print_results(client: &TasSharedMemoryClient) {
     println!("BB3B10 blocks (Cave 1D): {}", s.bb3b10_block_count);
 }
 
-/// Write a synthetic input log directly into shared memory.
-///
-/// Used by the benchmark mode to drive a deterministic input pattern without a Pico,
-/// since perf timing doesn't require a real-input oracle.
+/// Write a synthetic input log directly into shared memory (benchmark mode;
+/// perf timing does not need a real-input oracle).
 pub fn write_synthetic_input(client: &mut TasSharedMemoryClient, input_log: &[u8]) {
     let state = client.state_mut();
     let len = input_log.len().min(state.input_log.len());
@@ -1106,8 +907,8 @@ pub fn write_synthetic_input(client: &mut TasSharedMemoryClient, input_log: &[u8
     state.recorded_count = len as u32;
 }
 
-/// Arm continue-from-frame: set splice point and send ARM_CONTINUE.
-/// DLL will PLAY 0..frame, then auto-switch to REC.
+/// Arm continue-from-frame: set the splice point and send ARM_CONTINUE. The DLL
+/// plays 0..frame, then switches to REC.
 pub fn arm_continue(client: &mut TasSharedMemoryClient, frame: u32) {
     client.state_mut().continue_from_frame = frame;
     client.send_command(TasCommand::ArmContinue);
@@ -1119,15 +920,12 @@ pub fn arm_continue(client: &mut TasSharedMemoryClient, frame: u32) {
     );
 }
 
-/// Wait for mode to transition from PLAY to REC (ARM_CONTINUE splice).
-/// Returns true if the transition happened within timeout.
+/// Wait for the PLAY->REC transition of an ARM_CONTINUE splice.
 pub fn wait_continue_splice(client: &TasSharedMemoryClient, splice_frame: u32) -> bool {
     let start = Instant::now();
     loop {
-        // Poll fast (< one 1x tick = 10ms) so the splice is detected within a
-        // tick of firing. At 20ms the post-splice "overshoot" read 0-2 purely
-        // because the resumed REC advanced 0-2 ticks at the resume speed before
-        // the poll caught it — a measurement artifact, not a real overshoot.
+        // Poll faster than one 1x tick (10 ms) so the splice is seen within a
+        // tick; a slower poll reads the resumed REC's first ticks as overshoot.
         thread::sleep(Duration::from_millis(2));
         let s = client.state();
         if s.mode == TasMode::Rec as u32 {
@@ -1162,319 +960,20 @@ pub fn wait_continue_splice(client: &TasSharedMemoryClient, splice_frame: u32) -
     }
 }
 
-/// Wait until CONT playback reaches an early anchor frame while still in PLAY mode.
-/// Returns false if mode exits to OFF/REC too early or timeout is hit.
-fn wait_continue_anchor(client: &TasSharedMemoryClient, anchor_frame: u32) -> bool {
-    let start = Instant::now();
-    loop {
-        thread::sleep(Duration::from_millis(20));
-        let s = client.state();
-        if s.mode == TasMode::Off as u32 {
-            eprintln!(
-                "  ERROR: Mode went to OFF before CONT anchor frame {}",
-                anchor_frame
-            );
-            return false;
-        }
-        if s.mode == TasMode::Rec as u32 {
-            // For short splices, mode may flip PLAY->REC before this poll observes
-            // playback_pos > anchor. Accept if we already crossed the anchor frame.
-            if s.playback_pos >= anchor_frame {
-                return true;
-            }
-            eprintln!(
-                "  ERROR: Entered REC too early before CONT anchor frame {}",
-                anchor_frame
-            );
-            return false;
-        }
-        if s.playback_pos > anchor_frame {
-            return true;
-        }
-        if start.elapsed() > Duration::from_secs(CONT_ANCHOR_TIMEOUT_SECS) {
-            eprintln!(
-                "  ERROR: CONT anchor timeout at playback_pos={}/{}",
-                s.playback_pos, anchor_frame
-            );
-            return false;
-        }
-    }
-}
-
-/// F5 restart + ARM_CONTINUE with position matching, then wait for splice.
+/// Pico F5 restart + ARM_CONTINUE with bucket matching, then wait for the splice.
+/// Returns `Some(reroll_count)` on a clean splice, `None` on failure.
 ///
-/// Same as restart_play_and_match but uses ARM_CONTINUE instead of ARM_PLAY.
-/// On position match, waits for PLAY→REC splice at splice_frame.
-///
-/// Returns `Some(reroll_count)` if CONT spliced (Pico-F5 restart path), else
-/// `None`. Used for the cont-stress A/B vs the in-process restart.
+/// The bucket is judged with tas_ui's criteria (`judge_cont_bucket`: spawn bits
+/// plus the first-moving fingerprint) EARLY, before the splice fires, so a wrong
+/// bucket is stopped before it can mutate the recording.
 pub fn restart_continue_and_splice(
     client: &mut TasSharedMemoryClient,
     target: [f32; 3],
     splice_frame: u32,
     max_retries: u32,
 ) -> Option<u32> {
-    restart_continue_and_splice_with(client, target, splice_frame, max_retries, |c| {
-        restart_and_stabilize(c)
-    })
-}
+    use tas_shared::cont::BucketVerdict;
 
-/// In-process-restart CONT via the SAME poll loop as the Pico path — used only
-/// for the cont-stress A/B so the restart MECHANISM is the only variable (the
-/// production path uses `restart_continue_and_splice_inprocess`, the controller).
-pub fn restart_continue_and_splice_inprocess_loop(
-    client: &mut TasSharedMemoryClient,
-    target: [f32; 3],
-    splice_frame: u32,
-    max_retries: u32,
-) -> Option<u32> {
-    restart_continue_and_splice_with(client, target, splice_frame, max_retries, |c| {
-        restart_and_stabilize_inprocess(c)
-    })
-}
-
-/// Mimic tas_ui's per-frame controller cadence: after a Wait/Reroll the app
-/// returns to its egui render loop and only sends the *next* command (e.g. the
-/// Arm) on the following frame — inserting a vsync-limited, load-jittered render
-/// frame between the settle and the Arm. The harness normally loops immediately
-/// (no yield). Set CONT_YIELD_MS=N to inject a base-N + rand(0..N) ms delay here
-/// and test whether that post-settle render gap is what tanks real-world
-/// first-try vs the harness. Default 0 = off (no-op).
-fn cont_yield_render_frame() {
-    let base: u64 = match std::env::var("CONT_YIELD_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-    {
-        Some(n) if n > 0 => n,
-        _ => return,
-    };
-    // Cheap jitter from the clock's sub-ms nanos — emulates variable render load.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    let jitter = (nanos as u64) % (base + 1);
-    thread::sleep(Duration::from_millis(base + jitter));
-}
-
-/// In-process CONT splice via the SHARED transport controller
-/// (`tas_shared::transport`) — the exact restart/arm/reroll state machine tas_ui
-/// drives. The harness just steps the controller in a poll loop and applies its
-/// suggested reroll delays, so this test reflects precisely what the app does
-/// (one source of truth — they can't drift).
-///
-/// The controller reaches `Done` when the F5 bucket is accepted (at the
-/// first-moving fingerprint, BEFORE the splice fires); we then wait for the
-/// PLAY→REC splice at `splice_frame`. Returns `Some(reroll_count)` on a clean
-/// splice (0 = landed the bucket first try), `None` on failure.
-pub fn restart_continue_and_splice_inprocess(
-    client: &mut TasSharedMemoryClient,
-    target: [f32; 3],
-    splice_frame: u32,
-    max_retries: u32,
-) -> Option<u32> {
-    use tas_shared::transport::{Arm, ArmConfig, BucketTarget, StepOutcome, TransportController};
-
-    let expected_start_bits = [
-        target[0].to_bits(),
-        target[1].to_bits(),
-        target[2].to_bits(),
-    ];
-    let expected_first_moving = {
-        let s = client.state();
-        tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count)
-    };
-    match expected_first_moving {
-        Some(fm) => println!(
-            "  CONT bucket criteria (shared controller): spawn match + first-moving frame {}",
-            fm
-        ),
-        None => println!(
-            "  CONT bucket criteria (shared controller): recording never moves — spawn match only"
-        ),
-    }
-
-    let catchup_speed = client.state().playback_speed;
-    // Gate-aligned CONT by default: the prefix input is indexed from the
-    // observed gate and the splice fires at the aligned position, so the
-    // countdown landing on a different tick no longer forces a reroll — the
-    // same win PLAY got. CONT_NO_ALIGN=1 falls back to the old bucket match
-    // (splice arm-relative, reroll until the fingerprint matches) for A/B.
-    let no_align = std::env::var("CONT_NO_ALIGN").is_ok();
-    // Only align when the splice is comfortably past the gate: the
-    // gate-relative watcher needs BUCKET_MATCH_WINDOW samples to complete
-    // BEFORE the destructive splice, and near-gate / inside-countdown splices
-    // have their own edge cases (a delayed gate, a cave5 cap that spans the
-    // splice). Below the threshold, fall back to the proven bucket match.
-    // FE-10065 splices at 6200 vs gate ~298, far past this.
-    let rg = expected_first_moving.unwrap_or(0);
-    let align_ok = rg > 0 && splice_frame > rg + tas_shared::cont::BUCKET_MATCH_WINDOW;
-    let gate_align_rec = if no_align || !align_ok { 0 } else { rg };
-    let cfg = ArmConfig {
-        arm: Arm::Continue,
-        catchup_speed,
-        continue_from_frame: splice_frame,
-        gate_align_rec,
-        target: if gate_align_rec > 0 {
-            None
-        } else {
-            Some(BucketTarget {
-                expected_start_bits,
-                expected_first_moving,
-            })
-        },
-        max_retries,
-        // CONT hands the speed back at the splice (cont_resume_speed), not
-        // mid-replay, so it stages no handover here.
-        resume_speed: 0.0,
-        predict_bucket: gate_align_rec == 0,
-    };
-    let mut controller = TransportController::new(cfg);
-
-    // Keep a competing tas_ui process out of the single-slot command channel,
-    // and clear any post-run "Save attempt" dialog before the first restart
-    // (it can eat the in-process F5).
-    stop_competing_tas_ui_writer();
-    dismiss_save_dialog();
-
-    let speed = (catchup_speed as f64).max(0.05);
-    // Per-attempt budget: restart handshake + replay-to-judge at this speed.
-    let per_attempt = Duration::from_secs_f64(
-        RESTART_TIMEOUT_SECS as f64 + (CONT_ANCHOR_TIMEOUT_SECS as f64) * (1.0 / speed).max(1.0),
-    );
-    let mut attempt_deadline = Instant::now() + per_attempt;
-
-    loop {
-        match controller.step(client) {
-            StepOutcome::InProgress => {
-                if Instant::now() > attempt_deadline {
-                    // Name the phase and the state it is reading. "No progress"
-                    // is the same message for an F5 restart that never
-                    // completed, an arm the DLL never processed, and a judge
-                    // waiting on a replay that will not arrive - and those are
-                    // three unrelated bugs.
-                    let st = client.state();
-                    eprintln!(
-                        "  ERROR: CONT attempt stalled in {} | mode={} restart_state={} playback_pos={} arm_generation={} recorded={}",
-                        controller.phase_name(),
-                        st.mode,
-                        st.restart_state,
-                        st.playback_pos,
-                        st.arm_generation,
-                        st.recorded_count
-                    );
-                    client.send_command(TasCommand::Stop);
-                    return None;
-                }
-                // Poll cadence for the InProgress phases (restart-done detection
-                // + bucket judge). Default 5ms. Tunable via CONT_POLL_MS to
-                // emulate tas_ui's vsync-limited (~16ms) stepping — the
-                // experiment that tests whether step quantization is what makes
-                // real-world first-try (19%) far worse than the harness (~67%).
-                let poll_ms: u64 = std::env::var("CONT_POLL_MS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(5);
-                thread::sleep(Duration::from_millis(poll_ms));
-            }
-            StepOutcome::Wait { ms } => {
-                // Fixed Stop→Restart settle — sleep exactly this long so the
-                // Restart fires at a consistent F5 phase.
-                thread::sleep(Duration::from_millis(ms));
-                cont_yield_render_frame();
-            }
-            StepOutcome::Reroll {
-                attempt,
-                suggested_delay_ms,
-                observed,
-                expected,
-            } => {
-                println!(
-                    "  Retry {}/{}: CONT bucket reroll  observed first-moving={:?} expected={:?}",
-                    attempt, max_retries, observed, expected
-                );
-                // DIAGNOSTIC (CONT_DIAG=1): dump the actual play-vs-rec coords at
-                // the divergence frame so we can see whether this is an
-                // off-by-a-frame near-miss bucket (one moving, one stationary →
-                // large diff) or the right bucket diverging by tiny float noise.
-                if std::env::var("CONT_DIAG").is_ok() {
-                    if let Some(div) = observed {
-                        let s = client.state();
-                        let i = div as usize;
-                        if i < s.play_coords.len() && i < s.rec_coords.len() {
-                            let p = s.play_coords[i];
-                            let r = s.rec_coords[i];
-                            println!(
-                                "    div@{}: play=({:.6},{:.6},{:.6}) rec=({:.6},{:.6},{:.6}) |dx|={:.6} |dy|={:.6} |dz|={:.6}",
-                                div, p[0], p[1], p[2], r[0], r[1], r[2],
-                                (p[0]-r[0]).abs(), (p[1]-r[1]).abs(), (p[2]-r[2]).abs()
-                            );
-                            // Drift profile across the judge window: does this
-                            // bucket CONVERGE after the settle (good — the 80%
-                            // bucket) or keep GROWING (bad — a real near-miss)?
-                            let fm = expected_first_moving.unwrap_or(0) as usize;
-                            let end = (fm + 72)
-                                .min(s.playback_pos as usize)
-                                .min(s.play_coords.len())
-                                .min(s.rec_coords.len());
-                            let mut profile = String::from("    profile:");
-                            let mut k = fm.saturating_sub(8);
-                            while k < end {
-                                let p = s.play_coords[k];
-                                let r = s.rec_coords[k];
-                                let d = (p[0] - r[0])
-                                    .abs()
-                                    .max((p[1] - r[1]).abs())
-                                    .max((p[2] - r[2]).abs());
-                                profile.push_str(&format!(" {}:{:.4}", k, d));
-                                k += 8;
-                            }
-                            println!("{}", profile);
-                        }
-                    }
-                }
-                // Clear any save dialog that re-appeared after the Stop, then
-                // jitter the wall clock so the next F5 lands at a new phase.
-                dismiss_save_dialog();
-                thread::sleep(Duration::from_millis(suggested_delay_ms));
-                cont_yield_render_frame();
-                attempt_deadline = Instant::now() + per_attempt;
-            }
-            StepOutcome::Done { retries_used, .. } => {
-                if retries_used > 0 {
-                    println!(
-                        "  CONT bucket accepted (shared controller) after {} reroll(s)",
-                        retries_used
-                    );
-                }
-                println!("  CONT bucket accepted, waiting for splice...");
-                return if wait_continue_splice(client, splice_frame) {
-                    Some(retries_used)
-                } else {
-                    None
-                };
-            }
-            StepOutcome::Aborted { reason } => {
-                eprintln!("  WARNING: CONT aborted: {}", reason);
-                return None;
-            }
-        }
-    }
-}
-
-fn restart_continue_and_splice_with<F>(
-    client: &mut TasSharedMemoryClient,
-    target: [f32; 3],
-    splice_frame: u32,
-    max_retries: u32,
-    mut restart_fn: F,
-) -> Option<u32>
-where
-    F: FnMut(&mut TasSharedMemoryClient) -> bool,
-{
-    // Expected bucket signature from the loaded recording (shared-memory
-    // rec_coords), computed once. Same inputs tas_ui's set_continue_start_guard
-    // captures: the recording's start bits + first-moving frame.
     let expected_start_bits = [
         target[0].to_bits(),
         target[1].to_bits(),
@@ -1499,17 +998,12 @@ where
         if attempt > 0 {
             println!("  Retry {}/{}: CONT bucket reroll", attempt, max_retries);
         }
-        if !restart_fn(client) {
+        if !restart_and_stabilize(client) {
             eprintln!("  ERROR: Game not alive after restart");
             return None;
         }
-        // No focus_game() here: in-process injection writes game memory directly
-        // (no window focus needed), and its 200ms sleep was ~20 more frames of
-        // the spawn countdown lost before arming. Arm immediately after restart,
-        // matching tas_ui's CONT path, so play_coords[0] captures the countdown
-        // from its start and first-moving lines up with recordings.
-
-        // ARM_CONTINUE: starts as PLAY from tick 0, will auto-switch to REC at splice_frame
+        // Arm immediately after the restart (no focus call): every frame spent
+        // here shifts play_coords[0] later into the spawn countdown.
         arm_continue(client, splice_frame);
         thread::sleep(Duration::from_millis(100));
 
@@ -1522,21 +1016,12 @@ where
             }
         }
 
-        // Judge the CONT bucket with EXACTLY tas_ui's criteria (shared
-        // tas_shared::cont::judge_cont_bucket): spawn-bits match + first-moving
-        // frame fingerprint — NOT the old harness-only bit-exact anchor@250,
-        // which rerolled until a stricter bucket tas_ui never has to land on.
-        // We judge EARLY (before the splice fires) so a wrong bucket is STOPped
-        // before it can mutate the recording, and the reroll is fast — same as
-        // tas_ui's poll_continue_start_guard. Drift over the accepted bucket is
-        // checked by the caller, so the test measures the drift the USER sees.
         let verdict = poll_cont_verdict(
             client,
             expected_start_bits,
             expected_first_moving,
             splice_frame,
         );
-        use tas_shared::cont::BucketVerdict;
         match verdict {
             BucketVerdict::Match | BucketVerdict::NoSignal => {
                 if attempt > 0 {
@@ -1582,11 +1067,154 @@ where
     None
 }
 
-/// Poll `tas_shared::cont::judge_cont_bucket` until a definitive verdict,
-/// mirroring tas_ui's per-frame `poll_continue_start_guard`. Returns the first
-/// non-`KeepWaiting` verdict; on timeout returns `KeepWaiting`. If the splice
-/// already fired (mode REC) or playback reached the splice, judges once with the
-/// full prefix; if CONT bailed to OFF, reports `WrongStart`.
+/// In-process CONT splice through the shared transport controller
+/// (`tas_shared::transport`) — the exact restart/arm/reroll state machine tas_ui
+/// drives, so this measures what the app does.
+///
+/// The controller reaches `Done` when the bucket is accepted (before the splice
+/// fires); we then wait for the PLAY->REC splice at `splice_frame`. Returns
+/// `Some(reroll_count)` on a clean splice (0 = landed first try), `None` on
+/// failure.
+pub fn restart_continue_and_splice_inprocess(
+    client: &mut TasSharedMemoryClient,
+    target: [f32; 3],
+    splice_frame: u32,
+    max_retries: u32,
+) -> Option<u32> {
+    use tas_shared::transport::{Arm, ArmConfig, BucketTarget, StepOutcome, TransportController};
+
+    let expected_start_bits = [
+        target[0].to_bits(),
+        target[1].to_bits(),
+        target[2].to_bits(),
+    ];
+    let expected_first_moving = {
+        let s = client.state();
+        tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count)
+    };
+    match expected_first_moving {
+        Some(fm) => println!(
+            "  CONT bucket criteria (shared controller): spawn match + first-moving frame {}",
+            fm
+        ),
+        None => println!(
+            "  CONT bucket criteria (shared controller): recording never moves — spawn match only"
+        ),
+    }
+
+    let catchup_speed = client.state().playback_speed;
+    // Gate-aligned CONT indexes the prefix input from the observed gate and
+    // fires the splice at the aligned position, so a countdown landing on a
+    // different tick no longer forces a reroll. Only align when the splice is
+    // comfortably past the gate: the gate-relative watcher needs
+    // BUCKET_MATCH_WINDOW samples BEFORE the destructive splice. Below that,
+    // fall back to the bucket match.
+    let rg = expected_first_moving.unwrap_or(0);
+    let align_ok = rg > 0 && splice_frame > rg + tas_shared::cont::BUCKET_MATCH_WINDOW;
+    let gate_align_rec = if align_ok { rg } else { 0 };
+    let cfg = ArmConfig {
+        arm: Arm::Continue,
+        catchup_speed,
+        continue_from_frame: splice_frame,
+        gate_align_rec,
+        target: if gate_align_rec > 0 {
+            None
+        } else {
+            Some(BucketTarget {
+                expected_start_bits,
+                expected_first_moving,
+            })
+        },
+        max_retries,
+        // CONT hands the speed back at the splice (cont_resume_speed), not
+        // mid-replay, so it stages no handover here.
+        resume_speed: 0.0,
+        predict_bucket: gate_align_rec == 0,
+    };
+    let mut controller = TransportController::new(cfg);
+
+    // Keep a competing tas_ui out of the single-slot command channel, and clear
+    // any post-run dialog before the first restart (it can eat the in-process F5).
+    stop_competing_tas_ui_writer();
+    dismiss_save_dialog();
+
+    let speed = (catchup_speed as f64).max(0.05);
+    // Per-attempt budget: restart handshake + replay-to-judge at this speed.
+    let per_attempt = Duration::from_secs_f64(
+        RESTART_TIMEOUT_SECS as f64 + (JUDGE_TIMEOUT_SECS as f64) * (1.0 / speed).max(1.0),
+    );
+    let mut attempt_deadline = Instant::now() + per_attempt;
+
+    loop {
+        match controller.step(client) {
+            StepOutcome::InProgress => {
+                if Instant::now() > attempt_deadline {
+                    // Name the phase and the state it is reading: a restart
+                    // that never completed, an arm the DLL never processed
+                    // and a judge waiting on a replay are three different bugs.
+                    let st = client.state();
+                    eprintln!(
+                        "  ERROR: CONT attempt stalled in {} | mode={} restart_state={} playback_pos={} arm_generation={} recorded={}",
+                        controller.phase_name(),
+                        st.mode,
+                        st.restart_state,
+                        st.playback_pos,
+                        st.arm_generation,
+                        st.recorded_count
+                    );
+                    client.send_command(TasCommand::Stop);
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            StepOutcome::Wait { ms } => {
+                // Fixed Stop->Restart settle so the Restart fires at a
+                // consistent F5 phase.
+                thread::sleep(Duration::from_millis(ms));
+            }
+            StepOutcome::Reroll {
+                attempt,
+                suggested_delay_ms,
+                observed,
+                expected,
+            } => {
+                println!(
+                    "  Retry {}/{}: CONT bucket reroll  observed first-moving={:?} expected={:?}",
+                    attempt, max_retries, observed, expected
+                );
+                // Clear any save dialog that re-appeared after the Stop, then
+                // jitter the wall clock so the next F5 lands at a new phase.
+                dismiss_save_dialog();
+                thread::sleep(Duration::from_millis(suggested_delay_ms));
+                attempt_deadline = Instant::now() + per_attempt;
+            }
+            StepOutcome::Done { retries_used, .. } => {
+                if retries_used > 0 {
+                    println!(
+                        "  CONT bucket accepted (shared controller) after {} reroll(s)",
+                        retries_used
+                    );
+                }
+                println!("  CONT bucket accepted, waiting for splice...");
+                return if wait_continue_splice(client, splice_frame) {
+                    Some(retries_used)
+                } else {
+                    None
+                };
+            }
+            StepOutcome::Aborted { reason } => {
+                eprintln!("  WARNING: CONT aborted: {}", reason);
+                return None;
+            }
+        }
+    }
+}
+
+/// Poll `judge_cont_bucket` until a definitive verdict, the way tas_ui's
+/// per-frame guard does. Returns the first non-`KeepWaiting` verdict; on timeout
+/// returns `KeepWaiting`. If the splice already fired (mode REC) or playback
+/// reached the splice, judges once with the full prefix; if CONT bailed to OFF,
+/// reports `WrongStart`.
 fn poll_cont_verdict(
     client: &TasSharedMemoryClient,
     expected_start_bits: [u32; 3],
@@ -1595,11 +1223,10 @@ fn poll_cont_verdict(
 ) -> tas_shared::cont::BucketVerdict {
     use tas_shared::cont::{judge_cont_bucket, BucketVerdict};
     let t0 = Instant::now();
-    // The replay advances playback_pos at ~100*speed frames/sec, so a slow speed
-    // (e.g. 0.25x) needs a proportionally longer window to reach the bucket
-    // fingerprint. Scale the base timeout by 1/speed.
+    // The replay advances ~100*speed frames/sec, so a slow speed needs a
+    // proportionally longer window to reach the fingerprint.
     let speed = (client.state().playback_speed as f64).max(0.05);
-    let timeout = Duration::from_secs_f64(CONT_ANCHOR_TIMEOUT_SECS as f64 * (1.0 / speed).max(1.0));
+    let timeout = Duration::from_secs_f64(JUDGE_TIMEOUT_SECS as f64 * (1.0 / speed).max(1.0));
     loop {
         let (verdict, mode, pos) = {
             let s = client.state();
@@ -1644,25 +1271,14 @@ fn poll_cont_verdict(
 
 /// Drive Pico HID through a sequence of pattern steps.
 ///
-/// `fallback_ms` is the sleep duration if the Pico port cannot be opened
-/// (allows the test to wait for the equivalent recording duration).
+/// `fallback_ms` is how long to sleep instead if the Pico port cannot be opened,
+/// so the recording window still elapses.
 pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep], fallback_ms: Option<u64>) {
     let _ = drive_pico_steps_inner(steps, fallback_ms, None, false);
 }
 
-/// Drive a pattern while periodically refreshing a held non-zero mask. This is
-/// for long intentional holds; the Pico firmware releases keys after 500ms
-/// without traffic. Existing regression patterns retain their measured
-/// watchdog-release behavior through [`drive_pico_steps`].
-pub fn drive_pico_steps_keepalive(
-    steps: &[crate::patterns::PatternStep],
-    fallback_ms: Option<u64>,
-    keepalive_ms: u64,
-) {
-    let _ = drive_pico_steps_inner(steps, fallback_ms, Some(keepalive_ms.max(1)), false);
-}
-
-/// Acceptance must not substitute an unsteered recording for missing hardware.
+/// Acceptance must not substitute an unsteered recording for missing hardware,
+/// and refreshes its long hold before the firmware watchdog releases it.
 pub fn drive_pico_steps_required(steps: &[crate::patterns::PatternStep]) -> Result<(), String> {
     drive_pico_steps_inner(steps, None, Some(200), true)
 }
@@ -1674,39 +1290,17 @@ fn drive_pico_steps_inner(
     required: bool,
 ) -> Result<(), String> {
     let port_name = pico_port();
-    // PicoKeys, not a bare File: this loop holds movement keys down for the whole
-    // pattern — seconds at a time — which makes it by far the most exposed place
-    // for an interrupted run to leave a key physically stuck. Drop releases on
-    // every exit path, including a panic.
-    // KNOWN ISSUE — holds longer than 500ms are truncated, and DO NOT "fix" it
-    // with a keepalive without changing the suite with it. Measured, both ways.
+    // PicoKeys, not a bare File: this loop holds keys down for seconds at a
+    // time, so it is the most exposed place for an interrupted run to leave a
+    // key stuck; Drop releases on every exit path.
     //
-    // The firmware (F:\code.py on the CIRCUITPY volume) latches a mask until the
-    // next byte, but also runs a watchdog:
-    //
-    //     TIMEOUT_S = 0.5   # release all if no command in 500ms
-    //     if current_mask != 0 and (monotonic() - last_rx_time) > TIMEOUT_S:
-    //         kbd.release_all()
-    //
-    // This loop writes only when the mask CHANGES, and a pattern step is
-    // DEFAULT_HOLD_TICKS (56) * 10ms = 560ms — longer than the watchdog. So the
-    // firmware releases the key at the 500ms mark and nothing re-presses it. Held
-    // against the device with GetAsyncKeyState: LEFT is down at t=200ms, up at
-    // t=1200ms with no keepalive, and stays down at t=1200ms if the mask is
-    // re-sent every 200ms. So the truncation is real.
-    //
-    // BUT THE SUITE DEPENDS ON THE RELEASE HAPPENING THERE. That watchdog release
-    // lands INSIDE the recording window; the explicit 0xFF at the end of this
-    // function lands after it. Adding a 200ms keepalive therefore turned every
-    // recording from press+release into press-only, and `regression` Case 1 went
-    // from ALL GATES PASS in 4 retries (transitions=2, activeTicks=56, zero drift)
-    // to Gate 1 FAIL with transitions=0/`Live transitions: 1` and the start match
-    // exhausting all 60 retries. Same binary otherwise, A/B'd back to back.
-    //
-    // Fixing this properly means making the pattern hold and the recording window
-    // agree — shorten DEFAULT_HOLD_TICKS under the watchdog, or lengthen the
-    // window and re-baseline the gates — not a unilateral keepalive here.
-
+    // Holds longer than 500 ms are truncated: the firmware (TAS/pico/code.py,
+    // TIMEOUT_S) releases everything after 500 ms without a byte and this loop
+    // writes only on mask changes. The regression gates were baselined with
+    // that release landing INSIDE the recording window, so do not add a
+    // keepalive here without re-baselining them (one turned press+release
+    // recordings into press-only and failed Gate 1). Acceptance opts in via
+    // `keepalive_ms`.
     let mut port = match PicoKeys::open_checked() {
         Ok(p) => p,
         Err(error) => {
@@ -1769,15 +1363,12 @@ fn drive_pico_steps_inner(
 }
 
 fn require_pico_write(sent: bool, port: &str) -> Result<(), String> {
-    if sent { Ok(()) } else { Err(format!("Pico {port} write failed; acceptance cannot verify steering")) }
-}
-
-#[cfg(test)]
-mod pico_required_tests {
-    #[test]
-    fn failed_steering_or_release_write_is_an_error() {
-        assert!(super::require_pico_write(true, "test-port").is_ok());
-        assert!(super::require_pico_write(false, "test-port").unwrap_err().contains("write failed"));
+    if sent {
+        Ok(())
+    } else {
+        Err(format!(
+            "Pico {port} write failed; acceptance cannot verify steering"
+        ))
     }
 }
 
@@ -1797,4 +1388,71 @@ pub fn assert_proven_config(client: &TasSharedMemoryClient) {
         s.playback_speed,
         if s.cave5_hooked == 1 { "hooked" } else { "missing" }
     );
+}
+
+/// Speed modes need Cave 5 (the tick-rate hook) and natural ticks. Prints FAIL
+/// and returns false instead of panicking.
+pub fn require_speed_preconditions(client: &TasSharedMemoryClient) -> bool {
+    let s = client.state();
+    if s.cave5_hooked != 1 {
+        eprintln!("FAIL: Cave 5 is not hooked — speed scaling cannot be measured");
+        return false;
+    }
+    if s.force_fixed_tick != 0 {
+        eprintln!(
+            "FAIL: force_fixed_tick={} — must be 0 (fixed ticks override speed)",
+            s.force_fixed_tick
+        );
+        return false;
+    }
+    true
+}
+
+/// Locate a committed fixture under `TAS/recordings/`.
+///
+/// The binary normally runs from `TAS/target/<profile>/`, three levels below
+/// the repo root; the cwd-relative candidates cover `just` recipes run from the
+/// repo root or from `TAS/`.
+pub fn fixture_path(name: &str) -> Result<PathBuf, String> {
+    let relative = Path::new("TAS/recordings").join(name);
+    let mut candidates = Vec::new();
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+    {
+        candidates.push(dir.join("../../..").join(&relative));
+    }
+    candidates.push(relative);
+    candidates.push(Path::new("recordings").join(name));
+    candidates
+        .iter()
+        .find(|p| p.is_file())
+        .cloned()
+        .ok_or_else(|| format!("Couldn't locate {name} (tried {candidates:?})"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn failed_steering_or_release_write_is_an_error() {
+        assert!(super::require_pico_write(true, "test-port").is_ok());
+        assert!(super::require_pico_write(false, "test-port")
+            .unwrap_err()
+            .contains("write failed"));
+    }
+
+    #[test]
+    fn required_env_rejects_missing_and_blank() {
+        // SAFETY: the test never runs harness threads.
+        unsafe { std::env::remove_var("TAS_TEST_REQUIRED_ENV_PROBE") };
+        let err = super::required_env("TAS_TEST_REQUIRED_ENV_PROBE").unwrap_err();
+        assert!(err.contains("TAS_TEST_REQUIRED_ENV_PROBE"));
+        unsafe { std::env::set_var("TAS_TEST_REQUIRED_ENV_PROBE", "  ") };
+        assert!(super::required_env("TAS_TEST_REQUIRED_ENV_PROBE").is_err());
+        unsafe { std::env::set_var("TAS_TEST_REQUIRED_ENV_PROBE", "x") };
+        assert_eq!(
+            super::required_env("TAS_TEST_REQUIRED_ENV_PROBE").unwrap(),
+            "x"
+        );
+    }
 }

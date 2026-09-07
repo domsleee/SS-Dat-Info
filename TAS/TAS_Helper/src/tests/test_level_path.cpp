@@ -5,14 +5,8 @@
 // buffer is rejected, and — most importantly — that the DIFFICULTY segment is
 // never trusted, because some tracks share the easy/ shadow asset.
 #include "../level_path_parse.hpp"
+#include "check.hpp"
 #include <cstdio>
-
-static int g_fail = 0;
-
-static void check(bool cond, const char* name) {
-    std::printf("  %-4s %s\n", cond ? "ok" : "FAIL", name);
-    if (!cond) g_fail++;
-}
 
 int main() {
     using namespace levelpath;
@@ -105,10 +99,5 @@ int main() {
     check(LevelIdFrom(-1, "Forest", "Easy") == -1, "no path area => unresolved");
     check(LevelIdFrom(4, "Forest", "Easy") == -1, "out-of-range path area => unresolved");
 
-    if (g_fail == 0) {
-        std::printf("ALL PASS\n");
-        return 0;
-    }
-    std::printf("%d FAILED\n", g_fail);
-    return 1;
+    return FinishTests();
 }

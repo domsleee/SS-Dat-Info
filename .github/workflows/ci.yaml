@@ -102,6 +102,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: cd TAS && cargo fmt --all --check
+      - run: cd TAS && cargo clippy --workspace --all-targets -- -D warnings
       - name: Test TAS offline tools
         run: python -m unittest discover -s TAS/tools -p test_tools.py -v
       - run: cd TAS && cargo test --release

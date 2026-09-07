@@ -1,13 +1,6 @@
-# Compile + run the C++ unit suites with EVERY child window HIDDEN.
-#
-# Why: this runs from the pre-commit hook (via `just test_dll`). Launched from
-# a context without an inherited console (GUI git clients, background agents),
-# `cmd /c` and the console test exes each allocate a NEW console window - and a
-# console taking foreground PAUSES the windowed game. That froze an in-game
-# suite mid-replay when a commit ran during a test battery (2026-08-24).
-# Start-Process -WindowStyle Hidden allocates the console SW_HIDE: no window,
-# no foreground steal, in every launch context. Output is captured to temp
-# files and replayed so the hook's log looks exactly as before.
+# Compile and run the C++ unit suites (TAS/TAS_Helper/src/tests/test_*.cpp) with
+# every child window hidden. A console taking the foreground pauses the windowed
+# game, so nothing here may open one.
 $ErrorActionPreference = 'Stop'
 
 function Invoke-Hidden {
@@ -27,7 +20,7 @@ function Invoke-Hidden {
     # Visual Studio's vctip telemetry process, which can stay alive indefinitely.
     $p.WaitForExit()
     # Write-Host, NOT the pipeline: everything a function emits becomes its
-    # return value in PowerShell, and the caller compares that value to 0 —
+    # return value in PowerShell, and the caller compares that value to 0 -
     # log lines in the pipeline would turn every success into a false failure.
     Get-Content $out | ForEach-Object { Write-Host $_ }
     Get-Content $err | ForEach-Object { Write-Host $_ }
@@ -44,31 +37,41 @@ $vsPath = (Get-Content $vsOut | Select-Object -First 1).Trim()
 Remove-Item $vsOut -Force -ErrorAction SilentlyContinue
 if (-not $vsPath) { throw 'vswhere returned no installation path' }
 
-$suites = @(
-    @{ Src = '.\TAS\TAS_Helper\src\tests\test_mapping_owner.cpp'; Exe = 'tas_test_mapping_owner.exe'; Name = 'mapping_owner' },
-    @{ Src = '.\TAS\TAS_Helper\src\tests\test_input_gate.cpp'; Exe = 'tas_test_input_gate.exe'; Name = 'input_gate' },
-    @{ Src = '.\TAS\TAS_Helper\src\tests\test_level_path.cpp'; Exe = 'tas_test_level_path.exe'; Name = 'level_path' },
-    @{ Src = '.\TAS\TAS_Helper\src\tests\test_setup_config.cpp'; Exe = 'tas_test_setup_config.exe'; Name = 'setup_config' },
-    @{ Src = '.\TAS\TAS_Helper\src\tests\test_replay_capture.cpp'; Exe = 'tas_test_replay_capture.exe'; Name = 'replay_capture' },
-    @{ Src = '.\TAS\TAS_Helper\src\tests\test_race_timer.cpp'; Exe = 'tas_test_race_timer.exe'; Name = 'race_timer' },
-    @{ Src = '.\TAS\TAS_Helper\src\tests\test_rider_identity.cpp'; Exe = 'tas_test_rider_identity.exe'; Name = 'rider_identity' },
-    @{ Src = '.\TAS\TAS_Helper\src\tests\test_menu_model.cpp'; Exe = 'tas_test_menu_model.exe'; Name = 'menu_model' }
-)
-foreach ($t in $suites) {
-    $exe = Join-Path $env:TEMP $t.Exe
-    # A temp batch file instead of `cmd /c "<quoted> && <quoted>"`: Start-
-    # Process re-quotes the joined argument and cmd's quote-stripping rules
-    # then mangle the inner quotes ('C:\Program' is not recognized...). A
-    # single batch-file path has no nesting to mangle.
-    $batch = Join-Path $env:TEMP "tas_build_$($t.Name).cmd"
-    @(
-        "@call `"$vsPath\Common7\Tools\VsDevCmd.bat`" -arch=x64 -no_logo"
-        "@cl /nologo /EHsc /std:c++17 /Fe:`"$exe`" /Fo:`"$env:TEMP\\`" $($t.Src)"
-        "@exit /b %errorlevel%"
-    ) | Set-Content -Path $batch -Encoding ascii
-    $rc = Invoke-Hidden 'cmd.exe' @('/c', $batch)
-    Remove-Item $batch -Force -ErrorAction SilentlyContinue
-    if ($rc -ne 0) { throw "compile failed ($($t.Name))" }
-    if ((Invoke-Hidden $exe @()) -ne 0) { throw "$($t.Name) tests failed" }
+$suites = Get-ChildItem -Path (Join-Path $PSScriptRoot '..\TAS_Helper\src\tests') -Filter 'test_*.cpp' |
+    Sort-Object Name
+if (-not $suites) { throw 'no test_*.cpp suites found' }
+
+# A private directory per run: fixed exe/obj names in %TEMP% collide between
+# concurrent runs, and a stale locked exe fails the next compile.
+$work = Join-Path $env:TEMP ('tas_test_dll_' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $work | Out-Null
+try {
+    $i = 0
+    foreach ($src in $suites) {
+        $name = $src.BaseName -replace '^test_', ''
+        # Numbered, not named: a 32-bit exe with "setup" in its name trips
+        # Windows installer detection and refuses to start without elevation.
+        $exe = Join-Path $work ('suite{0:D2}.exe' -f $i++)
+        # A batch file instead of `cmd /c "<quoted> && <quoted>"`: Start-Process
+        # re-quotes the joined argument and cmd's quote-stripping rules then
+        # mangle the inner quotes. A single batch-file path has no nesting.
+        $batch = Join-Path $work "build_$name.cmd"
+        @(
+            # VsDevCmd runs a bare `vswhere.exe` from a pushd'd directory; with
+            # NoDefaultCurrentDirectoryInExePath set in the environment cmd
+            # refuses that lookup and prints "'vswhere.exe' is not recognized".
+            '@set NoDefaultCurrentDirectoryInExePath='
+            # -arch=x86: the DLL is Win32-only, so the suites must see the same
+            # pointer width and size_t as the shipped build.
+            "@call `"$vsPath\Common7\Tools\VsDevCmd.bat`" -arch=x86 -no_logo"
+            # Two backslashes: cl's argv parsing reads \" as a literal quote.
+            "@cl /nologo /EHsc /std:c++17 /Fe:`"$exe`" /Fo:`"$work\\`" `"$($src.FullName)`""
+            "@exit /b %errorlevel%"
+        ) | Set-Content -Path $batch -Encoding ascii
+        if ((Invoke-Hidden 'cmd.exe' @('/c', $batch)) -ne 0) { throw "compile failed ($name)" }
+        if ((Invoke-Hidden $exe @()) -ne 0) { throw "$name tests failed" }
+    }
+} finally {
+    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 }
-Write-Host 'test_dll: all C++ suites PASS (all children ran hidden)'
+Write-Host "test_dll: all $($suites.Count) C++ suites PASS (x86, all children ran hidden)"

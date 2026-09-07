@@ -6,7 +6,7 @@
 #include "../input_gate.hpp"
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
-#include "../external/safetyhook.hpp"
+#include <safetyhook.hpp>
 #include "cave5.hpp"   // g_contResetPending (cave2 sets at the splice, cave5 consumes)
 
 // Cave 2: Supreme::Cycle hook (SG+0x13FE40)
@@ -185,27 +185,27 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
     ScopedTasInjection injectionScope;
 
     if (transitions & INPUT_LEFT) {
-        bb3b10(thisPtr, GameAddresses::BB3B10_LEFT, (mask & INPUT_LEFT) ? 1 : 0,
+        bb3b10(thisPtr, GameAddresses::KEY_LEFT, (mask & INPUT_LEFT) ? 1 : 0,
                t.lo, t.hi);
     }
     if (transitions & INPUT_RIGHT) {
-        bb3b10(thisPtr, GameAddresses::BB3B10_RIGHT, (mask & INPUT_RIGHT) ? 1 : 0,
+        bb3b10(thisPtr, GameAddresses::KEY_RIGHT, (mask & INPUT_RIGHT) ? 1 : 0,
                t.lo, t.hi);
     }
     if (transitions & INPUT_UP) {
-        bb3b10(thisPtr, GameAddresses::BB3B10_UP, (mask & INPUT_UP) ? 1 : 0,
+        bb3b10(thisPtr, GameAddresses::KEY_UP, (mask & INPUT_UP) ? 1 : 0,
                t.lo, t.hi);
     }
     if (transitions & INPUT_DOWN) {
-        bb3b10(thisPtr, GameAddresses::BB3B10_DOWN, (mask & INPUT_DOWN) ? 1 : 0,
+        bb3b10(thisPtr, GameAddresses::KEY_DOWN, (mask & INPUT_DOWN) ? 1 : 0,
                t.lo, t.hi);
     }
     if (transitions & INPUT_JUMP) {
-        bb3b10(thisPtr, GameAddresses::BB3B10_JUMP, (mask & INPUT_JUMP) ? 1 : 0,
+        bb3b10(thisPtr, GameAddresses::KEY_JUMP, (mask & INPUT_JUMP) ? 1 : 0,
                t.lo, t.hi);
     }
     if (transitions & INPUT_SHIFT) {
-        bb3b10(thisPtr, GameAddresses::BB3B10_SHIFT, (mask & INPUT_SHIFT) ? 1 : 0,
+        bb3b10(thisPtr, GameAddresses::KEY_SHIFT, (mask & INPUT_SHIFT) ? 1 : 0,
                t.lo, t.hi);
     }
 
@@ -314,7 +314,7 @@ static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, boo
         KernelTime ft = { 0, GameAddresses::BB3B10_ARG4 };
         GetKernelTimeNow(addr, &ft);
         ft.lo = 0;  // floored like the steering stamp (see CallBB3B10OnTransitions)
-        bb3b10(thisPtr, GameAddresses::BB3B10_F5, pressed ? 1 : 0,
+        bb3b10(thisPtr, GameAddresses::KEY_F5, pressed ? 1 : 0,
                ft.lo, ft.hi);
     }
 }

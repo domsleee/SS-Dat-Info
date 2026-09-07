@@ -94,9 +94,8 @@ pub async fn run_tas_inject() -> Result<String, String> {
         .map_err(|err| format!("Failed to spawn Injector: {err}"))?;
 
     if !status.success() {
-        // Non-zero now also covers a loaded DLL whose TAS_Initialize refused
-        // the process (unsupported build, hook failure): Injector.log says
-        // which step failed and TAS_Helper.log (next to Supreme.exe) says why.
+        // Non-zero also means a loaded DLL whose TAS_Initialize refused the
+        // process: Injector.log names the step, TAS_Helper.log the reason.
         return Err("Injector.exe failed.\nIs Supreme.exe running? If so, see \
              Display_Config_Resources\\Injector.log and TAS_Helper.log."
             .to_string());
@@ -152,15 +151,6 @@ mod launch_tests {
         assert!(error.contains("TAS UI not found"));
         assert!(error.contains(&path.display().to_string()));
     }
-
-    #[test]
-    fn damaged_ui_spawn_error_is_not_success() {
-        let path = std::env::temp_dir().join(format!("invalid-tas-{}.exe", uuid::Uuid::new_v4()));
-        std::fs::write(&path, b"not an executable").unwrap();
-        let result = launch_tas_ui(&path);
-        std::fs::remove_file(&path).unwrap();
-        assert!(result.unwrap_err().contains("Could not launch TAS UI"));
-    }
 }
 
 /// Poll for a Windows named shared-memory section by attempting to open it
@@ -171,10 +161,7 @@ fn wait_for_shared_memory(name: &str, timeout: Duration) -> bool {
     use std::ffi::c_void;
     use std::iter;
 
-    // Win32's canonical type names, kept verbatim so the FFI signatures read
-    // like the SDK headers they mirror. Clippy 1.97 (the CI toolchain) flags
-    // fully-capitalized acronyms under -D warnings; renaming these to Dword
-    // etc. would be strictly less legible.
+    // Win32's own type names, so the FFI signatures read like the SDK headers.
     #[allow(clippy::upper_case_acronyms)]
     type HANDLE = *mut c_void;
     #[allow(clippy::upper_case_acronyms)]

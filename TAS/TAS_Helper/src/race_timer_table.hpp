@@ -11,15 +11,14 @@
 // and its live value is published through the +/-1 (clock-cs) wobble and the
 // finish freeze.
 //
-// STALENESS (2026-09-02): the table used to be cleared only on the
-// game_in_game 1->0 edge - and this game never drops that flag at the menu
-// (the level is not torn down there). Every trip through the menu rebuilds
-// the HUD, so the previous level's line objects stayed in the table with
-// their "advancing" history: the next race saw two advancing lines, called
-// the pick ambiguous and published nothing, and by the fourth trip all eight
-// slots held dead objects. A line that has not been sampled for STALE_TICKS
-// clock ticks is gone from the HUD, so it is evicted (and unlatched) before
-// every classification, and a full table evicts its stalest slot.
+// STALENESS: every trip through the menu rebuilds the HUD, and game_in_game
+// does not drop at the menu (the level is not torn down there), so the
+// previous level's line objects would keep their "advancing" history and make
+// the next race's pick ambiguous (two advancing lines: nothing published,
+// eventually all eight slots dead). A line that has not been sampled for
+// STALE_TICKS clock ticks is gone from the HUD, so it is evicted (and
+// unlatched) before every classification, and a full table evicts its
+// stalest slot.
 namespace racetimer {
 
 constexpr int      SLOTS = 8;

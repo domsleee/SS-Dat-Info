@@ -15,6 +15,7 @@ mod acceptance;
 mod benchmark;
 mod catchup_speed;
 mod certificate;
+mod cli;
 mod cont_cases;
 mod cont_hijack;
 mod cont_reliability;
@@ -45,6 +46,7 @@ mod speed_reset;
 mod steer_impact;
 mod stop_play_flake;
 mod video_rate;
+mod win32;
 
 use std::path::PathBuf;
 
