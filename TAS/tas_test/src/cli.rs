@@ -52,10 +52,7 @@ pub fn parse(args: &[String], specs: &[Spec], max_positional: usize) -> Result<F
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
-        match specs
-            .iter()
-            .find(|s| s.name == arg || s.alias == Some(arg))
-        {
+        match specs.iter().find(|s| s.name == arg || s.alias == Some(arg)) {
             Some(spec) => {
                 let Some(values) = args.get(i + 1..i + 1 + spec.values) else {
                     return Err(format!(
@@ -90,7 +87,9 @@ impl Flags {
 
     /// The last value given for `name` (later occurrences win).
     pub fn value(&self, name: &str) -> Option<&str> {
-        self.values(name).and_then(|v| v.first()).map(String::as_str)
+        self.values(name)
+            .and_then(|v| v.first())
+            .map(String::as_str)
     }
 
     pub fn values(&self, name: &str) -> Option<&[String]> {

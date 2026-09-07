@@ -440,7 +440,11 @@ impl HistoryWriter {
                         .entries
                         .iter()
                         .filter(|e| e.snapshot.is_some())
-                        .filter_map(|e| store.blob_ref(e.meta.entry_id).map(|b| (e.meta.entry_id, b)))
+                        .filter_map(|e| {
+                            store
+                                .blob_ref(e.meta.entry_id)
+                                .map(|b| (e.meta.entry_id, b))
+                        })
                         .collect();
                     if !refs.is_empty() {
                         if let Ok(mut pending) = worker_durable_blobs.lock() {
@@ -725,8 +729,7 @@ fn resolve_current(
     let pos = entries.iter().position(|e| e.meta.entry_id == target)?;
     // Restorable = an available snapshot entry, whether its bytes were read
     // (eager) or only referenced (lazy). Markers have neither.
-    let restorable =
-        |e: &LoadedEntry| e.available && (e.snapshot.is_some() || e.blob.is_some());
+    let restorable = |e: &LoadedEntry| e.available && (e.snapshot.is_some() || e.blob.is_some());
     if restorable(&entries[pos]) {
         return Some(target);
     }
@@ -840,7 +843,11 @@ mod tests {
         assert!(writer.flush().is_err());
         assert_eq!(writer.durable_revision(), 0);
         assert_eq!(writer.failed_revision(), 7);
-        assert_eq!(writer.take_errors().len(), 1, "the failure reaches the UI log");
+        assert_eq!(
+            writer.take_errors().len(),
+            1,
+            "the failure reaches the UI log"
+        );
     }
 
     #[test]
@@ -895,7 +902,9 @@ mod tests {
     fn load_blob_quarantines_corrupt_blob() {
         let dir = tmp_dir("lazy_corrupt");
         let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
-        store.persist(&[entry(1, "A", false, 4)], Some(1), 2).unwrap();
+        store
+            .persist(&[entry(1, "A", false, 4)], Some(1), 2)
+            .unwrap();
         drop(store);
         let (_lazy, res) = HistoryStoreV2::open_lazy(dir.clone()).unwrap();
         assert!(res.entries[0].available, "lazy open only stats the file");

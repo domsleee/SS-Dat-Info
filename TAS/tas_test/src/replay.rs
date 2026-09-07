@@ -216,7 +216,10 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
         }
     };
 
-    println!("Loaded: {} ticks, fft={}", rec.count, rec.meta.force_fixed_tick);
+    println!(
+        "Loaded: {} ticks, fft={}",
+        rec.count, rec.meta.force_fixed_tick
+    );
     if !rec.meta.notes.is_empty() {
         println!("Notes: {}", rec.meta.notes);
     }

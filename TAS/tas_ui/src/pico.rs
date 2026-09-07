@@ -202,7 +202,7 @@ pub fn show_panel(ui: &mut egui::Ui, pico: &mut PicoState, log: &mut UiLog) {
             if ui.button("Connect").clicked() {
                 pico.connect();
                 if pico.connected {
-                    log.push(&format!("Pico connected on {}", pico.port_name));
+                    log.push(format!("Pico connected on {}", pico.port_name));
                 }
             }
         }
@@ -217,13 +217,13 @@ pub fn show_panel(ui: &mut egui::Ui, pico: &mut PicoState, log: &mut UiLog) {
             if ui.button("F5 Restart").clicked() {
                 match pico.send_f5() {
                     Ok(()) => log.push("Pico: sent F5"),
-                    Err(e) => log.push(&format!("Pico F5 error: {}", e)),
+                    Err(e) => log.push(format!("Pico F5 error: {}", e)),
                 }
             }
             if ui.button("Soft Reconnect").clicked() {
                 match pico.soft_reconnect() {
                     Ok(()) => log.push("Pico: soft reconnect sent"),
-                    Err(e) => log.push(&format!("Pico reconnect error: {}", e)),
+                    Err(e) => log.push(format!("Pico reconnect error: {}", e)),
                 }
             }
         });
@@ -243,9 +243,9 @@ pub fn show_panel(ui: &mut egui::Ui, pico: &mut PicoState, log: &mut UiLog) {
         match serialport::available_ports() {
             Ok(ports) => {
                 let names: Vec<String> = ports.iter().map(|p| p.port_name.clone()).collect();
-                log.push(&format!("Ports: {}", names.join(", ")));
+                log.push(format!("Ports: {}", names.join(", ")));
             }
-            Err(e) => log.push(&format!("Port scan error: {}", e)),
+            Err(e) => log.push(format!("Port scan error: {}", e)),
         }
     }
 

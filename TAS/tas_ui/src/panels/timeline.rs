@@ -53,7 +53,7 @@ pub fn format_game_time(tick: u32, timer_anchor: u32) -> String {
 pub fn game_timer_anchor(state: &TasSharedState, remembered_level: Option<&str>) -> u32 {
     let level = crate::level::resolved_level_code(state).or(remembered_level);
     crate::start_line::start_cross_tick(&state.rec_coords, state.recorded_count, level)
-        .or_else(|| crate::recording::detect_first_moving(&state.rec_coords, state.recorded_count))
+        .or_else(|| tas_shared::cont::detect_first_moving(&state.rec_coords, state.recorded_count))
         .unwrap_or(0)
 }
 

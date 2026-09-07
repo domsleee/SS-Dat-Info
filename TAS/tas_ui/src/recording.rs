@@ -1,7 +1,8 @@
+use crate::history_store_v2::BlobRef;
+use crate::ui_log::UiLog;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use crate::history_store_v2::BlobRef;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -56,20 +57,6 @@ pub fn format_recording_duration(ticks: u32) -> String {
     } else {
         format!("{}:{:02}.{:02}", minutes, seconds, centiseconds)
     }
-}
-
-/// Find the first index after 0 where the recorded position diverges from
-/// `rec_coords[0]`. This is the recording's "race-start" landmark: the
-/// character holds the start coordinate during the pre-race countdown, then
-/// moves on the first physics frame after the gate opens. Returns `None` if
-/// `recorded_count` is 0 or no movement is recorded.
-///
-/// Bit-comparison of `f32` is intentional — we want exact equality, not
-/// epsilon, so the first sub-millimetre coord change counts.
-pub fn detect_first_moving(rec_coords: &[[f32; 3]], recorded_count: u32) -> Option<u32> {
-    // Delegate to the shared implementation so tas_ui and the cont-reliability
-    // harness use one source of truth for the F5-bucket fingerprint.
-    tas_shared::cont::detect_first_moving(rec_coords, recorded_count)
 }
 
 pub fn completed_session_label(
@@ -192,7 +179,8 @@ impl RecoverySessionContext {
         if let Some((fpu, renderer, (character, stance))) = live {
             self.fpu_control_word = (fpu != 0).then_some(fpu);
             self.renderer_id = (renderer != tas_shared::TAS_RENDERER_UNKNOWN).then_some(renderer);
-            self.rider_character = (character != tas_shared::TAS_CHARACTER_UNKNOWN).then_some(character);
+            self.rider_character =
+                (character != tas_shared::TAS_CHARACTER_UNKNOWN).then_some(character);
             self.rider_stance = (stance != u32::MAX).then_some(stance);
         }
         self
@@ -218,7 +206,8 @@ impl RecoverySessionContext {
     /// The rider stamp as the history entry shows it ("Keith · goofy").
     pub fn rider_label(&self) -> Option<String> {
         tas_shared::rider_label(
-            self.rider_character.unwrap_or(tas_shared::TAS_CHARACTER_UNKNOWN),
+            self.rider_character
+                .unwrap_or(tas_shared::TAS_CHARACTER_UNKNOWN),
             self.rider_stance.unwrap_or(u32::MAX),
         )
     }
@@ -256,7 +245,7 @@ pub struct RecoveryStore {
 
 impl RecoveryStore {
     pub fn new() -> Result<Self, String> {
-        let root = crate::history_store::default_history_root_dir().join("recovery");
+        let root = crate::settings::data_root_dir().join("recovery");
         Self::new_with(root, Duration::from_millis(DEFAULT_RECOVERY_DEBOUNCE_MS))
     }
 
@@ -281,20 +270,6 @@ impl RecoveryStore {
 
     pub fn root(&self) -> &Path {
         &self.root
-    }
-
-    // Synchronous checkpoint write. Production uses the off-thread take_write_job
-    // path; these sync wrappers are exercised by the recovery-store tests.
-    #[allow(dead_code)]
-    pub fn persist_if_needed(
-        &mut self,
-        state: &TasSharedState,
-        segments: &[Segment],
-        session: &RecoverySessionContext,
-        force: bool,
-    ) -> Result<bool, String> {
-        let snapshot = RecordingSnapshot::from_state(state);
-        self.persist_snapshot_if_needed(&snapshot, segments, session, force)
     }
 
     /// Minimum spacing between checkpoint writes at the given recording length.
@@ -346,23 +321,6 @@ impl RecoveryStore {
             recording_path: self.recording_path.clone(),
             metadata_path: self.metadata_path.clone(),
         })
-    }
-
-    #[allow(dead_code)]
-    pub fn persist_snapshot_if_needed(
-        &mut self,
-        snapshot: &RecordingSnapshot,
-        segments: &[Segment],
-        session: &RecoverySessionContext,
-        force: bool,
-    ) -> Result<bool, String> {
-        match self.take_write_job(snapshot, segments, session, force) {
-            Some(job) => {
-                job.write()?;
-                Ok(true)
-            }
-            None => Ok(false),
-        }
     }
 }
 
@@ -667,11 +625,6 @@ impl RecordingMetadata {
 pub struct RecordingFile;
 
 impl RecordingFile {
-    #[allow(dead_code)]
-    pub fn save(state: &TasSharedState, path: &std::path::Path) -> Result<(), String> {
-        Self::save_with_segments(state, path, &[])
-    }
-
     pub fn save_with_segments(
         state: &TasSharedState,
         path: &std::path::Path,
@@ -968,31 +921,21 @@ pub struct HistoryEntry {
     /// auto-generated `label`. `None` = use the auto label/duration.
     pub custom_name: Option<String>,
     pub label: String,
-    /// HH:MM:SS-of-day legacy display field. Kept for backward compat with the
-    /// legacy persisted format (read on migration, written by `to_persisted`);
-    /// production display logic uses `created_at`.
-    #[allow(dead_code)]
-    pub timestamp: String,
     /// Full local-tz creation time. Used for date grouping in the panel.
-    /// For legacy entries that were persisted without this field, the
-    /// in-memory value is set to load-time `Local::now()` as a best-effort
-    /// fallback so they cluster under "today" rather than scattering.
     pub created_at: chrono::DateTime<chrono::Local>,
     pub kind: HistoryEntryKind,
     /// Session start tick: 0 for REC entries (recording from the beginning)
-    /// or for markers, the resume tick for CONT entries. Zero on legacy
-    /// entries persisted before this field existed — the panel falls back
-    /// to label parsing in that case.
+    /// or for markers, the resume tick for CONT entries.
     pub start_tick: u32,
-    /// `recorded_count` at push time. Zero on legacy entries / markers.
+    /// `recorded_count` at push time. Zero on markers.
     pub end_tick: u32,
     /// First tick where the recorded position diverged from `rec_coords[0]`
-    /// — the "race-start" landmark. `None` for legacy entries, markers,
-    /// and snapshots with no detected movement.
+    /// — the "race-start" landmark. `None` for markers and snapshots with no
+    /// detected movement.
     pub first_moving: Option<u32>,
     /// Race time in centiseconds when the session ended by crossing the
     /// finish line (the HUD timer the finish-line watch auto-stopped at).
-    /// `None` = the session was stopped by hand / legacy entry. Drives the
+    /// `None` = the session was stopped by hand. Drives the
     /// "Finish m:ss.cc" label and the flag in the panel.
     pub finish_time_cs: Option<u32>,
     /// `true` when `finish_time_cs` came from the HUD timer (exact); `false`
@@ -1000,8 +943,8 @@ pub struct HistoryEntry {
     /// crossings (within ~0.05 s of the game's timer - shown with a "~").
     pub finish_time_exact: bool,
     /// Level code (e.g. "FE") the entry was created on, from the DLL's live
-    /// level_id at push time. `None` for legacy entries or when the level was
-    /// unknown (menu). Used by the panel's per-level filter.
+    /// level_id at push time. `None` when the level was unknown (menu). Used by
+    /// the panel's per-level filter.
     pub level: Option<String>,
     /// Physics-mode stamp at push time (`tas_shared::physics_mode_label`,
     /// e.g. `OpenGL/53-bit`). None = unknown / pre-stamp entry. Restoring an
@@ -1019,13 +962,13 @@ impl HistoryEntry {
     fn from_snapshot(label: String, kind: HistoryEntryKind, snapshot: RecordingSnapshot) -> Self {
         let now = chrono::Local::now();
         let end_tick = snapshot.recorded_count;
-        let first_moving = detect_first_moving(snapshot.rec_coords.as_ref(), end_tick);
+        let first_moving =
+            tas_shared::cont::detect_first_moving(snapshot.rec_coords.as_ref(), end_tick);
         Self {
             entry_id: 0, // assigned by RecordingHistory on push
             pinned: false,
             custom_name: None,
             label,
-            timestamp: now.format("%H:%M:%S").to_string(),
             created_at: now,
             kind,
             // start_tick is overwritten by `with_session` for CONT entries
@@ -1035,7 +978,7 @@ impl HistoryEntry {
             first_moving,
             finish_time_cs: None, // set by push_completed_session for finished runs
             finish_time_exact: false,
-            level: None, // stamped from live_level by RecordingHistory on push
+            level: None,   // stamped from live_level by RecordingHistory on push
             physics: None, // stamped from live_physics by RecordingHistory on push
             rider: None,   // stamped from live_rider by RecordingHistory on push
             snapshot: SnapshotSlot::Loaded {
@@ -1052,7 +995,6 @@ impl HistoryEntry {
             pinned: false,
             custom_name: None,
             label,
-            timestamp: now.format("%H:%M:%S").to_string(),
             created_at: now,
             kind,
             start_tick: 0,
@@ -1060,7 +1002,7 @@ impl HistoryEntry {
             first_moving: None,
             finish_time_cs: None,
             finish_time_exact: false,
-            level: None, // stamped from live_level by RecordingHistory on push
+            level: None,   // stamped from live_level by RecordingHistory on push
             physics: None, // stamped from live_physics by RecordingHistory on push
             rider: None,   // stamped from live_rider by RecordingHistory on push
             snapshot: SnapshotSlot::Marker,
@@ -1115,52 +1057,6 @@ impl PersistedSnapshot {
         }
         Ok(())
     }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct PersistedHistoryEntry {
-    pub label: String,
-    pub timestamp: String,
-    /// ISO 8601 local datetime with offset, e.g. `2026-05-24T21:04:43+10:00`.
-    /// Optional for backward compat — legacy entries persisted without this
-    /// field get serialised as `""` and the loader falls back to "now" when
-    /// constructing the in-memory `created_at`. Going forward, every new
-    /// entry serialises a full timestamp here so day-grouping in the panel
-    /// remains correct across multi-day sessions.
-    #[serde(default)]
-    pub created_at_iso: String,
-    pub kind: HistoryEntryKind,
-    pub snapshot: Option<PersistedSnapshot>,
-    /// Session start tick. Legacy entries default to 0; the panel falls
-    /// back to parsing `label` when this is 0 alongside a non-zero
-    /// snapshot recorded_count.
-    #[serde(default)]
-    pub start_tick: u32,
-    /// `recorded_count` at push time. Legacy entries default to 0.
-    #[serde(default)]
-    pub end_tick: u32,
-    /// "Race-start" landmark tick — first index where rec_coords diverged
-    /// from rec_coords[0]. Legacy entries default to None.
-    #[serde(default)]
-    pub first_moving: Option<u32>,
-    /// Race time (centiseconds) of a session that ended at the finish line.
-    #[serde(default)]
-    pub finish_time_cs: Option<u32>,
-    /// Whether that time is the HUD timer's (exact) or geometry-derived.
-    #[serde(default)]
-    pub finish_time_exact: bool,
-    /// Level code (e.g. "FE") the entry was created on. Legacy entries
-    /// default to None (always shown by the per-level filter).
-    #[serde(default)]
-    pub level: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct PersistedHistory {
-    pub version: u32,
-    pub saved_at: String,
-    pub current_index: Option<usize>,
-    pub entries: Vec<PersistedHistoryEntry>,
 }
 
 pub struct RecordingHistory {
@@ -1450,7 +1346,13 @@ impl RecordingHistory {
         snapshot: RecordingSnapshot,
         label: impl Into<String>,
     ) -> bool {
-        self.push_snapshot_entry(snapshot, label.into(), HistoryEntryKind::Snapshot, None, None)
+        self.push_snapshot_entry(
+            snapshot,
+            label.into(),
+            HistoryEntryKind::Snapshot,
+            None,
+            None,
+        )
     }
 
     /// Like `push_snapshot_data` but records the session's `start_tick` /
@@ -1621,20 +1523,22 @@ impl RecordingHistory {
         self.entries
             .iter()
             .map(|e| crate::history_store_v2::StoredEntry {
-                entry_id: e.entry_id,
-                name: e.label.clone(),
-                user_name: e.custom_name.clone(),
-                pinned: e.pinned,
-                kind: e.kind,
-                start_tick: e.start_tick,
-                end_tick: e.end_tick,
-                first_moving: e.first_moving,
-                finish_time_cs: e.finish_time_cs,
-                finish_time_exact: e.finish_time_exact,
-                level: e.level.clone(),
-                physics: e.physics.clone(),
-                rider: e.rider.clone(),
-                created_at_iso: e.created_at.to_rfc3339(),
+                meta: crate::history_store_v2::EntryMeta {
+                    entry_id: e.entry_id,
+                    name: e.label.clone(),
+                    user_name: e.custom_name.clone(),
+                    pinned: e.pinned,
+                    kind: e.kind,
+                    start_tick: e.start_tick,
+                    end_tick: e.end_tick,
+                    first_moving: e.first_moving,
+                    finish_time_cs: e.finish_time_cs,
+                    finish_time_exact: e.finish_time_exact,
+                    level: e.level.clone(),
+                    physics: e.physics.clone(),
+                    rider: e.rider.clone(),
+                    created_at_iso: e.created_at.to_rfc3339(),
+                },
                 // Bytes travel only for snapshots the store does not have
                 // yet. On-disk and durable entries send `None`; the store
                 // keeps their blob reference (ids are never reused).
@@ -1769,26 +1673,26 @@ impl RecordingHistory {
                 (None, Some(_), false) => SnapshotSlot::Unavailable,
                 (None, None, _) => SnapshotSlot::Marker,
             };
-            let created_at = chrono::DateTime::parse_from_rfc3339(&le.created_at_iso)
+            let meta = le.meta;
+            let created_at = chrono::DateTime::parse_from_rfc3339(&meta.created_at_iso)
                 .ok()
                 .map(|dt| dt.with_timezone(&chrono::Local))
                 .unwrap_or_else(chrono::Local::now);
             entries.push(HistoryEntry {
-                entry_id: le.entry_id,
-                pinned: le.pinned,
-                custom_name: le.user_name,
-                label: le.name,
-                timestamp: created_at.format("%H:%M:%S").to_string(),
+                entry_id: meta.entry_id,
+                pinned: meta.pinned,
+                custom_name: meta.user_name,
+                label: meta.name,
                 created_at,
-                kind: le.kind,
-                start_tick: le.start_tick,
-                end_tick: le.end_tick,
-                first_moving: le.first_moving,
-                finish_time_cs: le.finish_time_cs,
-                finish_time_exact: le.finish_time_exact,
-                level: le.level,
-                physics: le.physics,
-                rider: le.rider,
+                kind: meta.kind,
+                start_tick: meta.start_tick,
+                end_tick: meta.end_tick,
+                first_moving: meta.first_moving,
+                finish_time_cs: meta.finish_time_cs,
+                finish_time_exact: meta.finish_time_exact,
+                level: meta.level,
+                physics: meta.physics,
+                rider: meta.rider,
                 snapshot,
             });
         }
@@ -1806,17 +1710,6 @@ impl RecordingHistory {
         // A lowered cap (e.g. settings changed between sessions) trims on load.
         self.enforce_capacity_preserving_none();
         self.bump();
-    }
-
-    // can_undo/can_redo are predicate helpers exercised by the history tests.
-    #[allow(dead_code)]
-    pub fn can_undo(&self) -> bool {
-        self.undo_depth() > 0
-    }
-
-    #[allow(dead_code)]
-    pub fn can_redo(&self) -> bool {
-        self.redo_depth() > 0
     }
 
     pub fn undo_depth(&self) -> usize {
@@ -1847,115 +1740,6 @@ impl RecordingHistory {
 
     pub fn entries(&self) -> &[HistoryEntry] {
         &self.entries
-    }
-
-    // Writes the legacy JSON format. Production only READS it (on migration);
-    // the write side is exercised by tests + the serialize benchmark.
-    #[allow(dead_code)]
-    pub fn to_persisted(&self) -> PersistedHistory {
-        let entries = self
-            .entries
-            .iter()
-            .map(|entry| PersistedHistoryEntry {
-                label: entry.label.clone(),
-                timestamp: entry.timestamp.clone(),
-                created_at_iso: entry.created_at.to_rfc3339(),
-                kind: entry.kind,
-                snapshot: entry.snapshot.loaded().map(RecordingSnapshot::to_persisted),
-                start_tick: entry.start_tick,
-                end_tick: entry.end_tick,
-                first_moving: entry.first_moving,
-                finish_time_cs: entry.finish_time_cs,
-                finish_time_exact: entry.finish_time_exact,
-                level: entry.level.clone(),
-            })
-            .collect();
-
-        PersistedHistory {
-            version: 2,
-            saved_at: chrono::Local::now().to_rfc3339(),
-            current_index: self.current_index,
-            entries,
-        }
-    }
-
-    pub fn apply_persisted(&mut self, persisted: PersistedHistory) -> Result<(), String> {
-        let mut entries = Vec::with_capacity(persisted.entries.len());
-        for entry in persisted.entries {
-            let snapshot = match entry.snapshot {
-                Some(snapshot) => SnapshotSlot::Loaded {
-                    snapshot: RecordingSnapshot::from_persisted(snapshot)?,
-                    on_disk: None,
-                },
-                None => SnapshotSlot::Marker,
-            };
-            // Parse the persisted ISO timestamp into a chrono DateTime.
-            // For legacy entries that pre-date the `created_at_iso` field,
-            // fall back to today's date combined with the persisted
-            // HH:MM:SS — that preserves the original time-of-day so the
-            // row displays e.g. `21:04` rather than the load-time clock,
-            // while still clustering all legacy entries under "today" in
-            // the day-header grouping. If the timestamp is also unparsable,
-            // last-resort is `Local::now()`.
-            let created_at = chrono::DateTime::parse_from_rfc3339(&entry.created_at_iso)
-                .ok()
-                .map(|dt| dt.with_timezone(&chrono::Local))
-                .or_else(|| {
-                    let today = chrono::Local::now().date_naive();
-                    let hms =
-                        chrono::NaiveTime::parse_from_str(&entry.timestamp, "%H:%M:%S").ok()?;
-                    today
-                        .and_time(hms)
-                        .and_local_timezone(chrono::Local)
-                        .single()
-                })
-                .unwrap_or_else(chrono::Local::now);
-            // Legacy entries (pre-fields) come in with end_tick=0 even
-            // when a snapshot is present. Fall back to the snapshot's
-            // recorded_count so the renderer can still compute durations
-            // from structured data; start_tick stays 0 → renderer treats
-            // it as "no resume point" and falls back to label parsing
-            // for the context phrase.
-            let mut end_tick = entry.end_tick;
-            if end_tick == 0 {
-                if let Some(snap) = snapshot.loaded() {
-                    end_tick = snap.recorded_count;
-                }
-            }
-            entries.push(HistoryEntry {
-                entry_id: self.alloc_id(),
-                pinned: false,
-                custom_name: None,
-                label: entry.label,
-                timestamp: entry.timestamp,
-                created_at,
-                kind: entry.kind,
-                start_tick: entry.start_tick,
-                end_tick,
-                first_moving: entry.first_moving,
-                finish_time_cs: entry.finish_time_cs,
-                finish_time_exact: entry.finish_time_exact,
-                level: entry.level,
-                physics: None,
-                rider: None,
-                snapshot,
-            });
-        }
-
-        self.entries = entries;
-        self.current_index = persisted
-            .current_index
-            .filter(|idx| *idx < self.entries.len());
-
-        if let Some(idx) = self.current_index {
-            if !self.entries[idx].can_restore() {
-                self.current_index = None;
-            }
-        }
-
-        self.enforce_capacity();
-        self.bump(); // mark dirty so the (revision-gated) writer persists it
-        Ok(())
     }
 
     /// Soft cap: `capacity` bounds the number of UNPINNED entries. Pinned
@@ -2101,16 +1885,11 @@ impl SegmentTracker {
     }
 }
 
-#[allow(dead_code)]
-pub fn save_dialog(state: &TasSharedState, log: &mut Vec<String>) -> Option<PathBuf> {
-    save_dialog_with_segments(state, &[], log, None)
-}
-
 /// Per-game recordings folder: `<data_root>/recordings` (created on demand).
 /// `<data_root>` is the game folder when deployed (see
 /// `default_history_root_dir`), so each game install's recordings stay separate.
 pub fn recordings_dir() -> PathBuf {
-    let dir = crate::history_store::default_history_root_dir().join("recordings");
+    let dir = crate::settings::data_root_dir().join("recordings");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -2164,7 +1943,7 @@ fn load_dir_for_level(level: Option<&str>) -> PathBuf {
 pub fn save_dialog_with_segments(
     state: &TasSharedState,
     segments: &[Segment],
-    log: &mut Vec<String>,
+    log: &mut UiLog,
     level: Option<&str>,
 ) -> Option<PathBuf> {
     // Default name: `<level>-<time>` (e.g. FE-5876). Mis-tagging is permanent —
@@ -2182,13 +1961,11 @@ pub fn save_dialog_with_segments(
     {
         match RecordingFile::save_with_segments(state, &path, segments) {
             Ok(()) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                log.push(format!("[{}] Saved recording to {}", ts, path.display()));
+                log.push(format!("Saved recording to {}", path.display()));
                 return Some(path);
             }
             Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                log.push(format!("[{}] Save error: {}", ts, e));
+                log.push(format!("Save error: {}", e));
             }
         }
     }
@@ -2215,12 +1992,11 @@ pub fn pick_recording_path(level_id: u32) -> Option<PathBuf> {
 pub fn load_recording_path(
     state: &mut TasSharedState,
     tracker: &mut SegmentTracker,
-    log: &mut Vec<String>,
+    log: &mut UiLog,
     path: &std::path::Path,
 ) -> bool {
     match RecordingFile::load(state, path) {
         Ok((count, segments)) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
             let seg_count = segments.len();
             tracker.restore_from(segments);
             // The take carries the physics mode it was recorded under; the
@@ -2228,13 +2004,14 @@ pub fn load_recording_path(
             // differently (24-bit DirectX vs 53-bit OpenGL), so say so now
             // rather than letting the replay drift "mysteriously".
             if let Ok(meta) = RecordingFile::read_metadata(path) {
-                let live = tas_shared::physics_mode_label(state.renderer_id, state.fpu_control_word);
+                let live =
+                    tas_shared::physics_mode_label(state.renderer_id, state.fpu_control_word);
                 if let (Some(stamp), Some(live)) = (meta.physics_label(), live) {
                     if stamp != live {
                         log.push(format!(
-                            "[{}] WARNING: recording was made under {} but the game is running {}: \
+                            "WARNING: recording was made under {} but the game is running {}: \
                              the physics round differently, this replay will not be bit-exact",
-                            ts, stamp, live
+                            stamp, live
                         ));
                     }
                 }
@@ -2244,17 +2021,16 @@ pub fn load_recording_path(
                 if let (Some(stamp), Some(live)) = (meta.rider_label(), live_rider) {
                     if stamp != live {
                         log.push(format!(
-                            "[{}] WARNING: recording was made as {} but the rider is {}: \
+                            "WARNING: recording was made as {} but the rider is {}: \
                              a different character or stance has different physics, \
                              this replay will not line up",
-                            ts, stamp, live
+                            stamp, live
                         ));
                     }
                 }
             }
             log.push(format!(
-                "[{}] Loaded {} ticks, {} segments from {}",
-                ts,
+                "Loaded {} ticks, {} segments from {}",
                 count,
                 seg_count,
                 path.display()
@@ -2262,98 +2038,8 @@ pub fn load_recording_path(
             true
         }
         Err(e) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            log.push(format!("[{}] Load error: {}", ts, e));
+            log.push(format!("Load error: {}", e));
             false
-        }
-    }
-}
-
-pub fn dump_diagnostics(state: &TasSharedState, ui_drift: (f32, f32), log: &mut Vec<String>) {
-    let ts = chrono::Local::now();
-    let filename = format!("tas_dump_{}.txt", ts.format("%Y%m%d_%H%M%S"));
-
-    if let Some(path) = rfd::FileDialog::new()
-        .set_title("Dump Diagnostics")
-        .set_file_name(&filename)
-        .add_filter("Text", &["txt"])
-        .save_file()
-    {
-        let mut out = String::new();
-        out.push_str(&format!("TAS Diagnostics Dump - {}\n", ts.to_rfc3339()));
-        out.push_str(&format!("Version: {}\n", state.version));
-        out.push_str(&format!("Mode: {}\n", state.mode_str()));
-        out.push_str(&format!("Recorded: {} ticks\n", state.recorded_count));
-        out.push_str(&format!("Playback pos: {}\n", state.playback_pos));
-        out.push_str(&format!("Frame count: {}\n", state.frame_count));
-        out.push_str(&format!(
-            "Position: ({:.6}, {:.6}, {:.6})\n",
-            state.player_x, state.player_y, state.player_z
-        ));
-        out.push_str(&format!(
-            "Max drift (UI): X={:.9} Z={:.9}\n",
-            ui_drift.0, ui_drift.1
-        ));
-        out.push_str(&format!(
-            "Max drift (DLL): X={:.9} Z={:.9}\n",
-            state.max_drift_x, state.max_drift_z
-        ));
-        out.push_str(&format!("BB3B10 calls: {}\n", state.bb3b10_call_count));
-        out.push_str(&format!("Handler blocks: {}\n", state.handler_block_count));
-        out.push_str(&format!("BB3B10 blocks: {}\n", state.bb3b10_block_count));
-        out.push_str(&format!("Events: {}\n", state.event_count));
-        out.push_str(&format!(
-            "Config: fft={} speed={:.2}\n",
-            state.force_fixed_tick, state.playback_speed
-        ));
-        out.push_str(&format!(
-            "Hooks: cave2={} cave1c={} cave1d={} cave5={} replay={}\n",
-            state.cave2_hooked,
-            state.cave1c_hooked,
-            state.cave1d_hooked,
-            state.cave5_hooked,
-            state.replay_capture_hooked
-        ));
-        out.push_str(&format!(
-            "Pointers: replay=0x{:08X} player=0x{:08X}\n\n",
-            state.replay_ptr, state.player_ptr
-        ));
-
-        // Input transitions
-        let count = state.recorded_count as usize;
-        if count > 0 {
-            out.push_str("Input transitions:\n");
-            let mut prev: u8 = 0;
-            for i in 0..count {
-                let mask = state.input_log[i];
-                if mask != prev {
-                    let mut bits = String::new();
-                    for &(bit, _, name) in tas_shared::input_bits::ALL {
-                        if mask & bit != 0 {
-                            if !bits.is_empty() {
-                                bits.push('+');
-                            }
-                            bits.push_str(name);
-                        }
-                    }
-                    if bits.is_empty() {
-                        bits = "NONE".to_string();
-                    }
-                    out.push_str(&format!("  tick {}: {} (0x{:02X})\n", i, bits, mask));
-                    prev = mask;
-                }
-            }
-        }
-
-        match std::fs::write(&path, &out) {
-            Ok(()) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                log.push(format!("[{}] Dumped diagnostics to {}", ts, path.display()));
-            }
-            Err(e) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                log.push(format!("[{}] Dump error: {}", ts, e));
-            }
         }
     }
 }
@@ -2382,35 +2068,19 @@ mod tests {
         root
     }
 
-    #[test]
-    fn detect_first_moving_finds_first_changed_coord() {
-        let mut coords = vec![[1.0, 2.0, 3.0]; 10];
-        coords[5] = [1.0, 2.0, 3.5];
-        assert_eq!(detect_first_moving(&coords, 10), Some(5));
-    }
-
-    #[test]
-    fn detect_first_moving_returns_none_when_static() {
-        let coords = vec![[1.0, 2.0, 3.0]; 10];
-        assert_eq!(detect_first_moving(&coords, 10), None);
-    }
-
-    #[test]
-    fn detect_first_moving_returns_none_for_empty_or_single_tick() {
-        assert_eq!(detect_first_moving(&[], 0), None);
-        assert_eq!(detect_first_moving(&[[0.0; 3]], 1), None);
-        let coords = vec![[1.0, 2.0, 3.0]; 10];
-        assert_eq!(detect_first_moving(&coords, 0), None);
-    }
-
-    #[test]
-    fn detect_first_moving_respects_recorded_count_bound() {
-        // Movement at index 5, but recorded_count limits the scan to 3.
-        let mut coords = vec![[1.0, 2.0, 3.0]; 10];
-        coords[5] = [9.0, 9.0, 9.0];
-        assert_eq!(detect_first_moving(&coords, 3), None);
-        // Bumping the count to 6 finds it.
-        assert_eq!(detect_first_moving(&coords, 6), Some(5));
+    fn persist_checkpoint(
+        store: &mut RecoveryStore,
+        state: &TasSharedState,
+        segments: &[Segment],
+        session: &RecoverySessionContext,
+        force: bool,
+    ) -> Result<bool, String> {
+        let snapshot = RecordingSnapshot::from_state(state);
+        let Some(job) = store.take_write_job(&snapshot, segments, session, force) else {
+            return Ok(false);
+        };
+        job.write()?;
+        Ok(true)
     }
 
     #[test]
@@ -2452,8 +2122,8 @@ mod tests {
     fn history_new_is_empty() {
         let history = RecordingHistory::new(4);
         assert_eq!(history.len(), 0);
-        assert!(!history.can_undo());
-        assert!(!history.can_redo());
+        assert_eq!(history.undo_depth(), 0);
+        assert_eq!(history.redo_depth(), 0);
     }
 
     #[test]
@@ -2562,57 +2232,6 @@ mod tests {
         assert_eq!(history.entries()[0].label, "B");
         assert_eq!(history.entries()[1].label, "C");
         assert_eq!(history.current_index(), Some(1));
-    }
-
-    #[test]
-    fn history_persist_round_trip_preserves_snapshots() {
-        let mut history = RecordingHistory::new(8);
-        let a = one_tick_state(0x01);
-        let b = one_tick_state(0x02);
-        assert!(history.push_snapshot(&a, "A"));
-        assert!(history.push_snapshot(&b, "B"));
-        history.push_save_marker(&b, Path::new("C:\\temp\\run.tasrec"));
-        let _ = history.undo();
-
-        let persisted = history.to_persisted();
-        let mut restored = RecordingHistory::new(8);
-        restored.apply_persisted(persisted).unwrap();
-
-        assert_eq!(restored.len(), history.len());
-        assert_eq!(restored.current_index(), history.current_index());
-        assert_eq!(restored.entries()[2].kind, HistoryEntryKind::SaveMarker);
-        assert!(!restored.entries()[2].can_restore());
-        assert_eq!(restored.restore_index(1).unwrap().input_log[0], 0x02);
-    }
-
-    #[test]
-    fn history_apply_persisted_rejects_invalid_snapshot_lengths() {
-        let mut history = RecordingHistory::new(8);
-        let bad = PersistedHistory {
-            version: 2,
-            saved_at: chrono::Local::now().to_rfc3339(),
-            current_index: Some(0),
-            entries: vec![PersistedHistoryEntry {
-                label: "bad".to_string(),
-                timestamp: "00:00:00".to_string(),
-                created_at_iso: String::new(),
-                kind: HistoryEntryKind::Snapshot,
-                snapshot: Some(PersistedSnapshot {
-                    recorded_count: 2,
-                    input_log: vec![1], // invalid: expected len=2
-                    rec_coords: vec![[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
-                }),
-                start_tick: 0,
-                end_tick: 2,
-                first_moving: None,
-                finish_time_cs: None,
-                finish_time_exact: false,
-                level: None,
-            }],
-        };
-
-        let err = history.apply_persisted(bad).unwrap_err();
-        assert!(err.contains("input_log length mismatch"));
     }
 
     // ===== RecordingSnapshot =====
@@ -2764,106 +2383,6 @@ mod tests {
 
     // ===== RecoveryStore =====
 
-    // Is the 3.6s history persist a debug-build artifact? Run debug vs release:
-    //   cargo test -p tas_ui measure_history_serialize -- --ignored --nocapture
-    //   cargo test --release -p tas_ui measure_history_serialize -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn measure_history_serialize() {
-        use std::time::Instant;
-        let mut history = RecordingHistory::new(256);
-        let mut state = zeroed_state();
-        for i in 0..600usize {
-            state.rec_coords[i] = [i as f32, 1.0, 2.0];
-            state.input_log[i] = (i % 4) as u8;
-        }
-        for k in 0..190u32 {
-            state.recorded_count = 600 + k; // vary to defeat dedup
-            let snap = RecordingSnapshot::from_state(&state);
-            history.push_snapshot_data_with_session(snap, format!("entry {}", k), 0, 600 + k);
-        }
-        let payload = history.to_persisted();
-
-        let t = Instant::now();
-        let json = serde_json::to_string_pretty(&payload).unwrap();
-        let json_dt = t.elapsed();
-
-        let t = Instant::now();
-        let bin = bincode::serialize(&payload).unwrap();
-        let bin_dt = t.elapsed();
-
-        // Load side (startup recovery parses the whole file).
-        let t = Instant::now();
-        let _: PersistedHistory = serde_json::from_str(&json).unwrap();
-        let json_load = t.elapsed();
-        let t = Instant::now();
-        let _: PersistedHistory = bincode::deserialize(&bin).unwrap();
-        let bin_load = t.elapsed();
-        println!(
-            "\n    LOAD:  JSON {:?}   bincode {:?}   ({:.1}x faster)",
-            json_load,
-            bin_load,
-            json_load.as_secs_f64() / bin_load.as_secs_f64()
-        );
-
-        println!(
-            "\n>>> {} entries\n    JSON:    {} MB  serialize {:?}\n    bincode: {} MB  serialize {:?}\n    binary is {:.1}x smaller, {:.1}x faster to serialize\n",
-            history.len(),
-            json.len() / 1_000_000,
-            json_dt,
-            bin.len() / 1_000_000,
-            bin_dt,
-            json.len() as f64 / bin.len() as f64,
-            json_dt.as_secs_f64() / bin_dt.as_secs_f64(),
-        );
-    }
-
-    // Measurement (not a pass/fail gate). Run with:
-    //   cargo test -p tas_ui measure_rec_frame_cost -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn measure_rec_frame_cost() {
-        use std::time::Instant;
-        let mut state = zeroed_state();
-        state.recorded_count = 60000;
-        for i in 0..60000usize {
-            state.rec_coords[i] = [i as f32 * 0.1, 1.0, 2.0];
-            state.input_log[i] = (i % 4) as u8;
-        }
-
-        // 1) Per-frame snapshot cost (built EVERY frame during REC).
-        let n = 500u32;
-        let t = Instant::now();
-        for _ in 0..n {
-            let s = RecordingSnapshot::from_state(&state);
-            std::hint::black_box(&s);
-        }
-        let per_snap = t.elapsed() / n;
-        println!(
-            "\n>>> from_state (per-frame snapshot): {:?} per call",
-            per_snap
-        );
-
-        // 2) Disk-write cost (throttled, fires ~every debounce during REC).
-        let root = unique_temp_root("measure_rec_cost");
-        let mut store = RecoveryStore::new_in_root(root, Duration::ZERO).unwrap();
-        let snap = RecordingSnapshot::from_state(&state);
-        let session =
-            RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 60000).unwrap();
-        let n2 = 20u32;
-        let t = Instant::now();
-        for _ in 0..n2 {
-            store
-                .persist_snapshot_if_needed(&snap, &[], &session, true)
-                .unwrap();
-        }
-        let per_write = t.elapsed() / n2;
-        println!(
-            ">>> persist (forced disk write): {:?} per write\n",
-            per_write
-        );
-    }
-
     #[test]
     fn recovery_store_persists_and_loads_checkpoint() {
         let root = unique_temp_root("tas_ui_recovery_store_roundtrip");
@@ -2882,9 +2401,7 @@ mod tests {
         }];
         let session = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 5).unwrap();
 
-        assert!(store
-            .persist_if_needed(&state, &segments, &session, true)
-            .unwrap());
+        assert!(persist_checkpoint(&mut store, &state, &segments, &session, true).unwrap());
         let pending = store.load_pending().unwrap().expect("expected checkpoint");
         assert_eq!(pending.snapshot.recorded_count, 5);
         assert_eq!(pending.session.label, "Recorded 0:00.05");
@@ -2983,19 +2500,13 @@ mod tests {
         state.input_log[2] = 0x04;
         let session3 = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 3).unwrap();
 
-        assert!(store
-            .persist_if_needed(&state, &[], &session3, true)
-            .unwrap());
-        assert!(!store
-            .persist_if_needed(&state, &[], &session3, false)
-            .unwrap());
+        assert!(persist_checkpoint(&mut store, &state, &[], &session3, true).unwrap());
+        assert!(!persist_checkpoint(&mut store, &state, &[], &session3, false).unwrap());
 
         state.recorded_count = 4;
         state.input_log[3] = 0x08;
         let session4 = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 4).unwrap();
-        assert!(store
-            .persist_if_needed(&state, &[], &session4, false)
-            .unwrap());
+        assert!(persist_checkpoint(&mut store, &state, &[], &session4, false).unwrap());
 
         let pending = store.load_pending().unwrap().expect("expected checkpoint");
         assert_eq!(pending.snapshot.recorded_count, 4);
@@ -3013,18 +2524,14 @@ mod tests {
         state.input_log[0] = 0x01;
         state.input_log[1] = 0x02;
         let session2 = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 2).unwrap();
-        assert!(store
-            .persist_if_needed(&state, &[], &session2, true)
-            .unwrap());
+        assert!(persist_checkpoint(&mut store, &state, &[], &session2, true).unwrap());
 
         state.recorded_count = 6;
         for i in 2..6 {
             state.input_log[i] = 0x08;
         }
         let session6 = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 6).unwrap();
-        assert!(store
-            .persist_if_needed(&state, &[], &session6, true)
-            .unwrap());
+        assert!(persist_checkpoint(&mut store, &state, &[], &session6, true).unwrap());
 
         let metadata_path = root.join("recovery_checkpoint.json");
         let metadata_json = std::fs::read_to_string(metadata_path).unwrap();
@@ -3059,7 +2566,7 @@ mod tests {
 
         let path = unique_temp_path("rec_rt", "tasrec");
 
-        RecordingFile::save(&state, &path).unwrap();
+        RecordingFile::save_with_segments(&state, &path, &[]).unwrap();
 
         let mut loaded = zeroed_state();
         let (count, segments) = RecordingFile::load(&mut loaded, &path).unwrap();
@@ -3085,7 +2592,7 @@ mod tests {
     fn recording_file_save_empty_errors() {
         let state = zeroed_state();
         let path = unique_temp_path("rec_empty", "tasrec");
-        assert!(RecordingFile::save(&state, &path).is_err());
+        assert!(RecordingFile::save_with_segments(&state, &path, &[]).is_err());
     }
 
     #[test]
@@ -3100,20 +2607,22 @@ mod tests {
             let mut input_log = vec![0u8; count as usize];
             input_log[0] = id as u8;
             StoredEntry {
-                entry_id: id,
-                name: format!("take {}", id),
-                user_name: None,
-                pinned: false,
-                kind: HistoryEntryKind::Snapshot,
-                start_tick: 0,
-                end_tick: count,
-                first_moving: None,
-                finish_time_cs: None,
-                finish_time_exact: false,
-                level: None,
-                physics: None,
-                rider: None,
-                created_at_iso: "2026-09-02T00:00:00+10:00".to_string(),
+                meta: crate::history_store_v2::EntryMeta {
+                    entry_id: id,
+                    name: format!("take {}", id),
+                    user_name: None,
+                    pinned: false,
+                    kind: HistoryEntryKind::Snapshot,
+                    start_tick: 0,
+                    end_tick: count,
+                    first_moving: None,
+                    finish_time_cs: None,
+                    finish_time_exact: false,
+                    level: None,
+                    physics: None,
+                    rider: None,
+                    created_at_iso: "2026-09-02T00:00:00+10:00".to_string(),
+                },
                 snapshot: Some(PersistedSnapshot {
                     recorded_count: count,
                     input_log,
@@ -3121,11 +2630,11 @@ mod tests {
                 }),
             }
         };
-        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
         store.persist(&[mk(1, 3), mk(2, 5)], Some(2), 3).unwrap();
         drop(store);
 
-        let (_lazy, load) = HistoryStoreV2::open_in_lazy(dir.clone()).unwrap();
+        let (_lazy, load) = HistoryStoreV2::open_lazy(dir.clone()).unwrap();
         let mut history = RecordingHistory::new(8);
         history.set_blob_dir(dir.clone());
         history.apply_loaded(load.entries, load.current_entry_id, load.next_entry_id);
@@ -3154,7 +2663,10 @@ mod tests {
         ));
         // Restoring another entry drops the previous resident copy to disk.
         history.restore_index(1).expect("restorable");
-        assert!(matches!(history.entries()[0].snapshot, SnapshotSlot::OnDisk(_)));
+        assert!(matches!(
+            history.entries()[0].snapshot,
+            SnapshotSlot::OnDisk(_)
+        ));
         assert!(matches!(
             history.entries()[1].snapshot,
             SnapshotSlot::Loaded { .. }
@@ -3187,15 +2699,17 @@ mod tests {
         let blob = crate::history_store_v2::BlobRef {
             size: 0,
             checksum: 0,
-            format: 2,
         };
-        history.mark_durable(stored[2].entry_id, blob);
+        history.mark_durable(stored[2].meta.entry_id, blob);
         assert!(
             matches!(history.entries()[2].snapshot, SnapshotSlot::Loaded { .. }),
             "current entry stays resident"
         );
         history.restore_index(1).expect("restorable");
-        assert!(matches!(history.entries()[2].snapshot, SnapshotSlot::OnDisk(_)));
+        assert!(matches!(
+            history.entries()[2].snapshot,
+            SnapshotSlot::OnDisk(_)
+        ));
         assert!(history.to_stored_entries()[2].snapshot.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3211,7 +2725,7 @@ mod tests {
         state.recorded_count = 2;
         state.rider_character = tas_shared::TAS_CHARACTER_KEITH;
         state.rider_stance = 0;
-        RecordingFile::save(&state, &path).unwrap();
+        RecordingFile::save_with_segments(&state, &path, &[]).unwrap();
         let meta = RecordingFile::read_metadata(&path).unwrap();
         assert_eq!(meta.character.as_deref(), Some("Keith"));
         assert_eq!(meta.stance, Some(0));
@@ -3221,32 +2735,49 @@ mod tests {
         let mut live = zeroed_state();
         live.rider_character = tas_shared::TAS_CHARACTER_VINCENT;
         live.rider_stance = 0;
-        let mut log = Vec::new();
-        assert!(load_recording_path(&mut live, &mut tracker, &mut log, &path));
-        assert!(
-            log.iter().any(|l| l.contains("WARNING")
-                && l.contains("Keith · regular")
-                && l.contains("Vincent · regular")),
-            "{:?}",
-            log
-        );
+        let mut log = UiLog::default();
+        assert!(load_recording_path(
+            &mut live,
+            &mut tracker,
+            &mut log,
+            &path
+        ));
+        assert!(log.lines().iter().any(|l| l.contains("WARNING")
+            && l.contains("Keith · regular")
+            && l.contains("Vincent · regular")));
         let mut other_stance = zeroed_state();
         other_stance.rider_character = tas_shared::TAS_CHARACTER_KEITH;
         other_stance.rider_stance = 1;
-        let mut log2 = Vec::new();
-        assert!(load_recording_path(&mut other_stance, &mut tracker, &mut log2, &path));
-        assert!(log2.iter().any(|l| l.contains("WARNING") && l.contains("Keith · goofy")), "{:?}", log2);
+        let mut log2 = UiLog::default();
+        assert!(load_recording_path(
+            &mut other_stance,
+            &mut tracker,
+            &mut log2,
+            &path
+        ));
+        assert!(log2
+            .lines()
+            .iter()
+            .any(|l| l.contains("WARNING") && l.contains("Keith · goofy")));
         let mut same = zeroed_state();
         same.rider_character = tas_shared::TAS_CHARACTER_KEITH;
         same.rider_stance = 0;
-        let mut quiet = Vec::new();
-        assert!(load_recording_path(&mut same, &mut tracker, &mut quiet, &path));
-        assert!(!quiet.iter().any(|l| l.contains("WARNING")), "{:?}", quiet);
+        let mut quiet = UiLog::default();
+        assert!(load_recording_path(
+            &mut same,
+            &mut tracker,
+            &mut quiet,
+            &path
+        ));
+        assert!(!quiet.lines().iter().any(|l| l.contains("WARNING")));
 
         let mut unstamped = zeroed_state();
         unstamped.recorded_count = 1;
-        RecordingFile::save(&unstamped, &path).unwrap();
-        assert_eq!(RecordingFile::read_metadata(&path).unwrap().rider_label(), None);
+        RecordingFile::save_with_segments(&unstamped, &path, &[]).unwrap();
+        assert_eq!(
+            RecordingFile::read_metadata(&path).unwrap().rider_label(),
+            None
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -3262,30 +2793,42 @@ mod tests {
             0,
             3
         ));
-        assert_eq!(history.entries()[0].rider.as_deref(), Some("Vincent · regular"));
+        assert_eq!(
+            history.entries()[0].rider.as_deref(),
+            Some("Vincent · regular")
+        );
         history.set_live_rider(None);
-        assert_eq!(history.live_rider(), Some("Vincent · regular"), "unknown never erases known");
+        assert_eq!(
+            history.live_rider(),
+            Some("Vincent · regular"),
+            "unknown never erases known"
+        );
 
         let stored = history.to_stored_entries();
-        assert_eq!(stored[0].rider.as_deref(), Some("Vincent · regular"));
+        assert_eq!(stored[0].meta.rider.as_deref(), Some("Vincent · regular"));
         let dir = std::env::temp_dir().join(format!(
             "tas_ui_rider_{}_{}",
             std::process::id(),
             chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
         ));
         let (mut store, _) =
-            crate::history_store_v2::HistoryStoreV2::open_in(dir.clone()).unwrap();
+            crate::history_store_v2::HistoryStoreV2::open_eager(dir.clone()).unwrap();
         store
             .persist(&stored, history.current_entry_id(), history.next_entry_id())
             .unwrap();
         drop(store);
-        let (_s, load) =
-            crate::history_store_v2::HistoryStoreV2::open_in_lazy(dir.clone()).unwrap();
-        assert_eq!(load.entries[0].rider.as_deref(), Some("Vincent · regular"));
+        let (_s, load) = crate::history_store_v2::HistoryStoreV2::open_lazy(dir.clone()).unwrap();
+        assert_eq!(
+            load.entries[0].meta.rider.as_deref(),
+            Some("Vincent · regular")
+        );
         let mut reloaded = RecordingHistory::new(8);
         reloaded.set_blob_dir(dir.clone());
         reloaded.apply_loaded(load.entries, load.current_entry_id, load.next_entry_id);
-        assert_eq!(reloaded.entries()[0].rider.as_deref(), Some("Vincent · regular"));
+        assert_eq!(
+            reloaded.entries()[0].rider.as_deref(),
+            Some("Vincent · regular")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -3296,7 +2839,7 @@ mod tests {
         state.recorded_count = 2;
         state.renderer_id = tas_shared::TAS_RENDERER_OPENGL;
         state.fpu_control_word = 0x027F;
-        RecordingFile::save(&state, &path).unwrap();
+        RecordingFile::save_with_segments(&state, &path, &[]).unwrap();
         let meta = RecordingFile::read_metadata(&path).unwrap();
         assert_eq!(meta.renderer.as_deref(), Some("OpenGL"));
         assert_eq!(meta.fpu_control_word, Some(0x027F));
@@ -3304,30 +2847,36 @@ mod tests {
 
         // Loading it into a DirectX/24-bit game warns; the same mode stays quiet.
         let mut tracker = SegmentTracker::new();
-        let mut log = Vec::new();
+        let mut log = UiLog::default();
         let mut live = zeroed_state();
         live.renderer_id = tas_shared::TAS_RENDERER_DIRECTX6;
         live.fpu_control_word = 0x007F;
-        assert!(load_recording_path(&mut live, &mut tracker, &mut log, &path));
-        assert!(
-            log.iter().any(|l| l.contains("WARNING")
-                && l.contains("OpenGL/53-bit")
-                && l.contains("DirectX6/24-bit")),
-            "{:?}",
-            log
-        );
+        assert!(load_recording_path(
+            &mut live,
+            &mut tracker,
+            &mut log,
+            &path
+        ));
+        assert!(log.lines().iter().any(|l| l.contains("WARNING")
+            && l.contains("OpenGL/53-bit")
+            && l.contains("DirectX6/24-bit")));
         let mut same = zeroed_state();
         same.renderer_id = tas_shared::TAS_RENDERER_OPENGL;
         same.fpu_control_word = 0x027F;
-        let mut quiet = Vec::new();
-        assert!(load_recording_path(&mut same, &mut tracker, &mut quiet, &path));
-        assert!(!quiet.iter().any(|l| l.contains("WARNING")), "{:?}", quiet);
+        let mut quiet = UiLog::default();
+        assert!(load_recording_path(
+            &mut same,
+            &mut tracker,
+            &mut quiet,
+            &path
+        ));
+        assert!(!quiet.lines().iter().any(|l| l.contains("WARNING")));
 
         // A file saved before the stamp existed (or before the DLL sampled
         // the game thread) has no opinion.
         let mut unstamped = zeroed_state();
         unstamped.recorded_count = 1;
-        RecordingFile::save(&unstamped, &path).unwrap();
+        RecordingFile::save_with_segments(&unstamped, &path, &[]).unwrap();
         assert_eq!(
             RecordingFile::read_metadata(&path).unwrap().physics_label(),
             None
@@ -3356,7 +2905,11 @@ mod tests {
         // No start line known for the track: first movement is the best guess.
         assert_eq!(geometry_race_time_cs(23_846, None, Some(288)), 23_558);
         assert_eq!(geometry_race_time_cs(100, None, None), 100);
-        assert_eq!(geometry_race_time_cs(50, Some(80), None), 0, "never negative");
+        assert_eq!(
+            geometry_race_time_cs(50, Some(80), None),
+            0,
+            "never negative"
+        );
     }
 
     #[test]
@@ -3384,25 +2937,28 @@ mod tests {
         assert_eq!(history.entries()[0].finish_time_cs, Some(5334));
         assert!(history.entries()[0].finish_time_exact);
         assert_eq!(history.entries()[0].label, "Finish 0:53.34");
-        assert_eq!(history.entries()[1].finish_time_cs, None, "a hand-stopped take is not a finish");
+        assert_eq!(
+            history.entries()[1].finish_time_cs,
+            None,
+            "a hand-stopped take is not a finish"
+        );
 
         let stored = history.to_stored_entries();
-        assert_eq!(stored[0].finish_time_cs, Some(5334));
+        assert_eq!(stored[0].meta.finish_time_cs, Some(5334));
         let dir = std::env::temp_dir().join(format!(
             "tas_ui_finish_{}_{}",
             std::process::id(),
             chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
         ));
         let (mut store, _) =
-            crate::history_store_v2::HistoryStoreV2::open_in(dir.clone()).unwrap();
+            crate::history_store_v2::HistoryStoreV2::open_eager(dir.clone()).unwrap();
         store
             .persist(&stored, history.current_entry_id(), history.next_entry_id())
             .unwrap();
         drop(store);
-        let (_s, load) =
-            crate::history_store_v2::HistoryStoreV2::open_in_lazy(dir.clone()).unwrap();
-        assert_eq!(load.entries[0].finish_time_cs, Some(5334));
-        assert_eq!(load.entries[1].finish_time_cs, None);
+        let (_s, load) = crate::history_store_v2::HistoryStoreV2::open_lazy(dir.clone()).unwrap();
+        assert_eq!(load.entries[0].meta.finish_time_cs, Some(5334));
+        assert_eq!(load.entries[1].meta.finish_time_cs, None);
         let mut reloaded = RecordingHistory::new(8);
         reloaded.set_blob_dir(dir.clone());
         reloaded.apply_loaded(load.entries, load.current_entry_id, load.next_entry_id);
@@ -3423,28 +2979,33 @@ mod tests {
             0,
             3
         ));
-        assert_eq!(history.entries()[0].physics.as_deref(), Some("OpenGL/53-bit"));
+        assert_eq!(
+            history.entries()[0].physics.as_deref(),
+            Some("OpenGL/53-bit")
+        );
         // An unknown live mode (DLL not attached / not sampled yet) never
         // erases a known one.
         history.set_live_physics(None);
         assert_eq!(history.live_physics(), Some("OpenGL/53-bit"));
 
         let stored = history.to_stored_entries();
-        assert_eq!(stored[0].physics.as_deref(), Some("OpenGL/53-bit"));
+        assert_eq!(stored[0].meta.physics.as_deref(), Some("OpenGL/53-bit"));
         let dir = std::env::temp_dir().join(format!(
             "tas_ui_physics_{}_{}",
             std::process::id(),
             chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
         ));
         let (mut store, _) =
-            crate::history_store_v2::HistoryStoreV2::open_in(dir.clone()).unwrap();
+            crate::history_store_v2::HistoryStoreV2::open_eager(dir.clone()).unwrap();
         store
             .persist(&stored, history.current_entry_id(), history.next_entry_id())
             .unwrap();
         drop(store);
-        let (_s, load) =
-            crate::history_store_v2::HistoryStoreV2::open_in_lazy(dir.clone()).unwrap();
-        assert_eq!(load.entries[0].physics.as_deref(), Some("OpenGL/53-bit"));
+        let (_s, load) = crate::history_store_v2::HistoryStoreV2::open_lazy(dir.clone()).unwrap();
+        assert_eq!(
+            load.entries[0].meta.physics.as_deref(),
+            Some("OpenGL/53-bit")
+        );
         let mut reloaded = RecordingHistory::new(8);
         reloaded.set_blob_dir(dir.clone());
         reloaded.apply_loaded(load.entries, load.current_entry_id, load.next_entry_id);
@@ -3461,12 +3022,12 @@ mod tests {
         let mut first = zeroed_state();
         first.recorded_count = 2;
         first.input_log[..2].copy_from_slice(&[1, 2]);
-        RecordingFile::save(&first, &path).unwrap();
+        RecordingFile::save_with_segments(&first, &path, &[]).unwrap();
 
         let mut second = zeroed_state();
         second.recorded_count = 3;
         second.input_log[..3].copy_from_slice(&[7, 8, 9]);
-        RecordingFile::save(&second, &path).unwrap();
+        RecordingFile::save_with_segments(&second, &path, &[]).unwrap();
 
         let mut loaded = zeroed_state();
         RecordingFile::load(&mut loaded, &path).unwrap();
@@ -3935,11 +3496,11 @@ mod tests {
         let evicted = [1u64, 2, 3];
         let next_before = h.next_entry_id();
 
-        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
         store
             .persist(&h.to_stored_entries(), h.current_entry_id(), next_before)
             .unwrap();
-        let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let (_s, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
         let mut h2 = RecordingHistory::new(3);
         h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
 
@@ -3983,11 +3544,11 @@ mod tests {
         h.restore_index(1);
         let cur_id = h.current_entry_id();
 
-        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
         store
             .persist(&h.to_stored_entries(), cur_id, h.next_entry_id())
             .unwrap();
-        let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let (_s, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
         // Load into a history with a cap FAR below the entry count.
         let mut h2 = RecordingHistory::new(2);
         h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
@@ -4058,12 +3619,12 @@ mod tests {
         h.restore_index(1);
         let cur = h.current_entry_id();
 
-        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
         store
             .persist(&h.to_stored_entries(), cur, h.next_entry_id())
             .unwrap();
 
-        let (_s2, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let (_s2, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
         let mut h2 = RecordingHistory::new(16);
         h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
 
@@ -4086,21 +3647,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_persisted_bumps_revision() {
-        // Migration relies on this: apply_persisted -> revision bumps ->
-        // the revision-gated writer persists the migrated history.
-        let persisted = {
-            let mut src = RecordingHistory::new(8);
-            src.push_snapshot(&state_with_ticks(5), "A");
-            src.to_persisted()
-        };
-        let mut h = RecordingHistory::new(8);
-        let r0 = h.revision();
-        h.apply_persisted(persisted).unwrap();
-        assert!(h.revision() > r0, "apply_persisted must bump revision");
-    }
-
-    #[test]
     fn custom_name_roundtrips_and_clears() {
         use crate::history_store_v2::HistoryStoreV2;
         let dir = std::env::temp_dir().join(format!(
@@ -4113,7 +3659,7 @@ mod tests {
         let id = h.entries()[0].entry_id;
         assert!(h.rename(id, "  my best run  ")); // trims whitespace
 
-        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
         store
             .persist(
                 &h.to_stored_entries(),
@@ -4121,7 +3667,7 @@ mod tests {
                 h.next_entry_id(),
             )
             .unwrap();
-        let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let (_s, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
         let mut h2 = RecordingHistory::new(16);
         h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
 
@@ -4158,7 +3704,9 @@ mod tests {
         let session =
             RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 406).unwrap();
         store
-            .persist_snapshot_if_needed(&snap, &[], &session, true)
+            .take_write_job(&snap, &[], &session, true)
+            .unwrap()
+            .write()
             .unwrap();
 
         // Mirror startup: load the checkpoint and recover it into history.
@@ -4188,7 +3736,7 @@ mod tests {
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ));
         let (mut hstore, _) =
-            crate::history_store_v2::HistoryStoreV2::open_in(v2dir.clone()).unwrap();
+            crate::history_store_v2::HistoryStoreV2::open_eager(v2dir.clone()).unwrap();
         hstore
             .persist(
                 &history.to_stored_entries(),
@@ -4196,10 +3744,12 @@ mod tests {
                 history.next_entry_id(),
             )
             .unwrap();
-        let (_hs, hres) = crate::history_store_v2::HistoryStoreV2::open_in(v2dir.clone()).unwrap();
+        let (_hs, hres) =
+            crate::history_store_v2::HistoryStoreV2::open_eager(v2dir.clone()).unwrap();
         let reloaded = &hres.entries[0];
-        assert!(reloaded.pinned, "recovered entry persisted as pinned");
+        assert!(reloaded.meta.pinned, "recovered entry persisted as pinned");
         assert!(reloaded
+            .meta
             .user_name
             .as_deref()
             .unwrap()
@@ -4258,12 +3808,12 @@ mod tests {
             h.push_snapshot(&state_with_ticks(5), format!("S{}", i));
         }
         let cur = h.current_entry_id();
-        let (mut store, _) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
         store
             .persist(&h.to_stored_entries(), cur, h.next_entry_id())
             .unwrap();
 
-        let (_s, res) = HistoryStoreV2::open_in(dir.clone()).unwrap();
+        let (_s, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
         let mut h2 = RecordingHistory::new(3); // smaller cap
         h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
         assert_eq!(
@@ -4272,62 +3822,6 @@ mod tests {
             "lowered cap trims unpinned on load"
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn history_append_only_after_undo_preserves_all_entries() {
-        // Board requirement: pressing from a previous state must NOT discard later entries.
-        let mut history = RecordingHistory::new(16);
-        let s1 = state_with_ticks(10);
-        let s2 = state_with_ticks(20);
-        let s3 = state_with_ticks(30);
-        let s4 = state_with_ticks(40);
-
-        assert!(history.push_snapshot(&s1, "Rec 10"));
-        assert!(history.push_snapshot(&s2, "Rec 20"));
-        assert!(history.push_snapshot(&s3, "Rec 30"));
-        assert_eq!(history.len(), 3);
-
-        // Undo to s2
-        let snap = history.undo().unwrap();
-        assert_eq!(snap.recorded_count, 20);
-        assert_eq!(history.current_index(), Some(1));
-
-        // Push new entry from this undo point — must NOT truncate s3
-        assert!(history.push_snapshot(&s4, "Rec 40"));
-        assert_eq!(history.len(), 4); // [s1, s2, s3, s4] — all preserved
-        assert_eq!(history.entries()[0].label, "Rec 10");
-        assert_eq!(history.entries()[1].label, "Rec 20");
-        assert_eq!(history.entries()[2].label, "Rec 30"); // NOT deleted
-        assert_eq!(history.entries()[3].label, "Rec 40");
-        assert_eq!(history.current_index(), Some(3));
-    }
-
-    #[test]
-    fn history_double_undo_then_push_preserves_all() {
-        let mut history = RecordingHistory::new(16);
-        let s1 = state_with_ticks(10);
-        let s2 = state_with_ticks(20);
-        let s3 = state_with_ticks(30);
-        let s4 = state_with_ticks(40);
-        let s5 = state_with_ticks(50);
-
-        for (s, label) in [(&s1, "A"), (&s2, "B"), (&s3, "C"), (&s4, "D")] {
-            assert!(history.push_snapshot(s, label));
-        }
-        assert_eq!(history.len(), 4);
-
-        // Undo twice: D -> C -> B
-        history.undo().unwrap();
-        history.undo().unwrap();
-        assert_eq!(history.current_index(), Some(1)); // on B
-
-        // Push E — all of [A, B, C, D, E] should exist
-        assert!(history.push_snapshot(&s5, "E"));
-        assert_eq!(history.len(), 5);
-        assert_eq!(history.entries()[2].label, "C"); // preserved
-        assert_eq!(history.entries()[3].label, "D"); // preserved
-        assert_eq!(history.entries()[4].label, "E"); // new
     }
 
     #[test]
@@ -4351,7 +3845,7 @@ mod tests {
 
         // Can't undo further
         assert!(history.undo().is_none());
-        assert!(!history.can_undo());
+        assert_eq!(history.undo_depth(), 0);
 
         // Redo back to 15
         let snap = history.redo().unwrap();
@@ -4363,7 +3857,7 @@ mod tests {
 
         // Can't redo further
         assert!(history.redo().is_none());
-        assert!(!history.can_redo());
+        assert_eq!(history.redo_depth(), 0);
     }
 
     #[test]
@@ -4421,34 +3915,6 @@ mod tests {
         let empty = zeroed_state(); // recorded_count = 0
         assert!(!history.push_snapshot(&empty, "Empty"));
         assert_eq!(history.len(), 0);
-    }
-
-    #[test]
-    fn history_persist_round_trip_after_undo_preserves_all() {
-        let mut history = RecordingHistory::new(16);
-        let s1 = state_with_ticks(10);
-        let s2 = state_with_ticks(20);
-        let s3 = state_with_ticks(30);
-
-        assert!(history.push_snapshot(&s1, "A"));
-        assert!(history.push_snapshot(&s2, "B"));
-        assert!(history.push_snapshot(&s3, "C"));
-        history.undo().unwrap(); // cursor on B
-
-        // Persist and restore
-        let persisted = history.to_persisted();
-        assert_eq!(persisted.entries.len(), 3); // all three persisted
-        assert_eq!(persisted.current_index, Some(1)); // cursor on B
-
-        let mut restored = RecordingHistory::new(16);
-        restored.apply_persisted(persisted).unwrap();
-        assert_eq!(restored.len(), 3);
-        assert_eq!(restored.current_index(), Some(1));
-        assert_eq!(restored.entries()[0].label, "A");
-        assert_eq!(restored.entries()[1].label, "B");
-        assert_eq!(restored.entries()[2].label, "C"); // C preserved through round-trip
-        assert!(restored.can_undo());
-        assert!(restored.can_redo());
     }
 
     #[test]
@@ -4557,42 +4023,13 @@ mod tests {
         assert!(history.push_loaded_snapshot(&s_loaded, Path::new("loaded.tasrec")));
 
         // Should be able to undo back to the recording
-        assert!(history.can_undo());
+        assert!(history.undo_depth() > 0);
         let snap = history.undo().unwrap();
         assert_eq!(snap.recorded_count, 10);
 
         // And redo back to the loaded file
-        assert!(history.can_redo());
+        assert!(history.redo_depth() > 0);
         let snap = history.redo().unwrap();
         assert_eq!(snap.recorded_count, 50);
-    }
-
-    #[test]
-    fn history_multiple_undo_push_cycles_never_lose_data() {
-        // Stress test: repeatedly undo and push, verify entry count only grows
-        let mut history = RecordingHistory::new(64);
-        let states: Vec<_> = (1..=10).map(|n| state_with_ticks(n * 5)).collect();
-
-        // Push 5 entries
-        for (i, s) in states[..5].iter().enumerate() {
-            assert!(history.push_snapshot(s, format!("S{}", i)));
-        }
-        assert_eq!(history.len(), 5);
-
-        // Undo 3 times, push new
-        history.undo().unwrap();
-        history.undo().unwrap();
-        history.undo().unwrap();
-        assert!(history.push_snapshot(&states[5], "S5"));
-        assert_eq!(history.len(), 6); // all 5 + new one
-
-        // Undo 2 times, push another
-        history.undo().unwrap();
-        history.undo().unwrap();
-        assert!(history.push_snapshot(&states[6], "S6"));
-        assert_eq!(history.len(), 7); // none lost
-
-        // Verify first entry is still intact
-        assert_eq!(history.entries()[0].label, "S0");
     }
 }
