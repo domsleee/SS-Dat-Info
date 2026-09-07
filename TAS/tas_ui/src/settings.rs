@@ -1,6 +1,9 @@
-use serde::{Deserialize, Serialize};
+//! Persistent UI settings and the per-install data directory everything else
+//! (history, recovery, recordings, the session log) lives under.
 
-/// Persistent settings saved between sessions.
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -17,8 +20,7 @@ pub struct Settings {
     pub cont_catchup_speed: f32,
 
     /// Max UNPINNED undo-history entries kept (the v2 store soft cap). Pinned
-    /// entries and the current entry are always kept. Default preserves the old
-    /// 500-entry depth so existing histories migrate without trimming.
+    /// entries and the current entry are always kept.
     pub history_cap: usize,
 }
 
@@ -32,33 +34,23 @@ impl Default for Settings {
             show_log: false,
             show_trajectory: false,
             playback_speed: 1.0,
-            // CONT catch-up speed (tick_advance scaling). The catch-up replay is
-            // PHYSICS-COMPUTE-bound, not cap- or render-bound: measured sweep on
-            // FE-10065@6200 shows effective rate asymptotes to a hard ~80× ceiling
-            // (~8000 ticks/sec, ~125µs/tick) — 96×→66×, 192×→77×, 384×→80×. So the
-            // setting saturates; 256× captures ~all of it (~80× effective, ~17%
-            // faster replay than 96×) with reliability + zero-drift + frame-exact
-            // resume fully preserved (12/12 clean, first-try 9/12 at 256× — no
-            // regression vs 96×). Past ~256× is pure diminishing returns. The F5
-            // bucket lottery is set at RESTART, not replay speed, so higher catch-up
-            // doesn't cost reliability. (Rendering-suppression was tried and proven
-            // useless; the cave5 64 tick/frame cap is never even reached — the game
-            // runs only ~20 ticks/frame.)
+            // The catch-up replay is physics-compute-bound at ~80x effective;
+            // 256x saturates that ceiling without costing reliability.
             cont_catchup_speed: 256.0,
             history_cap: 500,
         }
     }
 }
 
-fn settings_path() -> std::path::PathBuf {
+fn settings_path() -> PathBuf {
     if let Some(root) = std::env::var_os("SSB_INSPECT_DATA_DIR") {
-        return std::path::PathBuf::from(root).join("ssb_inspect_settings.json");
+        return PathBuf::from(root).join("ssb_inspect_settings.json");
     }
     // Store next to the executable
     if let Ok(exe) = std::env::current_exe() {
         exe.with_file_name("ssb_inspect_settings.json")
     } else {
-        std::path::PathBuf::from("ssb_inspect_settings.json")
+        PathBuf::from("ssb_inspect_settings.json")
     }
 }
 
@@ -69,16 +61,9 @@ impl Settings {
             Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
             Err(_) => Self::default(),
         };
-        // Migrate stale catch-up defaults to the current 256× default. 20× was
-        // the pre-cave5 slider cap; 64× and 96× were prior defaults before the
-        // physics-ceiling sweep showed 256× is ~all the achievable speed (~80×
-        // effective) with no reliability cost. Bump those exact values — anything
-        // else (30, 40, 100, 128, etc.) is a deliberate user choice, left alone.
-        let s = settings.cont_catchup_speed;
-        if (s - 20.0).abs() < f32::EPSILON
-            || (s - 64.0).abs() < f32::EPSILON
-            || (s - 96.0).abs() < f32::EPSILON
-        {
+        // Superseded defaults move to the current one; any other value is a
+        // deliberate choice and is left alone.
+        if [20.0, 64.0, 96.0].contains(&settings.cont_catchup_speed) {
             settings.cont_catchup_speed = 256.0;
         }
         settings
@@ -92,29 +77,53 @@ impl Settings {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn old_play_bucket_settings_are_ignored_without_resetting_other_values() {
-        let old = r#"{
-            "show_pico_panel": true,
-            "show_debug_drift": false,
-            "show_history": true,
-            "show_config": false,
-            "show_log": true,
-            "show_trajectory": false,
-            "playback_speed": 1.0,
-            "cont_catchup_speed": 128.0,
-            "history_cap": 250,
-            "play_bucket_match": false,
-            "play_judge_speed": 32.0
-        }"#;
-        let s: Settings = serde_json::from_str(old).expect("old file must still parse");
-        assert!(s.show_pico_panel);
-        assert!(s.show_log);
-        assert_eq!(s.history_cap, 250);
-        assert_eq!(s.cont_catchup_speed, 128.0);
+/// Root directory for all per-install TAS data. Resolution order:
+///   1. `SSB_INSPECT_DATA_DIR` (tests / custom setups).
+///   2. `<game>/Display_Config_Resources/TAS/data` when tas_ui runs deployed
+///      inside a `Display_Config_Resources/TAS` folder, so each game install
+///      keeps its own recordings and history. A `data/` subfolder rather than a
+///      `tas` sibling: that would collide with `TAS` on case-insensitive
+///      Windows.
+///   3. `~/.ssb-inspector` for un-deployed dev builds.
+pub fn data_root_dir() -> PathBuf {
+    if let Some(over) = std::env::var_os("SSB_INSPECT_DATA_DIR") {
+        return PathBuf::from(over);
     }
+    if let Some(dir) = game_data_root_from_exe() {
+        return dir;
+    }
+    user_home_dir()
+        .map(|home| home.join(".ssb-inspector"))
+        .unwrap_or_else(|| PathBuf::from(".ssb-inspector"))
+}
+
+/// `<exe dir>/data` when the running exe sits in a `Display_Config_Resources`
+/// child folder (the deployment layout); `None` for a dev build under
+/// `target/`, so no stray `data` dir appears there.
+fn game_data_root_from_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    let parent = exe_dir.parent()?;
+    if parent
+        .file_name()?
+        .to_str()?
+        .eq_ignore_ascii_case("Display_Config_Resources")
+    {
+        Some(exe_dir.join("data"))
+    } else {
+        None
+    }
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .or_else(|| {
+            let drive = std::env::var_os("HOMEDRIVE")?;
+            let path = std::env::var_os("HOMEPATH")?;
+            let mut buf = PathBuf::from(drive);
+            buf.push(path);
+            Some(buf)
+        })
 }

@@ -1,26 +1,15 @@
-//! End-to-end save/reload/replay test.
-//!
-//! Validates that the full record-save-reload-replay workflow produces zero
-//! drift across game restarts. This is the workflow tas_ui exercises in real
-//! use, and the one no other test mode covers:
+//! End-to-end save/reload/replay test: the workflow tas_ui exercises in real
+//! use, and the one no other mode covers.
 //!
 //!   1. Record a fresh trajectory in this session (via Pico HID).
 //!   2. Save the recording to a `.tasrec` file on disk.
-//!   3. Kill the game (terminate Supreme.exe).
+//!   3. Kill the game.
 //!   4. Revive — fresh game, fresh DLL injection, fresh shared memory.
-//!   5. Load the `.tasrec` from disk into shared memory.
-//!   6. Replay it.
-//!   7. Verify zero drift (rec_coords vs play_coords bit-identical).
+//!   5. Load the `.tasrec` from disk into shared memory and replay it.
+//!   6. Verify zero drift (rec_coords vs play_coords bit-identical).
 //!
-//! Pass criterion: exit code 0 + zero drift on the cross-session replay.
-//!
-//! Fails if anything in the persistence path corrupts state: incomplete
-//! capture (e.g. rotation/velocity not preserved), reload bug, or any
-//! mismatch between record-time and replay-time game state that can't be
-//! reconstructed from the file alone.
+//! Fails if anything in the persistence path loses state the replay needs.
 
-use std::path::PathBuf;
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -31,11 +20,9 @@ use crate::harness;
 use crate::patterns;
 use crate::replay;
 
-/// Record for long enough that the 1000-frame trajectory match exercises a
-/// full window of post-stationary, post-initial-input motion — not just a
-/// short blip. At 1x speed (100 ticks/s) we need ~11 seconds of game time
-/// to fill 1100 ticks; pattern + tail yields ~1200 ticks so playback exits
-/// match-verification with the recording still running.
+/// Long enough that the 1000-frame trajectory match covers real post-input
+/// motion: pattern + tail is ~1200 ticks, so the match window closes with the
+/// recording still running.
 const REC_DURATION_SECS: u64 = 13;
 const PATTERN: &str = "LR";
 const HOLD_TICKS: u32 = 500;
@@ -44,17 +31,12 @@ const TAIL_NEUTRAL_TICKS: u32 = 200;
 pub fn run() -> bool {
     println!("=== Save / Reload / Replay End-to-End Test ===\n");
 
-    // ---- Phase 1: Record fresh ----
     println!("--- Phase 1: Record fresh trajectory ---");
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
 
-    // Use Pico F5 restart for REC. Both REC and PLAY then use the same
-    // restart_and_stabilize timing (~16s), so the snowboarder slides the
-    // same amount before rec_coords[0] / play_coords[0] is captured.
-    // Position match alone is sufficient because at this slide endpoint
-    // the rotation is determined by the F5 bucket (same as f5-probe shows
-    // at F5 spawn — buckets are session-stable).
+    // Pico F5 for both REC and PLAY, so the boarder slides the same amount
+    // before rec_coords[0] / play_coords[0] is captured.
     if !harness::restart_and_stabilize(&client) {
         eprintln!("ERROR: Game not alive for REC");
         return false;
@@ -62,13 +44,10 @@ pub fn run() -> bool {
 
     harness::arm_rec(&mut client);
 
-    let mut steps = patterns::build_from_pattern(PATTERN, HOLD_TICKS, 0);
-    let last_stop = patterns::total_ticks(&steps);
-    steps.push(patterns::PatternStep {
-        name: "TAIL".into(),
-        mask: 0x00,
-        stop_tick: last_stop + TAIL_NEUTRAL_TICKS,
-    });
+    let steps = patterns::with_neutral_tail(
+        patterns::build_from_pattern(PATTERN, HOLD_TICKS, 0),
+        TAIL_NEUTRAL_TICKS,
+    );
     println!(
         "  Driving Pico HID: {} hold={} + {}t tail ({} total ticks)",
         PATTERN,
@@ -109,7 +88,6 @@ pub fn run() -> bool {
         rec_count, transitions, rec_start[0], rec_start[1], rec_start[2]
     );
 
-    // ---- Phase 2: Save to disk ----
     let out_dir = crate::output_dir();
     let tasrec_path = out_dir.join("save_reload_test.tasrec");
     println!(
@@ -139,13 +117,11 @@ pub fn run() -> bool {
     }
     println!("  Saved {} ticks to disk", count);
 
-    // ---- Phase 3: Kill game, force fresh revive ----
     println!("\n--- Phase 3: Kill game (force fresh state) ---");
     drop(client);
-    kill_game();
+    harness::kill_game();
     thread::sleep(Duration::from_millis(800));
 
-    // ---- Phase 4: Revive, reload from disk ----
     println!("\n--- Phase 4: Revive game + reload recording ---");
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
@@ -167,9 +143,7 @@ pub fn run() -> bool {
 
     let target = loaded.rec_coords[0];
 
-    // ---- Phase 5: Replay against reloaded recording ----
     println!("\n--- Phase 5: Replay reloaded recording ---");
-    // PLAY uses the same Pico F5 path as REC so slide timing matches.
     let matched =
         harness::restart_play_and_match(&mut client, target, harness::START_MATCH_RETRIES);
     if !matched {
@@ -244,16 +218,3 @@ pub fn run() -> bool {
 
     zero_drift
 }
-
-fn kill_game() {
-    let _ = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Get-Process Supreme,tas_ui,Display_Config -ErrorAction SilentlyContinue | Stop-Process -Force",
-        ])
-        .output();
-}
-
-#[allow(dead_code)]
-fn _ensure_output_dir(_p: &PathBuf) {}

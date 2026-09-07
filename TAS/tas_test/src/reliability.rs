@@ -1,13 +1,7 @@
-//! Reliability test: N consecutive REC+PLAY cycles at a given speed with steering.
-//!
-//! Validates that the zero-drift property holds reliably across multiple
-//! consecutive runs at elevated playback speeds (e.g. 12x catch-up).
-//!
-//! Strategy: Both REC and PLAY run at the same target speed. Since speed
-//! scaling is physics-transparent (SSB-186), this tests the full 12x pipeline
-//! without position matching issues from mixed-speed stabilization.
-//!
-//! SSB-247: 10x retries at 12x catch-up speed with steering.
+//! Reliability test: N consecutive steered REC+PLAY cycles at one speed, each
+//! with zero drift. REC and PLAY run at the same speed (speed scaling is
+//! physics-transparent), so the full catch-up pipeline is exercised without
+//! mixed-speed stabilization affecting the position match.
 
 use crate::{drift, gates, harness, patterns};
 use std::thread;
@@ -28,8 +22,6 @@ pub struct CycleResult {
     pub max_drift_x: f64,
     pub max_drift_y: f64,
     pub max_drift_z: f64,
-    pub max_drift_frame_x: usize,
-    pub max_drift_frame_z: usize,
     pub position_matched: bool,
     pub playback_complete: bool,
     pub all_gates_pass: bool,
@@ -115,22 +107,23 @@ impl ReliabilityReport {
     }
 }
 
-pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
+pub fn run(iterations: u32, speed: f32) -> bool {
     println!(
-        "=== Reliability Test: {}x REC+PLAY at {}x speed (SSB-247) ===\n",
+        "=== Reliability Test: {}x REC+PLAY at {}x speed ===\n",
         iterations, speed
     );
 
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
 
-    // tas_ui (if running) writes playback_speed = 1.0 every frame from its
-    // in-memory state, which clobbers our speed setting and collapses the
-    // test back to 1× rate. Kill it before doing speed-sensitive work.
+    // tas_ui writes playback_speed = 1.0 every frame from its own state, which
+    // would collapse the test back to 1x.
     harness::ensure_exclusive_runtime_ownership(&mut client, "reliability speed scaling");
 
     harness::assert_proven_config(&client);
-    assert_eq!(client.state().cave5_hooked, 1, "Cave 5 must be hooked for speed test");
+    if !harness::require_speed_preconditions(&client) {
+        return false;
+    }
 
     let mut results = Vec::new();
 
@@ -139,36 +132,22 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
         println!("  Cycle {}/{}", i, iterations);
         println!("{}", "=".repeat(60));
 
-        // ---- REC phase (at target speed) ----
-        // Both REC and PLAY run at the same speed. Since speed scaling only
-        // changes the per-tick time advance constant (Cave 5), the physics
-        // step per tick is identical. This means same-speed REC+PLAY produces
-        // zero drift, which validates the 12x pipeline end-to-end.
         client.state_mut().playback_speed = speed;
         println!("\n--- REC at {}x ---", speed);
 
         if !harness::restart_and_stabilize(&client) {
             eprintln!("ERROR: Game not alive for REC cycle {}", i);
-            std::process::exit(1);
+            return false;
         }
 
-        // No explicit focus_game here: send_f5_pico (called inside
-        // restart_and_stabilize) already focuses the game window, and an
-        // extra focus_game adds ~400ms of slide before rec_coords[0] is
-        // captured — which is then NOT matched by PLAY's faster sampling
-        // (~150ms after stabilize). The resulting consistent ~1-unit X and
-        // ~5-unit Z offset breaks restart_play_and_match position matching
-        // and the test fails 10/10 cycles despite zero post-match drift.
+        // No focus_game between restart and arm: the extra ~400 ms of slide
+        // before rec_coords[0] is captured breaks the PLAY position match.
         harness::arm_rec(&mut client);
 
-        // Build steering pattern + neutral tail
-        let mut steps = patterns::build_from_pattern(PATTERN, HOLD_TICKS, GAP_TICKS);
-        let last_stop = patterns::total_ticks(&steps);
-        steps.push(patterns::PatternStep {
-            name: "TAIL".into(),
-            mask: 0x00,
-            stop_tick: last_stop + TAIL_NEUTRAL_TICKS,
-        });
+        let steps = patterns::with_neutral_tail(
+            patterns::build_from_pattern(PATTERN, HOLD_TICKS, GAP_TICKS),
+            TAIL_NEUTRAL_TICKS,
+        );
 
         println!(
             "  Driving Pico HID: {} + {}t tail ({} total ticks)",
@@ -199,13 +178,9 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
                 "ERROR: Too few ticks recorded ({}) in cycle {}",
                 rec_count, i
             );
-            std::process::exit(1);
+            return false;
         }
 
-        // ---- PLAY phase (at same target speed) ----
-        // Keep speed at the same value for PLAY. Position matching uses
-        // natural F5 retries (no forcing needed since both phases run at
-        // the same speed and stabilization time).
         println!("\n--- PLAY at {}x (same-speed) ---", speed);
 
         let matched =
@@ -246,15 +221,12 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
             max_drift_x: d.max_drift_x,
             max_drift_y: d.max_drift_y,
             max_drift_z: d.max_drift_z,
-            max_drift_frame_x: d.max_drift_frame_x,
-            max_drift_frame_z: d.max_drift_frame_z,
             position_matched: matched,
             playback_complete: play_ok,
             all_gates_pass: assessment.all_pass(),
         });
     }
 
-    // Reset speed
     client.state_mut().playback_speed = 1.0;
     println!("\nReset playback_speed to 1.0");
 
@@ -265,5 +237,5 @@ pub fn run(iterations: u32, speed: f32) -> ReliabilityReport {
     };
 
     report.print_summary();
-    report
+    report.all_pass()
 }

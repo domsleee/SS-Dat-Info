@@ -1,15 +1,8 @@
 //! TAS test runner CLI for Supreme Snowboarding.
 //!
-//! Modes:
-//!   smoke       — Basic REC/PLAY without F5 alignment
-//!   f5          — F5-aligned straight-line REC/PLAY (zero-drift baseline)
-//!   regression  — 15-case regression suite with CSV output
-//!   acceptance  — 3-phase acceptance test (baseline, steered REC, PLAY)
-//!   speed       — Playback speed verification (0.25x, 1x, 2x)
-//!   speed-reset — Speed reset verification (2x stop restores normal)
-//!   drift-speed — Drift-at-speed verification (2x same-speed, 1x/2x cross-speed)
-//!   replay      — Load .tasrec file and replay N times, checking drift each time
-//!   cont-reliability — CONT splice reliability test at long frame offsets
+//! [`MODES`] is the one list of modes: it is the dispatcher and the source of
+//! `tas_test help`, so a mode cannot exist without its help line. Every mode
+//! exits 0 on pass, 1 on fail and 2 on a command-line error.
 
 mod acceptance;
 mod benchmark;
@@ -24,11 +17,14 @@ mod cont_ui;
 mod dialog_e2e;
 mod drift;
 mod drift_speed;
+mod f5;
 mod gate_align;
 mod gates;
 mod harness;
 mod level_seq;
 mod live_suite;
+mod load;
+mod menu;
 mod patterns;
 mod pause_resume;
 mod play_judge;
@@ -40,7 +36,9 @@ mod regression;
 mod reliability;
 mod replay;
 mod save_reload;
+mod segment;
 mod shm;
+mod smoke;
 mod speed;
 mod speed_reset;
 mod steer_impact;
@@ -50,691 +48,379 @@ mod win32;
 
 use std::path::PathBuf;
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("help");
+use cli::{flag, pair, switch, usage_error, Flags, Spec};
 
-    match mode {
-        "shm" => {
-            if let Err(error) = shm::run(&args[2..]) {
-                eprintln!("SHM: {error}");
-                std::process::exit(1);
-            }
-        }
-        "live" => {
-            if let Err(error) = live_suite::run(&args[2..], output_dir()) {
-                eprintln!("LIVE SUITE FAILED: {error}");
-                std::process::exit(1);
-            }
-        }
-        "cont-ui-left-spam" => {
-            if let Err(error) = cont_ui::run(&args[2..]) {
-                eprintln!("CONT UI LEFT-SPAM FAILED: {error}");
-                std::process::exit(1);
-            }
-        }
-        "smoke" => run_smoke_test(),
-        "f5" => run_f5_aligned_test(),
-        "segment" => run_segment_test(),
-        "regression" => {
-            let out = output_dir();
-            let cache_dir = out.join("regression_cache");
-            let csv_path = out.join("regression_results.csv");
-            let cert_path = out.join("regression_certificate.json");
-            let results = regression::run(&cache_dir, &csv_path);
-            certificate::write_regression_certificate(&results, &csv_path, &cert_path);
-            let passed = results.iter().filter(|r| r.all_gates_pass).count();
-            std::process::exit(if passed == results.len() { 0 } else { 1 });
-        }
-        "acceptance" => {
-            let out = output_dir();
-            let cert_path = out.join("acceptance_certificate.json");
-            let iterations = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(5u32);
-            if iterations == 0 {
-                eprintln!("acceptance iteration count must be at least 1");
-                std::process::exit(2);
-            }
-            let mut last_result = None;
-            let mut passed = 0u32;
-            for i in 1..=iterations {
-                println!(
-                    "\n========== Acceptance run {}/{} ==========",
-                    i, iterations
-                );
-                let result = acceptance::run();
-                if result.all_pass() {
-                    passed += 1;
-                    println!("Acceptance run {}/{} PASSED", i, iterations);
-                } else {
-                    println!("Acceptance run {}/{} FAILED — aborting", i, iterations);
-                    last_result = Some(result);
-                    break;
-                }
-                last_result = Some(result);
-            }
-            if let Some(result) = last_result.as_ref() {
-                certificate::write_acceptance_certificate(result, &cert_path);
-            }
-            println!(
-                "\n=== Acceptance: {}/{} runs passed ===",
-                passed, iterations
-            );
-            std::process::exit(if passed == iterations { 0 } else { 1 });
-        }
-        "speed" => {
-            let result = speed::run();
-            std::process::exit(if result.all_pass() { 0 } else { 1 });
-        }
-        "speed-reset" => {
-            let result = speed_reset::run();
-            std::process::exit(if result.all_pass() { 0 } else { 1 });
-        }
-        "drift-speed" => {
-            let result = drift_speed::run();
-            std::process::exit(if result.all_pass() { 0 } else { 1 });
-        }
-        "save-reload" => {
-            // End-to-end test: record → save to disk → kill game → revive →
-            // reload from disk → replay → verify zero drift. The one workflow
-            // tas_ui actually exercises that no other test mode covers.
-            let ok = save_reload::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "pause-resume" => {
-            // Record → start playback → Escape (pause) → wait → Escape
-            // (resume — game fast-forwards) → finish playback → verify the
-            // first 1000 frames replay with zero drift across the pause
-            // boundary.
-            let ok = pause_resume::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "steer-impact" => {
-            // Injected steering must move the player (BB3B10 arg4 / inject-path
-            // guard). Focus-free + warmup-free → fails on stale arg4, passes
-            // once arg4 is sourced live from game memory.
-            let ok = steer_impact::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "rec-repro" => {
-            // REC-vs-REC reproducibility: the same driven input recorded twice
-            // must yield the same transitions (scuffing catcher).
-            let ok = rec_repro::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "rec-start" => {
-            // Start-position regression guard: a fresh recording must BEGIN at
-            // the stationary spawn (capturing the countdown / pre-timer inputs),
-            // not mid-fall. `--file <path>` analyzes a saved .tasrec read-only.
-            let mut file: Option<String> = None;
-            let mut i = 2;
-            while i < args.len() {
-                if args[i] == "--file" && i + 1 < args.len() {
-                    file = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            let ok = match file {
-                Some(f) => rec_start::check_file(&f),
+struct Mode {
+    name: &'static str,
+    /// Argument synopsis printed after the name.
+    usage: &'static str,
+    summary: &'static str,
+    /// Receives the arguments after the mode name; returns pass/fail.
+    run: fn(&[String]) -> bool,
+}
+
+const MODES: &[Mode] = &[
+    Mode {
+        name: "live",
+        usage: "[--recording PATH] [--splice N] [--iterations N]",
+        summary: "cont-ui-left-spam, then acceptance, then regression as child processes",
+        run: |args| report(live_suite::run(args, output_dir()), "LIVE SUITE FAILED"),
+    },
+    Mode {
+        name: "cont-ui-left-spam",
+        usage: "[--recording PATH] [--splice N] [--iterations N]",
+        summary: "Isolated tas_ui: F12 CONT with physical Pico LEFT taps, zero splice mismatch",
+        run: |args| report(cont_ui::run(args), "CONT UI LEFT-SPAM FAILED"),
+    },
+    Mode {
+        name: "acceptance",
+        usage: "[N]",
+        summary: "Unsteered baseline REC, Pico-steered REC that differs, PLAY that matches; N runs",
+        run: run_acceptance,
+    },
+    Mode {
+        name: "regression",
+        usage: "",
+        summary: "15 scripted steering patterns, REC then PLAY with zero drift; CSV + certificate",
+        run: run_regression,
+    },
+    Mode {
+        name: "smoke",
+        usage: "",
+        summary: "Pipeline liveness: ticks captured, playback completes, player moves (not F5-aligned)",
+        run: |args| no_args(args) && smoke::run(),
+    },
+    Mode {
+        name: "f5",
+        usage: "",
+        summary: "F5-aligned straight-line REC then PLAY through the gate checks",
+        run: |args| no_args(args) && f5::run(),
+    },
+    Mode {
+        name: "segment",
+        usage: "",
+        summary: "Two-segment CONT (LEFT, F5-matched CONT into RIGHT) with zero boundary drift",
+        run: |args| no_args(args) && segment::run(),
+    },
+    Mode {
+        name: "replay",
+        usage: "<file.tasrec> [--iterations N] [--verbose] [--no-match]",
+        summary: "Replay a .tasrec N times; drift, incomplete playback or a failed start match fails",
+        run: run_replay,
+    },
+    Mode {
+        name: "reliability",
+        usage: "[--iterations N] [--speed X]",
+        summary: "N consecutive steered REC+PLAY cycles at one speed (default 10 at 12x)",
+        run: |args| {
+            let flags = parse(args, &[flag("--iterations", Some("-n")), flag("--speed", Some("-s"))], 0);
+            reliability::run(num(&flags, "--iterations", 10), num(&flags, "--speed", 12.0))
+        },
+    },
+    Mode {
+        name: "drift-speed",
+        usage: "",
+        summary: "REC 2x/PLAY 2x and REC 1x/PLAY 2x both replay with zero drift",
+        run: |args| no_args(args) && drift_speed::run(),
+    },
+    Mode {
+        name: "save-reload",
+        usage: "",
+        summary: "Steered REC, save, kill and relaunch the game, reload, replay with zero drift",
+        run: |args| no_args(args) && save_reload::run(),
+    },
+    Mode {
+        name: "pause-resume",
+        usage: "",
+        summary: "Escape pause and resume during PLAY; the replay stays bit-identical",
+        run: |args| no_args(args) && pause_resume::run(),
+    },
+    Mode {
+        name: "stop-play-flake",
+        usage: "",
+        summary: "PLAY, STOP at varying frames, PLAY again; second playbacks match a reference",
+        run: |args| no_args(args) && stop_play_flake::run(),
+    },
+    Mode {
+        name: "rec-start",
+        usage: "[--file PATH]",
+        summary: "A fresh recording starts at the stationary spawn; --file judges a saved .tasrec",
+        run: |args| {
+            let flags = parse(args, &[flag("--file", None)], 0);
+            match flags.value("--file") {
+                Some(file) => rec_start::check_file(file),
                 None => rec_start::run(),
+            }
+        },
+    },
+    Mode {
+        name: "rec-repro",
+        usage: "",
+        summary: "The same driven input recorded twice yields the same transitions",
+        run: |args| no_args(args) && rec_repro::run(),
+    },
+    Mode {
+        name: "steer-impact",
+        usage: "",
+        summary: "Injected steering moves the player, and only with a live Kernel::Time stamp",
+        run: |args| no_args(args) && steer_impact::run(),
+    },
+    Mode {
+        name: "refresh-tasrec",
+        usage: "<source.tasrec> <out.tasrec>",
+        summary: "Replay a recording live and write it back with fresh coordinates",
+        run: |args| {
+            let flags = parse(args, &[], 2);
+            let [source, out] = flags.positional.as_slice() else {
+                usage_error("refresh-tasrec needs <source.tasrec> <out.tasrec>");
             };
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "catchup-speed" => {
-            // Catch-up SPEED guard: median time-to-splice at 1× and 64×, assert
-            // the ratio (64× must stay much faster than native). The ratio
-            // cancels the harness's ~2× wall-clock environment, so it is safe to
-            // assert where an absolute wall-time would not be.
-            let ok = catchup_speed::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "play-pace" => {
-            // Playback-pace guard: 1× PLAY of a fixed frame window must take
-            // ~native wall time (frames×0.01s). Catches "skip-ahead" (PLAY
-            // running faster than real time). 1× PLAY is clock-gated, so unlike
-            // most timing here the absolute pace is a sound assertion.
-            let ok = play_pace::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "cont-input-protection" => {
-            let ok = cont_restart_race::run_input_protection();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "cont-restart-race" => {
-            // Verifies the cave2 contract that tas_ui's Stop→Restart
-            // serialisation depends on: confirms (1) sending Stop + Restart
-            // back-to-back loses the Stop, so cave2 still sees REC/PLAY
-            // mode when ArmContinue arrives, and (2) sending Stop, waiting
-            // for mode==OFF, then sending Restart cleanly gets ArmContinue
-            // accepted. If half 2 fails, tas_ui's CONT-twice fix is broken.
-            let ok = cont_restart_race::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "fe-cont-reliability" => {
-            // CONT splice against TAS/recordings/FE-tremendous.tasrec at
-            // frame 2200, 5 iterations at 12x catchup. Pinned variant of
-            // cont-reliability for the specific recording the user cares
-            // about; passes only if all 5/5 splices are zero-drift.
-            let ok = cont_cases::run(&cont_cases::FE_TREMENDOUS);
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "fe10065-cont" => {
-            // CONT splice against TAS/recordings/FE-10065.tasrec at frame 6200,
-            // 8 iterations each at 64x and 256x. Passes only
-            // if all splices are zero-drift AND the resume lands within a few
-            // frames of the splice (the Problem B resume-timing guard).
-            let ok = cont_cases::run(&cont_cases::FE_10065);
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "stop-play-flake" => {
-            // Load FE-tremendous, PLAY → STOP at a varying mid-playback
-            // frame → PLAY again, verify zero drift over the first 1000
-            // frames of the second playback. 10 iterations with stop
-            // points spread across the recording to surface intermittent
-            // post-STOP replay drift.
-            let ok = stop_play_flake::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "gate-align" => {
-            let n = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(8u32);
-            let rec = args.get(3).map(|s| s.as_str());
-            std::process::exit(if gate_align::run(n, rec) { 0 } else { 1 });
-        }
-        "play-judge" => {
-            let mut iterations = 5u32;
-            let mut i = 2;
-            while i < args.len() {
-                if (args[i] == "--iterations" || args[i] == "-n") && i + 1 < args.len() {
-                    iterations = args[i + 1].parse().unwrap_or(5);
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            std::process::exit(if play_judge::run(iterations) { 0 } else { 1 });
-        }
-        "benchmark" => {
-            let mut config = benchmark::BenchmarkConfig::default();
-            let mut i = 2;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--repeats" | "-n" => {
-                        config.repeats = args
-                            .get(i + 1)
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(config.repeats);
-                        i += 2;
-                    }
-                    "--frames" | "-f" => {
-                        config.measure_frames = args
-                            .get(i + 1)
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(config.measure_frames);
-                        i += 2;
-                    }
-                    _ => {
-                        i += 1;
-                    }
-                }
-            }
-            let result = benchmark::run(config);
-            std::process::exit(if result.is_ok() { 0 } else { 1 });
-        }
-        "replay" => {
-            let path = args.get(2).unwrap_or_else(|| {
-                eprintln!("Usage: tas_test replay <path.tasrec> [--iterations N] [--verbose]");
-                std::process::exit(1);
-            });
-            let mut iterations = 5u32;
-            let mut verbose = false;
-            let mut no_match = false;
-            let mut i = 3;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--iterations" | "-n" => {
-                        iterations = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(5);
-                        i += 2;
-                    }
-                    "--verbose" | "-v" => {
-                        verbose = true;
-                        i += 1;
-                    }
-                    "--no-match" => {
-                        no_match = true;
-                        i += 1;
-                    }
-                    _ => {
-                        i += 1;
-                    }
-                }
-            }
-            let report = replay::run(path, iterations, verbose, no_match);
-            // Exit non-zero if ANY iteration: had drift, didn't complete
-            // playback, or (unless --no-match was requested) failed position
-            // matching. The previous "drift only" check was misleading
-            // because compute_drift inspects only the frames that played —
-            // a run that never started returns 0.0 drift and would have
-            // exited 0, hiding real failures from CI.
-            let any_failure = report.results.iter().any(|r| {
-                let drifted = r.has_drift();
-                let pos_failed = !no_match && !r.position_matched;
-                drifted || !r.playback_complete || pos_failed
-            });
-            // An empty result set makes `.any()` vacuously false, so a run that
-            // produced no iterations at all would exit 0 — "nothing failed"
-            // because nothing happened. Zero iterations is a failure.
-            if report.results.is_empty() {
-                eprintln!("ERROR: replay produced no iterations — nothing was verified");
-                std::process::exit(1);
-            }
-            std::process::exit(if any_failure { 1 } else { 0 });
-        }
-        "refresh-tasrec" => {
-            let source = args.get(2).unwrap_or_else(|| {
-                eprintln!("Usage: tas_test refresh-tasrec <source.tasrec> <out.tasrec>");
-                std::process::exit(1);
-            });
-            let out = args.get(3).unwrap_or_else(|| {
-                eprintln!("Usage: tas_test refresh-tasrec <source.tasrec> <out.tasrec>");
-                std::process::exit(1);
-            });
-            match refresh_recording::run(source, out) {
-                Ok(()) => std::process::exit(0),
-                Err(err) => {
-                    eprintln!("ERROR: {}", err);
-                    std::process::exit(1);
-                }
-            }
-        }
-        "reliability" => {
-            let mut iterations = 10u32;
-            let mut speed = 12.0f32;
-            let mut i = 2;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--iterations" | "-n" => {
-                        iterations = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(10);
-                        i += 2;
-                    }
-                    "--speed" | "-s" => {
-                        speed = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(12.0);
-                        i += 2;
-                    }
-                    _ => {
-                        i += 1;
-                    }
-                }
-            }
-            let report = reliability::run(iterations, speed);
-            std::process::exit(if report.all_pass() { 0 } else { 1 });
-        }
-        "cont-hijack" => {
-            // Bug #2 regression: a continue_from_frame set during a plain PLAY
-            // must NOT hijack the replay into REC (g_cave2_contArmed gate).
-            let ok = cont_hijack::run();
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        "load" => {
-            // Load a .tasrec into shared memory and EXIT — without stopping
-            // tas_ui or arming anything. For driving the product UI from
-            // scripts: load here, then arm through tas_ui itself (F10), so the
-            // panel/controller behavior under test is the real one.
-            let Some(path) = args.get(2) else {
-                eprintln!("Usage: tas_test load <path.tasrec>");
-                std::process::exit(2);
+            report(refresh_recording::run(source, out), "ERROR")
+        },
+    },
+    Mode {
+        name: "speed",
+        usage: "",
+        summary: "0.25x and 2x tick counts scale against 1x; speed is back at 1x afterwards",
+        run: |args| no_args(args) && speed::run(),
+    },
+    Mode {
+        name: "speed-reset",
+        usage: "",
+        summary: "After 2x REC and STOP the OFF-mode tick rate and F5 are back to normal",
+        run: |args| no_args(args) && speed_reset::run(),
+    },
+    Mode {
+        name: "catchup-speed",
+        usage: "",
+        summary: "Median time-to-splice at 64x versus 1x stays above the required ratio",
+        run: |args| no_args(args) && catchup_speed::run(),
+    },
+    Mode {
+        name: "play-pace",
+        usage: "",
+        summary: "1x PLAY of a fixed frame window takes native wall time",
+        run: |args| no_args(args) && play_pace::run(),
+    },
+    Mode {
+        name: "play-judge",
+        usage: "[--iterations N]",
+        summary: "A judged PLAY replays the countdown at catch-up speed and hands back exactly",
+        run: |args| {
+            let flags = parse(args, &[flag("--iterations", Some("-n"))], 0);
+            play_judge::run(num(&flags, "--iterations", 5))
+        },
+    },
+    Mode {
+        name: "benchmark",
+        usage: "[--repeats N] [--frames N]",
+        summary: "Per-hook __rdtsc timings over fixed frame windows; informational",
+        run: |args| {
+            let flags = parse(args, &[flag("--repeats", Some("-n")), flag("--frames", Some("-f"))], 0);
+            let defaults = benchmark::BenchmarkConfig::default();
+            let config = benchmark::BenchmarkConfig {
+                repeats: num(&flags, "--repeats", defaults.repeats),
+                measure_frames: num(&flags, "--frames", defaults.measure_frames),
             };
-            let mut client = match tas_shared::TasSharedMemoryClient::open() {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("ERROR: no TAS shared memory ({})", e);
-                    std::process::exit(1);
-                }
+            report(benchmark::run(config).map(|_| ()), "BENCHMARK FAILED")
+        },
+    },
+    Mode {
+        name: "video-rate",
+        usage: "[secs] [--at X Y]",
+        summary: "Distinct frames per second reaching the screen, measured from outside the process",
+        run: |args| {
+            let flags = parse(args, &[pair("--at")], 1);
+            let secs = positional_num(&flags, 0);
+            let region = flags.values("--at").map(|xy| {
+                let at = |raw: &str| {
+                    raw.parse::<i32>()
+                        .unwrap_or_else(|_| usage_error(format!("--at: expected a number, got '{raw}'")))
+                };
+                (at(&xy[0]), at(&xy[1]))
+            });
+            video_rate::run(secs, region)
+        },
+    },
+    Mode {
+        name: "dialog-e2e",
+        usage: "",
+        summary: "Real finishes with a Pico Escape on the save dialog, then the main menu speed",
+        run: |args| no_args(args) && dialog_e2e::run(),
+    },
+    Mode {
+        name: "cont-reliability",
+        usage: "[--iterations N] [--speed X] [--splice N] [--file PATH | --synthetic] [--profile taps|sweep] [--tap-ticks N]",
+        summary: "Repeated CONT splices: zero prefix drift, coverage and forward progress (default FE-tremendous @2200)",
+        run: run_cont_reliability,
+    },
+    Mode {
+        name: "fe-cont-reliability",
+        usage: "",
+        summary: "FE-tremendous, five splices at 2200 at 12x",
+        run: |args| no_args(args) && cont_cases::run(&cont_cases::FE_TREMENDOUS),
+    },
+    Mode {
+        name: "fe10065-cont",
+        usage: "",
+        summary: "FE-10065, eight splices at 6200 at 64x and 256x with resume-timing limits",
+        run: |args| no_args(args) && cont_cases::run(&cont_cases::FE_10065),
+    },
+    Mode {
+        name: "cont-hijack",
+        usage: "",
+        summary: "A continue_from_frame written during a plain PLAY leaves it in PLAY",
+        run: |args| no_args(args) && cont_hijack::run(),
+    },
+    Mode {
+        name: "cont-restart-race",
+        usage: "",
+        summary: "Stop+Restart together lose the Stop; Stop, wait for OFF, then Restart is accepted",
+        run: |args| no_args(args) && cont_restart_race::run(),
+    },
+    Mode {
+        name: "cont-input-protection",
+        usage: "",
+        summary: "Live input stays blocked through the CONT restart and STOP releases it",
+        run: |args| no_args(args) && cont_restart_race::run_input_protection(),
+    },
+    Mode {
+        name: "gate-align",
+        usage: "[N] [recording]",
+        summary: "Gate-relative input indexing reproduces the run over N aligned replays",
+        run: |args| {
+            let flags = parse(args, &[], 2);
+            let iterations = positional_num(&flags, 0).unwrap_or(8);
+            gate_align::run(iterations, flags.positional.get(1).map(String::as_str))
+        },
+    },
+    Mode {
+        name: "shm",
+        usage: "[--command record|play|stop|restart]",
+        summary: "Version-checked shared-memory diagnostics; read-only by default",
+        run: |args| report(shm::run(args), "SHM"),
+    },
+    Mode {
+        name: "load",
+        usage: "<file.tasrec>",
+        summary: "Write a recording into shared memory and exit; refuses while REC/PLAY is active",
+        run: |args| {
+            let flags = parse(args, &[], 1);
+            let Some(path) = flags.positional.first() else {
+                usage_error("load needs <file.tasrec>");
             };
-            // Refuse mid-session: bulk-writing the input/coord arrays races
-            // the DLL during REC (it is appending to them) and swaps the data
-            // a PLAY is actively consuming. OFF is the only safe state.
-            let mode = client.state().mode;
-            if mode != 0 {
-                eprintln!(
-                    "ERROR: refusing to load while the DLL is in mode {} (REC/PLAY \
-                     active). Press STOP first.",
-                    mode
-                );
-                std::process::exit(1);
-            }
-            match replay::load_tasrec(std::path::Path::new(path)) {
-                Ok(r) => {
-                    replay::write_to_shared(&mut client, &r);
-                    println!("loaded {} ticks from {}", r.count, path);
-                    std::process::exit(0);
+            load::run(path)
+        },
+    },
+    Mode {
+        name: "menu",
+        usage: "[activate <id|label> | focus <id|label> | up | down | left | right | trigger]",
+        summary: "Print the menu document, or drive the menu through the game's own entry points",
+        run: |args| {
+            let flags = parse(args, &[], 2);
+            let arg = |i: usize| flags.positional.get(i).map(String::as_str);
+            menu::run(arg(0), arg(1))
+        },
+    },
+    Mode {
+        name: "gamestate",
+        usage: "",
+        summary: "Launch or reuse the game and print the status six times (any track)",
+        run: |args| {
+            no_args(args) && {
+                allow_any_level();
+                let client = harness::ensure_game_running();
+                for _ in 0..6 {
+                    harness::print_status(&client);
+                    std::thread::sleep(std::time::Duration::from_millis(500));
                 }
-                Err(e) => {
-                    eprintln!("ERROR: {}", e);
-                    std::process::exit(1);
-                }
+                true
             }
-        }
-        "dialog-e2e" => {
-            // END-TO-END: real finishes, real Pico keypress on the save dialog
-            // (PLAY and REC modes), then the ACTUAL main menu measured.
-            std::process::exit(if dialog_e2e::run() { 0 } else { 1 });
-        }
-        "video-rate" => {
-            // Measures the SCREEN, not shared memory, so the same command works
-            // with TAS absent — which is the only way to get a no-TAS baseline
-            // for the menu-video speed complaint.
-            let secs = args.get(2).and_then(|s| s.parse::<u64>().ok());
-            let mut region: Option<(i32, i32)> = None;
-            let mut i = 2;
-            while i < args.len() {
-                if args[i] == "--at" && i + 2 < args.len() {
-                    // `--at X Y`: sample a patch with its top-left THERE, instead
-                    // of auto-picking. For pointing at a specific thing (e.g. the
-                    // background video) rather than whatever moves most.
-                    match (args[i + 1].parse::<i32>(), args[i + 2].parse::<i32>()) {
-                        (Ok(x), Ok(y)) => region = Some((x, y)),
-                        _ => eprintln!("WARNING: --at needs two integers; ignoring"),
-                    }
-                    i += 3;
-                } else {
-                    i += 1;
-                }
-            }
-            std::process::exit(if video_rate::run_region(secs, region) {
-                0
+        },
+    },
+    Mode {
+        name: "level-seq",
+        usage: "[secs] | watch [secs]",
+        summary: "The DLL publishes level context through the seqlock; watch logs transitions instead",
+        run: |args| {
+            allow_any_level();
+            let flags = parse(args, &[], 2);
+            if flags.positional.first().map(String::as_str) == Some("watch") {
+                level_seq::watch(positional_num(&flags, 1))
+            } else if flags.positional.len() > 1 {
+                usage_error("level-seq takes [secs] or watch [secs]");
             } else {
-                1
-            });
-        }
-        "level-seq" => {
-            // Wiring test for the level-context seqlock: proves the DLL actually
-            // publishes through it. Diagnostic — runs on whatever track is
-            // loaded, so it must not refuse on an unexpected one.
-            if std::env::var("TAS_TEST_LEVEL").is_err() {
-                // SAFETY: single-threaded startup, before any harness thread.
-                unsafe { std::env::set_var("TAS_TEST_LEVEL", "any") };
+                level_seq::run(positional_num(&flags, 0))
             }
-            // `level-seq watch [secs]` logs transitions instead of asserting —
-            // for when you are about to change level on purpose.
-            if args.get(2).map(|s| s.as_str()) == Some("watch") {
-                let secs = args.get(3).and_then(|s| s.parse::<u64>().ok());
-                std::process::exit(if level_seq::watch(secs) { 0 } else { 1 });
-            }
-            let secs = args.get(2).and_then(|s| s.parse::<u64>().ok());
-            std::process::exit(if level_seq::run(secs) { 0 } else { 1 });
-        }
-        "gamestate" => {
-            // Validate the game_in_game exposure: revive (in-game) + inject, then
-            // print state a few times (game_in_game should read 1 in-game).
-            //
-            // This is the diagnostic you reach for WHEN the session is wrong, so
-            // it must not refuse to run on an unexpected track — that would hide
-            // the very state you are trying to inspect. Opt out of the check
-            // unless the caller explicitly asked for one.
-            if std::env::var("TAS_TEST_LEVEL").is_err() {
-                // SAFETY: single-threaded startup, before any harness thread.
-                unsafe { std::env::set_var("TAS_TEST_LEVEL", "any") };
-            }
-            let client = harness::ensure_game_running();
-            for _ in 0..6 {
-                harness::print_status(&client);
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-        }
-        "cont-reliability" => {
-            let mut iterations = 10u32;
-            let mut speed = 12.0f32;
-            let mut splice = 2200u32; // FE-tremendous's proven splice frame
-            let mut file: Option<String> = None;
-            let mut synthetic = false;
-            let mut profile = cont_reliability::BaselineInputProfile::Taps;
-            let mut tap_ticks: Option<u32> = None;
-            let mut i = 2;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--iterations" | "-n" => {
-                        iterations = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(10);
-                        i += 2;
-                    }
-                    "--speed" | "-s" => {
-                        speed = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(12.0);
-                        i += 2;
-                    }
-                    "--splice" => {
-                        splice = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(2400);
-                        i += 2;
-                    }
-                    "--file" => {
-                        file = args.get(i + 1).cloned();
-                        i += 2;
-                    }
-                    "--synthetic" => {
-                        // Force a fresh REC baseline (bucket-compatible with the
-                        // current in-process restart) instead of the FE default.
-                        synthetic = true;
-                        i += 1;
-                    }
-                    "--profile" => {
-                        let raw = args.get(i + 1).map(|s| s.as_str()).unwrap_or("");
-                        profile = match cont_reliability::BaselineInputProfile::parse(raw) {
-                            Some(p) => p,
-                            None => {
-                                eprintln!(
-                                    "ERROR: invalid --profile '{}'; expected 'taps' or 'sweep'",
-                                    raw
-                                );
-                                std::process::exit(1);
-                            }
-                        };
-                        i += 2;
-                    }
-                    "--tap-ticks" => {
-                        let parsed = args.get(i + 1).and_then(|s| s.parse::<u32>().ok());
-                        tap_ticks = Some(parsed.unwrap_or(8).max(1));
-                        i += 2;
-                    }
-                    _ => {
-                        i += 1;
-                    }
-                }
-            }
-            // Default to the real FE-tremendous recording (the user's actual
-            // workflow) when no --file is given — a real steered run makes the
-            // drift check meaningful. Falls back to a synthetic baseline only if
-            // the recording can't be located.
-            let file = if synthetic {
-                None
-            } else {
-                file.or_else(|| {
-                    let exe_dir = std::env::current_exe()
-                        .ok()
-                        .and_then(|p| p.parent().map(PathBuf::from))
-                        .unwrap_or_else(|| PathBuf::from("."));
-                    let candidates = [
-                        exe_dir
-                            .join("../../..")
-                            .join("TAS/recordings/FE-tremendous.tasrec"),
-                        PathBuf::from("TAS/recordings/FE-tremendous.tasrec"),
-                        PathBuf::from("recordings/FE-tremendous.tasrec"),
-                    ];
-                    candidates
-                        .iter()
-                        .find(|p| p.exists())
-                        .map(|p| p.to_string_lossy().into_owned())
-                })
-            };
-            match &file {
-                Some(p) => println!("  Baseline: real recording {} (default)", p),
-                None => println!("  Baseline: synthetic (FE-tremendous not found)"),
-            }
-            let report = cont_reliability::run(
-                iterations,
-                speed,
-                splice,
-                file.as_deref(),
-                profile,
-                tap_ticks,
-            );
-            std::process::exit(if report.all_pass() { 0 } else { 1 });
-        }
-        "menu" => {
-            // The menu as TEXT (shm v46) and the COMMAND channel (v47) for agents:
-            //   tas_test menu                       print the document (one JSON line)
-            //   tas_test menu activate <id|label>   focus that item, then Enter on it
-            //   tas_test menu focus <id|label>      just move the cursor there
-            //   tas_test menu up|down|left|right    move the cursor; `trigger` = Enter
-            // A command is executed by the DLL on the menu thread through the
-            // game's own entry points. This waits for the ack, then for the
-            // document to settle, and prints {"result":..,"doc":..}; exit 0 on ok.
-            let mut client = match tas_shared::TasSharedMemoryClient::open() {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("ERROR: no TAS shared memory ({})", e);
-                    std::process::exit(1);
-                }
-            };
-            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
-            if sub.is_empty() {
-                match tas_shared::menu_doc(client.state()) {
-                    Some(doc) => println!("{}", doc),
-                    None => println!("{{\"screen\":null,\"sel\":null,\"items\":[]}}"),
-                }
-                std::process::exit(0);
-            }
-            let Some(kind) = tas_shared::menu_command_kind(sub) else {
-                eprintln!("Usage: tas_test menu [activate <id|label> | focus <id|label> | up | down | left | right | trigger]");
-                std::process::exit(2);
-            };
-            let target = args.get(3).cloned().unwrap_or_default();
-            if tas_shared::menu_command_needs_target(kind) && target.is_empty() {
-                eprintln!("Usage: tas_test menu {} <id|label>", sub);
-                std::process::exit(2);
-            }
-            // The document can be momentarily unavailable while the DLL is
-            // writing it or the page is in transition: retry briefly before
-            // calling it "no menu" (codex review 2026-09-04).
-            let read_doc = |c: &tas_shared::TasSharedMemoryClient| -> Option<String> {
-                let t = std::time::Instant::now();
-                loop {
-                    if let Some(d) = tas_shared::menu_doc(c.state()) {
-                        return Some(d);
-                    }
-                    if t.elapsed() > std::time::Duration::from_millis(400) {
-                        return None;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-            };
-            let before = read_doc(&client);
-            let screen = tas_shared::menu_screen_id(client.state()).unwrap_or_default();
-            if before.is_none() {
-                // Nobody consumes commands outside a menu (the hook runs from
-                // the menu's own per-frame update), so say so at once.
-                println!("{{\"result\":\"no menu\",\"doc\":null}}");
-                std::process::exit(1);
-            }
-            // The command names the page it was read from, so it is refused
-            // rather than executed if the menu moves on first.
-            let seq = match tas_shared::menu_command_submit(client.state_mut(), kind, &target, &screen) {
-                Ok(seq) => seq,
-                Err(tas_shared::MenuSubmitError::Busy) => {
-                    println!("{{\"result\":\"busy\",\"doc\":{}}}", before.as_deref().unwrap_or("null"));
-                    std::process::exit(1);
-                }
-            };
-            let t0 = std::time::Instant::now();
-            let result = loop {
-                if let Some(r) = tas_shared::menu_command_result(client.state(), seq) {
-                    break Some(r);
-                }
-                if t0.elapsed() > std::time::Duration::from_millis(3000) {
-                    break None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            };
-            let name = match result {
-                Some(r) => tas_shared::menu_result_name(r).to_string(),
-                None => "timeout".to_string(),
-            };
-            if result == Some(tas_shared::TAS_MENU_RESULT_OK) {
-                // Let the menu react: a page transition takes ~1-2 s. Wait for
-                // the document to change and then hold still for 400 ms; give
-                // up on "no change" after 1.5 s; cap at 4 s.
-                use std::time::{Duration, Instant};
-                let t1 = Instant::now();
-                let mut last = before.clone();
-                let mut since = Instant::now();
-                loop {
-                    std::thread::sleep(Duration::from_millis(50));
-                    let now = tas_shared::menu_doc(client.state());
-                    if now != last {
-                        last = now;
-                        since = Instant::now();
-                    }
-                    let held = since.elapsed();
-                    if last != before && held >= Duration::from_millis(400) {
-                        break;
-                    }
-                    if last == before && held >= Duration::from_millis(1500) {
-                        break;
-                    }
-                    if t1.elapsed() >= Duration::from_millis(4000) {
-                        break;
-                    }
-                }
-            }
-            let doc = read_doc(&client).unwrap_or_else(|| "null".to_string());
-            println!("{{\"result\":\"{}\",\"doc\":{}}}", name, doc);
-            std::process::exit(if result == Some(tas_shared::TAS_MENU_RESULT_OK) { 0 } else { 1 });
-        }
-        _ => {
-            println!("Usage: tas_test <mode>");
-            println!();
-            println!("Modes:");
-            println!("  shm [--command record|play|stop|restart]  Version-checked diagnostics; read-only by default");
-            println!("  fe-cont-reliability / fe10065-cont       Named real-recording CONT cases");
-            println!("  live        UI LEFT-spam, acceptance, regression (--recording PATH --splice N --iterations N)");
-            println!("  cont-ui-left-spam  Self-contained UI F12 + Pico LEFT taps (--recording PATH --splice N --iterations N)");
-            println!("  smoke       Basic REC/PLAY without F5 alignment");
-            println!("  menu        Print the menu document (current page items, labels, ids) as JSON");
-            println!("  menu activate <id|label> / focus <id|label> / up|down|left|right|trigger");
-            println!("              Drive the menu through the game's own entry points; prints result + doc");
-            println!("  f5          F5-aligned straight-line zero-drift check");
-            println!("  segment     Multi-segment CONT zero-drift test (requires Pico HID)");
-            println!("  regression  15-case regression suite (requires Pico HID)");
-            println!("  acceptance  3-phase acceptance test (requires Pico HID)");
-            println!("  speed       Playback speed verification (0.25x, 1x, 2x)");
-            println!("  speed-reset Speed reset verification (2x stop restores normal)");
-            println!("  drift-speed Drift-at-speed verification (2x same, 1x/2x cross)");
-            println!("  benchmark   Cave hook perf benchmark (frame-window repeats)");
-            println!(
-                "  reliability N consecutive REC+PLAY cycles at Nx speed (default 10x at 12x)"
-            );
-            println!(
-                "  cont-reliability CONT splice reliability (default 10x, splice 2400 @ 12x; profile=taps)"
-            );
-            println!("  replay      Load .tasrec file and play back N times (drift check)");
-            println!("  refresh-tasrec Re-record a .tasrec baseline from live runtime");
-            println!();
-            println!("Options for replay:");
-            println!("  --iterations N  Number of playback iterations (default: 5)");
-            println!("  --verbose       Show drift details for every iteration");
-            println!();
-            println!("Usage for refresh-tasrec:");
-            println!("  refresh-tasrec <source.tasrec> <out.tasrec>");
-            println!();
-            println!("Options for cont-reliability:");
-            println!("  --file PATH     Load baseline from .tasrec instead of fresh REC");
-            println!("  --profile NAME  Synthetic baseline profile: taps (default) or sweep");
-            println!("  --tap-ticks N   Tick hold per tap for profile=taps (default: 8)");
-            println!();
-            println!("Options for benchmark:");
-            println!("  --repeats N     Number of benchmark repeats (default: 3)");
-            println!("  --frames N      Frames per scenario window (default: 600)");
-            println!();
-            println!("Exit code: 0 = all pass, 1 = some failed");
-        }
+        },
+    },
+];
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let name = args.first().map(String::as_str).unwrap_or("help");
+    if matches!(name, "help" | "--help" | "-h") {
+        print_help();
+        return;
+    }
+    let Some(mode) = MODES.iter().find(|m| m.name == name) else {
+        eprintln!("ERROR: unknown mode '{name}'\n");
+        print_help();
+        std::process::exit(2);
+    };
+    let passed = (mode.run)(&args[1..]);
+    std::process::exit(if passed { 0 } else { 1 });
+}
+
+fn print_help() {
+    println!("Usage: tas_test <mode> [args]\n");
+    println!("Modes:");
+    for mode in MODES {
+        let usage = if mode.usage.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", mode.usage)
+        };
+        println!("  {}{}", mode.name, usage);
+        println!("      {}", mode.summary);
+    }
+    println!("\nExit code: 0 = pass, 1 = fail, 2 = command-line error");
+}
+
+fn parse(args: &[String], specs: &[Spec], max_positional: usize) -> Flags {
+    cli::parse(args, specs, max_positional).unwrap_or_else(|e| usage_error(e))
+}
+
+/// Modes without arguments still reject stray ones, so a typo cannot pass
+/// silently as "the default".
+fn no_args(args: &[String]) -> bool {
+    parse(args, &[], 0);
+    true
+}
+
+fn num<T: std::str::FromStr>(flags: &Flags, name: &str, default: T) -> T {
+    flags.num(name, default).unwrap_or_else(|e| usage_error(e))
+}
+
+fn positional_num<T: std::str::FromStr>(flags: &Flags, index: usize) -> Option<T> {
+    flags
+        .positional_num(index)
+        .unwrap_or_else(|e| usage_error(e))
+}
+
+fn report(result: Result<(), String>, prefix: &str) -> bool {
+    if let Err(error) = result {
+        eprintln!("{prefix}: {error}");
+        return false;
+    }
+    true
+}
+
+/// Diagnostics run on whatever track is loaded: opt out of the track guard
+/// unless the caller asked for a specific one.
+fn allow_any_level() {
+    if std::env::var("TAS_TEST_LEVEL").is_err() {
+        // SAFETY: single-threaded startup, before any harness thread.
+        unsafe { std::env::set_var("TAS_TEST_LEVEL", "any") };
     }
 }
 
@@ -750,373 +436,133 @@ fn output_dir() -> PathBuf {
         })
 }
 
-/// Multi-segment E2E zero-drift test (SSB-131).
-///
-/// Strategy: Use F5 position matching via ARM_PLAY to find a matching position,
-/// then immediately reuse that F5 for ARM_CONTINUE (no second restart needed).
-///
-/// Phase 1: REC segment 0 with LEFT steering
-/// Phase 2: F5-match via PLAY (establishes matching position), then ARM_CONTINUE
-///          for segment 1 with RIGHT steering
-/// Phase 3: PLAY full recording, verify zero drift at segment boundary
-fn run_segment_test() {
-    println!("=== Multi-Segment E2E Zero-Drift Test (SSB-131) ===\n");
-    let mut client = harness::ensure_game_running();
-    harness::print_status(&client);
+fn run_regression(args: &[String]) -> bool {
+    no_args(args);
+    let out = output_dir();
+    let csv_path = out.join("regression_results.csv");
+    let cert_path = out.join("regression_certificate.json");
+    let results = regression::run(&csv_path);
+    certificate::write_regression(&results, &csv_path, &cert_path);
+    !results.is_empty() && results.iter().all(|r| r.all_gates_pass)
+}
 
-    // ---- Phase 1: REC segment 0 with LEFT steering ----
-    println!("\n--- Phase 1: REC segment 0 (LEFT steering) ---");
-    if !harness::restart_and_stabilize(&client) {
-        eprintln!("ERROR: Game not alive for Phase 1");
-        std::process::exit(1);
+fn run_acceptance(args: &[String]) -> bool {
+    let flags = parse(args, &[], 1);
+    let iterations: u32 = positional_num(&flags, 0).unwrap_or(5);
+    if iterations == 0 {
+        usage_error("acceptance iteration count must be at least 1");
     }
-
-    harness::arm_rec(&mut client);
-    println!("  Recording with LEFT steering via Pico HID...");
-
-    // Drive LEFT for 200 ticks, then neutral for 100 ticks (total 300)
-    let seg0_steps = patterns::build_from_explicit(&[
-        ("LEFT", tas_shared::input_bits::LEFT, 200),
-        ("NEUTRAL", 0x00, 100),
-    ]);
-    drive_pico_steps(&seg0_steps);
-
-    let seg0_count = client.state().recorded_count;
-    harness::stop(&mut client);
-    println!("  Segment 0 recorded: {} ticks", seg0_count);
-
-    if seg0_count < 200 {
-        eprintln!("ERROR: Too few ticks in segment 0 (need >= 200)");
-        std::process::exit(1);
-    }
-
-    let rec_start = client.state().rec_coords[0];
-    println!(
-        "  REC start: ({:.4}, {:.4}, {:.4})",
-        rec_start[0], rec_start[1], rec_start[2]
-    );
-    println!("  Segments before CONT: {}", client.state().segment_count);
-
-    let splice_frame: u32 = 200;
-
-    // ---- Phase 2: CONT from frame 200 ----
-    // Strategy: F5-restart loop until position matches, then ARM_CONTINUE
-    // (not ARM_PLAY). This uses the same matching logic but starts CONT directly.
-    println!(
-        "\n--- Phase 2: CONT from frame {} (RIGHT steering) ---",
-        splice_frame
-    );
-
-    // Set continue_from_frame before starting CONT retries
-    let matched = harness::restart_continue_and_splice(
-        &mut client,
-        rec_start,
-        splice_frame,
-        30, // more retries
-    );
-    if matched.is_none() {
-        eprintln!("ERROR: Could not position-match for CONT after retries");
-        std::process::exit(1);
-    }
-
-    // Now we're in REC mode at the splice point — send RIGHT steering
-    println!("  Recording segment 1 with RIGHT steering via Pico HID...");
-    let seg1_steps = patterns::build_from_explicit(&[
-        ("RIGHT", tas_shared::input_bits::RIGHT, 200),
-        ("NEUTRAL", 0x00, 100),
-    ]);
-    drive_pico_steps(&seg1_steps);
-
-    let total_count = client.state().recorded_count;
-    harness::stop(&mut client);
-    println!("  Total recorded after CONT: {} ticks", total_count);
-    println!("  Segment count: {}", client.state().segment_count);
-
-    // Print segment boundaries
-    let state = client.state();
-    for i in 0..state.segment_count as usize {
-        let b = &state.segment_boundaries[i];
-        println!(
-            "  Boundary[{}]: frame={} input_log_offset={}",
-            i, b.frame, b.input_log_offset
-        );
-    }
-
-    // Verify input log has both LEFT and RIGHT
-    let mut has_left = false;
-    let mut has_right = false;
-    for i in 0..total_count as usize {
-        if state.input_log[i] & tas_shared::input_bits::LEFT != 0 {
-            has_left = true;
-        }
-        if state.input_log[i] & tas_shared::input_bits::RIGHT != 0 {
-            has_right = true;
-        }
-    }
-    println!(
-        "  Input log check: has_left={} has_right={} (both expected)",
-        has_left, has_right
-    );
-
-    if !has_left || !has_right {
-        eprintln!("ERROR: Input log missing expected LEFT or RIGHT inputs");
-        std::process::exit(1);
-    }
-
-    // ---- Phase 3: PLAY full recording ----
-    println!(
-        "\n--- Phase 3: PLAY full recording ({} ticks) ---",
-        total_count
-    );
-
-    if !harness::restart_play_and_match(&mut client, rec_start, harness::START_MATCH_RETRIES) {
-        eprintln!("WARNING: Could not match position for PLAY (continuing anyway)");
-    }
-    let play_ok = harness::wait_playback(&client, total_count);
-    if !play_ok {
-        eprintln!("WARNING: Playback did not complete normally");
-    }
-
-    // ---- Results & Verification ----
-    harness::print_results(&client);
-
-    let state = client.state();
-
-    // Check drift at segment boundary specifically
-    if splice_frame < total_count {
-        let sf = splice_frame as usize;
-        let boundary_drift_x =
-            (state.rec_coords[sf][0] as f64 - state.play_coords[sf][0] as f64).abs();
-        let boundary_drift_y =
-            (state.rec_coords[sf][1] as f64 - state.play_coords[sf][1] as f64).abs();
-        let boundary_drift_z =
-            (state.rec_coords[sf][2] as f64 - state.play_coords[sf][2] as f64).abs();
-        println!("\n--- Segment Boundary (frame {}) ---", splice_frame);
-        println!(
-            "  REC[{}]:  ({:.6}, {:.6}, {:.6})",
-            sf, state.rec_coords[sf][0], state.rec_coords[sf][1], state.rec_coords[sf][2]
-        );
-        println!(
-            "  PLAY[{}]: ({:.6}, {:.6}, {:.6})",
-            sf, state.play_coords[sf][0], state.play_coords[sf][1], state.play_coords[sf][2]
-        );
-        println!(
-            "  Boundary drift: X={:.9} Y={:.9} Z={:.9}",
-            boundary_drift_x, boundary_drift_y, boundary_drift_z
-        );
-        if boundary_drift_x == 0.0 && boundary_drift_y == 0.0 && boundary_drift_z == 0.0 {
-            println!("  Boundary check: PASS (zero discontinuity)");
+    let cert_path = output_dir().join("acceptance_certificate.json");
+    let mut last_result = None;
+    let mut passed = 0u32;
+    for i in 1..=iterations {
+        println!("\n========== Acceptance run {}/{} ==========", i, iterations);
+        let result = acceptance::run();
+        let ok = result.all_pass();
+        last_result = Some(result);
+        if ok {
+            passed += 1;
+            println!("Acceptance run {}/{} PASSED", i, iterations);
         } else {
-            println!("  Boundary check: FAIL (drift at segment boundary)");
+            println!("Acceptance run {}/{} FAILED — aborting", i, iterations);
+            break;
         }
     }
-
-    // 4-gate assessment
-    let assessment = gates::run_gates(state, total_count);
-    assessment.print_summary();
-
-    // Print final verdict
-    println!("\n=== SEGMENT TEST VERDICT ===");
-    if assessment.all_pass() {
-        println!("*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***");
-        println!(
-            "  {} ticks, {} segments, splice at frame {}",
-            total_count, state.segment_count, splice_frame
-        );
-    } else {
-        println!("*** MULTI-SEGMENT ZERO-DRIFT TEST FAILED ***");
+    if let Some(result) = last_result.as_ref() {
+        certificate::write_acceptance(result, &cert_path);
     }
-
-    std::process::exit(if assessment.all_pass() { 0 } else { 1 });
+    println!(
+        "\n=== Acceptance: {}/{} runs passed ===",
+        passed, iterations
+    );
+    passed == iterations
 }
 
-/// Drive Pico HID through a sequence of pattern steps (delegates to harness).
-fn drive_pico_steps(steps: &[patterns::PatternStep]) {
-    harness::drive_pico_steps(steps, None);
-}
-
-fn run_smoke_test() {
-    println!("=== Smoke Test ===");
-    let mut client = harness::ensure_game_running();
-    harness::print_status(&client);
-
-    // REC 3s
-    println!("\n--- REC 3s ---");
-    harness::arm_rec(&mut client);
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    let rec_count = client.state().recorded_count;
-    harness::stop(&mut client);
-    println!("Recorded {} ticks", rec_count);
-
-    // PLAY
-    println!("--- PLAY ---");
-    harness::arm_play(&mut client);
-    let play_ok = harness::wait_playback(&client, rec_count);
-    harness::print_results(&client);
-
-    // Verdict. Smoke is deliberately NOT F5-aligned, so REC and PLAY start from
-    // different spawns and drift is EXPECTED — asserting zero drift here would
-    // be wrong. What smoke can and must assert is that the pipeline is alive
-    // end to end: ticks were captured, playback ran to completion, and the
-    // player actually moved in both phases. Previously this mode asserted
-    // nothing at all and reported success purely by exiting 0, so a run that
-    // recorded zero ticks or never moved still looked green.
-    let state = client.state();
-    let played = state.playback_pos;
-    // Measure PLAY movement only over frames that actually played. Using
-    // rec_count would walk past playback_pos into stale/zero play_coords, which
-    // can manufacture a large bogus delta on a short playback and mask the very
-    // failure `complete_ok` is there to catch.
-    // "Moved" means moved on ANY axis. Gating on Z alone would call a run that
-    // travelled purely in X/Y motionless.
-    let (rec_dx, rec_dy, rec_dz) = drift::compute_movement(&state.rec_coords, rec_count as usize);
-    let (play_dx, play_dy, play_dz) =
-        drift::compute_movement(&state.play_coords, rec_count.min(played) as usize);
-    let rec_travel = rec_dx.max(rec_dy).max(rec_dz);
-    let play_travel = play_dx.max(play_dy).max(play_dz);
-
-    // Smoke has no drift gate (it is not F5-aligned), so nothing else here would
-    // notice a non-finite trace: `compute_movement` compares with `>`, which is
-    // false for NaN, and infinity would read as "moved". Check finiteness
-    // directly over the assessed spans.
-    let finite = |coords: &[[f32; 3]], n: usize| {
-        coords[..n.min(coords.len())]
-            .iter()
-            .all(|c| c[0].is_finite() && c[1].is_finite() && c[2].is_finite())
+fn run_replay(args: &[String]) -> bool {
+    let flags = parse(
+        args,
+        &[
+            flag("--iterations", Some("-n")),
+            switch("--verbose", Some("-v")),
+            switch("--no-match", None),
+        ],
+        1,
+    );
+    let Some(path) = flags.positional.first() else {
+        usage_error("replay needs <path.tasrec>");
     };
-    let coords_finite = finite(&state.rec_coords, rec_count as usize)
-        && finite(&state.play_coords, rec_count.min(played) as usize);
-
-    let recorded_ok = rec_count > 0;
-    let complete_ok = play_ok && played >= rec_count;
-    let rec_moved = rec_travel > 0.1;
-    let play_moved = play_travel > 0.1;
-
-    println!("\n=== SMOKE CHECKS ===");
-    println!(
-        "  recorded ticks    : {} — {}",
-        rec_count,
-        if recorded_ok { "PASS" } else { "FAIL" }
-    );
-    println!(
-        "  playback complete : {}/{} — {}",
-        played,
-        rec_count,
-        if complete_ok { "PASS" } else { "FAIL" }
-    );
-    println!(
-        "  REC movement      : max(dx,dy,dz)={:.4} (dx={:.4} dy={:.4} dz={:.4}) — {}",
-        rec_travel,
-        rec_dx,
-        rec_dy,
-        rec_dz,
-        if rec_moved { "PASS" } else { "FAIL" }
-    );
-    println!(
-        "  PLAY movement     : max(dx,dy,dz)={:.4} (dx={:.4} dy={:.4} dz={:.4}) — {}",
-        play_travel,
-        play_dx,
-        play_dy,
-        play_dz,
-        if play_moved { "PASS" } else { "FAIL" }
-    );
-    println!(
-        "  coords finite     : {} — {}",
-        coords_finite,
-        if coords_finite { "PASS" } else { "FAIL" }
-    );
-    println!("  (drift is not asserted — smoke is not F5-aligned by design)");
-
-    let pass = recorded_ok && complete_ok && rec_moved && play_moved && coords_finite;
-    if pass {
-        println!("\n*** SMOKE TEST PASSED ***");
-    } else {
-        println!("\n*** SMOKE TEST FAILED ***");
+    let iterations = num(&flags, "--iterations", 5u32);
+    let no_match = flags.is_set("--no-match");
+    let report = replay::run(path, iterations, flags.is_set("--verbose"), no_match);
+    // Zero iterations would make `.any()` vacuously false.
+    if report.results.is_empty() {
+        eprintln!("ERROR: replay produced no iterations — nothing was verified");
+        return false;
     }
-    std::process::exit(if pass { 0 } else { 1 });
+    // Drift, incomplete playback and (unless --no-match) a failed start match
+    // all fail; drift alone is not enough because a run that never started
+    // reports 0.0 drift over zero frames.
+    !report.results.iter().any(|r| {
+        r.has_drift() || !r.playback_complete || (!no_match && !r.position_matched)
+    })
 }
 
-fn run_f5_aligned_test() {
-    println!("=== F5-Aligned Zero-Drift Test ===");
-    let mut client = harness::ensure_game_running();
-    harness::print_status(&client);
-
-    // Phase 1: F5 + REC (straight line)
-    println!("\n--- Phase 1: F5 + REC ---");
-    if !harness::restart_and_stabilize(&client) {
-        eprintln!("ERROR: Game not alive after F5");
-        std::process::exit(1);
+fn run_cont_reliability(args: &[String]) -> bool {
+    let flags = parse(
+        args,
+        &[
+            flag("--iterations", Some("-n")),
+            flag("--speed", Some("-s")),
+            flag("--splice", None),
+            flag("--file", None),
+            switch("--synthetic", None),
+            flag("--profile", None),
+            flag("--tap-ticks", None),
+        ],
+        0,
+    );
+    let iterations = num(&flags, "--iterations", 10u32);
+    let speed = num(&flags, "--speed", 12.0f32);
+    let splice = num(&flags, "--splice", 2200u32);
+    let profile = match flags.value("--profile") {
+        None => cont_reliability::BaselineInputProfile::Taps,
+        Some(raw) => cont_reliability::BaselineInputProfile::parse(raw)
+            .unwrap_or_else(|| usage_error(format!("invalid --profile '{raw}'; expected 'taps' or 'sweep'"))),
+    };
+    let tap_ticks = flags
+        .value("--tap-ticks")
+        .map(|_| num(&flags, "--tap-ticks", 8u32).max(1));
+    // A real steered recording makes the drift check meaningful, so the
+    // default baseline is FE-tremendous; `--synthetic` records a fresh one.
+    let file = if flags.is_set("--synthetic") {
+        None
+    } else {
+        flags.value("--file").map(str::to_string).or_else(|| {
+            harness::fixture_path("FE-tremendous.tasrec")
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        })
+    };
+    match &file {
+        Some(p) => println!("  Baseline: real recording {}", p),
+        None => println!("  Baseline: synthetic"),
     }
+    let report = cont_reliability::run(iterations, speed, splice, file.as_deref(), profile, tap_ticks);
+    report.all_pass()
+}
 
-    harness::arm_rec(&mut client);
-    println!("Recording 5s (straight line)...");
-    std::thread::sleep(std::time::Duration::from_secs(5));
+#[cfg(test)]
+mod tests {
+    use super::MODES;
 
-    let rec_count = client.state().recorded_count;
-    harness::stop(&mut client);
-    println!("Recorded {} ticks", rec_count);
-
-    if rec_count == 0 {
-        eprintln!("ERROR: No ticks recorded");
-        std::process::exit(1);
-    }
-
-    let s = client.state();
-    let last = (rec_count - 1) as usize;
-    println!(
-        "First REC coord: ({:.4}, {:.4}, {:.4})",
-        s.rec_coords[0][0], s.rec_coords[0][1], s.rec_coords[0][2]
-    );
-    println!(
-        "Last REC coord [{}]: ({:.4}, {:.4}, {:.4})",
-        last, s.rec_coords[last][0], s.rec_coords[last][1], s.rec_coords[last][2]
-    );
-
-    // Capture REC start position for matching
-    let rec_start = client.state().rec_coords[0];
-
-    // Phase 2: F5 + PLAY (match REC starting position via play_coords[0])
-    println!("\n--- Phase 2: F5 + PLAY ---");
-    if !harness::restart_play_and_match(&mut client, rec_start, harness::START_MATCH_RETRIES) {
-        eprintln!("WARNING: Could not match REC position for PLAY (continuing anyway)");
-    }
-    // Playback is already running from restart_play_and_match
-    harness::wait_playback(&client, rec_count);
-
-    // Debug: coordinate comparison and drift analysis
-    let s = client.state();
-    let n = rec_count as usize;
-    println!("\n--- Starting position comparison ---");
-    println!(
-        "  REC[0]: ({:.6}, {:.6}, {:.6})",
-        s.rec_coords[0][0], s.rec_coords[0][1], s.rec_coords[0][2]
-    );
-    println!(
-        "  PLAY[0]: ({:.6}, {:.6}, {:.6})",
-        s.play_coords[0][0], s.play_coords[0][1], s.play_coords[0][2]
-    );
-    println!(
-        "  Initial offset: dx={:.9} dy={:.9} dz={:.9}",
-        (s.rec_coords[0][0] as f64 - s.play_coords[0][0] as f64).abs(),
-        (s.rec_coords[0][1] as f64 - s.play_coords[0][1] as f64).abs(),
-        (s.rec_coords[0][2] as f64 - s.play_coords[0][2] as f64).abs()
-    );
-
-    // Drift progression at sample frames
-    println!("\n--- Drift progression ---");
-    for &frame in &[0, 5, 10, 50, 100, 200, 500, 1000, 1500] {
-        if frame < n {
-            let dx = (s.rec_coords[frame][0] as f64 - s.play_coords[frame][0] as f64).abs();
-            let dz = (s.rec_coords[frame][2] as f64 - s.play_coords[frame][2] as f64).abs();
-            println!("  [{}] dx={:.9} dz={:.9}", frame, dx, dz);
+    #[test]
+    fn mode_names_are_unique() {
+        for (i, mode) in MODES.iter().enumerate() {
+            assert!(
+                !MODES[..i].iter().any(|m| m.name == mode.name),
+                "duplicate mode {}",
+                mode.name
+            );
         }
     }
-
-    harness::print_results(&client);
-
-    // 4-gate assessment
-    let assessment = gates::run_gates_straight(client.state(), rec_count);
-    assessment.print_summary();
-
-    std::process::exit(if assessment.all_pass() { 0 } else { 1 });
 }

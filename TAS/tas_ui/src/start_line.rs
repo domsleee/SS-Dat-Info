@@ -1,7 +1,6 @@
-//! Start/finish-line crossing detection for recordings (game-awareness 1.6 +
-//! 1.7: "the timer under From: should be from when it crosses the start
-//! line", "if the player crosses the finish line during record, the
-//! recording should stop").
+//! Start/finish-line crossing detection for recordings: the tick a run's
+//! race timer starts (the timeline and the From: sub-label anchor on it) and
+//! the tick it crosses the finish line (REC auto-stops there).
 //!
 //! The game's race timer starts/ends at TRIGGER PLANES (Start_Point /
 //! Finish_Point markers), already extracted offline into

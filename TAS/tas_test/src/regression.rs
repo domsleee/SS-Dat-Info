@@ -1,22 +1,18 @@
-//! Regression suite — 15 test cases ported from _drift_regression_suite.lua.
-//!
-//! Each case: scripted steering pattern -> REC -> PLAY -> drift check -> CSV output.
+//! Regression suite: 15 scripted steering patterns, each REC -> PLAY -> drift
+//! check -> CSV row.
 
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use serde::Serialize;
 use tas_shared::input_bits;
 
 use crate::drift;
 use crate::gates;
 use crate::harness;
 use crate::patterns::{self, PatternStep};
-
-// Empirically, 20 retries was not enough to reliably hit the replayable F5 bucket
-// for short patterns like jump_tap. 60 cleared repeated live stress reruns.
-const START_MATCH_RETRIES: u32 = 60;
 
 /// A single regression test case definition.
 #[derive(Debug, Clone)]
@@ -42,8 +38,8 @@ pub struct WindowMetrics {
     pub active_norm_drift_z: f64,
 }
 
-/// Result of running one regression case.
-#[derive(Debug)]
+/// Result of running one regression case; also the certificate's row.
+#[derive(Debug, Serialize)]
 pub struct CaseResult {
     pub name: String,
     pub pattern: String,
@@ -92,9 +88,9 @@ pub fn build_cases() -> Vec<RegressionCase> {
         case_explicit(
             "L_long_R_short_L",
             &[
-                ("LEFT1", input_bits::LEFT, 72),
-                ("RIGHT2", input_bits::RIGHT, 36),
-                ("LEFT3", input_bits::LEFT, 72),
+                (input_bits::LEFT, 72),
+                (input_bits::RIGHT, 36),
+                (input_bits::LEFT, 72),
             ],
         ),
         // 11-12: Jump variants
@@ -107,9 +103,9 @@ pub fn build_cases() -> Vec<RegressionCase> {
         case_explicit(
             "shift_left_right",
             &[
-                ("SHIFT_LEFT", input_bits::SHIFT | input_bits::LEFT, 56),
-                ("NEUTRAL", 0, 20),
-                ("SHIFT_RIGHT", input_bits::SHIFT | input_bits::RIGHT, 56),
+                (input_bits::SHIFT | input_bits::LEFT, 56),
+                (0, 20),
+                (input_bits::SHIFT | input_bits::RIGHT, 56),
             ],
         ),
     ];
@@ -130,7 +126,7 @@ fn case_pattern(name: &str, pattern: &str, hold: u32, gap: u32) -> RegressionCas
     }
 }
 
-fn case_explicit(name: &str, defs: &[(&str, u8, u32)]) -> RegressionCase {
+fn case_explicit(name: &str, defs: &[(u8, u32)]) -> RegressionCase {
     RegressionCase {
         ordinal: 0,
         name: name.to_string(),
@@ -166,7 +162,7 @@ fn filter_cases(cases: Vec<RegressionCase>) -> Vec<RegressionCase> {
 }
 
 /// Run the full regression suite. Drives input via Pico HID for real REC.
-pub fn run(cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
+pub fn run(csv_path: &Path) -> Vec<CaseResult> {
     let cases = filter_cases(build_cases());
     let mut results = Vec::new();
 
@@ -195,7 +191,7 @@ pub fn run(cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
             case.pattern_str
         );
 
-        let result = run_single_case(&mut client, case, cache_dir);
+        let result = run_single_case(&mut client, case);
         append_csv(csv_path, &result);
 
         println!(
@@ -242,19 +238,14 @@ pub fn run(cache_dir: &Path, csv_path: &Path) -> Vec<CaseResult> {
 fn run_single_case(
     client: &mut tas_shared::TasSharedMemoryClient,
     case: &RegressionCase,
-    cache_dir: &Path,
 ) -> CaseResult {
-    let cache_path = cache_dir.join(format!("{:02}_{}.tas", case.ordinal, slug(&case.name)));
-
     // Phase 1: Record
     if !harness::restart_and_stabilize(client) {
         return error_result(case, "Game not alive after restart (REC phase)");
     }
 
     harness::arm_rec(client);
-
-    // Drive the Pico HID according to the pattern schedule
-    drive_pico_pattern(&case.steps);
+    harness::drive_pico_steps(&case.steps, None);
 
     let rec_count = client.state().recorded_count;
     harness::stop(client);
@@ -321,7 +312,7 @@ fn start_playback_with_fallback(
     target: [f32; 3],
     label: &str,
 ) -> Result<bool, String> {
-    if harness::restart_play_and_match(client, target, START_MATCH_RETRIES) {
+    if harness::restart_play_and_match(client, target, harness::START_MATCH_RETRIES) {
         return Ok(true);
     }
 
@@ -337,11 +328,6 @@ fn start_playback_with_fallback(
     }
     harness::arm_play(client);
     Ok(false)
-}
-
-/// Drive Pico HID according to the pattern step schedule (delegates to harness).
-fn drive_pico_pattern(steps: &[PatternStep]) {
-    harness::drive_pico_steps(steps, None);
 }
 
 fn error_result(case: &RegressionCase, msg: &str) -> CaseResult {
@@ -370,15 +356,6 @@ fn error_result(case: &RegressionCase, msg: &str) -> CaseResult {
         all_gates_pass: false,
         error: Some(msg.to_string()),
     }
-}
-
-fn slug(s: &str) -> String {
-    s.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .collect::<String>()
-        .trim_matches('_')
-        .to_string()
 }
 
 fn write_csv_header(path: &Path) {
@@ -483,10 +460,8 @@ fn print_window_metrics(metrics: &WindowMetrics) {
 }
 
 fn print_translation_verdict(start_matched: bool, metrics: &WindowMetrics) {
-    // NOTE: X/Z only — this is a translation *diagnostic*, and WindowMetrics
-    // feeds the CSV artifact schema, so it is deliberately not widened to Y.
-    // The authoritative zero-drift verdict (Gate 3 / `replay_zero`) does check
-    // all three axes; the name says XZ so this line cannot be misread as one.
+    // X/Z only: a translation diagnostic feeding the CSV schema. The zero-drift
+    // verdict (Gate 3 / `replay_zero`) checks all three axes.
     println!(
         "  Translation diagnostic: startMatched={} fullNormZeroXZ={} fullNormXZ=({:.9}, {:.9})",
         start_matched,

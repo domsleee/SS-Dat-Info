@@ -6,10 +6,8 @@ use tas_shared::TasSharedState;
 
 /// Per-axis drift result.
 ///
-/// Y (vertical) is compared alongside X/Z. It was historically omitted, which
-/// left every drift-based mode blind to a regression that changed height while
-/// preserving the ground track — jump arcs and terrain following are exactly
-/// that shape, so a "zero drift" verdict used to be able to hide them.
+/// Y (vertical) is compared alongside X/Z: jump arcs and terrain following can
+/// change height while preserving the ground track.
 #[derive(Debug, Clone, Default)]
 pub struct DriftResult {
     pub max_drift_x: f64,
@@ -23,15 +21,6 @@ pub struct DriftResult {
 impl DriftResult {
     pub fn is_zero(&self) -> bool {
         self.max_drift_x == 0.0 && self.max_drift_y == 0.0 && self.max_drift_z == 0.0
-    }
-
-    pub fn is_within(&self, epsilon: f64) -> bool {
-        self.max_drift_x < epsilon && self.max_drift_y < epsilon && self.max_drift_z < epsilon
-    }
-
-    /// Largest drift across all three axes — for one-line reporting.
-    pub fn max_axis(&self) -> f64 {
-        self.max_drift_x.max(self.max_drift_y).max(self.max_drift_z)
     }
 }
 
@@ -92,11 +81,8 @@ fn compute_drift_between(
         let dy = (rec_y as f64 - play_y as f64).abs();
         let dz = (rec_z as f64 - play_z as f64).abs();
 
-        // NaN must never read as "no drift". Every comparison against NaN is
-        // false, so a NaN delta would slide through the `>` tests below and leave
-        // the maxima at 0.0 — i.e. `is_zero()` would report a clean run for a
-        // simulation that had gone non-finite. Force it to infinity so it fails
-        // every gate loudly instead.
+        // NaN must never read as "no drift": every comparison against NaN is
+        // false and would leave the maxima at 0.0, so force it to infinity.
         let sanitize = |d: f64| if d.is_nan() { f64::INFINITY } else { d };
         let (dx, dy, dz) = (sanitize(dx), sanitize(dy), sanitize(dz));
 
@@ -130,26 +116,6 @@ pub fn compute_drift(state: &TasSharedState, count: u32) -> DriftResult {
 }
 
 /// Compute drift between rec_coords and play_coords over the window `[start, count)`.
-/// Gate-relative drift: rec_coords from rec_gate, play_coords from play_gate,
-/// for `count` samples. When the two gates differ (the countdown landed on a
-/// different tick), raw-index drift is meaningless but this is exactly zero on
-/// a correct aligned replay.
-pub fn compute_drift_gate_relative(
-    state: &TasSharedState,
-    rec_gate: u32,
-    play_gate: u32,
-    count: u32,
-) -> DriftResult {
-    compute_drift_between(
-        &state.rec_coords,
-        &state.play_coords,
-        rec_gate as usize,
-        play_gate as usize,
-        count as usize,
-        false,
-    )
-}
-
 pub fn compute_drift_window(state: &TasSharedState, start: u32, count: u32) -> DriftResult {
     let end = count as usize;
     let start = (start as usize).min(end);
@@ -183,7 +149,9 @@ pub fn compute_normalized_drift_window(
 }
 
 /// Compare recording and playback at equal offsets from their independently
-/// observed gates. Drift frame indices are reported in recording coordinates.
+/// observed gates, for `count` samples. When the countdown ended on a different
+/// tick, raw-index drift is meaningless but this is exactly zero on a correct
+/// aligned replay. Drift frame indices are reported in recording coordinates.
 pub fn compute_gate_relative_drift(
     state: &TasSharedState,
     rec_gate: u32,
@@ -253,9 +221,7 @@ pub fn first_input_tick(input_log: &[u8], count: usize) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn zeroed_state() -> Box<TasSharedState> {
-        tas_shared::zeroed_boxed()
-    }
+    use tas_shared::zeroed_boxed as zeroed_state;
 
     // ========== compute_drift ==========
 
@@ -307,18 +273,6 @@ mod tests {
         assert!(d.is_zero());
     }
 
-    #[test]
-    fn drift_is_within() {
-        let d = DriftResult {
-            max_drift_x: 0.001,
-            max_drift_y: 0.0015,
-            max_drift_z: 0.002,
-            ..Default::default()
-        };
-        assert!(d.is_within(0.01));
-        assert!(!d.is_within(0.001));
-    }
-
     // ========== Y axis (vertical) ==========
 
     #[test]
@@ -345,12 +299,11 @@ mod tests {
     }
 
     #[test]
-    fn drift_is_within_catches_y_alone() {
+    fn is_zero_catches_y_alone() {
         let d = DriftResult {
             max_drift_y: 0.5,
             ..Default::default()
         };
-        assert!(!d.is_within(0.01));
         assert!(!d.is_zero());
     }
 
@@ -375,26 +328,12 @@ mod tests {
             state.rec_coords[i] = [1.0, 2.0, 3.0];
             state.play_coords[i] = [1.0, 2.0, 3.0];
         }
-        // A non-finite simulation must fail, not report a clean run. Every
-        // comparison against NaN is false, so without the guard the maxima stay
-        // 0.0 and is_zero() returns true.
+        // A non-finite simulation must fail, not report a clean run.
         state.play_coords[7][1] = f32::NAN;
 
         let d = compute_drift(&state, 20);
         assert!(!d.is_zero(), "NaN must not read as zero drift");
-        assert!(!d.is_within(f64::MAX));
         assert!(d.max_drift_y.is_infinite());
-    }
-
-    #[test]
-    fn max_axis_reports_largest_of_three() {
-        let d = DriftResult {
-            max_drift_x: 1.0,
-            max_drift_y: 7.0,
-            max_drift_z: 3.0,
-            ..Default::default()
-        };
-        assert_eq!(d.max_axis(), 7.0);
     }
 
     #[test]

@@ -1,23 +1,20 @@
-//! Bug #2 regression: a `continue_from_frame` that lands in shared memory during
-//! a PLAIN PLAY must NOT hijack the replay into REC.
+//! A `continue_from_frame` that lands in shared memory during a PLAIN PLAY must
+//! NOT hijack the replay into REC.
 //!
-//! Repro: arm a normal PLAY, then (simulating a stray UI/writer setting the
-//! splice marker mid-replay) write `continue_from_frame` to a frame ahead of the
-//! playhead. Without the fix, cave2's per-frame splice check flips PLAY→REC at
-//! that frame and truncates the recording. With the `g_cave2_contArmed` gate, a
-//! splice can only fire for a PLAY that was genuinely entered via ARM_CONTINUE,
-//! so the plain replay runs to completion (PLAY→OFF) and NEVER enters REC.
+//! Arm a normal PLAY, then (as a stray writer would) set the splice marker to
+//! a frame ahead of the playhead. cave2's `g_cave2_contArmed` gate only lets a
+//! splice fire for a PLAY entered via ARM_CONTINUE, so the plain replay must
+//! run to completion (PLAY→OFF) and never enter REC.
 
 use std::thread;
 use std::time::{Duration, Instant};
+
+use tas_shared::TasMode;
 
 use crate::{harness, replay};
 
 const SPLICE_AT: u32 = 2000; // a frame well within the recording, ahead of the playhead
 const REPLAY_SPEED: f32 = 32.0;
-
-const MODE_PLAY: u32 = 2;
-const MODE_REC: u32 = 1;
 
 pub fn run() -> bool {
     println!("=== BUG #2 REGRESSION: CONT-during-PLAY must not start REC ===\n");
@@ -28,18 +25,10 @@ pub fn run() -> bool {
     thread::sleep(Duration::from_millis(100));
 
     // Load a real recording so the plain PLAY has frames to replay.
-    let path = "TAS/recordings/FE-10065.tasrec";
-    let candidates = [
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("../../..").join(path))),
-        Some(std::path::PathBuf::from(path)),
-        Some(std::path::PathBuf::from("recordings/FE-10065.tasrec")),
-    ];
-    let recpath = match candidates.into_iter().flatten().find(|p| p.exists()) {
-        Some(p) => p,
-        None => {
-            eprintln!("ERROR: couldn't find {}", path);
+    let recpath = match harness::fixture_path("FE-10065.tasrec") {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
             return false;
         }
     };
@@ -71,7 +60,8 @@ pub fn run() -> bool {
         if pos >= 100 {
             break;
         }
-        if client.state().mode != MODE_PLAY || t0.elapsed() > Duration::from_secs(10) {
+        if client.state().mode != TasMode::Play as u32 || t0.elapsed() > Duration::from_secs(10)
+        {
             eprintln!(
                 "  ERROR: replay didn't start (pos={}, mode={})",
                 pos,
@@ -99,7 +89,7 @@ pub fn run() -> bool {
             let s = client.state();
             (s.mode, s.playback_pos)
         };
-        if mode == MODE_REC {
+        if mode == TasMode::Rec as u32 {
             hijacked = true;
             println!("  !!! HIJACKED: mode flipped to REC at pos={}", pos);
             break;
@@ -108,7 +98,7 @@ pub fn run() -> bool {
             crossed = true;
             break; // safely past the splice frame, still PLAY
         }
-        if mode != MODE_PLAY {
+        if mode != TasMode::Play as u32 {
             // PLAY ended (reached end of recording) without ever hitting REC.
             crossed = pos >= SPLICE_AT;
             break;

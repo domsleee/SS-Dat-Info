@@ -141,9 +141,6 @@ pub struct ReplayResult {
     pub max_drift_x: f64,
     pub max_drift_y: f64,
     pub max_drift_z: f64,
-    pub max_drift_frame_x: usize,
-    pub max_drift_frame_y: usize,
-    pub max_drift_frame_z: usize,
     pub position_matched: bool,
     pub playback_complete: bool,
 }
@@ -231,52 +228,19 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
 
-    // Pre-flight: is the game even on the track this recording belongs to?
-    // Without this a wrong-track run looks like a hang — the start matcher can
-    // never reach a spawn that is on another map, so it burns its full retry
-    // budget (~22s each) and the mode appears to stall for many minutes.
-    // FAIL CLOSED. Waiting for a resolved level is not enough on its own: if it
-    // never resolves, treating that as "no opinion" lets through exactly the
-    // wrong-track replay this guard exists to stop, and the caller sees the
-    // 10-minute pseudo-hang instead of an error. Unresolved means we CANNOT
-    // confirm the track, and a guard that cannot confirm must refuse.
-    //
-    // TAS_TEST_LEVEL=any is the documented, explicit bypass (it already disables
-    // the harness track check), so deliberate off-track work stays possible
-    // without the guard silently deciding for you.
-    let bypass = std::env::var("TAS_TEST_LEVEL")
-        .map(|v| v.eq_ignore_ascii_case("any"))
-        .unwrap_or(false);
-    let resolved = {
-        let start = std::time::Instant::now();
-        loop {
-            if let Some(id) = tas_shared::resolved_level_id(client.state()) {
-                break Some(id);
-            }
-            if start.elapsed() > std::time::Duration::from_secs(12) {
-                break None;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-    };
-    match resolved {
+    // The recording must belong to the live track: on the wrong track the
+    // start matcher can never hit and burns its whole retry budget. The
+    // harness has already waited for the level to resolve (or exited), so an
+    // unresolved level here means `TAS_TEST_LEVEL=any` bypassed the guard.
+    match tas_shared::resolved_level_id(client.state()) {
         Some(id) => {
             if let Err(msg) = tas_shared::level::check_recording_matches_live(path, id) {
                 eprintln!("ERROR: {}", msg);
                 std::process::exit(1);
             }
         }
-        None if bypass => {
-            eprintln!("  WARNING: level unresolved; track guard bypassed (TAS_TEST_LEVEL=any)");
-        }
         None => {
-            eprintln!(
-                "ERROR: the track could not be identified within 12s, so this recording \
-                 cannot be confirmed to belong here. Replaying on the wrong track never \
-                 matches the recorded spawn and burns the entire retry budget. Navigate \
-                 into a Time-Attack track, or set TAS_TEST_LEVEL=any to replay anyway."
-            );
-            std::process::exit(1);
+            eprintln!("  WARNING: level unresolved; track guard bypassed (TAS_TEST_LEVEL=any)");
         }
     }
 
@@ -325,9 +289,6 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
             max_drift_x: d.max_drift_x,
             max_drift_y: d.max_drift_y,
             max_drift_z: d.max_drift_z,
-            max_drift_frame_x: d.max_drift_frame_x,
-            max_drift_frame_y: d.max_drift_frame_y,
-            max_drift_frame_z: d.max_drift_frame_z,
             position_matched: matched,
             playback_complete: play_ok,
         };
@@ -342,9 +303,8 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
                 d.max_drift_z,
                 d.max_drift_frame_z
             );
-            // Find first frame where any axis diverges (bit-level mismatch).
-            // Reveals whether drift is sudden (rotation mismatch at start) or
-            // gradual (some per-frame state slowly diverging).
+            // The first bit-level divergence tells a sudden rotation mismatch
+            // at the start from a gradual one.
             let played = rec.count.min(state.playback_pos) as usize;
             let mut first_div: Option<(usize, [f32; 3], [f32; 3])> = None;
             for i in 0..played {

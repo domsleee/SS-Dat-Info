@@ -98,7 +98,8 @@ pub fn focus_game() {
 
 /// Send Escape through the Pico (mask bit 7). The Pico is a real HID keyboard,
 /// so the press reaches the game's pause handler; the synthetic fallback for
-/// machines without one generally does not.
+/// machines without one generally does not, and the caller's verdict must
+/// notice (pause-resume checks that the frame counter actually stalled).
 pub fn send_escape() -> bool {
     focus_game();
     if let Some(mut keys) = PicoKeys::open() {
@@ -483,7 +484,8 @@ fn kill_image(image: &str, exclude_pid: Option<u32>) -> u32 {
     }
 }
 
-/// Kill every game, launcher and TAS process except ourselves.
+/// Kill every game, launcher and TAS process except ourselves (the same list
+/// and `supreme-service` exclusion as the justfile's `stop_game`).
 pub fn kill_game() {
     let me = std::process::id();
     for image in [
@@ -1290,17 +1292,11 @@ fn drive_pico_steps_inner(
     required: bool,
 ) -> Result<(), String> {
     let port_name = pico_port();
-    // PicoKeys, not a bare File: this loop holds keys down for seconds at a
-    // time, so it is the most exposed place for an interrupted run to leave a
-    // key stuck; Drop releases on every exit path.
-    //
-    // Holds longer than 500 ms are truncated: the firmware (TAS/pico/code.py,
-    // TIMEOUT_S) releases everything after 500 ms without a byte and this loop
-    // writes only on mask changes. The regression gates were baselined with
-    // that release landing INSIDE the recording window, so do not add a
-    // keepalive here without re-baselining them (one turned press+release
-    // recordings into press-only and failed Gate 1). Acceptance opts in via
-    // `keepalive_ms`.
+    // The firmware (TAS/pico/code.py, TIMEOUT_S) releases every key 500 ms
+    // after the last byte and this loop writes only on mask changes, so long
+    // holds are truncated. The regression gates are baselined with that release
+    // inside the recording window: do not add a default keepalive without
+    // re-baselining them. Acceptance opts in via `keepalive_ms`.
     let mut port = match PicoKeys::open_checked() {
         Ok(p) => p,
         Err(error) => {
@@ -1372,17 +1368,26 @@ fn require_pico_write(sent: bool, port: &str) -> Result<(), String> {
     }
 }
 
-/// Assert the proven zero-drift configuration before a gate runs: natural
-/// ticks (`force_fixed_tick == 0`) and a 1x (or unset) playback speed. Every
-/// live gate calls this once after `ensure_game_running`.
+/// Require the proven zero-drift configuration before a gate runs: natural
+/// ticks (`force_fixed_tick == 0`) and a 1x (or unset) playback speed. Exits 1
+/// with the offending value instead of running a gate whose answer is
+/// meaningless.
 pub fn assert_proven_config(client: &TasSharedMemoryClient) {
     let s = client.state();
-    assert_eq!(s.force_fixed_tick, 0, "fft must be 0 (natural ticks)");
-    assert!(
-        s.playback_speed == 1.0 || s.playback_speed == 0.0,
-        "playback_speed must be 1.0 or 0.0 (got {})",
-        s.playback_speed
-    );
+    if s.force_fixed_tick != 0 {
+        eprintln!(
+            "ERROR: force_fixed_tick={} — must be 0 (natural ticks)",
+            s.force_fixed_tick
+        );
+        std::process::exit(1);
+    }
+    if s.playback_speed != 1.0 && s.playback_speed != 0.0 {
+        eprintln!(
+            "ERROR: playback_speed must be 1.0 or 0.0 (got {})",
+            s.playback_speed
+        );
+        std::process::exit(1);
+    }
     println!(
         "Config OK: fft=0, speed={} (Cave5={})",
         s.playback_speed,
@@ -1408,27 +1413,38 @@ pub fn require_speed_preconditions(client: &TasSharedMemoryClient) -> bool {
     true
 }
 
-/// Locate a committed fixture under `TAS/recordings/`.
+/// Locate a file by its path relative to the repository root.
 ///
 /// The binary normally runs from `TAS/target/<profile>/`, three levels below
-/// the repo root; the cwd-relative candidates cover `just` recipes run from the
-/// repo root or from `TAS/`.
-pub fn fixture_path(name: &str) -> Result<PathBuf, String> {
-    let relative = Path::new("TAS/recordings").join(name);
+/// the root; the cwd-relative candidate covers `just` recipes run from the root.
+pub fn repo_path(relative: impl AsRef<Path>) -> Result<PathBuf, String> {
+    let relative = relative.as_ref();
     let mut candidates = Vec::new();
     if let Some(dir) = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf))
     {
-        candidates.push(dir.join("../../..").join(&relative));
+        candidates.push(dir.join("../../..").join(relative));
     }
-    candidates.push(relative);
-    candidates.push(Path::new("recordings").join(name));
+    candidates.push(relative.to_path_buf());
     candidates
         .iter()
         .find(|p| p.is_file())
         .cloned()
-        .ok_or_else(|| format!("Couldn't locate {name} (tried {candidates:?})"))
+        .ok_or_else(|| {
+            format!(
+                "Couldn't locate {} (tried {candidates:?})",
+                relative.display()
+            )
+        })
+}
+
+/// Locate a committed recording under `TAS/recordings/` (also found from `TAS/`).
+pub fn fixture_path(name: &str) -> Result<PathBuf, String> {
+    repo_path(Path::new("TAS/recordings").join(name)).or_else(|error| {
+        let from_tas = Path::new("recordings").join(name);
+        from_tas.is_file().then_some(from_tas).ok_or(error)
+    })
 }
 
 #[cfg(test)]

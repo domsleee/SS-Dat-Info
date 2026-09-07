@@ -31,16 +31,15 @@ use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 use crate::harness;
 use crate::replay;
 
-const RECORDING_REL: &str = "TAS/recordings/FE-10065.tasrec";
+const RECORDING: &str = "FE-10065.tasrec";
 /// A post-finish dialog stops Supreme::Cycle while leaving TAS in PLAY. Treat a
 /// stable playback position and stable, readable race clock as a terminal run
 /// instead of burning the full timeout. The matched control establishes how
 /// many meaningful ticks exist before that freeze.
 const FINISH_STALL_SECS: u64 = 3;
-/// Replayed fast. Judging during a catch-up was already measured bit-exact
-/// (drift 0.0000 at 64x on this same recording), so this buys depth without
-/// buying a new variable.
-const DEFAULT_COMPARE_SPEED: f32 = 16.0;
+/// Replayed fast: judging during a catch-up is bit-exact on this recording, so
+/// this buys depth without a new variable.
+const COMPARE_SPEED: f32 = 16.0;
 const PLAY_TIMEOUT_SECS: u64 = 180;
 /// Arm delays swept across attempts, in milliseconds. The gate is measured
 /// from the ARM, so delaying the arm moves the gate — which is the only way to
@@ -79,30 +78,26 @@ struct Attempt {
     index_drift: f32,
 }
 
+/// `rec` is a path, or the name of a committed recording under
+/// `TAS/recordings/`; the default is FE-10065.
 pub fn run(iterations: u32, rec: Option<&str>) -> bool {
-    let compare_speed = std::env::var("TAS_GATE_ALIGN_SPEED")
-        .ok()
-        .and_then(|value| value.parse::<f32>().ok())
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(DEFAULT_COMPARE_SPEED);
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let rel = rec.unwrap_or(RECORDING_REL);
-    let candidates = [
-        exe_dir.join("../../..").join(rel),
-        PathBuf::from(rel),
-        exe_dir.join("../../..").join("TAS/recordings").join(rel),
-    ];
-    let Some(path) = candidates.iter().find(|p| p.exists()) else {
-        eprintln!("ERROR: couldn't locate {}", rel);
-        return false;
+    let compare_speed = COMPARE_SPEED;
+    let name = rec.unwrap_or(RECORDING);
+    let path = match Some(PathBuf::from(name))
+        .filter(|p| p.is_file())
+        .ok_or(())
+        .or_else(|()| harness::fixture_path(name))
+    {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            return false;
+        }
     };
-    let path = path.to_string_lossy().into_owned();
     println!(
         "=== Gate-relative input alignment: {} at {}x ===",
-        path, compare_speed
+        path.display(),
+        compare_speed
     );
 
     let mut client = harness::ensure_game_running();
@@ -110,7 +105,7 @@ pub fn run(iterations: u32, rec: Option<&str>) -> bool {
     harness::stop(&mut client);
     thread::sleep(Duration::from_millis(100));
 
-    let loaded = match replay::load_tasrec(std::path::Path::new(&path)) {
+    let loaded = match replay::load_tasrec(&path) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("ERROR: {}", e);

@@ -1,4 +1,4 @@
-//! Cave hook performance benchmark runner (SSB-296).
+//! Cave hook performance benchmark runner.
 //!
 //! Method:
 //! - Measure fixed frame windows (not fixed time) to reduce jitter.
@@ -279,7 +279,7 @@ fn ensure_race_stable(client: &mut TasSharedMemoryClient) -> bool {
 }
 
 pub fn run(config: BenchmarkConfig) -> Result<BenchmarkReport, String> {
-    println!("=== Cave Hook Benchmark (SSB-296) ===");
+    println!("=== Cave Hook Benchmark ===");
     println!(
         "Config: repeats={} measure_frames={}\n",
         config.repeats, config.measure_frames
