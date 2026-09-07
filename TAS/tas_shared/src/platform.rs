@@ -195,19 +195,6 @@ impl TasSharedMemoryClient {
         }
     }
 
-    /// Volatile read of tick_count (poll-hot field written by DLL).
-    ///
-    /// This is the PHYSICS tick counter (cave5 emits it per frame), not
-    /// the render-frame counter. Anything asking "is the game simulating
-    /// faster than real time?" has to read this one: fast-forward means
-    /// more ticks per frame, and frame_count cannot see that.
-    pub fn tick_count_volatile(&self) -> u32 {
-        unsafe {
-            let ptr = std::ptr::addr_of!((*self.ptr).tick_count);
-            std::ptr::read_volatile(ptr)
-        }
-    }
-
     /// Volatile read of playback_pos (poll-hot field written by DLL).
     pub fn playback_pos_volatile(&self) -> u32 {
         unsafe {
@@ -238,10 +225,6 @@ impl TasSharedMemoryClient {
             let ptr = std::ptr::addr_of_mut!((*self.ptr).restart_state);
             std::ptr::write_volatile(ptr, 0);
         }
-    }
-
-    pub fn reset_hook_perf_counters(&mut self) {
-        self.state_mut().reset_hook_perf_counters();
     }
 }
 

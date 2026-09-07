@@ -906,15 +906,6 @@ pub fn print_results(client: &TasSharedMemoryClient) {
     println!("BB3B10 blocks (Cave 1D): {}", s.bb3b10_block_count);
 }
 
-/// Write a synthetic input log directly into shared memory (benchmark mode;
-/// perf timing does not need a real-input oracle).
-pub fn write_synthetic_input(client: &mut TasSharedMemoryClient, input_log: &[u8]) {
-    let state = client.state_mut();
-    let len = input_log.len().min(state.input_log.len());
-    state.input_log[..len].copy_from_slice(&input_log[..len]);
-    state.recorded_count = len as u32;
-}
-
 /// Arm continue-from-frame: set the splice point and send ARM_CONTINUE. The DLL
 /// plays 0..frame, then switches to REC.
 pub fn arm_continue(client: &mut TasSharedMemoryClient, frame: u32) {

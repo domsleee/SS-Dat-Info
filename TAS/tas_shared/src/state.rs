@@ -9,7 +9,7 @@ use crate::rider::TAS_CHARACTER_UNKNOWN;
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
 
 /// Bumped whenever `TasSharedState` changes layout (mirrors shared_state.hpp).
-pub const TAS_SHARED_VERSION: u32 = 50;
+pub const TAS_SHARED_VERSION: u32 = 51;
 /// v46: size of the menu document buffer (JSON, NUL-terminated).
 pub const TAS_MENU_DOC_MAX: usize = 4096;
 /// v47: size of the menu command target (id or label, NUL-terminated).
@@ -80,15 +80,6 @@ pub struct TasLogEntry {
     pub sequence: u32,
     pub severity: u32,
     pub text: [u8; TAS_LOG_ENTRY_SIZE],
-}
-
-/// Hook performance counters (cycles measured with __rdtsc).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TasHookPerfCounter {
-    pub calls: u64,
-    pub cycles_total: u64,
-    pub cycles_max: u64,
 }
 
 impl TasLogEntry {
@@ -168,16 +159,7 @@ pub struct TasSharedState {
     pub bb3b10_call_count: u32,
     pub handler_block_count: u32,
     pub frame_count: u32,
-    pub event_count: u32,
     pub bb3b10_block_count: u32,
-
-    // Hook performance counters (DLL writes, `tas_test benchmark` reads)
-    pub perf_cave2: TasHookPerfCounter,
-    pub perf_cave5: TasHookPerfCounter,
-    pub perf_cave1c_down: TasHookPerfCounter,
-    pub perf_cave1c_up: TasHookPerfCounter,
-    pub perf_cave1d: TasHookPerfCounter,
-    pub perf_replay_capture: TasHookPerfCounter,
 
     // Hook status (DLL writes, UI reads)
     pub cave2_hooked: u32,
@@ -219,11 +201,6 @@ pub struct TasSharedState {
     pub log_write_seq: u32,
     pub log_ring: [TasLogEntry; TAS_LOG_RING_SIZE],
 
-    /// `frame_count` at CONT replay start and at the PLAY->REC splice; the
-    /// delta is how many game frames the catch-up replay took.
-    pub cont_replay_start_fc: u32,
-    pub cont_splice_fc: u32,
-
     /// CONT resume speed (UI writes, DLL reads). Applied to `playback_speed`
     /// atomically at the splice. 0.0 = unset.
     pub cont_resume_speed: f32,
@@ -240,7 +217,8 @@ pub struct TasSharedState {
     pub level_id: u32,
 
     /// On-screen player race time in centiseconds, read by the DLL from the HUD
-    /// text line. `u32::MAX` = not racing / unknown. Read via [`race_pair`].
+    /// text line. `u32::MAX` = not racing / unknown. Read via [`race_pair`]
+    /// when the time and its gate stamp must come from one coherent publish.
     pub race_time_cs: u32,
     /// The 16-bit game clock value captured at the gate cross (= clock −
     /// race_time); constant during a run. `u32::MAX` = unknown.
@@ -612,15 +590,6 @@ impl TasSharedState {
         }
         (entries, cursor)
     }
-
-    pub fn reset_hook_perf_counters(&mut self) {
-        self.perf_cave2 = TasHookPerfCounter::default();
-        self.perf_cave5 = TasHookPerfCounter::default();
-        self.perf_cave1c_down = TasHookPerfCounter::default();
-        self.perf_cave1c_up = TasHookPerfCounter::default();
-        self.perf_cave1d = TasHookPerfCounter::default();
-        self.perf_replay_capture = TasHookPerfCounter::default();
-    }
 }
 
 /// Heap-allocate a zeroed TasSharedState (avoids stack overflow for ~1.6MB struct).
@@ -641,41 +610,40 @@ mod tests {
     #[test]
     fn layout_pinned_to_shared_state_hpp() {
         use std::mem::offset_of;
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_651_664);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_651_504);
         let pins = [
-            ("perf_cave2", offset_of!(TasSharedState, perf_cave2), 72),
-            ("input_log", offset_of!(TasSharedState, input_log), 568),
-            ("rec_coords", offset_of!(TasSharedState, rec_coords), 66_104),
+            ("input_log", offset_of!(TasSharedState, input_log), 416),
+            ("rec_coords", offset_of!(TasSharedState, rec_coords), 65_952),
             (
                 "play_coords",
                 offset_of!(TasSharedState, play_coords),
-                852_536,
+                852_384,
             ),
             (
                 "log_write_seq",
                 offset_of!(TasSharedState, log_write_seq),
-                1_638_968,
+                1_638_816,
             ),
             (
-                "cont_replay_start_fc",
-                offset_of!(TasSharedState, cont_replay_start_fc),
-                1_647_164,
+                "cont_resume_speed",
+                offset_of!(TasSharedState, cont_resume_speed),
+                1_647_012,
             ),
             (
                 "level_ctx_seq",
                 offset_of!(TasSharedState, level_ctx_seq),
-                1_647_344,
+                1_647_184,
             ),
             (
                 "fpu_control_word",
                 offset_of!(TasSharedState, fpu_control_word),
-                1_647_392,
+                1_647_232,
             ),
-            ("menu_doc", offset_of!(TasSharedState, menu_doc), 1_647_456),
+            ("menu_doc", offset_of!(TasSharedState, menu_doc), 1_647_296),
             (
                 "menu_cmd_result",
                 offset_of!(TasSharedState, menu_cmd_result),
-                1_651_660,
+                1_651_500,
             ),
         ];
         for (name, actual, expected) in pins {

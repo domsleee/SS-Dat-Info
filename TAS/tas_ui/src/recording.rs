@@ -1,8 +1,6 @@
 use crate::history_store_v2::BlobRef;
 use crate::ui_log::UiLog;
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -31,8 +29,6 @@ const RECOVERY_PHASE_LATE_TICKS: u32 = 48_000; // ~8 min
 /// Early-phase interval; also the value the production `RecoveryStore::new`
 /// constructs with. A zero debounce (test-only) disables throttling entirely.
 const DEFAULT_RECOVERY_DEBOUNCE_MS: u64 = RECOVERY_DEBOUNCE_EARLY_MS;
-const MAX_TASREC_METADATA_BYTES: usize = 1024 * 1024;
-const MAX_TASREC_BYTES: u64 = (4 + MAX_TASREC_METADATA_BYTES + TAS_MAX_TICKS * (1 + 3 * 4)) as u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecordingSessionKind {
@@ -542,27 +538,6 @@ fn atomic_replace_file(temp_path: &Path, final_path: &Path) -> Result<(), String
     })
 }
 
-fn write_file_atomically(path: &Path, data: &[u8]) -> Result<(), String> {
-    let temp = temp_path_for(path);
-    let write_result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .map_err(|e| format!("failed to create {}: {}", temp.display(), e))?;
-        file.write_all(data)
-            .map_err(|e| format!("failed to write {}: {}", temp.display(), e))?;
-        file.sync_all()
-            .map_err(|e| format!("failed to flush {}: {}", temp.display(), e))?;
-        drop(file);
-        atomic_replace_file(&temp, path)
-    })();
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    write_result
-}
-
 fn remove_if_exists(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
@@ -740,137 +715,52 @@ impl RecordingFile {
         }
 
         let meta_json = serde_json::to_string_pretty(&meta).map_err(|e| format!("{}", e))?;
-
-        // File format: [4-byte meta_len][JSON metadata][input_log bytes][rec_coords floats]
-        let meta_bytes = meta_json.as_bytes();
-        let meta_len = meta_bytes.len() as u32;
-
-        let mut data = Vec::new();
-        data.extend_from_slice(&meta_len.to_le_bytes());
-        data.extend_from_slice(meta_bytes);
-        data.extend_from_slice(&state.input_log[..count]);
-
-        // Write rec_coords as raw f32 bytes
-        for i in 0..count {
-            for j in 0..3 {
-                data.extend_from_slice(&state.rec_coords[i][j].to_le_bytes());
-            }
-        }
-
-        write_file_atomically(path, &data)
+        let data = tas_codec::encode(
+            meta_json.as_bytes(),
+            &state.input_log[..count],
+            &state.rec_coords[..count],
+        )?;
+        tas_codec::save_atomic(path, &data)
     }
 
     /// Parse only the JSON header of a `.tasrec` (same bounds as `load`).
     pub fn read_metadata(path: &std::path::Path) -> Result<RecordingMetadata, String> {
-        let file = File::open(path).map_err(|e| format!("{}", e))?;
-        let mut head = Vec::new();
-        file.take((4 + MAX_TASREC_METADATA_BYTES) as u64)
-            .read_to_end(&mut head)
-            .map_err(|e| format!("{}", e))?;
-        if head.len() < 4 {
-            return Err("File too small".into());
-        }
-        let meta_len = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
-        if meta_len > MAX_TASREC_METADATA_BYTES {
-            return Err(format!("Recording metadata too large: {} bytes", meta_len));
-        }
-        let end = 4usize
-            .checked_add(meta_len)
-            .ok_or_else(|| "Recording metadata length overflow".to_string())?;
-        if head.len() < end {
-            return Err("Truncated metadata".into());
-        }
-        serde_json::from_slice::<RecordingMetadata>(&head[4..end]).map_err(|e| format!("{}", e))
+        let data = tas_codec::read_bounded(path)?;
+        let meta_len = tas_codec::header_meta_len(&data)?;
+        serde_json::from_slice::<RecordingMetadata>(&data[4..4 + meta_len])
+            .map_err(|e| format!("{}", e))
     }
 
     pub fn load(
         state: &mut TasSharedState,
         path: &std::path::Path,
     ) -> Result<(u32, Vec<Segment>), String> {
-        let file = File::open(path).map_err(|e| format!("{}", e))?;
-        let reported_len = file.metadata().map_err(|e| format!("{}", e))?.len();
-        if reported_len > MAX_TASREC_BYTES {
-            return Err(format!(
-                "Recording file too large: {} bytes (maximum {})",
-                reported_len, MAX_TASREC_BYTES
-            ));
-        }
-        let mut data = Vec::with_capacity(reported_len as usize);
-        file.take(MAX_TASREC_BYTES + 1)
-            .read_to_end(&mut data)
-            .map_err(|e| format!("{}", e))?;
-        if data.len() as u64 > MAX_TASREC_BYTES {
-            return Err(format!(
-                "Recording file too large: more than {} bytes",
-                MAX_TASREC_BYTES
-            ));
-        }
-        if data.len() < 4 {
-            return Err("File too small".into());
-        }
-
-        let meta_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        if meta_len > MAX_TASREC_METADATA_BYTES {
-            return Err(format!("Recording metadata too large: {} bytes", meta_len));
-        }
-        let metadata_end = 4usize
-            .checked_add(meta_len)
-            .ok_or_else(|| "Recording metadata length overflow".to_string())?;
-        if data.len() < metadata_end {
-            return Err("Truncated metadata".into());
-        }
-
-        let meta_json =
-            std::str::from_utf8(&data[4..4 + meta_len]).map_err(|e| format!("{}", e))?;
+        let data = tas_codec::read_bounded(path)?;
+        let meta_len = tas_codec::header_meta_len(&data)?;
         let meta: RecordingMetadata =
-            serde_json::from_str(meta_json).map_err(|e| format!("{}", e))?;
+            serde_json::from_slice(&data[4..4 + meta_len]).map_err(|e| format!("{}", e))?;
 
         let count = meta.recorded_count as usize;
         if count > TAS_MAX_TICKS {
             return Err(format!("Recording too long: {} ticks", count));
         }
-
-        let input_start = metadata_end;
-        let input_end = input_start
-            .checked_add(count)
-            .ok_or_else(|| "Recording input length overflow".to_string())?;
-        if data.len() < input_end {
-            return Err("Truncated input log".into());
-        }
+        // Legacy files may end after the input log: coordinates stay zeroed.
+        let body = tas_codec::decode_body(&data, meta_len, count, false)?;
 
         // Clear and load input log
-        state.input_log[..count].copy_from_slice(&data[input_start..input_end]);
+        state.input_log[..count].copy_from_slice(&body.input_log);
         for i in count..TAS_MAX_TICKS {
             state.input_log[i] = 0;
         }
 
-        // Load rec_coords if present. Crucially, zero the FULL coord
-        // buffer first — loading a legacy/minimal .tasrec with no coord
-        // block used to silently leave the previous recording's coords
-        // in shared memory, which then corrupted CONT start-matching,
+        // Zero the FULL coord buffer first — loading a legacy/minimal .tasrec
+        // with no coord block used to silently leave the previous recording's
+        // coords in shared memory, which then corrupted CONT start-matching,
         // drift analysis, and any re-save of the loaded file.
         for i in 0..TAS_MAX_TICKS {
             state.rec_coords[i] = [0.0, 0.0, 0.0];
         }
-        let coords_start = input_end;
-        let coords_size = count * 3 * 4; // 3 floats * 4 bytes
-        let coords_end = coords_start
-            .checked_add(coords_size)
-            .ok_or_else(|| "Recording coordinate length overflow".to_string())?;
-        if data.len() >= coords_end {
-            let mut offset = coords_start;
-            for i in 0..count {
-                for j in 0..3 {
-                    state.rec_coords[i][j] = f32::from_le_bytes([
-                        data[offset],
-                        data[offset + 1],
-                        data[offset + 2],
-                        data[offset + 3],
-                    ]);
-                    offset += 4;
-                }
-            }
-        }
+        state.rec_coords[..count].copy_from_slice(&body.rec_coords);
 
         state.recorded_count = meta.recorded_count;
         state.force_fixed_tick = 0; // always force fft=0 (proven zero-drift config)
@@ -2190,8 +2080,10 @@ pub fn load_recording_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
+    use tas_codec::MAX_TASREC_BYTES;
 
     static REC_COUNTER: AtomicU32 = AtomicU32::new(0);
 

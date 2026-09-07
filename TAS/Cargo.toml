@@ -1,3 +1,3 @@
 [workspace]
-members = ["tas_ui", "tas_test", "tas_shared"]
+members = ["tas_ui", "tas_test", "tas_shared", "tas_codec"]
 resolver = "2"

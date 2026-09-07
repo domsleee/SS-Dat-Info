@@ -9,7 +9,7 @@
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
 
-constexpr uint32_t TAS_SHARED_VERSION = 50; // research/prototype fields removed
+constexpr uint32_t TAS_SHARED_VERSION = 51;
 constexpr uint32_t TAS_MENU_DOC_MAX = 4096;  // menu document buffer (JSON, NUL-terminated)
 constexpr uint32_t TAS_MENU_CMD_TARGET_MAX = 64;  // menu command target (id or label, NUL-terminated)
 // menu_cmd_kind
@@ -118,15 +118,7 @@ struct TasLogEntry {
     char      text[TAS_LOG_ENTRY_SIZE];      // NUL-terminated message
 };
 
-// Hook performance counters (cycles measured with __rdtsc).
-struct TasHookPerfCounter {
-    uint64_t calls;          // Number of callback invocations
-    uint64_t cycles_total;   // Sum of elapsed cycles across all calls
-    uint64_t cycles_max;     // Worst single-call elapsed cycles
-};
-
-// All fields are naturally aligned (uint32_t/float = 4 bytes, the perf
-// counters 8). No packing; must match the Rust repr(C) layout.
+// All fields are naturally aligned 4-byte words. No packing; must match the Rust repr(C) layout.
 struct TasSharedState {
     // -- Version (read-only after init) --
     uint32_t version;               // TAS_SHARED_VERSION
@@ -147,16 +139,7 @@ struct TasSharedState {
     uint32_t bb3b10_call_count;     // BB3B10 observer calls (Cave 2 direct)
     uint32_t handler_block_count;   // Cave 1C: external handler blocks during PLAY
     uint32_t frame_count;           // Cave 2: total frames processed
-    uint32_t event_count;           // General event counter
     uint32_t bb3b10_block_count;    // Cave 1D: BB3B10 blocks during REC
-
-    // -- Hook performance counters (DLL writes, `tas_test benchmark` reads) --
-    TasHookPerfCounter perf_cave2;
-    TasHookPerfCounter perf_cave5;
-    TasHookPerfCounter perf_cave1c_down;
-    TasHookPerfCounter perf_cave1c_up;
-    TasHookPerfCounter perf_cave1d;
-    TasHookPerfCounter perf_replay_capture;
 
     // -- Hook status (DLL writes, UI reads) --
     uint32_t cave2_hooked;          // 1 if Supreme::Cycle hook installed
@@ -197,12 +180,6 @@ struct TasSharedState {
     // -- Log ring buffer (DLL writes, UI reads) --
     volatile uint32_t log_write_seq;              // Next sequence number to write (monotonic)
     TasLogEntry       log_ring[TAS_LOG_RING_SIZE]; // Circular buffer of log entries
-
-    // -- CONT splice timing (DLL writes, harness reads) --
-    // frame_count at CONT replay start and at the PLAY->REC splice; the delta
-    // is how many game frames the catch-up replay took.
-    uint32_t cont_replay_start_fc;
-    uint32_t cont_splice_fc;
 
     // -- CONT resume speed (UI writes, DLL reads) --
     // Applied to playback_speed atomically at the splice so the resumed
@@ -366,19 +343,18 @@ struct TasSharedState {
 #define TAS_PIN_OFFSET(field, expected) \
     static_assert(offsetof(TasSharedState, field) == (expected), \
                   "TasSharedState." #field " moved: bump TAS_SHARED_VERSION and update tas_shared/src/lib.rs")
-static_assert(sizeof(TasSharedState) == 1651664,
+static_assert(sizeof(TasSharedState) == 1651504,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/lib.rs");
-TAS_PIN_OFFSET(perf_cave2, 72);
-TAS_PIN_OFFSET(input_log, 568);
-TAS_PIN_OFFSET(rec_coords, 66104);
-TAS_PIN_OFFSET(play_coords, 852536);
-TAS_PIN_OFFSET(log_write_seq, 1638968);
-TAS_PIN_OFFSET(cont_replay_start_fc, 1647164);
-TAS_PIN_OFFSET(level_ctx_seq, 1647344);
-TAS_PIN_OFFSET(fpu_control_word, 1647392);
-TAS_PIN_OFFSET(menu_doc, 1647456);
-TAS_PIN_OFFSET(menu_cmd_result, 1651660);
+TAS_PIN_OFFSET(input_log, 416);
+TAS_PIN_OFFSET(rec_coords, 65952);
+TAS_PIN_OFFSET(play_coords, 852384);
+TAS_PIN_OFFSET(log_write_seq, 1638816);
+TAS_PIN_OFFSET(cont_resume_speed, 1647012);
+TAS_PIN_OFFSET(level_ctx_seq, 1647184);
+TAS_PIN_OFFSET(fpu_control_word, 1647232);
+TAS_PIN_OFFSET(menu_doc, 1647296);
+TAS_PIN_OFFSET(menu_cmd_result, 1651500);
 #undef TAS_PIN_OFFSET
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks
@@ -400,14 +376,6 @@ inline void LogRing(TasSharedState* s, TasLogSeverity severity, const char* text
     entry->text[i] = '\0';
     // Write sequence last (acts as release fence for reader)
     entry->sequence = seq + 1;  // +1 so 0 means "unused"
-}
-
-inline void PerfSample(TasHookPerfCounter& c, uint64_t elapsedCycles) {
-    c.calls++;
-    c.cycles_total += elapsedCycles;
-    if (elapsedCycles > c.cycles_max) {
-        c.cycles_max = elapsedCycles;
-    }
 }
 
 // Shared memory management (DLL side - creates the mapping)

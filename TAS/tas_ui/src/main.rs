@@ -2428,7 +2428,7 @@ impl eframe::App for TasApp {
                             egui::CollapsingHeader::new("Debug Config")
                                 .default_open(false)
                                 .show(ui, |ui| {
-                                    config::show(ui, shared.state_mut());
+                                    config::show(ui, shared.state());
                                 });
                             ui.separator();
                         }
@@ -2816,12 +2816,11 @@ impl eframe::App for TasApp {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.label(format!(
-                            "Recorded: {} | Playback: {} | BB3B10: {} | Blocks: {} | Events: {}",
+                            "Recorded: {} | Playback: {} | BB3B10: {} | Blocks: {}",
                             state.recorded_count,
                             state.playback_pos,
                             state.bb3b10_call_count,
-                            state.handler_block_count,
-                            state.event_count
+                            state.handler_block_count
                         ));
                     });
                 }

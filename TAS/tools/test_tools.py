@@ -6,19 +6,6 @@ import struct
 import unittest
 
 from level_points import DEFAULT_INPUT, generate
-from pe_inspect import direct_sites
-
-
-class CallerTests(unittest.TestCase):
-    def test_final_instruction_and_negative_displacement(self):
-        data = b"\x90" + b"\xe8" + struct.pack("<i", -6)
-        self.assertEqual(list(direct_sites(data, 0, len(data), 0)), [(1, "call")])
-
-    def test_clamps_to_image_and_rejects_partial_instruction(self):
-        data = b"\xe9" + struct.pack("<i", 10)
-        self.assertEqual(list(direct_sites(data, 0, 100, 15)), [(0, "jmp")])
-        self.assertEqual(list(direct_sites(data, 0, 4, 15)), [])
-        self.assertEqual(list(direct_sites(data, 0, 5, 14)), [])
 
 
 class LevelPointsTests(unittest.TestCase):

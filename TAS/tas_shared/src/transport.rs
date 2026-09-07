@@ -374,8 +374,6 @@ pub struct TransportController {
     /// attempt cannot be wrong about this cycle. The first attempt pays the
     /// full replay either way — something has to be tried first.
     learned_countdown_k: Option<i64>,
-    /// How many rerolls this cycle threw away without replaying anything.
-    predictive_rejects: u32,
     /// Consecutive predictive rejects with no replay in between, i.e. with
     /// nothing confirming the K they were based on.
     blind_predictive_rejects: u32,
@@ -402,15 +400,9 @@ impl TransportController {
             completed_via: CompletedVia::Unjudged,
             handoff_sent: false,
             learned_countdown_k: None,
-            predictive_rejects: 0,
             blind_predictive_rejects: 0,
             arm_generation_at_arm: 0,
         }
-    }
-
-    /// Rerolls this cycle rejected at arm time, with nothing replayed.
-    pub fn predictive_rejects(&self) -> u32 {
-        self.predictive_rejects
     }
 
     /// True when this cycle owns `playback_speed` outright: it stages a
@@ -777,7 +769,6 @@ impl TransportController {
                                     self.blind_predictive_rejects = 0;
                                 } else {
                                     self.blind_predictive_rejects += 1;
-                                    self.predictive_rejects += 1;
                                     return self.reroll(
                                             port,
                                             format!(

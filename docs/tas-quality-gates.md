@@ -104,9 +104,8 @@ their drift verdict vacuous.
 | `catchup-speed` | no | `*** CATCH-UP SPEED OK: 64× catch-up is Nx faster than 1× ...` | Median time-to-splice at 64x versus 1x stays above the required ratio. |
 | `play-pace` | no | `*** PLAY-PACE OK: 1× PLAY ran at N% of native wall time ...` | 1x PLAY of a fixed frame window takes native wall time. |
 | `play-judge [--iterations N]` | no | `*** PLAY JUDGE HANDOVER PASSED ***` | A judged PLAY replays the countdown at catch-up speed and hands back at `first_moving + 1` with the run unchanged. |
-| `benchmark [--repeats N] [--frames N]` | no | summary table | Per-hook `__rdtsc` timings over fixed frame windows; informational. |
 | `video-rate [secs] [--at X Y]` | no | rate summary | Distinct frames per second reaching the screen, measured from outside the process; works with no DLL injected. |
-| `dialog-e2e` | yes | `*** DIALOG-E2E PASSED: save-dialog and menu behave at native speed end to end ***` | Real finishes with a Pico Escape on the save dialog in PLAY and after a CONT splice, then the main menu speed; uses `TAS/tools/keys.ps1` for its quit sequence. |
+| `dialog-e2e` | yes | `*** DIALOG-E2E PASSED: save-dialog and menu behave at native speed end to end ***` | Real finishes with a Pico Escape on the save dialog in PLAY and after a CONT splice, then the main menu speed; the quit navigates by menu-document ids after one physical ESC. |
 
 ### CONT
 

@@ -10,7 +10,7 @@ int main() {
     std::printf("rider_identity tests:\n");
     using namespace riderparse;
 
-    // StringHeaderUsable (codex 2026-09-03: `len + 1 > cap` wrapped for a dead string)
+    // StringHeaderUsable rejects a wrapped-around length from a dead string.
     check(StringHeaderUsable(0x02000000, 5, 31, 32), "a normal 5-char string fits a 32-byte buffer");
     check(StringHeaderUsable(0x02000000, 31, 31, 32), "len 31 into cap 32 is the largest that fits");
     check(!StringHeaderUsable(0x02000000, 32, 32, 32), "len 32 into cap 32 leaves no room for the NUL");

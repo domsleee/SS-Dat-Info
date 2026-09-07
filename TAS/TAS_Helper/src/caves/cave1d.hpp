@@ -34,7 +34,6 @@ inline void UninstallCave1D() {
 
 void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
                                      uint32_t pressed, uint32_t unk, uint32_t arg4) {
-    uint64_t t0 = __rdtsc();
     auto* s = g_cave1dState;
     if (s) {
         s->bb3b10_call_count++;
@@ -49,7 +48,6 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
         // Allow through only on the thread Cave 2 is actively injecting from.
         if (IsTasInjectionThread()) {
             cave1dInline.thiscall<void>(ecx, keyIndex, pressed, unk, arg4);
-            PerfSample(s->perf_cave1d, __rdtsc() - t0);
             return;
         }
 
@@ -61,7 +59,6 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
         // spawn. NOT pause-exempt (the F5 reload stalls the cycle).
         if (s->cont_suppress_input && keyIndex != GameAddresses::KEY_ESC) {
             s->bb3b10_block_count++;
-            PerfSample(s->perf_cave1d, __rdtsc() - t0);
             return;
         }
 
@@ -77,7 +74,6 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
         if (s->mode == MODE_REC
             && keyIndex != GameAddresses::KEY_ESC && !gamePaused) {
             s->bb3b10_block_count++;
-            PerfSample(s->perf_cave1d, __rdtsc() - t0);
             return;
         }
     }
@@ -85,7 +81,6 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
     // Pass through in all other cases (IDLE, PLAY)
     cave1dInline.thiscall<void>(ecx, keyIndex, pressed, unk, arg4);
     if (s) {
-        PerfSample(s->perf_cave1d, __rdtsc() - t0);
     }
 }
 

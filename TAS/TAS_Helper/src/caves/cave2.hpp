@@ -816,12 +816,6 @@ static void __declspec(noinline) Cave2_Logic() {
     } else if (s->mode == MODE_PLAY) {
         uint32_t pos = s->playback_pos;
 
-        // CONT replay starting (first replay tick): stamp frame_count so the
-        // harness can measure how many game-frames the catch-up replay takes to
-        // reach the splice (the "resume off by a few frames" skew).
-        if (pos == 0 && s->continue_from_frame > 0) {
-            s->cont_replay_start_fc = s->frame_count;
-        }
 
         // The endpoint has to move with the input.
         //
@@ -952,10 +946,6 @@ static void __declspec(noinline) Cave2_Logic() {
             uint32_t rec_splice = s->continue_from_frame;
             s->recorded_count = rec_splice;
 
-            // Stamp the splice instant. (cont_splice_fc - cont_replay_start_fc)
-            // is the game-frames the replay took to reach the splice — the
-            // diagnostic for "resume yields a few frames early/late".
-            s->cont_splice_fc = s->frame_count;
 
             // Drop to the user's resume speed ATOMICALLY here, at the exact
             // splice tick. Otherwise the recording keeps fast-forwarding at the
@@ -993,7 +983,6 @@ static void __declspec(noinline) Cave2_Logic() {
 // FSAVE saves all 8 ST registers + control/status (108 bytes) and reinits FPU.
 // FRSTOR restores everything before returning to game code.
 static void Cave2_MidCallback(SafetyHookContext& ctx) {
-    uint64_t t0 = __rdtsc();
     uint8_t fpu_buf[108];
     __asm { fsave [fpu_buf] }
     auto* s = g_cave2State;
@@ -1011,7 +1000,6 @@ static void Cave2_MidCallback(SafetyHookContext& ctx) {
     Cave2_Logic();
     __asm { frstor [fpu_buf] }
     if (s) {
-        PerfSample(s->perf_cave2, __rdtsc() - t0);
     }
 }
 

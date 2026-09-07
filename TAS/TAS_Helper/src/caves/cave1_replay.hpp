@@ -74,7 +74,6 @@ bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
                     (void*)addr.replay_capture_site, addr.player_vtable));
 
     replayCaptureHook = safetyhook::create_mid(addr.replay_capture_site, [](SafetyHookContext& ctx) {
-        uint64_t t0 = __rdtsc();
         auto* s = g_replayState;
         auto* addr = g_replayAddr;
         if (!s || !addr) return;
@@ -134,7 +133,6 @@ bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
             }
         }
 
-        PerfSample(s->perf_replay_capture, __rdtsc() - t0);
     });
 
     if (!replayCaptureHook) {
