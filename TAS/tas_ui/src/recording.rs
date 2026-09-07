@@ -2052,10 +2052,6 @@ mod tests {
 
     static REC_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-    fn zeroed_state() -> Box<TasSharedState> {
-        tas_shared::zeroed_boxed()
-    }
-
     fn unique_temp_path(prefix: &str, ext: &str) -> std::path::PathBuf {
         let id = REC_COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("{}_{}_{}.{}", prefix, std::process::id(), id, ext))
@@ -2111,7 +2107,7 @@ mod tests {
     // ===== RecordingHistory =====
 
     fn one_tick_state(mask: u8) -> Box<TasSharedState> {
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 1;
         state.input_log[0] = mask;
         state.rec_coords[0] = [mask as f32, 0.0, mask as f32];
@@ -2238,7 +2234,7 @@ mod tests {
 
     #[test]
     fn snapshot_from_state_and_restore() {
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 2;
         state.input_log[0] = 0x01;
         state.input_log[1] = 0x02;
@@ -2265,7 +2261,7 @@ mod tests {
 
     #[test]
     fn snapshot_restore_clears_trailing_data() {
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 5;
         for i in 0..5 {
             state.input_log[i] = 0xFF;
@@ -2387,7 +2383,7 @@ mod tests {
     fn recovery_store_persists_and_loads_checkpoint() {
         let root = unique_temp_root("tas_ui_recovery_store_roundtrip");
         let mut store = RecoveryStore::new_in_root(root.clone(), Duration::ZERO).unwrap();
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 5;
         for i in 0..5 {
             state.input_log[i] = (i as u8) + 1;
@@ -2415,7 +2411,7 @@ mod tests {
     /// memory / a misbehaving DLL) must clamp, not panic-slice the hot path.
     #[test]
     fn from_state_clamps_overlong_recorded_count() {
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = TAS_MAX_TICKS as u32 + 50;
         let snap = RecordingSnapshot::from_state(&state);
         assert_eq!(
@@ -2467,7 +2463,7 @@ mod tests {
     fn recovery_writer_flush_drains_before_clear() {
         let root = unique_temp_root("tas_ui_recovery_writer_drain");
         let mut store = RecoveryStore::new_in_root(root.clone(), Duration::ZERO).unwrap();
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 3;
         state.input_log[0] = 9;
         let snap = RecordingSnapshot::from_state(&state);
@@ -2493,7 +2489,7 @@ mod tests {
     fn recovery_store_skips_unchanged_non_forced_writes() {
         let root = unique_temp_root("tas_ui_recovery_store_skip");
         let mut store = RecoveryStore::new_in_root(root.clone(), Duration::ZERO).unwrap();
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 3;
         state.input_log[0] = 0x01;
         state.input_log[1] = 0x02;
@@ -2519,7 +2515,7 @@ mod tests {
     fn recovery_store_replaces_checkpoint_atomically() {
         let root = unique_temp_root("tas_ui_recovery_store_atomic");
         let mut store = RecoveryStore::new_in_root(root.clone(), Duration::ZERO).unwrap();
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 2;
         state.input_log[0] = 0x01;
         state.input_log[1] = 0x02;
@@ -2552,7 +2548,7 @@ mod tests {
 
     #[test]
     fn recording_file_round_trip() {
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.version = 4;
         state.recorded_count = 10;
         state.force_fixed_tick = 0;
@@ -2568,7 +2564,7 @@ mod tests {
 
         RecordingFile::save_with_segments(&state, &path, &[]).unwrap();
 
-        let mut loaded = zeroed_state();
+        let mut loaded = tas_shared::zeroed_boxed();
         let (count, segments) = RecordingFile::load(&mut loaded, &path).unwrap();
         assert_eq!(count, 10);
         assert!(segments.is_empty());
@@ -2590,7 +2586,7 @@ mod tests {
 
     #[test]
     fn recording_file_save_empty_errors() {
-        let state = zeroed_state();
+        let state = tas_shared::zeroed_boxed();
         let path = unique_temp_path("rec_empty", "tasrec");
         assert!(RecordingFile::save_with_segments(&state, &path, &[]).is_err());
     }
@@ -2685,7 +2681,7 @@ mod tests {
 
         // A session take stays resident until the writer reports it durable,
         // then drops once it is no longer current.
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 4;
         state.input_log[0] = 9;
         assert!(history.push_snapshot_data_with_session(
@@ -2721,7 +2717,7 @@ mod tests {
     #[test]
     fn recording_file_stamps_and_checks_the_rider() {
         let path = unique_temp_path("rec_rider", "tasrec");
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 2;
         state.rider_character = tas_shared::TAS_CHARACTER_KEITH;
         state.rider_stance = 0;
@@ -2732,7 +2728,7 @@ mod tests {
         assert_eq!(meta.rider_label().as_deref(), Some("Keith · regular"));
 
         let mut tracker = SegmentTracker::new();
-        let mut live = zeroed_state();
+        let mut live = tas_shared::zeroed_boxed();
         live.rider_character = tas_shared::TAS_CHARACTER_VINCENT;
         live.rider_stance = 0;
         let mut log = UiLog::default();
@@ -2745,7 +2741,7 @@ mod tests {
         assert!(log.lines().iter().any(|l| l.contains("WARNING")
             && l.contains("Keith · regular")
             && l.contains("Vincent · regular")));
-        let mut other_stance = zeroed_state();
+        let mut other_stance = tas_shared::zeroed_boxed();
         other_stance.rider_character = tas_shared::TAS_CHARACTER_KEITH;
         other_stance.rider_stance = 1;
         let mut log2 = UiLog::default();
@@ -2759,7 +2755,7 @@ mod tests {
             .lines()
             .iter()
             .any(|l| l.contains("WARNING") && l.contains("Keith · goofy")));
-        let mut same = zeroed_state();
+        let mut same = tas_shared::zeroed_boxed();
         same.rider_character = tas_shared::TAS_CHARACTER_KEITH;
         same.rider_stance = 0;
         let mut quiet = UiLog::default();
@@ -2771,7 +2767,7 @@ mod tests {
         ));
         assert!(!quiet.lines().iter().any(|l| l.contains("WARNING")));
 
-        let mut unstamped = zeroed_state();
+        let mut unstamped = tas_shared::zeroed_boxed();
         unstamped.recorded_count = 1;
         RecordingFile::save_with_segments(&unstamped, &path, &[]).unwrap();
         assert_eq!(
@@ -2785,7 +2781,7 @@ mod tests {
     fn history_entries_carry_the_rider_stamp_through_the_store() {
         let mut history = RecordingHistory::new(8);
         history.set_live_rider(Some("Vincent · regular".to_string()));
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 3;
         assert!(history.push_snapshot_data_with_session(
             RecordingSnapshot::from_state(&state),
@@ -2835,7 +2831,7 @@ mod tests {
     #[test]
     fn recording_file_stamps_and_reports_physics_mode() {
         let path = unique_temp_path("rec_physics", "tasrec");
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 2;
         state.renderer_id = tas_shared::TAS_RENDERER_OPENGL;
         state.fpu_control_word = 0x027F;
@@ -2848,7 +2844,7 @@ mod tests {
         // Loading it into a DirectX/24-bit game warns; the same mode stays quiet.
         let mut tracker = SegmentTracker::new();
         let mut log = UiLog::default();
-        let mut live = zeroed_state();
+        let mut live = tas_shared::zeroed_boxed();
         live.renderer_id = tas_shared::TAS_RENDERER_DIRECTX6;
         live.fpu_control_word = 0x007F;
         assert!(load_recording_path(
@@ -2860,7 +2856,7 @@ mod tests {
         assert!(log.lines().iter().any(|l| l.contains("WARNING")
             && l.contains("OpenGL/53-bit")
             && l.contains("DirectX6/24-bit")));
-        let mut same = zeroed_state();
+        let mut same = tas_shared::zeroed_boxed();
         same.renderer_id = tas_shared::TAS_RENDERER_OPENGL;
         same.fpu_control_word = 0x027F;
         let mut quiet = UiLog::default();
@@ -2874,7 +2870,7 @@ mod tests {
 
         // A file saved before the stamp existed (or before the DLL sampled
         // the game thread) has no opinion.
-        let mut unstamped = zeroed_state();
+        let mut unstamped = tas_shared::zeroed_boxed();
         unstamped.recorded_count = 1;
         RecordingFile::save_with_segments(&unstamped, &path, &[]).unwrap();
         assert_eq!(
@@ -2915,7 +2911,7 @@ mod tests {
     #[test]
     fn finished_sessions_keep_their_race_time_through_the_store() {
         let mut history = RecordingHistory::new(8);
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 3;
         let stamp = FinishStamp {
             cs: 5334,
@@ -2971,7 +2967,7 @@ mod tests {
     fn history_entries_carry_the_physics_stamp_through_the_store() {
         let mut history = RecordingHistory::new(8);
         history.set_live_physics(Some("OpenGL/53-bit".to_string()));
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 3;
         assert!(history.push_snapshot_data_with_session(
             RecordingSnapshot::from_state(&state),
@@ -3019,17 +3015,17 @@ mod tests {
     #[test]
     fn recording_file_atomically_replaces_existing_save() {
         let path = unique_temp_path("rec_replace", "tasrec");
-        let mut first = zeroed_state();
+        let mut first = tas_shared::zeroed_boxed();
         first.recorded_count = 2;
         first.input_log[..2].copy_from_slice(&[1, 2]);
         RecordingFile::save_with_segments(&first, &path, &[]).unwrap();
 
-        let mut second = zeroed_state();
+        let mut second = tas_shared::zeroed_boxed();
         second.recorded_count = 3;
         second.input_log[..3].copy_from_slice(&[7, 8, 9]);
         RecordingFile::save_with_segments(&second, &path, &[]).unwrap();
 
-        let mut loaded = zeroed_state();
+        let mut loaded = tas_shared::zeroed_boxed();
         RecordingFile::load(&mut loaded, &path).unwrap();
         assert_eq!(loaded.recorded_count, 3);
         assert_eq!(&loaded.input_log[..3], &[7, 8, 9]);
@@ -3040,7 +3036,7 @@ mod tests {
     fn recording_file_load_truncated_errors() {
         let path = unique_temp_path("rec_trunc", "tasrec");
         std::fs::write(&path, [0u8; 2]).unwrap(); // Too small
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         assert!(RecordingFile::load(&mut state, &path).is_err());
         let _ = std::fs::remove_file(&path);
     }
@@ -3051,7 +3047,7 @@ mod tests {
         let file = File::create(&path).unwrap();
         file.set_len(MAX_TASREC_BYTES + 1).unwrap();
         drop(file);
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         let error = match RecordingFile::load(&mut state, &path) {
             Ok(_) => panic!("oversized recording unexpectedly loaded"),
             Err(error) => error,
@@ -3062,7 +3058,7 @@ mod tests {
 
     #[test]
     fn recording_file_with_segments_round_trip() {
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 5;
         for i in 0..5 {
             state.input_log[i] = 0x04;
@@ -3088,7 +3084,7 @@ mod tests {
         RecordingFile::save_with_segments(&state, &path, &segments).unwrap();
 
         // Use RecordingFile::load() for a real round-trip (not manual JSON parse)
-        let mut loaded = zeroed_state();
+        let mut loaded = tas_shared::zeroed_boxed();
         let (count, loaded_segments) = RecordingFile::load(&mut loaded, &path).unwrap();
         assert_eq!(count, 5);
         assert_eq!(loaded_segments.len(), 2);
@@ -3123,7 +3119,7 @@ mod tests {
 
     /// Helper: create state with N recorded ticks and distinct input per tick.
     fn state_with_ticks(n: u32) -> Box<TasSharedState> {
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = n;
         for i in 0..(n as usize).min(TAS_MAX_TICKS) {
             state.input_log[i] = (i + 1) as u8;
@@ -3912,7 +3908,7 @@ mod tests {
     #[test]
     fn history_zero_recorded_count_is_rejected() {
         let mut history = RecordingHistory::new(8);
-        let empty = zeroed_state(); // recorded_count = 0
+        let empty = tas_shared::zeroed_boxed(); // recorded_count = 0
         assert!(!history.push_snapshot(&empty, "Empty"));
         assert_eq!(history.len(), 0);
     }
