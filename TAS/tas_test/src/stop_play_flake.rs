@@ -1,60 +1,39 @@
-//! Stop+Play flakiness test against FE-tremendous.
+//! Stop+Play flakiness test against FE-tremendous: PLAY, STOP mid-playback,
+//! PLAY again, and require the second playback to reproduce a reference
+//! playback captured at the start of the run.
 //!
-//! User reports: loading FE-tremendous.tasrec, hitting PLAY, then STOP at
-//! some point mid-playback, then PLAY again — sometimes the second PLAY
-//! produces a different trajectory than the first. The test pins this
-//! down by comparing each stop+play iteration's trajectory against a
-//! single baseline trajectory captured at the start of the run.
-//!
-//! Important framing: FE-tremendous has a known inherent drift vs its
-//! own rec_coords (the recording was made without rotation/velocity
-//! state captured, so any F5 bucket whose rotation differs from
-//! whatever the original recorder had produces a divergent trajectory
-//! at frame ~249). That drift is NOT what this test measures.
-//!
-//! This test measures whether STOP+PLAY produces the SAME trajectory
-//! that a fresh PLAY produces — i.e. whether STOP introduces
-//! additional non-determinism on top of the recording's existing
-//! issues. Pass means: stop+play is idempotent. Drifted-but-consistent
-//! is a PASS. Drifted-and-different-from-baseline is a FAIL.
+//! FE-tremendous carries no rotation/velocity state, so an F5 bucket other
+//! than the original recorder's diverges from its own rec_coords at frame
+//! ~249. That drift is not what this measures: the question is whether STOP
+//! adds non-determinism on top of it, so the judge is "second playback ==
+//! reference playback", not "playback == recording".
 //!
 //! Sequence:
-//!   1. Phase 0: One reference PLAY, capture play_coords[0..N]
+//!   1. Phase 0: one reference PLAY, capture play_coords[0..VERIFY_FRAMES]
 //!   2. For each iteration:
-//!      a. CMD_RESTART → ARM_PLAY (no position match — tas_ui's flow)
-//!      b. Wait until playback_pos hits the iteration's STOP_AT_FRAMES[i]
-//!      c. Send STOP
-//!      d. CMD_RESTART → ARM_PLAY again
-//!      e. Wait until playback_pos hits VERIFY_FRAMES
-//!      f. Compare second-play play_coords[0..VERIFY_FRAMES] vs reference
-//!
-//! Pass: all iterations produce play_coords bit-identical to the
-//! reference. Any mismatch is the STOP-induced flakiness the user
-//! described.
+//!      a. CMD_RESTART → ARM_PLAY (no position match, like tas_ui's PLAY)
+//!      b. wait until playback_pos hits the iteration's stop frame, STOP
+//!      c. CMD_RESTART → ARM_PLAY again, rerolling F5 until the reference
+//!         bucket comes up
+//!      d. compare play_coords[0..VERIFY_FRAMES] against the reference bit-for-bit
 
-use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::harness;
-use crate::replay;
+use crate::{drift, harness, replay};
 
-const ITERATIONS: u32 = 10;
 const VERIFY_FRAMES: u32 = 1000;
+/// Stop points spread across the recording; the count is the iteration count.
 const STOP_AT_FRAMES: [u32; 10] = [1200, 800, 2000, 1500, 2400, 1800, 1100, 2200, 900, 1700];
-const RECORDING_REL: &str = "TAS/recordings/FE-tremendous.tasrec";
-/// How many times to retry the second PLAY when its trajectory diverges
-/// from the reference. FE-tremendous's F5 bucket lottery is non-trivial:
-/// the reference lands in one bucket, subsequent F5s may land in others.
-/// Retrying re-rolls until we get the bucket that matches the reference.
-/// 30 retries × ~3s = up to ~90s of catch-up per iteration on a bad streak.
+const RECORDING: &str = "FE-tremendous.tasrec";
+/// F5 rerolls allowed for the second PLAY to land the reference bucket.
 const REF_MATCH_RETRIES: u32 = 30;
-/// How many leading frames the retry loop checks for an early-divergence
-/// signal. If those frames match the reference bit-identically, we trust
-/// the full VERIFY_FRAMES will too (the trajectory's deterministic from
-/// the start state). 50 covers the recording's stationary phase plus a
-/// few motion frames where any rotation mismatch would surface.
+/// Leading frames the retry loop checks against the reference; covers the
+/// stationary phase plus enough motion for a rotation mismatch to surface.
 const RETRY_VERIFY_FRAMES: u32 = 300;
+/// The reference must travel at least this far over the verify window, or
+/// the comparison is zero-vs-zero.
+const MIN_REFERENCE_TRAVEL: f64 = 0.1;
 
 struct CycleResult {
     iteration: u32,
@@ -62,18 +41,16 @@ struct CycleResult {
     started_ok: bool,
     second_play_ok: bool,
     /// Max absolute coordinate difference between this iteration's second
-    /// playback and the reference playback, over the first VERIFY_FRAMES.
-    /// Bit-identical match → 0.0.
+    /// playback and the reference over the first VERIFY_FRAMES.
     max_dx_vs_ref: f64,
     max_dz_vs_ref: f64,
-    /// First frame where this iteration's second playback diverges from
-    /// the reference playback (bit-level). None = matches all frames.
+    /// First frame where the second playback differs from the reference at
+    /// the bit level. None = matches all frames.
     first_div_frame: Option<usize>,
 }
 
-/// Mirrors tas_ui's PLAY button flow: in-process restart, then ARM_PLAY.
-/// No position-matching retry — whatever F5 bucket the game lands on is
-/// what we replay against.
+/// tas_ui's PLAY button flow: in-process restart, then ARM_PLAY, whatever F5
+/// bucket the game lands on.
 fn restart_then_play(client: &mut tas_shared::TasSharedMemoryClient) -> bool {
     if !harness::restart_and_stabilize_inprocess(client) {
         return false;
@@ -83,14 +60,16 @@ fn restart_then_play(client: &mut tas_shared::TasSharedMemoryClient) -> bool {
     client.mode_volatile() == tas_shared::TasMode::Play as u32
 }
 
-/// Restart + ARM_PLAY, then verify the trajectory matches the reference
-/// over the first RETRY_VERIFY_FRAMES frames. If it diverges, STOP and
-/// retry up to `max_retries` times.
-///
-/// For FE-tremendous specifically: the recording is missing rotation state
-/// in its file format, so different F5 buckets produce different
-/// trajectories. The reference playback locked in one bucket's behaviour;
-/// this function rolls F5 until we land in the same bucket again.
+fn first_bit_divergence(play: &[[f32; 3]], reference: &[[f32; 3]]) -> Option<usize> {
+    play.iter().zip(reference).position(|(p, r)| {
+        p.iter()
+            .zip(r)
+            .any(|(a, b)| a.to_bits() != b.to_bits())
+    })
+}
+
+/// Restart + ARM_PLAY, rerolling F5 until the first RETRY_VERIFY_FRAMES frames
+/// match the reference bit-for-bit.
 fn restart_play_match_reference(
     client: &mut tas_shared::TasSharedMemoryClient,
     reference: &[[f32; 3]],
@@ -98,8 +77,6 @@ fn restart_play_match_reference(
     max_retries: u32,
 ) -> bool {
     for attempt in 0..=max_retries {
-        // Rewrite recording each retry; STOP after a divergence shouldn't
-        // need this, but it's a cheap safety belt.
         replay::write_to_shared(client, rec);
 
         if !restart_then_play(client) {
@@ -107,41 +84,26 @@ fn restart_play_match_reference(
             continue;
         }
 
-        // Wait until playback reaches RETRY_VERIFY_FRAMES so we have a window
-        // to compare against the reference.
         let _ = wait_for_pos(client, RETRY_VERIFY_FRAMES, Duration::from_secs(20));
 
+        let window = RETRY_VERIFY_FRAMES as usize;
         let state = client.state();
-        let mut diverge: Option<usize> = None;
-        for (j, r) in reference
-            .iter()
-            .copied()
-            .enumerate()
-            .take(RETRY_VERIFY_FRAMES as usize)
-        {
-            let p = state.play_coords[j];
-            if p[0].to_bits() != r[0].to_bits()
-                || p[1].to_bits() != r[1].to_bits()
-                || p[2].to_bits() != r[2].to_bits()
-            {
-                diverge = Some(j);
-                break;
+        match first_bit_divergence(&state.play_coords[..window], &reference[..window]) {
+            None => {
+                println!(
+                    "  Reference-trajectory match (attempt {}, {} frames verified)",
+                    attempt + 1,
+                    RETRY_VERIFY_FRAMES
+                );
+                return true;
             }
-        }
-        if diverge.is_none() {
-            println!(
-                "  Reference-trajectory match (attempt {}, {} frames verified)",
+            Some(frame) => println!(
+                "  Reference-trajectory mismatch at frame {} (attempt {}/{}) — retrying for matching F5 bucket",
+                frame,
                 attempt + 1,
-                RETRY_VERIFY_FRAMES
-            );
-            return true;
+                max_retries
+            ),
         }
-        println!(
-            "  Reference-trajectory mismatch at frame {} (attempt {}/{}) — retrying for matching F5 bucket",
-            diverge.unwrap(),
-            attempt + 1,
-            max_retries
-        );
         harness::stop(client);
         thread::sleep(Duration::from_millis(200));
     }
@@ -152,16 +114,13 @@ fn restart_play_match_reference(
     false
 }
 
-/// Wait until playback_pos reaches `target` or the timeout elapses.
-/// Returns the actual playback_pos seen.
+/// Wait until playback_pos reaches `target` or the timeout elapses; returns
+/// the position seen.
 fn wait_for_pos(client: &tas_shared::TasSharedMemoryClient, target: u32, timeout: Duration) -> u32 {
     let start = Instant::now();
     loop {
         let pos = client.playback_pos_volatile();
-        if pos >= target {
-            return pos;
-        }
-        if start.elapsed() > timeout {
+        if pos >= target || start.elapsed() > timeout {
             return pos;
         }
         thread::sleep(Duration::from_millis(20));
@@ -169,29 +128,16 @@ fn wait_for_pos(client: &tas_shared::TasSharedMemoryClient, target: u32, timeout
 }
 
 pub fn run() -> bool {
+    let iterations = STOP_AT_FRAMES.len() as u32;
     println!(
         "=== Stop+Play Flakiness Test (FE-tremendous, baseline-comparison, {}× iters) ===\n",
-        ITERATIONS
+        iterations
     );
 
-    // Resolve recording fixture path.
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let candidates = [
-        exe_dir.join("../../..").join(RECORDING_REL),
-        PathBuf::from(RECORDING_REL),
-        PathBuf::from("recordings/FE-tremendous.tasrec"),
-    ];
-    let path = match candidates.iter().find(|p| p.exists()) {
-        Some(p) => p.clone(),
-        None => {
-            eprintln!(
-                "ERROR: Couldn't locate {} (tried {} paths)",
-                RECORDING_REL,
-                candidates.len()
-            );
+    let path = match harness::fixture_path(RECORDING) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
             return false;
         }
     };
@@ -209,7 +155,6 @@ pub fn run() -> bool {
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
 
-    // ---- Phase 0: Reference playback ----
     println!("\n--- Phase 0: Reference playback (no stop) ---");
     replay::write_to_shared(&mut client, &rec);
 
@@ -219,6 +164,7 @@ pub fn run() -> bool {
     }
     let _ = wait_for_pos(&client, VERIFY_FRAMES, Duration::from_secs(60));
     let reference: Vec<[f32; 3]> = client.state().play_coords[..VERIFY_FRAMES as usize].to_vec();
+    let player_ptr = client.state().player_ptr;
     harness::stop(&mut client);
     thread::sleep(Duration::from_millis(200));
     println!(
@@ -230,26 +176,37 @@ pub fn run() -> bool {
         reference[(VERIFY_FRAMES - 1) as usize][1],
         reference[(VERIFY_FRAMES - 1) as usize][2],
     );
+    // A reference that never moved (no player, no coordinate capture) would
+    // make every bit-for-bit comparison vacuously clean.
+    let (ref_dx, ref_dy, ref_dz) = drift::compute_movement(&reference, reference.len());
+    let reference_travel = ref_dx.max(ref_dy).max(ref_dz);
+    if player_ptr == 0 {
+        eprintln!("FAIL: player_ptr is 0 — the reference playback captured no player");
+        return false;
+    }
+    if reference_travel < MIN_REFERENCE_TRAVEL {
+        eprintln!(
+            "FAIL: reference playback never moved (max travel {:.4} over {} frames)",
+            reference_travel, VERIFY_FRAMES
+        );
+        return false;
+    }
+    println!("  Reference travel over the verify window: {:.3}", reference_travel);
 
-    // ---- Iterations ----
-    let mut results: Vec<CycleResult> = Vec::with_capacity(ITERATIONS as usize);
-    for i in 0..ITERATIONS {
-        let stop_at = STOP_AT_FRAMES[(i as usize) % STOP_AT_FRAMES.len()];
+    let mut results: Vec<CycleResult> = Vec::with_capacity(STOP_AT_FRAMES.len());
+    for (i, &stop_at) in STOP_AT_FRAMES.iter().enumerate() {
+        let iteration = i as u32 + 1;
         println!(
             "\n--- Iteration {}/{} (stop at frame {}) ---",
-            i + 1,
-            ITERATIONS,
-            stop_at
+            iteration, iterations, stop_at
         );
 
-        // Make sure shared rec_coords / input_log are fresh.
         replay::write_to_shared(&mut client, &rec);
 
-        // First playback
         if !restart_then_play(&mut client) {
             println!("  First playback: restart failed");
             results.push(CycleResult {
-                iteration: i + 1,
+                iteration,
                 stop_at,
                 started_ok: false,
                 second_play_ok: false,
@@ -260,23 +217,17 @@ pub fn run() -> bool {
             continue;
         }
 
-        // Wait until reaching the stop point.
         let actual_stop = wait_for_pos(&client, stop_at, Duration::from_secs(60));
         println!("  STOP at playback_pos={}", actual_stop);
         harness::stop(&mut client);
         thread::sleep(Duration::from_millis(200));
 
-        // Second playback — retry until trajectory matches the reference.
-        // FE-tremendous's F5 bucket lottery means a naive single-shot PLAY
-        // sometimes lands in a different bucket and diverges; the test's
-        // purpose is to verify STOP doesn't introduce flakiness ON TOP of
-        // that, so we re-roll F5 until we get the reference bucket.
         let second_ok =
             restart_play_match_reference(&mut client, &reference, &rec, REF_MATCH_RETRIES);
         if !second_ok {
             println!("  Second playback: reference match failed after retries");
             results.push(CycleResult {
-                iteration: i + 1,
+                iteration,
                 stop_at,
                 started_ok: true,
                 second_play_ok: false,
@@ -287,41 +238,20 @@ pub fn run() -> bool {
             continue;
         }
 
-        // Reference match locked in — wait for the full VERIFY_FRAMES so the
-        // post-iteration table reports the full-window diff (should be zero).
         let _ = wait_for_pos(&client, VERIFY_FRAMES, Duration::from_secs(60));
 
-        // Compare second-play coords vs reference.
         let state = client.state();
+        let play = &state.play_coords[..VERIFY_FRAMES as usize];
         let mut max_dx = 0.0f64;
         let mut max_dz = 0.0f64;
-        let mut first_div: Option<usize> = None;
-        for (j, r) in reference
-            .iter()
-            .copied()
-            .enumerate()
-            .take(VERIFY_FRAMES as usize)
-        {
-            let p = state.play_coords[j];
-            let dx = (p[0] as f64 - r[0] as f64).abs();
-            let dz = (p[2] as f64 - r[2] as f64).abs();
-            if dx > max_dx {
-                max_dx = dx;
-            }
-            if dz > max_dz {
-                max_dz = dz;
-            }
-            if first_div.is_none()
-                && (p[0].to_bits() != r[0].to_bits()
-                    || p[1].to_bits() != r[1].to_bits()
-                    || p[2].to_bits() != r[2].to_bits())
-            {
-                first_div = Some(j);
-            }
+        for (p, r) in play.iter().zip(&reference) {
+            max_dx = max_dx.max((p[0] as f64 - r[0] as f64).abs());
+            max_dz = max_dz.max((p[2] as f64 - r[2] as f64).abs());
         }
+        let first_div = first_bit_divergence(play, &reference);
 
         println!(
-            "  Second playback: vs reference dx_max={:.6} (frame any) dz_max={:.6} first_div={}",
+            "  Second playback: vs reference dx_max={:.6} dz_max={:.6} first_div={}",
             max_dx,
             max_dz,
             first_div
@@ -333,7 +263,7 @@ pub fn run() -> bool {
         thread::sleep(Duration::from_millis(200));
 
         results.push(CycleResult {
-            iteration: i + 1,
+            iteration,
             stop_at,
             started_ok: true,
             second_play_ok: true,
@@ -343,7 +273,6 @@ pub fn run() -> bool {
         });
     }
 
-    // ---- Summary ----
     println!("\n=== STOP+PLAY FLAKE SUMMARY ===");
     println!("Comparing each iteration's SECOND playback to the reference (single PLAY, no stop).");
     println!(
@@ -386,19 +315,19 @@ pub fn run() -> bool {
     println!();
     println!(
         "  Bit-identical to reference: {} / {}    Diverged: {}    Start-failed: {}",
-        clean, ITERATIONS, diverged, start_failed
+        clean, iterations, diverged, start_failed
     );
 
-    let pass = clean == ITERATIONS;
+    let pass = clean == iterations;
     if pass {
         println!(
             "\n*** STOP+PLAY FLAKE TEST PASSED: {}/{} iterations matched the reference playback ***",
-            clean, ITERATIONS
+            clean, iterations
         );
     } else {
         println!(
             "\n*** STOP+PLAY FLAKE TEST FAILED: {} of {} iterations diverged from the reference ***",
-            diverged, ITERATIONS
+            diverged, iterations
         );
     }
     pass

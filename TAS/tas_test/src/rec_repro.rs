@@ -67,14 +67,14 @@ pub fn run() -> bool {
 
     // Distinctive pattern: alternating taps + a long hold, ~8s total.
     let steps = patterns::build_from_explicit(&[
-        ("LEFT1", input_bits::LEFT, 60),
-        ("GAP1", 0x00, 40),
-        ("RIGHT1", input_bits::RIGHT, 60),
-        ("GAP2", 0x00, 40),
-        ("LEFT2", input_bits::LEFT, 200),
-        ("GAP3", 0x00, 40),
-        ("RIGHT2", input_bits::RIGHT, 60),
-        ("TAIL", 0x00, 300),
+        (input_bits::LEFT, 60),
+        (0x00, 40),
+        (input_bits::RIGHT, 60),
+        (0x00, 40),
+        (input_bits::LEFT, 200),
+        (0x00, 40),
+        (input_bits::RIGHT, 60),
+        (0x00, 300),
     ]);
 
     let Some((log_a, count_a)) = record_pass(&mut client, &steps, 1) else {

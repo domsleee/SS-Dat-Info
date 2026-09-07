@@ -1,18 +1,13 @@
-//! Drift-at-speed verification test (SSB-186).
-//!
-//! Validates that speed scaling (Cave 5) does NOT introduce drift:
+//! Drift-at-speed verification: speed scaling (Cave 5) does not introduce
+//! drift.
 //!
 //!   Case 1: REC at 2x + PLAY at 2x → zero drift (same-speed symmetry)
 //!   Case 2: REC at 1x + PLAY at 2x → zero drift (cross-speed is physics-transparent)
 //!
-//! Why cross-speed is zero-drift:
-//!   The time advance constant (EXE+0x6DB08) only controls how many ticks per
-//!   second the game processes. Each tick's physics step is identical regardless
-//!   of the constant's value. Since the input log is per-tick, replaying the
-//!   same tick sequence at any speed produces identical coordinate trajectories.
-//!
-//! Uses Pico HID for steering (required for zero-drift baseline).
-//! Uses F5 position matching for bit-exact starting positions.
+//! The time advance constant only controls how many ticks per second the game
+//! processes; each tick's physics step is identical, and the input log is
+//! per-tick, so the same tick sequence replays to the same trajectory at any
+//! speed. Steering comes from the Pico; starts are F5 position-matched.
 
 use crate::{drift, gates, harness, patterns};
 use std::thread;
@@ -25,47 +20,25 @@ const GAP_TICKS: u32 = 0;
 /// Extra neutral ticks after the steering pattern to let physics settle.
 const TAIL_NEUTRAL_TICKS: u32 = 100;
 
-#[derive(Debug)]
-pub struct DriftSpeedResult {
-    /// Case 1: same-speed 2x REC + 2x PLAY
-    pub same_speed_rec_count: u32,
-    pub same_speed_drift: drift::DriftResult,
-    pub same_speed_pass: bool,
-
-    /// Case 2: cross-speed 1x REC + 2x PLAY
-    pub cross_speed_rec_count: u32,
-    pub cross_speed_drift: drift::DriftResult,
-    pub cross_speed_pass: bool,
-}
-
-impl DriftSpeedResult {
-    pub fn all_pass(&self) -> bool {
-        self.same_speed_pass && self.cross_speed_pass
-    }
-}
-
-/// Run a REC phase at the given speed with Pico HID steering.
-/// Returns (rec_count, rec_coords[0]) or exits on failure.
-fn rec_at_speed(client: &mut tas_shared::TasSharedMemoryClient, speed: f32) -> (u32, [f32; 3]) {
+/// REC at `speed` with Pico steering. Returns `(rec_count, rec_coords[0])`.
+fn rec_at_speed(
+    client: &mut tas_shared::TasSharedMemoryClient,
+    speed: f32,
+) -> Option<(u32, [f32; 3])> {
     client.state_mut().playback_speed = speed;
     println!("  Set playback_speed = {} for REC", speed);
 
     if !harness::restart_and_stabilize(client) {
         eprintln!("ERROR: Game not alive for REC at {}x", speed);
-        std::process::exit(1);
+        return None;
     }
 
     harness::arm_rec(client);
 
-    // Build steering pattern + neutral tail
-    let mut steps = patterns::build_from_pattern(PATTERN, HOLD_TICKS, GAP_TICKS);
-    let last_stop = patterns::total_ticks(&steps);
-    steps.push(patterns::PatternStep {
-        name: "TAIL".into(),
-        mask: 0x00,
-        stop_tick: last_stop + TAIL_NEUTRAL_TICKS,
-    });
-
+    let steps = patterns::with_neutral_tail(
+        patterns::build_from_pattern(PATTERN, HOLD_TICKS, GAP_TICKS),
+        TAIL_NEUTRAL_TICKS,
+    );
     println!(
         "  Driving Pico HID: pattern={} hold={} gap={} + {}t tail ({} total ticks)",
         PATTERN,
@@ -75,8 +48,6 @@ fn rec_at_speed(client: &mut tas_shared::TasSharedMemoryClient, speed: f32) -> (
         patterns::total_ticks(&steps)
     );
     harness::drive_pico_steps(&steps, None);
-
-    // Small settle time for last ticks to register
     thread::sleep(Duration::from_millis(200));
 
     let rec_count = client.state().recorded_count;
@@ -94,14 +65,12 @@ fn rec_at_speed(client: &mut tas_shared::TasSharedMemoryClient, speed: f32) -> (
             "ERROR: Too few ticks recorded ({}) at {}x",
             rec_count, speed
         );
-        std::process::exit(1);
+        return None;
     }
-
-    (rec_count, rec_start)
+    Some((rec_count, rec_start))
 }
 
-/// Run a PLAY phase at the given speed with F5 position matching.
-/// Returns true if playback completed.
+/// PLAY at `speed` with F5 position matching. Returns true if playback completed.
 fn play_at_speed(
     client: &mut tas_shared::TasSharedMemoryClient,
     speed: f32,
@@ -119,133 +88,74 @@ fn play_at_speed(
     harness::wait_playback(client, rec_count)
 }
 
-/// Run the drift-at-speed verification test.
-pub fn run() -> DriftSpeedResult {
-    println!("=== Drift-at-Speed Verification Test (SSB-186) ===\n");
+/// One REC/PLAY case. Completion is part of the verdict: `compute_drift` only
+/// inspects frames that played, so a stalled replay reads as clean drift over
+/// a truncated window. The gate assessment is printed but not folded in: its
+/// movement gates are Z-only and unrelated to speed transparency.
+fn case(
+    client: &mut tas_shared::TasSharedMemoryClient,
+    label: &str,
+    rec_speed: f32,
+    play_speed: f32,
+) -> Option<bool> {
+    let (rec_count, rec_start) = rec_at_speed(client, rec_speed)?;
+    println!("\n  Starting PLAY at {}x...", play_speed);
+    let play_ok = play_at_speed(client, play_speed, rec_start, rec_count);
+    if !play_ok {
+        eprintln!("WARNING: Playback did not complete for {label}");
+    }
+    let d = drift::compute_drift(client.state(), rec_count);
+    gates::run_gates(client.state(), rec_count).print_summary();
+    println!(
+        "\n  {label} drift: X={:.9} (frame {}) Y={:.9} Z={:.9} (frame {})",
+        d.max_drift_x, d.max_drift_frame_x, d.max_drift_y, d.max_drift_z, d.max_drift_frame_z,
+    );
+    let pass = d.is_zero() && play_ok;
+    println!(
+        "  {label} verdict: {} (expect zero drift)",
+        if pass { "PASS" } else { "FAIL" }
+    );
+    Some(pass)
+}
+
+pub fn run() -> bool {
+    println!("=== Drift-at-Speed Verification Test ===\n");
 
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
-
-    // Verify Cave 5 is hooked and fft=0
-    {
-        let s = client.state();
-        assert_eq!(s.cave5_hooked, 1, "Cave 5 must be hooked for speed test");
-        assert_eq!(
-            s.force_fixed_tick, 0,
-            "force_fixed_tick must be 0 for speed test"
-        );
+    if !harness::require_speed_preconditions(&client) {
+        return false;
     }
 
-    // ======== Case 1: REC at 2x + PLAY at 2x (expect zero drift) ========
     println!("--- Case 1: REC at 2x + PLAY at 2x (same-speed) ---\n");
+    let Some(same_speed_pass) = case(&mut client, "Case 1", 2.0, 2.0) else {
+        return false;
+    };
 
-    let (rec_count_2x, rec_start_2x) = rec_at_speed(&mut client, 2.0);
-
-    println!("\n  Starting PLAY at 2x...");
-    let play_ok_same = play_at_speed(&mut client, 2.0, rec_start_2x, rec_count_2x);
-    if !play_ok_same {
-        eprintln!("WARNING: Playback did not complete for case 1");
-    }
-
-    let same_speed_drift = drift::compute_drift(client.state(), rec_count_2x);
-    let same_speed_assessment = gates::run_gates(client.state(), rec_count_2x);
-    same_speed_assessment.print_summary();
-
-    println!(
-        "\n  Case 1 drift: X={:.9} (frame {}) Y={:.9} Z={:.9} (frame {})",
-        same_speed_drift.max_drift_x,
-        same_speed_drift.max_drift_frame_x,
-        same_speed_drift.max_drift_y,
-        same_speed_drift.max_drift_z,
-        same_speed_drift.max_drift_frame_z,
-    );
-    // Completion is part of the verdict, not just a warning: `compute_drift`
-    // only inspects frames that played, so a replay that stalled early returns a
-    // small (often zero) drift over a truncated window and used to read as a
-    // clean pass.
-    //
-    // The 4-gate assessment is printed but deliberately NOT folded in. Gate 0
-    // requires sampled world Z to be non-zero and Gates 1/2 define movement via
-    // Z alone (gates.rs), so a legitimate zero-drift run that crosses Z==0 or
-    // travels mainly in X/Y would fail for reasons unrelated to speed
-    // transparency — which is the only thing this mode is about. This mode needs
-    // a Pico HID and could not be exercised here, so it does not get an
-    // unverifiable new failure mode. Revisit once it can be run live.
-    let same_speed_pass = same_speed_drift.is_zero() && play_ok_same;
-    println!(
-        "  Case 1 verdict: {} (expect zero drift)",
-        if same_speed_pass { "PASS" } else { "FAIL" }
-    );
-
-    // ======== Case 2: REC at 1x + PLAY at 2x (expect zero drift — speed is physics-transparent) ========
     println!("\n--- Case 2: REC at 1x + PLAY at 2x (cross-speed) ---\n");
-
-    let (rec_count_1x, rec_start_1x) = rec_at_speed(&mut client, 1.0);
-
-    println!("\n  Starting PLAY at 2x...");
-    let play_ok_cross = play_at_speed(&mut client, 2.0, rec_start_1x, rec_count_1x);
-    if !play_ok_cross {
-        eprintln!("WARNING: Playback did not complete for case 2");
-    }
-
-    let cross_speed_drift = drift::compute_drift(client.state(), rec_count_1x);
+    let Some(cross_speed_pass) = case(&mut client, "Case 2", 1.0, 2.0) else {
+        return false;
+    };
     harness::print_results(&client);
 
-    println!(
-        "\n  Case 2 drift: X={:.9} (frame {}) Y={:.9} Z={:.9} (frame {})",
-        cross_speed_drift.max_drift_x,
-        cross_speed_drift.max_drift_frame_x,
-        cross_speed_drift.max_drift_y,
-        cross_speed_drift.max_drift_z,
-        cross_speed_drift.max_drift_frame_z,
-    );
-    let cross_speed_pass = cross_speed_drift.is_zero() && play_ok_cross;
-    println!(
-        "  Case 2 verdict: {} (expect zero drift — speed scaling is physics-transparent)",
-        if cross_speed_pass { "PASS" } else { "FAIL" }
-    );
-
-    // Reset speed
     client.state_mut().playback_speed = 1.0;
     println!("\nReset playback_speed to 1.0");
 
-    // ======== Summary ========
-    let result = DriftSpeedResult {
-        same_speed_rec_count: rec_count_2x,
-        same_speed_drift,
-        same_speed_pass,
-        cross_speed_rec_count: rec_count_1x,
-        cross_speed_drift,
-        cross_speed_pass,
-    };
-
     println!("\n=== DRIFT-AT-SPEED TEST RESULTS ===");
     println!(
-        "Case 1 (2x REC + 2x PLAY): drift X={:.9} Z={:.9} — {}",
-        result.same_speed_drift.max_drift_x,
-        result.same_speed_drift.max_drift_z,
-        if result.same_speed_pass {
-            "PASS"
-        } else {
-            "FAIL"
-        },
+        "Case 1 (2x REC + 2x PLAY): {}",
+        if same_speed_pass { "PASS" } else { "FAIL" }
     );
     println!(
-        "Case 2 (1x REC + 2x PLAY): drift X={:.9} Z={:.9} — {}",
-        result.cross_speed_drift.max_drift_x,
-        result.cross_speed_drift.max_drift_z,
-        if result.cross_speed_pass {
-            "PASS"
-        } else {
-            "FAIL"
-        },
+        "Case 2 (1x REC + 2x PLAY): {}",
+        if cross_speed_pass { "PASS" } else { "FAIL" }
     );
 
-    if result.all_pass() {
+    let pass = same_speed_pass && cross_speed_pass;
+    if pass {
         println!("\n*** DRIFT-AT-SPEED TEST PASSED ***");
     } else {
         println!("\n*** DRIFT-AT-SPEED TEST FAILED ***");
     }
-
-    result
+    pass
 }

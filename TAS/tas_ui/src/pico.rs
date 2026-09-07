@@ -1,5 +1,7 @@
 use eframe::egui;
 
+use crate::ui_log::UiLog;
+
 fn is_pico_data_port(info: &serialport::SerialPortInfo) -> bool {
     // boot.py enables console (interface 0) and binary data (interface 2).
     matches!(&info.port_type, serialport::SerialPortType::UsbPort(usb)
@@ -67,7 +69,6 @@ pub struct PicoState {
     pub connected: bool,
     pub port: Option<Box<dyn serialport::SerialPort>>,
     pub error: Option<String>,
-    pub auto_detected: bool,
     scan_attempted: bool,
 }
 
@@ -78,7 +79,6 @@ impl PicoState {
             connected: false,
             port: None,
             error: None,
-            auto_detected: false,
             scan_attempted: false,
         }
     }
@@ -100,7 +100,6 @@ impl PicoState {
             return vec![format!("Pico auto-detect: {error}")];
         }
         self.connect();
-        self.auto_detected = self.connected;
         if self.connected {
             vec![format!(
                 "Pico data interface connected on {}",
@@ -183,7 +182,7 @@ impl PicoState {
     }
 }
 
-pub fn show_panel(ui: &mut egui::Ui, pico: &mut PicoState, log: &mut Vec<String>) {
+pub fn show_panel(ui: &mut egui::Ui, pico: &mut PicoState, log: &mut UiLog) {
     ui.heading("Pico HID");
 
     ui.horizontal(|ui| {
@@ -196,21 +195,14 @@ pub fn show_panel(ui: &mut egui::Ui, pico: &mut PicoState, log: &mut Vec<String>
             ui.colored_label(egui::Color32::from_rgb(80, 200, 80), "Connected");
             if ui.button("Disconnect").clicked() {
                 pico.disconnect();
-                log.push(format!(
-                    "[{}] Pico disconnected",
-                    chrono::Local::now().format("%H:%M:%S")
-                ));
+                log.push("Pico disconnected");
             }
         } else {
             ui.colored_label(egui::Color32::GRAY, "Disconnected");
             if ui.button("Connect").clicked() {
                 pico.connect();
                 if pico.connected {
-                    log.push(format!(
-                        "[{}] Pico connected on {}",
-                        chrono::Local::now().format("%H:%M:%S"),
-                        pico.port_name
-                    ));
+                    log.push(&format!("Pico connected on {}", pico.port_name));
                 }
             }
         }
@@ -224,98 +216,44 @@ pub fn show_panel(ui: &mut egui::Ui, pico: &mut PicoState, log: &mut Vec<String>
         ui.horizontal(|ui| {
             if ui.button("F5 Restart").clicked() {
                 match pico.send_f5() {
-                    Ok(()) => log.push(format!(
-                        "[{}] Pico: sent F5",
-                        chrono::Local::now().format("%H:%M:%S")
-                    )),
-                    Err(e) => log.push(format!(
-                        "[{}] Pico F5 error: {}",
-                        chrono::Local::now().format("%H:%M:%S"),
-                        e
-                    )),
+                    Ok(()) => log.push("Pico: sent F5"),
+                    Err(e) => log.push(&format!("Pico F5 error: {}", e)),
                 }
             }
             if ui.button("Soft Reconnect").clicked() {
                 match pico.soft_reconnect() {
-                    Ok(()) => log.push(format!(
-                        "[{}] Pico: soft reconnect sent",
-                        chrono::Local::now().format("%H:%M:%S")
-                    )),
-                    Err(e) => log.push(format!(
-                        "[{}] Pico reconnect error: {}",
-                        chrono::Local::now().format("%H:%M:%S"),
-                        e
-                    )),
+                    Ok(()) => log.push("Pico: soft reconnect sent"),
+                    Err(e) => log.push(&format!("Pico reconnect error: {}", e)),
                 }
             }
         });
 
         ui.horizontal(|ui| {
             if ui.button("Health Check").clicked() {
-                let ok = pico.health_check();
-                if ok {
-                    log.push(format!(
-                        "[{}] Pico: health OK",
-                        chrono::Local::now().format("%H:%M:%S")
-                    ));
+                if pico.health_check() {
+                    log.push("Pico: health OK");
                 } else {
-                    log.push(format!(
-                        "[{}] Pico: health FAIL (disconnected)",
-                        chrono::Local::now().format("%H:%M:%S")
-                    ));
+                    log.push("Pico: health FAIL (disconnected)");
                 }
             }
         });
+    }
 
-        // Available COM ports
-        if ui.button("Scan Ports").clicked() {
-            match serialport::available_ports() {
-                Ok(ports) => {
-                    let names: Vec<String> = ports.iter().map(|p| p.port_name.clone()).collect();
-                    log.push(format!(
-                        "[{}] Ports: {}",
-                        chrono::Local::now().format("%H:%M:%S"),
-                        names.join(", ")
-                    ));
-                }
-                Err(e) => {
-                    log.push(format!(
-                        "[{}] Port scan error: {}",
-                        chrono::Local::now().format("%H:%M:%S"),
-                        e
-                    ));
-                }
+    if ui.button("Scan Ports").clicked() {
+        match serialport::available_ports() {
+            Ok(ports) => {
+                let names: Vec<String> = ports.iter().map(|p| p.port_name.clone()).collect();
+                log.push(&format!("Ports: {}", names.join(", ")));
             }
-        }
-    } else {
-        // Show scan button even when disconnected
-        if ui.button("Scan Ports").clicked() {
-            match serialport::available_ports() {
-                Ok(ports) => {
-                    let names: Vec<String> = ports.iter().map(|p| p.port_name.clone()).collect();
-                    log.push(format!(
-                        "[{}] Ports: {}",
-                        chrono::Local::now().format("%H:%M:%S"),
-                        names.join(", ")
-                    ));
-                }
-                Err(e) => {
-                    log.push(format!(
-                        "[{}] Port scan error: {}",
-                        chrono::Local::now().format("%H:%M:%S"),
-                        e
-                    ));
-                }
-            }
+            Err(e) => log.push(&format!("Port scan error: {}", e)),
         }
     }
 
-    // Keyboard shortcut hints
     ui.separator();
     ui.label(egui::RichText::new("Shortcuts").strong().small());
     ui.label(egui::RichText::new("F5 Restart game  F9 REC  F10 PLAY").small());
     ui.label(egui::RichText::new("F11 STOP  F12 CONT").small());
-    ui.label(egui::RichText::new("Space Stop  . Step  , Step back").small());
+    ui.label(egui::RichText::new("Space Stop").small());
     ui.label(egui::RichText::new("Ctrl+Z Undo  Ctrl+S Save  Ctrl+O Open").small());
     ui.label(egui::RichText::new("+/- Timeline zoom").small());
 }
@@ -325,22 +263,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pico_state_defaults() {
-        let pico = PicoState::new();
-        // Default is COM7 unless TAS_PICO_PORT is set
-        let expected = std::env::var("TAS_PICO_PORT").unwrap_or_else(|_| "COM7".into());
-        assert_eq!(pico.port_name, expected);
-        assert!(!pico.connected);
-        assert!(pico.port.is_none());
-        assert!(pico.error.is_none());
-        assert!(!pico.auto_detected);
-        assert!(!pico.scan_attempted);
-    }
-
-    #[test]
     fn disconnect_clears_connected() {
         let mut pico = PicoState::new();
-        // Simulate connected state (no real port)
         pico.connected = true;
         pico.disconnect();
         assert!(!pico.connected);

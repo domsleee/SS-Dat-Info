@@ -18,7 +18,6 @@
 //!             flag here kills the keyboard), and the menu VIDEO must move at
 //!             a plausible rate (video-rate's screen sampler).
 
-use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -29,30 +28,14 @@ use crate::harness;
 use crate::replay;
 use crate::video_rate;
 
-const RECORDING_REL: &str = "TAS/recordings/FE-decent-done.tasrec";
+const RECORDING: &str = "FE-decent-done.tasrec";
 /// Splice close to the finish (race ends ~tick 6800) so the post-splice REC
 /// coasts across the line with no live input, like a user redoing the ending.
 const CONT_SPLICE_FRAME: u32 = 6700;
 const DIALOG_IDLE_SECS: u64 = 12;
-/// Native is 100 ticks/sec; the 100ms buckets read ~10-11. A burst (the old
-/// bug: 1219 ticks in the first 100ms) is an order of magnitude out, so a
-/// generous ceiling still separates them cleanly.
+/// Native is 100 ticks/sec; the 100ms buckets read ~10-11. A backlog burst is
+/// an order of magnitude out, so a generous ceiling still separates them.
 const MAX_TICKS_PER_SEC: f64 = 140.0;
-
-fn locate_recording() -> Option<String> {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let candidates = [
-        exe_dir.join("../../..").join(RECORDING_REL),
-        PathBuf::from(RECORDING_REL),
-    ];
-    candidates
-        .iter()
-        .find(|p| p.exists())
-        .map(|p| p.to_string_lossy().into_owned())
-}
 
 /// Wait until the engine freezes at the post-race dialog: frame_count stops
 /// advancing for >2s. Returns false on the deadline.
@@ -104,10 +87,9 @@ fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str)
         label, idled
     );
 
-    // THE REAL KEYPRESS: hardware HID Escape from the Pico, exactly what a
-    // user's keyboard sends. (The Pico mask has no Enter; any key resumes the
-    // engine and would replay the backlog if the drain were broken, so Escape
-    // exercises the same bug path the report describes.)
+    // A hardware HID Escape from the Pico, exactly what a user's keyboard
+    // sends. The Pico mask has no Enter; any key resumes the engine and would
+    // replay the backlog if the drain were broken.
     if !harness::send_escape() {
         eprintln!(
             "  [{}] WARNING: Pico Escape failed — falling back to PostMessage Enter",
@@ -136,21 +118,21 @@ fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str)
     (rate, ok)
 }
 
+/// Drive `TAS/tools/keys.ps1`; a failed quit sequence is reported because it
+/// would turn Phase C into measuring the wrong screen.
 fn run_keys(keys: &str, delay_ms: u32) -> bool {
-    // Resolve relative to the exe (target/release/tas_test.exe -> repo root)
-    // instead of a hard-coded checkout path, and REPORT failure: a silently
-    // failed quit sequence turns Phase C into measuring the wrong screen.
-    let script = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join(r"..\..\..\TAS\tools\keys.ps1")))
-        .filter(|p| p.exists())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| r"TAS\tools\keys.ps1".to_string());
+    let script = match harness::repo_path("TAS/tools/keys.ps1") {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("  WARNING: {e}");
+            return false;
+        }
+    };
     match Command::new("powershell")
         .args([
             "-NoProfile",
             "-File",
-            &script,
+            &script.to_string_lossy(),
             "-Keys",
             keys,
             "-DelayMs",
@@ -171,18 +153,24 @@ fn run_keys(keys: &str, delay_ms: u32) -> bool {
 }
 
 pub fn run() -> bool {
-    let Some(path) = locate_recording() else {
-        eprintln!("ERROR: couldn't locate {}", RECORDING_REL);
-        return false;
+    let path = match harness::fixture_path(RECORDING) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            return false;
+        }
     };
-    println!("=== Save-dialog + menu-speed END TO END: {} ===", path);
+    println!(
+        "=== Save-dialog + menu-speed END TO END: {} ===",
+        path.display()
+    );
 
     let mut client = harness::ensure_game_running();
     harness::stop_competing_tas_ui_writer();
     harness::stop(&mut client);
     thread::sleep(Duration::from_millis(200));
 
-    let loaded = match replay::load_tasrec(std::path::Path::new(&path)) {
+    let loaded = match replay::load_tasrec(&path) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("ERROR: {}", e);
@@ -193,7 +181,6 @@ pub fn run() -> bool {
     println!("  {} ticks loaded", loaded.count);
     harness::focus_game();
 
-    // ---------------- PHASE A: PLAY finish + real-key dismiss ----------------
     println!("--- PHASE A: aligned PLAY at 1x through the finish ---");
     client.state_mut().playback_speed = 1.0;
     if harness::restart_play_aligned_inprocess(&mut client).is_none() {
@@ -210,7 +197,6 @@ pub fn run() -> bool {
     );
     let (_rate_a, pass_a) = idle_dismiss_profile(&client, "A/PLAY");
 
-    // ---------------- PHASE B: CONT -> REC rides through the finish ----------
     println!(
         "--- PHASE B: CONT from {} -> splice -> REC crosses the finish ---",
         CONT_SPLICE_FRAME
@@ -253,7 +239,6 @@ pub fn run() -> bool {
     );
     let (_rate_b, pass_b_burst) = idle_dismiss_profile(&client, "B/REC");
 
-    // ---------------- PHASE C: the REAL main menu ----------------------------
     println!("--- PHASE C: quit to the main menu, measure what the user sees ---");
     // Pause menu: DOWN x4 = Return To Menu; "Are you sure?" = LEFT then ENTER.
     if !run_keys("ESC,DOWN,DOWN,DOWN,DOWN,ENTER,LEFT,ENTER", 700) {
@@ -266,11 +251,10 @@ pub fn run() -> bool {
 
     // The user-visible thing itself: the menu video's on-screen motion.
     println!("  menu video (screen sampler):");
-    let pass_c_video = video_rate::run_region(Some(6), None);
+    let pass_c_video = video_rate::run(Some(6), None);
 
-    // After >9s at the menu any stale suppress flag must have been retired by
-    // the level-scan worker — and a CONT that completed normally never leaves
-    // it set at all. A set flag here = dead keyboard.
+    // A CONT that completed normally never leaves the suppress flag set, and
+    // a stale one is retired at the menu; a set flag here = dead keyboard.
     let suppress = client.state().cont_suppress_input;
     let pass_c_flag = suppress == 0;
     println!(

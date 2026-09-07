@@ -1,20 +1,9 @@
-//! Pause/resume replay test.
-//!
-//! Records a fresh trajectory, then replays it with an Escape pause inserted
-//! mid-playback: pause for several seconds, resume (game fast-forwards as it
-//! consumes the accumulated wall-clock time), wait for playback to finish,
-//! then verify the first 1000 frames of rec_coords vs play_coords are bit-
-//! identical.
-//!
-//! Catches the regression the user reported originally: pause+resume with
-//! cave hooks loaded was causing a visible speedup on resume that should
-//! NOT affect deterministic playback. If physics actually re-runs the
-//! catch-up ticks correctly under the recorded inputs, drift stays zero;
-//! if cave5's tick handling or the time-advance constant gets perturbed
-//! across the pause boundary, the snowboarder ends up off the recorded
-//! trajectory after resume and this test fails.
-//!
-//! Pass criterion: exit code 0, "*** PAUSE/RESUME REPLAY PASSED ***" line.
+//! Pause/resume replay test: record a fresh trajectory, replay it with an
+//! Escape pause inserted mid-playback, resume (the game fast-forwards through
+//! the accumulated wall-clock time), and require the replay to stay
+//! bit-identical both over the leading window and after the pause point. If
+//! cave5's tick handling or the time-advance constant is perturbed across the
+//! pause boundary, the boarder leaves the recorded trajectory after resume.
 
 use std::thread;
 use std::time::Duration;
@@ -51,13 +40,10 @@ pub fn run() -> bool {
 
     harness::arm_rec(&mut client);
 
-    let mut steps = patterns::build_from_pattern(PATTERN, HOLD_TICKS, 0);
-    let last_stop = patterns::total_ticks(&steps);
-    steps.push(patterns::PatternStep {
-        name: "TAIL".into(),
-        mask: 0x00,
-        stop_tick: last_stop + TAIL_NEUTRAL_TICKS,
-    });
+    let steps = patterns::with_neutral_tail(
+        patterns::build_from_pattern(PATTERN, HOLD_TICKS, 0),
+        TAIL_NEUTRAL_TICKS,
+    );
     println!(
         "  Driving Pico HID: {} hold={} + {}t tail ({} total ticks)",
         PATTERN,
@@ -183,22 +169,11 @@ pub fn run() -> bool {
         drift_result.max_drift_frame_z
     );
 
-    // The prefix window above is NOT the test. `restart_play_and_match_inprocess`
-    // verifies the first MATCH_VERIFY_FRAMES (=ZERO_DRIFT_FRAMES) before it
-    // returns, so by the time we wait for PAUSE_AT_FRAME the replay is already
-    // past it — the pause lands at ~1089 with the window ending at 1000. Checking
-    // [0,1000) therefore only re-checks frames that played BEFORE the pause, and
-    // is structurally incapable of seeing a pause-induced divergence. The real
-    // assertion is the window AFTER the pause point.
-    // Anchor on the EARLIER position (before the hold), deliberately.
-    //
-    // It is tempting to anchor on pos_after_pause as "the frame playback resumes
-    // from", but `actually_paused` only requires fc_delta < PAUSE_DURATION_SECS*10
-    // (=40), so up to 39 callbacks may advance and still be classified as paused.
-    // Anchoring on the later position would skip those frames — and they are
-    // precisely the frames at the pause boundary where a resume-induced
-    // divergence shows up first. The earlier anchor is conservative: it folds in
-    // a few known-good pre-pause frames, but it cannot miss a post-resume frame.
+    // The prefix window only covers frames that played BEFORE the pause (the
+    // start matcher already verified them), so the real assertion is the
+    // window after the pause point. Anchor on the earlier position: up to 39
+    // callbacks may advance while still counting as paused, and those boundary
+    // frames are where a resume-induced divergence shows first.
     let resume_anchor = pos_at_pause.min(pos_after_pause);
     let post_pause_drift = drift::compute_drift_window(state, resume_anchor, rec_count);
     let post_pause_frames = rec_count.saturating_sub(resume_anchor);
@@ -226,18 +201,9 @@ pub fn run() -> bool {
         }
     }
 
-    // The drift check is only meaningful if a pause actually happened. Without
-    // it the replay ran start-to-finish uninterrupted, which trivially yields
-    // zero drift while testing nothing — a false green. `actually_paused` was
-    // already measured above (frame_count stalled during the hold); gate on it.
-    // Completion matters too: the drift window is only the first 1000 frames, so
-    // a replay that renders that prefix and then stalls or drops out of PLAY
-    // before rec_count would otherwise pass on a prefix that proves nothing about
-    // the pause it was supposed to survive.
+    // Zero drift proves nothing unless the game actually paused, playback ran
+    // to completion afterwards, and there was a post-pause window to perturb.
     let played_all = client.state().playback_pos >= rec_count;
-    // A post-pause window that is empty means the pause landed at/after the end
-    // of playback — there is nothing it could have perturbed, so the run proves
-    // nothing and must not pass.
     let post_pause_window_ok = post_pause_frames > 0;
     let pass = drift_result.is_zero()
         && post_pause_drift.is_zero()

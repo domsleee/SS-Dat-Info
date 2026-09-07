@@ -1,21 +1,11 @@
-//! Recording-start regression test (guards SSB "armed mid-run" bug).
+//! Recording-start regression test: a fresh recording must BEGIN at the
+//! stationary spawn, capturing the countdown and pre-timer inputs.
 //!
-//! Background: the REC button does an in-process F5 restart and only arms
-//! recording once the restart state machine reports "done". An uncommitted
-//! restart rework added a long `RESTART_STABILIZE_FRAMES` settle, so "done"
-//! landed ~6s after the F5 — well into the fall. The result: `rec[0]` is
-//! already in motion, and the spawn / countdown / pre-timer inputs are
-//! silently dropped from every recording.
-//!
-//! Why no existing test caught it: the drift and CONT suites assert
-//! *reproducibility* (REC vs PLAY drift == 0, CONT anchor match). A recording
-//! that starts mid-fall is perfectly reproducible — REC and PLAY both start
-//! mid-fall — so those tests stay green. The missing invariant is *start
-//! completeness*: a fresh recording must BEGIN at the stationary spawn, with
-//! the player's opening motion much slower than its mid-run motion.
-//!
-//! This test encodes that invariant. It is intentionally relative (start speed
-//! vs mid-run speed) so it is independent of level, spawn position, and units.
+//! The REC button does an in-process F5 restart and arms once the restart
+//! state machine reports done; a settle that is too long arms mid-fall. The
+//! drift and CONT suites cannot see that: a recording that starts mid-fall
+//! is perfectly reproducible. The invariant here is relative (opening speed
+//! vs mid-run speed), so it is independent of level, spawn position and units.
 
 use crate::{harness, replay};
 use std::thread;
@@ -30,9 +20,8 @@ const MAX_START_RATIO: f64 = 0.30;
 /// Frames averaged at the head of the recording for the opening speed.
 const HEAD_FRAMES: usize = 10;
 /// A valid run must record at least this many frames and travel at least this
-/// far, else the ratio is meaningless. MIN_FRAMES is above the known-good
-/// ~183-frame countdown prefix so there is real motion to measure (codex: a
-/// 120 floor let the mid-run reference sit inside the prefix).
+/// far, else the ratio is meaningless. MIN_FRAMES is above the ~183-frame
+/// countdown prefix so the mid-run reference cannot sit inside it.
 const MIN_FRAMES: usize = 300;
 const MIN_TRAVEL: f64 = 1.0;
 /// The stationary countdown prefix that proves the spawn was captured. Floor is
@@ -86,9 +75,8 @@ pub fn analyze_start(coords: &[[f32; 3]], count: usize) -> StartAnalysis {
     }
     let start_speed = start_sum / head as f64;
 
-    // Mid-run speed: mean per-frame motion over the LAST third. The last third
-    // is past any countdown, so it reflects real run speed (codex: the middle
-    // third can overlap a ~183-frame stationary prefix and dilute the reference).
+    // Mid-run speed: mean per-frame motion over the LAST third, which is past
+    // any countdown (the middle third can overlap the stationary prefix).
     let lo = (2 * n / 3).max(1);
     let mut mid_sum = 0.0;
     let mut midc = 0usize;
@@ -236,10 +224,8 @@ pub fn run() -> bool {
     }
     harness::focus_game();
     harness::arm_rec(&mut client);
-    // 6s, not 4s: the countdown prefix (~183 live frames) is fixed regardless of
-    // REC length, so a longer capture just adds moving frames — keeping total
-    // frames comfortably over MIN_FRAMES even on a slow env tick (avoids a
-    // spurious INCONCLUSIVE). Neutral input is fine; gravity drives the run.
+    // The countdown prefix is fixed, so a longer capture only adds moving
+    // frames and keeps the total comfortably over MIN_FRAMES.
     println!("  Recording ~6s from restart (neutral input; gravity drives the run)...");
     thread::sleep(Duration::from_secs(6));
     let count = client.state().recorded_count as usize;

@@ -1,14 +1,14 @@
 use eframe::egui;
+use tas_shared::cont::detect_first_moving;
 use tas_shared::{TasCommand, TasMode, TasSharedState};
 
-use crate::recording::{detect_first_moving, format_recording_duration, RecordingHistory};
+use crate::recording::{format_recording_duration, RecordingHistory};
 
 pub enum Action {
     Send(TasCommand),
     RestartThen(TasCommand),
     Undo,
     Redo,
-    StepOne,
     SetContinueFrame(u32),
     /// Set the CONT resume speed *while catch-up is in flight*. During catch-up
     /// `playback_speed` is the catch-up multiplier, so the speed buttons can't
@@ -18,6 +18,27 @@ pub enum Action {
     Log(String),
 }
 
+pub struct TransportProps<'a> {
+    pub mode: TasMode,
+    pub recorded: u32,
+    pub continue_from: &'a mut u32,
+    pub continue_from_text: &'a mut String,
+    pub playback_speed: &'a mut f32,
+    /// CONT catch-up multiplier, shown in the CONT tooltip and caption.
+    pub cont_catchup_speed: f32,
+    pub history: &'a RecordingHistory,
+    pub state: &'a TasSharedState,
+    /// A CONT catch-up replay is in flight.
+    pub catchup_active: bool,
+    /// Speed playback drops to at the splice (the play speed otherwise).
+    pub resume_speed: f32,
+    /// False while the game sits in a menu / pause / dialog (engine cycle
+    /// frozen, or not in a level at all). Arming from there fires an F5 into
+    /// a stopped engine, so REC/PLAY/CONT gray out. STOP stays available -
+    /// it is the escape hatch and must work everywhere.
+    pub arming_allowed: bool,
+}
+
 fn can_arm_continue(mode: TasMode, recorded: u32) -> bool {
     if recorded == 0 {
         return false;
@@ -25,41 +46,29 @@ fn can_arm_continue(mode: TasMode, recorded: u32) -> bool {
     matches!(mode, TasMode::Off | TasMode::Rec | TasMode::Play)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn show(
-    ui: &mut egui::Ui,
-    mode: TasMode,
-    recorded: u32,
-    continue_from: &mut u32,
-    continue_from_text: &mut String,
-    playback_speed: &mut f32,
-    cont_catchup_speed: &mut f32,
-    _step_mode: &mut bool,
-    history: &RecordingHistory,
-    state: &TasSharedState,
-    catchup_active: bool,
-    resume_speed: f32,
-    // False while the game sits in a menu / pause / dialog (engine cycle
-    // frozen, or not in a level at all). Arming from there fires an F5 into
-    // a stopped engine, so REC/PLAY/CONT gray out. STOP stays available -
-    // it is the escape hatch and must work everywhere.
-    arming_allowed: bool,
-) -> Vec<Action> {
+pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
+    let TransportProps {
+        mode,
+        recorded,
+        continue_from,
+        continue_from_text,
+        playback_speed,
+        cont_catchup_speed,
+        history,
+        state,
+        catchup_active,
+        resume_speed,
+        arming_allowed,
+    } = props;
     let mut actions = Vec::new();
 
     ui.horizontal(|ui| {
-        // NOTE: the game-state ("In Game (Forest Easy)") and race-timer chips
-        // used to live here, which made the row's width DYNAMIC — every
-        // state change shifted the buttons. They moved into the status card
-        // (main.rs) where variable-width text doesn't displace controls.
         let is_off = mode == TasMode::Off;
         let is_rec = mode == TasMode::Rec;
         let is_play = mode == TasMode::Play;
         let can_continue = can_arm_continue(mode, recorded);
 
-        // F-key labels live in tooltips so the buttons stay narrow —
-        // history panel + transport were clipping Redo at 976 px wide.
-        // REC button (red when recording)
+        // F-key labels live in tooltips so the buttons stay narrow.
         let rec_text = egui::RichText::new("\u{23FA} REC");
         let rec_text = if is_rec {
             rec_text
@@ -98,7 +107,6 @@ pub fn show(
             actions.push(Action::RestartThen(TasCommand::ArmPlay));
         }
 
-        // STOP button
         if ui
             .add_enabled(!is_off, egui::Button::new("\u{23F9} STOP"))
             .on_hover_text("Stop (F11 / Space)")
@@ -123,14 +131,14 @@ pub fn show(
             .on_disabled_hover_text("Enter a level first - can't continue from a menu")
             .on_hover_text(format!(
                 "Continue from a specific frame · catch-up ×{}  (F12)",
-                *cont_catchup_speed
+                cont_catchup_speed
             ))
             .clicked()
         {
             normalize_continue_frame_text(continue_from_text, continue_from, recorded);
             actions.push(Action::Log(format!(
                 "Continue recording from frame {} ({}x catch-up)",
-                *continue_from, *cont_catchup_speed
+                *continue_from, cont_catchup_speed
             )));
             actions.push(Action::SetContinueFrame(*continue_from));
             actions.push(Action::RestartThen(TasCommand::ArmContinue));
@@ -138,16 +146,11 @@ pub fn show(
 
         if recorded > 0 {
             ui.label("from:");
-            // Stack the tick input + an in-game-time sub-label so the
-            // user can sanity-check what they typed against the race
-            // clock. `first_moving` is recomputed per-frame; with rec_coords
-            // up to ~600k floats it's cheap enough (< 1ms at the worst
-            // case) and avoids us caching anything across frames.
+            // Tick input with an in-game-time sub-label so the typed frame can
+            // be checked against the race clock. The race timer starts at the
+            // START-LINE cross, not at first motion; anchor on the line when
+            // the track is known, else on first_moving.
             let first_moving = detect_first_moving(&state.rec_coords, recorded);
-            // The race timer starts at the START-LINE cross, not at first
-            // motion (the line is 0.5–3s past the gate). Anchor the in-game
-            // time on the line when the track is known; fall back to
-            // first_moving for unknown levels / runs that never cross.
             let timer_anchor = crate::start_line::start_cross_tick(
                 &state.rec_coords,
                 recorded,
@@ -187,13 +190,10 @@ pub fn show(
                 );
             });
         }
-        // The "catch ×N" editor moved to File > Settings (horizontal space);
-        // the live value still shows in the CONT button's tooltip above.
 
         ui.separator();
 
-        // Undo / Redo — icon-only buttons. Labels would push the row
-        // past the 976 px wide window with the history panel visible.
+        // Undo / Redo — icon-only buttons so the row fits beside the history rail.
         let undo_count = history.undo_depth();
         if ui
             .add_enabled(undo_count > 0, egui::Button::new("\u{21A9}"))
@@ -213,15 +213,9 @@ pub fn show(
 
         ui.separator();
 
-        // Playback speed. The Nx preset buttons stay VISIBLE during CONT
-        // catch-up (just disabled) so the chosen play speed is never hidden —
-        // the catch-up caption sits beside them, not in place of them.
-        // 0.01x is the slow-mo preset for frame-picking; 0.5/1/2 are everyday.
-        // (0.25 and 4x were dropped — rarely touched, ate transport width.)
-        // During catch-up the buttons set the RESUME speed (what playback drops
-        // to at the splice), so highlight against that; otherwise the live play
-        // speed. The buttons stay enabled during catch-up — editing the resume
-        // speed mid-catch-up is exactly when you want it.
+        // Playback speed presets. They stay visible during CONT catch-up and
+        // then set the RESUME speed (what playback drops to at the splice), so
+        // the highlight follows that; otherwise the live play speed.
         let selected = if catchup_active {
             resume_speed
         } else {
@@ -237,8 +231,8 @@ pub fn show(
             };
             if ui.add_enabled(!is_off, btn).clicked() {
                 if catchup_active {
-                    // playback_speed is the catch-up multiplier here — don't
-                    // touch it; restage the resume speed via main.rs.
+                    // playback_speed is the catch-up multiplier here; restage
+                    // the resume speed via main.rs instead.
                     actions.push(Action::SetResumeSpeed(spd));
                 } else {
                     *playback_speed = spd;
@@ -248,7 +242,7 @@ pub fn show(
         }
         if catchup_active {
             ui.label(
-                egui::RichText::new(format!("catching up {}x…", *cont_catchup_speed))
+                egui::RichText::new(format!("catching up {}x…", cont_catchup_speed))
                     .color(egui::Color32::from_rgb(200, 160, 60)),
             );
         }

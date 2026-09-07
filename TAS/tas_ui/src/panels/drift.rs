@@ -2,28 +2,28 @@ use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
 use tas_shared::TasSharedState;
 
+use crate::drift_scan::DriftWindow;
+
 /// Gate-aligned plot samples from the current playback generation.
 #[derive(Default)]
 pub struct DriftCache {
     drift_x: Vec<[f64; 2]>,
     drift_z: Vec<[f64; 2]>,
-    bases: Option<(usize, usize)>,
-    generation: u32,
+    window: DriftWindow,
 }
 
 impl DriftCache {
     /// Update the cache if the underlying data has changed. Returns true if refreshed.
     pub fn refresh(&mut self, state: &TasSharedState) -> bool {
-        let generation_changed = self.generation != state.arm_generation;
-        let (count, _) = crate::drift_window(state, &mut self.bases, &mut self.generation);
-        if generation_changed {
+        let (count, reset) = self.window.update(state);
+        if reset {
             self.drift_x.clear();
             self.drift_z.clear();
         }
         if state.mode != tas_shared::TasMode::Play as u32 {
-            return generation_changed;
+            return reset;
         }
-        let (play_base, rec_base) = self.bases.unwrap_or((0, 0));
+        let (play_base, rec_base) = self.window.bases();
 
         let step = (count / 1000).max(1);
         self.drift_x.clear();

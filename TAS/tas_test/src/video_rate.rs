@@ -1,154 +1,42 @@
-//! `tas_test video-rate [secs]` — measure how fast the game's picture actually
-//! ADVANCES, from outside the process.
+//! `tas_test video-rate [secs] [--at X Y]`: how fast the game's picture
+//! ADVANCES, measured from outside the process.
 //!
-//! Built to answer one question that shared memory cannot: how fast does the
-//! menu background video run with NO TAS loaded? Shared-memory counters only
-//! exist once the DLL is injected, so they can measure the suspect and never
-//! the control. This measures the screen instead, so the SAME method works with
-//! TAS absent, with the DLL injected, and with tas_ui also running.
+//! Shared-memory counters only exist once the DLL is injected, so they can
+//! measure the suspect and never the control. This grabs a small region of the
+//! game window as fast as Windows allows, hashes the pixels and timestamps
+//! every change; distinct images per second is the rate at which new frames
+//! reach the screen, with or without TAS loaded.
 //!
-//! METHOD. Grab a small region of the game window as fast as Windows will allow,
-//! hash the pixels, and timestamp every change. Distinct images per second is
-//! the rate at which new frames are actually reaching the screen, which is what
-//! "the video plays too fast / too slow" is a statement about.
-//!
-//! WHAT IT CANNOT SEE. The sampler is not free, so it has a ceiling: a true rate
-//! above the sampling rate is undercounted. The report prints the sampling rate
-//! next to the result for exactly this reason — treat a change-rate that lands
-//! near the sample-rate as "at least this", not "this". Region choice matters
-//! too: a patch of static UI never changes and would read 0, so the default sits
-//! in the middle of the window where the video plays.
-//!
-//! Presented as intervals, not just an average, because the failure modes look
-//! different: a Sleep-limiter running at the wrong timer resolution shifts the
-//! whole distribution, while a stutter leaves the median alone and grows the
-//! tail.
+//! The sampler is not free, so a true rate above the sampling rate is
+//! undercounted; the sampling rate is printed next to the result for that
+//! reason. Intervals are reported as percentiles because a limiter at the
+//! wrong timer resolution shifts the whole distribution while a stutter only
+//! grows the tail.
 
 use std::time::{Duration, Instant};
 
-type Handle = isize;
+use crate::win32::{self, BitmapInfo, BitmapInfoHeader, Handle, Rect};
 
-const SRCCOPY: u32 = 0x00CC_0020;
-const DIB_RGB_COLORS: u32 = 0;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Rect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-}
-
-#[repr(C)]
-struct BitmapInfoHeader {
-    size: u32,
-    width: i32,
-    height: i32,
-    planes: u16,
-    bit_count: u16,
-    compression: u32,
-    size_image: u32,
-    x_ppm: i32,
-    y_ppm: i32,
-    clr_used: u32,
-    clr_important: u32,
-}
-
-#[repr(C)]
-struct BitmapInfo {
-    header: BitmapInfoHeader,
-    colors: [u32; 3],
-}
-
-// Split by DLL so the linker is told which import library each symbol lives in
-// — without these the build fails with unresolved externals.
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn GetDesktopWindow() -> Handle;
-    fn GetDC(hwnd: Handle) -> Handle;
-    fn ReleaseDC(hwnd: Handle, hdc: Handle) -> i32;
-    fn FindWindowA(cls: *const u8, name: *const u8) -> Handle;
-    fn GetWindowRect(h: Handle, r: *mut Rect) -> i32;
-    fn SetForegroundWindow(h: Handle) -> i32;
-    fn BringWindowToTop(h: Handle) -> i32;
-    fn ShowWindow(h: Handle, cmd: i32) -> i32;
-    fn GetForegroundWindow() -> Handle;
-}
-
-#[link(name = "gdi32")]
-unsafe extern "system" {
-    fn CreateCompatibleDC(hdc: Handle) -> Handle;
-    fn DeleteDC(hdc: Handle) -> i32;
-    fn CreateCompatibleBitmap(hdc: Handle, w: i32, h: i32) -> Handle;
-    fn DeleteObject(o: Handle) -> i32;
-    fn SelectObject(hdc: Handle, o: Handle) -> Handle;
-    fn BitBlt(
-        dst: Handle,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-        src: Handle,
-        sx: i32,
-        sy: i32,
-        rop: u32,
-    ) -> i32;
-    fn GetDIBits(
-        hdc: Handle,
-        hbm: Handle,
-        start: u32,
-        lines: u32,
-        bits: *mut u8,
-        bi: *mut BitmapInfo,
-        usage: u32,
-    ) -> i32;
-}
-
-const GAME_TITLE: &[u8] = b"Supreme Snowboarding Copyright (C) 1999 by Housemarque, Inc.\0";
-
-/// Sample patch. Small enough that a grab costs well under a millisecond (the
-/// sampling ceiling is the whole limit on what this can see), big enough that a
-/// frame change is guaranteed to touch it.
+/// Sample patch: small enough that a grab costs well under a millisecond, big
+/// enough that a frame change is guaranteed to touch it.
 const PATCH_W: i32 = 192;
 const PATCH_H: i32 = 144;
 
-/// Find the game window, bring it to the FRONT, and return its rect.
-///
-/// Focusing is not a convenience — the game does not render while it is in the
-/// background, so its window composites as blank white and every frame reads
-/// identical. The first run of this tool measured "0 distinct frames" for
-/// exactly that reason, which looks indistinguishable from "the video is
-/// frozen". Doing it here makes the measurement self-contained instead of
-/// depending on whoever runs it remembering to click the game first.
+/// Bring the game to the front and return its rect. The game does not render
+/// in the background (its window composites blank), so an unfocused
+/// measurement reads "0 distinct frames".
 fn focus_game_and_rect() -> Option<Rect> {
-    unsafe {
-        let hwnd = FindWindowA(std::ptr::null(), GAME_TITLE.as_ptr());
-        if hwnd == 0 {
-            return None;
-        }
-        ShowWindow(hwnd, 9); // SW_RESTORE
-        BringWindowToTop(hwnd);
-        SetForegroundWindow(hwnd);
-        // Give the game a beat to repaint once it is actually frontmost.
-        std::thread::sleep(Duration::from_millis(900));
-        if GetForegroundWindow() != hwnd {
-            eprintln!(
-                "  WARNING: could not bring the game to the front. It does not render\n  \
-                 in the background, so the measurement below is probably all zeros."
-            );
-        }
-        let mut r = Rect {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
-        if GetWindowRect(hwnd, &mut r) == 0 {
-            return None;
-        }
-        Some(r)
+    let hwnd = win32::find_game_window()?;
+    let focused = win32::bring_to_front(hwnd);
+    // Give the game a beat to repaint once it is frontmost.
+    std::thread::sleep(Duration::from_millis(900));
+    if !focused {
+        eprintln!(
+            "  WARNING: could not bring the game to the front. It does not render\n  \
+             in the background, so the measurement below is probably all zeros."
+        );
     }
+    win32::window_rect(hwnd)
 }
 
 /// A reusable GDI capture surface, so probing many patches costs one setup.
@@ -164,10 +52,10 @@ struct Grabber {
 impl Grabber {
     fn new() -> Self {
         unsafe {
-            let screen = GetDC(GetDesktopWindow());
-            let mem = CreateCompatibleDC(screen);
-            let bmp = CreateCompatibleBitmap(screen, PATCH_W, PATCH_H);
-            let old = SelectObject(mem, bmp);
+            let screen = win32::GetDC(win32::GetDesktopWindow());
+            let mem = win32::CreateCompatibleDC(screen);
+            let bmp = win32::CreateCompatibleBitmap(screen, PATCH_W, PATCH_H);
+            let old = win32::SelectObject(mem, bmp);
             Grabber {
                 screen,
                 mem,
@@ -196,15 +84,25 @@ impl Grabber {
 
     fn hash_at(&mut self, x: i32, y: i32) -> u64 {
         unsafe {
-            BitBlt(self.mem, 0, 0, PATCH_W, PATCH_H, self.screen, x, y, SRCCOPY);
-            GetDIBits(
+            win32::BitBlt(
+                self.mem,
+                0,
+                0,
+                PATCH_W,
+                PATCH_H,
+                self.screen,
+                x,
+                y,
+                win32::SRCCOPY,
+            );
+            win32::GetDIBits(
                 self.mem,
                 self.bmp,
                 0,
                 PATCH_H as u32,
                 self.buf.as_mut_ptr(),
                 &mut self.bi,
-                DIB_RGB_COLORS,
+                win32::DIB_RGB_COLORS,
             );
         }
         fnv1a(&self.buf)
@@ -214,17 +112,18 @@ impl Grabber {
 impl Drop for Grabber {
     fn drop(&mut self) {
         unsafe {
-            SelectObject(self.mem, self.old);
-            DeleteObject(self.bmp);
-            DeleteDC(self.mem);
-            ReleaseDC(GetDesktopWindow(), self.screen);
+            win32::SelectObject(self.mem, self.old);
+            win32::DeleteObject(self.bmp);
+            win32::DeleteDC(self.mem);
+            win32::ReleaseDC(win32::GetDesktopWindow(), self.screen);
         }
     }
 }
 
-/// Probe a grid over the window and return the origin of the patch that changes
-/// most — i.e. where the video actually is, rather than where we assumed.
-fn pick_liveliest_patch(r: &Rect) -> (i32, i32) {
+/// Probe a grid over the window and return the origin of the patch that
+/// changes most: where the video actually is, not where it was assumed to be
+/// (on the Arcade menu the centre lands on static buttons).
+fn pick_liveliest_patch(g: &mut Grabber, r: &Rect) -> (i32, i32) {
     const COLS: i32 = 5;
     const ROWS: i32 = 4;
     const PROBE_MS: u64 = 420;
@@ -233,7 +132,6 @@ fn pick_liveliest_patch(r: &Rect) -> (i32, i32) {
     let h = r.bottom - r.top;
     let mut best = (r.left + w / 2 - PATCH_W / 2, r.top + h / 2 - PATCH_H / 2);
     let mut best_changes = -1i32;
-    let mut g = Grabber::new();
 
     for row in 0..ROWS {
         for col in 0..COLS {
@@ -278,45 +176,27 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
-pub fn run(secs: Option<u64>) -> bool {
-    run_region(secs, None)
-}
-
-pub fn run_region(secs: Option<u64>, region: Option<(i32, i32)>) -> bool {
+/// `region` is the top-left of the patch to sample; `None` auto-picks the
+/// liveliest patch. An explicit region wins because "liveliest" is not always
+/// the thing you mean (the animated logo strip beats the background video).
+pub fn run(secs: Option<u64>, region: Option<(i32, i32)>) -> bool {
     let observe = Duration::from_secs(secs.unwrap_or(6).max(1));
 
     let Some(r) = focus_game_and_rect() else {
         eprintln!(
             "ERROR: no Supreme window found.\n  \
              Looked for the exact title {:?}. Is the game running?",
-            String::from_utf8_lossy(&GAME_TITLE[..GAME_TITLE.len() - 1])
+            String::from_utf8_lossy(&win32::GAME_TITLE[..win32::GAME_TITLE.len() - 1])
         );
         return false;
     };
-    // FIND THE MOVING PART OF THE PICTURE. Do not assume where it is.
-    //
-    // The first version sampled the window's centre on the theory that "the
-    // video plays behind everything, so the middle must be moving". On the
-    // Arcade menu the centre lands squarely on the Pipe/Air BUTTONS — static UI
-    // — while the actual video (a snowboarder) is up in the top right. It still
-    // produced plausible-looking numbers, because button edges and a sliver of
-    // sky change a bit, so nothing flagged that the measurement was pointed at
-    // the wrong thing. A metric that silently measures the wrong pixels is worse
-    // than one that fails.
-    //
-    // So: probe a grid, and pick the patch that actually changes the most. The
-    // chosen coordinates are printed, so the answer to "what did you measure?"
-    // is in the output rather than in an assumption.
-    // An explicit region wins over the auto-pick: "liveliest" is not always the
-    // thing you mean. On the Arcade menu the liveliest patch is the animated
-    // logo strip, while the background VIDEO — the snowboarder — is elsewhere
-    // and is what the complaint is actually about.
+    let mut grabber = Grabber::new();
     let (cx, cy) = match region {
         Some((x, y)) => {
             println!("  region: ({},{}) — explicitly requested", x, y);
             (x, y)
         }
-        None => pick_liveliest_patch(&r),
+        None => pick_liveliest_patch(&mut grabber, &r),
     };
 
     println!("\n=== video-rate: how fast is the picture advancing? ===");
@@ -331,9 +211,8 @@ pub fn run_region(secs: Option<u64>, region: Option<(i32, i32)>) -> bool {
         observe
     );
     let shm = tas_shared::TasSharedMemoryClient::open().ok();
-    // The game's own tick/frame counters. If the menu's animation is advancing
-    // too fast, the question is whether the TICK SOURCE is running fast — which
-    // these answer directly, where the screen metric only shows the consequence.
+    // The game's own tick/frame counters answer whether the TICK SOURCE runs
+    // fast, where the screen metric only shows the consequence.
     let ticks_before = shm.as_ref().map(|c| c.state().tick_count);
     let frames_before = shm.as_ref().map(|c| c.state().frame_count);
 
@@ -341,56 +220,16 @@ pub fn run_region(secs: Option<u64>, region: Option<(i32, i32)>) -> bool {
     let mut samples = 0u64;
     let mut last_hash = 0u64;
 
-    unsafe {
-        let screen = GetDC(GetDesktopWindow());
-        let mem = CreateCompatibleDC(screen);
-        let bmp = CreateCompatibleBitmap(screen, PATCH_W, PATCH_H);
-        let old = SelectObject(mem, bmp);
-
-        let mut bi = BitmapInfo {
-            header: BitmapInfoHeader {
-                size: std::mem::size_of::<BitmapInfoHeader>() as u32,
-                width: PATCH_W,
-                // Negative = top-down rows. Only consistency matters for hashing.
-                height: -PATCH_H,
-                planes: 1,
-                bit_count: 32,
-                compression: 0,
-                size_image: 0,
-                x_ppm: 0,
-                y_ppm: 0,
-                clr_used: 0,
-                clr_important: 0,
-            },
-            colors: [0; 3],
-        };
-        let mut buf = vec![0u8; (PATCH_W * PATCH_H * 4) as usize];
-
-        let start = Instant::now();
-        while start.elapsed() < observe {
-            BitBlt(mem, 0, 0, PATCH_W, PATCH_H, screen, cx, cy, SRCCOPY);
-            GetDIBits(
-                mem,
-                bmp,
-                0,
-                PATCH_H as u32,
-                buf.as_mut_ptr(),
-                &mut bi,
-                DIB_RGB_COLORS,
-            );
-            let h = fnv1a(&buf);
-            samples += 1;
-            if h != last_hash {
-                last_hash = h;
-                changes.push(Instant::now());
-            }
+    let start = Instant::now();
+    while start.elapsed() < observe {
+        let h = grabber.hash_at(cx, cy);
+        samples += 1;
+        if h != last_hash {
+            last_hash = h;
+            changes.push(Instant::now());
         }
-
-        SelectObject(mem, old);
-        DeleteObject(bmp);
-        DeleteDC(mem);
-        ReleaseDC(GetDesktopWindow(), screen);
     }
+    drop(grabber);
 
     let elapsed = observe.as_secs_f64();
     let sample_hz = samples as f64 / elapsed;

@@ -47,13 +47,17 @@ const ORIGINAL_RECORDING: &[u8] =
 fn original_recording_file() -> Vec<u8> {
     let count = u32::from_le_bytes(ORIGINAL_RECORDING[..4].try_into().unwrap());
     assert_eq!(ORIGINAL_RECORDING.len(), 4 + count as usize * 13);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
     // History blobs have no file metadata. Add the normal file envelope using
     // the test's standard injection configuration, without inventing a rider
     // or renderer stamp. Copy the captured inputs and XYZ bytes verbatim.
     let metadata = serde_json::to_vec(&serde_json::json!({
         "version": 1, "recorded_count": count, "inject_mode": 6,
         "force_fixed_tick": 0, "force_direct": 2, "input_source": 0,
-        "max_drift_x": 0.0, "max_drift_z": 0.0, "timestamp": "2026-09-05",
+        "max_drift_x": 0.0, "max_drift_z": 0.0, "timestamp": timestamp.to_string(),
         "notes": "UI break at 4500: original history entry 2431; metadata envelope added for live UI loading"
     })).unwrap();
     let mut file = (metadata.len() as u32).to_le_bytes().to_vec();
@@ -143,6 +147,7 @@ pub fn validate_options(args: &[String]) -> Result<(), String> {
 #[cfg(windows)]
 mod live {
     use super::*;
+    use crate::win32;
     use std::{os::windows::process::CommandExt, thread};
     use tas_shared::{TasMode, TasSharedMemoryClient};
 
@@ -228,39 +233,22 @@ mod live {
         }
         Ok(ui)
     }
-    #[link(name = "user32")]
-    extern "system" {
-        fn SetForegroundWindow(window: isize) -> i32;
-        fn GetForegroundWindow() -> isize;
-        fn IsWindow(window: isize) -> i32;
-        fn GetAsyncKeyState(key: i32) -> i16;
-        fn keybd_event(key: u8, scan: u8, flags: u32, extra: usize);
-    }
     fn press(key: u8) {
-        unsafe {
-            keybd_event(key, 0, 0, 0);
-        }
-        thread::sleep(Duration::from_millis(100));
-        unsafe {
-            keybd_event(key, 0, 2, 0);
-        }
+        win32::tap_key(key, Duration::from_millis(100));
     }
-    struct StopOnExit(isize);
+    struct StopOnExit(win32::Hwnd);
     impl Drop for StopOnExit {
         fn drop(&mut self) {
-            if unsafe { GetForegroundWindow() == self.0 && IsWindow(self.0) != 0 } {
-                press(122);
+            if win32::is_foreground(self.0) && win32::is_window(self.0) {
+                press(win32::VK_F11);
             }
         }
     }
-    fn healthy(windows: &[isize; 2]) -> Result<(), String> {
-        if windows
-            .iter()
-            .any(|window| unsafe { IsWindow(*window) == 0 })
-        {
+    fn healthy(windows: &[win32::Hwnd; 2]) -> Result<(), String> {
+        if windows.iter().any(|window| !win32::is_window(*window)) {
             return Err("Game or UI exited".into());
         }
-        if unsafe { GetForegroundWindow() != windows[0] } {
+        if !win32::is_foreground(windows[0]) {
             return Err("Game lost focus; trial inconclusive".into());
         }
         Ok(())
@@ -284,12 +272,10 @@ mod live {
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).into());
         }
-        let windows: [isize; 2] =
+        let windows: [win32::Hwnd; 2] =
             serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
         std::fs::metadata(&config.log).map_err(|e| e.to_string())?;
-        unsafe {
-            SetForegroundWindow(windows[0]);
-        }
+        win32::bring_to_front(windows[0]);
         thread::sleep(Duration::from_millis(300));
         healthy(&windows)?;
         let mut pico = crate::harness::PicoKeys::open()
@@ -309,7 +295,7 @@ mod live {
                 return Err("Pico release failed".into());
             }
             let stop = StopOnExit(windows[0]);
-            press(123); // Actual UI F12 shortcut; never ArmContinue from this process.
+            press(win32::VK_F12); // Actual UI F12 shortcut; never ArmContinue from this process.
             let start = Instant::now();
             while start.elapsed() < Duration::from_secs(3) {
                 healthy(&windows)?;
@@ -318,7 +304,7 @@ mod live {
                         return Err("Pico write failed".into());
                     }
                     thread::sleep(Duration::from_millis(40));
-                    if unsafe { GetAsyncKeyState(37) < 0 } != down {
+                    if win32::key_is_down(win32::VK_LEFT) != down {
                         return Err("LEFT HID transition not observed".into());
                     }
                 }

@@ -1,38 +1,20 @@
 //! Steering-impact regression test: injected steering must MOVE the player,
 //! and ONLY with a correct BB3B10 arg4.
 //!
-//! Guards the BB3B10-arg4 class of bug — the injected-input killer. BB3B10's
-//! 4th argument is dynamic per-race-load state, and the game's input observer
-//! SILENTLY DISCARDS any injected key whose arg4 is wrong. A hardcoded or stale
-//! value therefore makes ALL injected steering a no-op: the boarder goes
-//! straight while the recording says turn (dead REC steering; replays / CONT
-//! going straight — the "drift").
+//! The game's input observer silently discards any injected key whose arg4
+//! is wrong, so a stale value makes ALL injected steering a no-op; the drift
+//! and CONT suites cannot see that because a straight-line replay is perfectly
+//! reproducible. "arg4" is the hi dword of the 64-bit Kernel::Time every key
+//! event is stamped with at dispatch (BB3B10(key, pressed, Time.lo, Time.hi)),
+//! and the observer discards events whose Time predates the current race
+//! context; the DLL stamps injections with the game's own
+//! Kernel::Time::Current().
 //!
-//! Why the existing suites never caught it: drift and CONT tests assert
-//! REPRODUCIBILITY (REC vs PLAY drift == 0, bucket match). A straight-line
-//! replay is perfectly reproducible — both sides go straight — so they stay
-//! green while steering is completely dead. The missing invariant is INPUT
-//! IMPACT: replaying a hard turn must turn the boarder, and a WRONG arg4 must
-//! not.
-//!
-//! The mechanism (RE'd 2026-06-10): "arg4" is the hi dword of the 64-bit
-//! Kernel::Time every key event is stamped with at message-pump dispatch
-//! (Win32_Driver::Translate → keyDown +3940 → BB3B10(key, pressed, Time.lo,
-//! Time.hi)); the observer discards events whose Time predates the current
-//! race context. The DLL therefore stamps injections with the game's own
-//! Kernel::Time::Current() — focus-independent, no keypress calibration.
-//!
-//! Method (deterministic, no focus/warmup games): replay the same hard RIGHT
-//! twice via the `test_arg4_override` DLL hook —
-//!   Phase A: force a deliberately-WRONG Time.hi → injection must be
-//!            discarded → boarder goes STRAIGHT (lateral swing ~0).
+//! Method: replay the same hard RIGHT twice via the `test_arg4_override` hook.
+//!   Phase A: a deliberately WRONG Time.hi → injection discarded → boarder
+//!            goes STRAIGHT.
 //!   Phase B: override 0 → the live Kernel::Time::Current stamp → boarder
-//!            TURNS (large lateral swing), AND the DLL must report
-//!            arg4_source == TIME_CURRENT — proving the proper path fired,
-//!            not the keypress-calibrated fallback.
-//! PASS requires ALL. If the inject path, the Time stamping, or the
-//! Time::Current resolution regresses, one of the checks flips and the test
-//! fails.
+//!            TURNS, and the DLL reports arg4_source == TIME_CURRENT.
 
 use crate::harness;
 use std::thread;

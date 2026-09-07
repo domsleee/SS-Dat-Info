@@ -1,6 +1,6 @@
 //! Named real-recording cases sharing the CONT reliability runner.
 use crate::cont_reliability::{self, ContReliabilityReport};
-use std::path::PathBuf;
+use crate::harness;
 
 pub struct Case {
     recording: &'static str,
@@ -29,22 +29,6 @@ pub const FE_10065: Case = Case {
     signature: "FE-10065 CONT",
 };
 
-fn recording_path(case: &Case) -> Result<PathBuf, String> {
-    let relative = PathBuf::from("TAS/recordings").join(case.recording);
-    let mut candidates = vec![];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("../../..").join(&relative));
-        }
-    }
-    candidates.extend([relative, PathBuf::from("recordings").join(case.recording)]);
-    candidates
-        .iter()
-        .find(|p| p.is_file())
-        .cloned()
-        .ok_or_else(|| format!("Couldn't locate {} (tried {candidates:?})", case.recording))
-}
-
 fn timing_passes(case: &Case, max_overshoot: u32, best_resume_ms: f64) -> bool {
     case.timing
         .is_none_or(|(frames, ms)| max_overshoot <= frames && best_resume_ms <= ms)
@@ -71,7 +55,7 @@ fn judge(case: &Case, report: &ContReliabilityReport) -> bool {
 }
 
 pub fn run(case: &Case) -> bool {
-    let path = match recording_path(case) {
+    let path = match harness::fixture_path(case.recording) {
         Ok(path) => path,
         Err(error) => {
             eprintln!("{error}");
@@ -160,8 +144,6 @@ mod tests {
                         replay_coverage_ok: true,
                         playback_pos_at_splice: case.splice,
                         splice_recorded_count: case.splice,
-                        replay_start_fc: 0,
-                        splice_fc: 0,
                         max_drift_x: 0.0,
                         max_drift_y: 0.0,
                         max_drift_z: 0.0,
@@ -169,12 +151,6 @@ mod tests {
                         max_drift_frame_z: 0,
                         forward_only_ok: true,
                         prefix_net_z: 1.0,
-                        prefix_forward_steps: 1,
-                        prefix_backward_steps: 0,
-                        prefix_min_x: 0.0,
-                        prefix_max_x: 0.0,
-                        prefix_min_z: 0.0,
-                        prefix_max_z: 1.0,
                     })
                     .collect(),
             };

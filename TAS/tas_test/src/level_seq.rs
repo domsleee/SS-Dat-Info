@@ -1,82 +1,44 @@
-//! `tas_test level-seq` — verify the level-context seqlock is actually WIRED UP.
+//! `tas_test level-seq`: the level-context seqlock is actually WIRED UP.
 //!
-//! This test exists because of a specific failure that every other check
-//! missed. The seqlock writer (`publishContext` in the DLL's `level_scan.hpp`)
-//! was written, reviewed, commented, and committed — and never called. The
-//! stores still went out the old way, the sequence sat at 0 forever, and the
-//! Rust reader, seeing an even and unchanged sequence on every read, accepted
-//! everything exactly as it had before. The protocol was inert and looked
-//! perfect: the unit tests passed (they drive their own writer), the live runs
-//! passed (the fields are still written, just unprotected), and the level
-//! detection worked.
-//!
-//! A protocol whose absence is invisible is not protecting anything. So this
-//! asserts the one thing a dead writer cannot fake — that the DLL has actually
-//! executed the sequence.
-//!
-//! Checks, in order of how much they catch:
+//! A seqlock writer that is never called is invisible to every other check:
+//! the fields are still written, the sequence sits at 0, and a reader that
+//! sees an even, unchanged sequence accepts everything. So this asserts the
+//! one thing a dead writer cannot fake, that the DLL has executed the
+//! sequence:
 //!
 //!   1. SEQUENCE IS NON-ZERO. `Start()` publishes once during DLL init, so a
-//!      live DLL always has seq >= 2. Zero means no publication has EVER
-//!      happened: the writer is unwired (the exact bug above) or the DLL
-//!      predates the protocol. This alone fails on the broken build and passes
-//!      on the fixed one.
-//!
-//!   2. SEQUENCE IS EVEN when sampled at rest. Odd means a write is in flight
-//!      (fine, transient — we retry) or the writer died between its two
-//!      increments (fatal: every reader is locked out forever). Persistently
-//!      odd is the second case.
-//!
-//!   3. READS SUCCEED. The reader must actually obtain clean windows, not just
-//!      reject everything. A protocol that never returns is trivially never
-//!      wrong, and that is the failure mode a naive seqlock test walks into.
-//!
+//!      live DLL always has seq >= 2.
+//!   2. SEQUENCE IS EVEN at rest. Persistently odd means the writer died
+//!      between its two increments and every reader is locked out.
+//!   3. READS SUCCEED. A reader that rejects everything is never wrong.
 //!   4. NO TORN PATH ESCAPES. Every non-empty path handed out must be a
-//!      plausible level path. A splice of two different tracks generally is
-//!      not — it is the tail of one grafted onto the head of another.
+//!      plausible level path; a splice of two tracks generally is not.
 //!
-//! Read-only and non-destructive: it never sends a command, so it is safe to
-//! run against a session mid-experiment.
+//! Read-only: it never sends a command.
 
 use crate::harness;
 use std::time::{Duration, Instant};
 
-/// How long to observe by default. Long enough to span several publisher cycles
-/// (the DLL polls at 200ms while unresolved, 1.5s once settled) without being
-/// tedious. `tas_test level-seq <secs>` soaks for longer — worth it on Village,
-/// where two tracks share a resource path and the difficulty rests entirely on
-/// the heap scan, so scan instability would show up as the context flapping in
-/// and out of resolved.
+/// Long enough to span several publisher cycles. `tas_test level-seq <secs>`
+/// soaks for longer, which matters on Village where two tracks share a path
+/// and scan instability shows as the context flapping.
 const OBSERVE_DEFAULT_SECS: u64 = 4;
 
-/// The grammar the DLL itself requires before it will believe a path. Mirrors
-/// `levelpath::IsPlausible` — a spliced path fails it whenever the two tracks
-/// differ before the "tracks" segment, which is the usual case.
+/// Mirrors the DLL's `levelpath::IsPlausible`; a spliced path fails it
+/// whenever the two tracks differ before the "tracks" segment.
 fn plausible(path: &str) -> bool {
     let l = path.to_ascii_lowercase();
     l.contains("levels") && l.contains("tracks")
 }
 
-/// `tas_test level-seq watch [secs]` — an INSTRUMENT, not a gate.
-///
-/// Logs every level-context transition with a millisecond timestamp and asserts
-/// nothing. `run()` deliberately fails on more than one id, because it assumes a
-/// quiet track; this is for the opposite situation — you are about to change
-/// level on purpose and want to see exactly what the DLL publishes and when.
-///
-/// What it answers: does quitting to the menu actually INVALIDATE (context goes
-/// unresolved), or does the old track stay asserted through the teardown? That
-/// distinction decides how bad the shared-path case (Village Easy and Village
-/// Hard load the same `.../village/Tracks/easy/...`) really is — if every switch
-/// passes through a teardown, the path never has to change for us to notice.
+/// `tas_test level-seq watch [secs]`: an instrument, not a gate. Logs every
+/// level-context transition with a timestamp and asserts nothing, for when you
+/// are about to change level on purpose.
 pub fn watch(secs: Option<u64>) -> bool {
     let observe = Duration::from_secs(secs.unwrap_or(30).max(1));
-    // Attach directly — NOT through ensure_game_running(). That checks liveness,
-    // and liveness is zero at exactly the moment this tool is for: the engine
-    // cycle STOPS at a static menu, so the helper would refuse to connect
-    // precisely while you are trying to watch a level change. Same reasoning as
-    // the `gamestate` diagnostic: a tool for inspecting a wrong state must not
-    // decline to run because the state is wrong.
+    // Attach directly, not through ensure_game_running(): the engine cycle
+    // stops at a static menu, so a liveness check would refuse exactly when
+    // this tool is needed.
     let client = match tas_shared::TasSharedMemoryClient::open() {
         Ok(c) => c,
         Err(e) => {
@@ -142,9 +104,8 @@ pub fn run(secs: Option<u64>) -> bool {
         eprintln!(
             "\nFAIL: level_ctx_seq is 0 — the DLL has NEVER published through the \
              seqlock.\n  \
-             Start() publishes during init, so a live DLL cannot be at 0. Either the \
-             publishContext() calls are missing (the writer is dead code and the \
-             protocol is inert), or this game has an older TAS_Helper.dll loaded.\n  \
+             Start() publishes during init, so a live DLL cannot be at 0: the \
+             publishContext() calls are missing, or an older TAS_Helper.dll is loaded.\n  \
              Redeploy with `just deploy_run` and re-run."
         );
         return false;
@@ -159,12 +120,9 @@ pub fn run(secs: Option<u64>) -> bool {
     let mut bad_path: Option<String> = None;
     let mut last_seq = seq0;
     let mut last_ctx: Option<(u32, String)> = None;
-    // Distinct ids seen resolved, and how often the context flipped between
-    // resolved and unresolved. On a stable track both should be 1 and 0: the
-    // DLL only republishes on a real change, and it goes unresolved when two
-    // scans in one context CONTRADICT each other. So flapping here is the scan
-    // being unable to make up its mind, which is exactly what you want to know
-    // on Village, where the path cannot supply the difficulty.
+    // On a stable track one id is seen and the context never flips: the DLL
+    // republishes only on a real change and goes unresolved when two scans
+    // contradict each other.
     let mut ids_seen: Vec<u32> = Vec::new();
     let mut resolved_flips = 0usize;
     let mut was_resolved: Option<bool> = None;
@@ -222,8 +180,7 @@ pub fn run(secs: Option<u64>) -> bool {
 
     let mut ok = true;
 
-    // A path that survived the seqlock but is not a level path means a torn read
-    // escaped — the protocol is present but broken.
+    // A clean read that is not a level path is a torn read that escaped.
     if let Some(p) = bad_path {
         eprintln!(
             "\nFAIL: a clean read returned an implausible path: {:?}\n  \
@@ -235,43 +192,34 @@ pub fn run(secs: Option<u64>) -> bool {
         ok = false;
     }
 
-    // Never getting a clean read is a failure even though nothing was "wrong":
-    // a reader that always returns None never splices either, and would pass a
-    // less careful version of this test.
+    // A reader that always returns None never splices either.
     if reads_ok == 0 {
         eprintln!(
             "\nFAIL: not one clean read in {} attempts.\n  \
              Either the sequence is stuck ODD (a writer killed between its two \
-             increments locks out every reader permanently — Start() is meant to \
-             clear that on reinjection), or the level is unresolved for the whole \
-             window. Check `tas_test status`: if level_epoch != level_scan_epoch \
-             the scan simply has not identified the track, which is not a seqlock \
-             fault — get into a race and re-run.",
+             increments locks out every reader), or the level is unresolved for the \
+             whole window. Check `tas_test shm`: if the level is unresolved the scan \
+             has not identified the track, which is not a seqlock fault — get into a \
+             race and re-run.",
             samples
         );
         ok = false;
     }
 
-    // Two different tracks inside one observation window means the scan is
-    // contradicting itself. That does not corrupt anything — the DLL answers a
-    // contradiction by going unresolved, and unresolved matches nothing — but it
-    // means the difficulty is not actually being determined, which the user
-    // would experience as the track chip flickering.
+    // Two tracks in one window means the scan contradicts itself: the DLL
+    // answers by going unresolved, which the user sees as a flickering chip.
     if ids_seen.len() > 1 {
         eprintln!(
             "\nFAIL: the scan resolved to {} DIFFERENT tracks in one window: {:?}\n  \
              The level did not change (that would have shown as a path change), so \
-             the heap scan is not converging. Raise MIN_TRACK_HITS / dominance in \
-             level_scan.hpp, or the area hint is not constraining it.",
+             the level scan is not converging.",
             ids_seen.len(),
             ids_seen
         );
         ok = false;
     }
 
-    // Persistently odd = wedged writer. Transiently odd is normal and expected;
-    // this is deliberately a loose bound, because catching the writer mid-update
-    // is the protocol working, not failing.
+    // Persistently odd = wedged writer; transiently odd is the protocol working.
     if samples > 0 && odd_samples * 2 > samples {
         eprintln!(
             "\nFAIL: the sequence was odd in {}/{} samples — the writer looks wedged \

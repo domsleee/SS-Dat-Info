@@ -195,63 +195,23 @@ pub fn run_gates_aligned(
     assessment
 }
 
-/// Simplified gate check for straight-line tests (no steering input expected).
-/// Only checks Gate 0 (coords captured), Gate 2 (movement during play), and Gate 3 (drift).
+/// The gates for a straight-line test: no steering input is expected, so Gate 1
+/// is skipped.
 pub fn run_gates_straight(state: &TasSharedState, rec_count: u32) -> GateAssessment {
-    let n = rec_count as usize;
-
-    let reference_frames = gate0_reference_frames(n);
-    let ref_total = reference_frames.len();
-    let ref_ok = reference_frames
-        .iter()
-        .filter(|&&frame| state.rec_coords[frame][2] != 0.0)
-        .count();
-    let gate0 = GateResult {
-        gate: 0,
-        name: "Z-coord reference",
-        passed: ref_total > 0 && ref_ok == ref_total,
-        detail: format!("{}/{} reference frames have non-zero Z", ref_ok, ref_total),
-    };
-
-    // Gate 1: skip for straight-line (no input expected)
-    let gate1 = GateResult {
+    let mut assessment = run_gates(state, rec_count);
+    assessment.gates[1] = GateResult {
         gate: 1,
         name: "REC movement (skip: straight)",
         passed: true,
         detail: "skipped for straight-line test".into(),
     };
-
-    let (_, _, play_dz) = drift::compute_movement(&state.play_coords, n);
-    let gate2 = GateResult {
-        gate: 2,
-        name: "PLAY movement",
-        passed: play_dz > 0.1,
-        detail: format!("playDeltaZ={:.4}", play_dz),
-    };
-
-    let drift_result = drift::compute_drift(state, rec_count);
-    let gate3 = GateResult {
-        gate: 3,
-        name: "Zero drift",
-        passed: drift_result.is_zero(),
-        detail: format!(
-            "maxDriftX={:.9} maxDriftY={:.9} maxDriftZ={:.9}",
-            drift_result.max_drift_x, drift_result.max_drift_y, drift_result.max_drift_z,
-        ),
-    };
-
-    GateAssessment {
-        gates: [gate0, gate1, gate2, gate3],
-        drift: drift_result,
-    }
+    assessment
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn zeroed_state() -> Box<TasSharedState> {
-        tas_shared::zeroed_boxed()
-    }
+    use tas_shared::zeroed_boxed as zeroed_state;
 
     fn perfect_steered_state(n: usize) -> Box<TasSharedState> {
         let mut state = zeroed_state();

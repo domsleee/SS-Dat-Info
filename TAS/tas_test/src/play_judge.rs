@@ -28,7 +28,6 @@
 //! Failure here means the handover is not exact, or judging at speed changed
 //! the physics — both of which are reasons not to ship it.
 
-use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -38,7 +37,7 @@ use tas_shared::{TasCommand, TasSharedMemoryClient};
 use crate::harness;
 use crate::replay;
 
-const RECORDING_REL: &str = "TAS/recordings/FE-10065.tasrec";
+const RECORDING: &str = "FE-10065.tasrec";
 /// Catch-up speeds to compare. 1.0 is the control (no handover at all).
 const SPEEDS: &[f32] = &[1.0, 64.0];
 const MAX_RETRIES: u32 = 30;
@@ -68,30 +67,21 @@ struct Run {
 }
 
 pub fn run(iterations: u32) -> bool {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
-    let candidates = [
-        exe_dir.join("../../..").join(RECORDING_REL),
-        PathBuf::from(RECORDING_REL),
-        PathBuf::from("recordings/FE-10065.tasrec"),
-    ];
-    let path = match candidates.iter().find(|p| p.exists()) {
-        Some(p) => p.to_string_lossy().into_owned(),
-        None => {
-            eprintln!("ERROR: couldn't locate {}", RECORDING_REL);
+    let path = match harness::fixture_path(RECORDING) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
             return false;
         }
     };
-    println!("=== Judged PLAY speed handover: {} ===", path);
+    println!("=== Judged PLAY speed handover: {} ===", path.display());
 
     let mut client = harness::ensure_game_running();
     harness::stop_competing_tas_ui_writer();
     harness::stop(&mut client);
     thread::sleep(Duration::from_millis(100));
 
-    let loaded = match replay::load_tasrec(std::path::Path::new(&path)) {
+    let loaded = match replay::load_tasrec(&path) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("ERROR: {}", e);
@@ -143,10 +133,8 @@ pub fn run(iterations: u32) -> bool {
                 speed, d, control_drift, m, control_move
             );
             // Drift is compared against the control, not an absolute epsilon:
-            // the bucket the F5 lands legitimately blips during the settle, and
-            // pinning an absolute number here is exactly the mistake that once
-            // made CONT "never land". What must not happen is the fast path
-            // being WORSE than the slow one by more than that blip.
+            // the landed bucket legitimately blips during the settle. The fast
+            // path must not be worse than the slow one by more than that blip.
             if d > control_drift + tas_shared::cont::BUCKET_MATCH_EPSILON {
                 println!("  FAIL: {}x drifts further than 1x does", speed);
                 all_ok = false;
@@ -229,10 +217,8 @@ fn one_cycle(
     let mut ms_to_movement = f64::NAN;
     let mut staged = false;
     // playback_pos still holds the PREVIOUS replay's final value until this
-    // cycle's arm resets it, and that value is past fm on any recording worth
-    // testing - so "has the replay passed fm" latches instantly at t=0 unless
-    // we first watch it come back down. (It read 0 ms on every run after the
-    // first before this.)
+    // cycle's arm resets it, so "has the replay passed fm" must first watch it
+    // come back down.
     let mut replay_started = false;
     let mut deadline = Instant::now() + Duration::from_secs(ATTEMPT_TIMEOUT_SECS);
     let mut retries = 0;

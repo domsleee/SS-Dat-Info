@@ -1,20 +1,22 @@
-//! Three-phase acceptance test — ported from _full_drift_test.lua.
+//! Three-phase acceptance test.
 //!
 //! Phase 1 (BASELINE): REC with NO input — straight run, captures reference path
-//! Phase 2 (RECORD):   REC with Pico steering — alternating L/R via HID
+//! Phase 2 (RECORD):   REC with Pico steering
 //! Phase 3 (PLAYBACK): PLAY from recorded input — Pico CLOSED before playback
 //!
 //! Checks:
-//!   BASELINE vs RECORD X coords must DIFFER (steering changed path)
+//!   BASELINE vs RECORD coords must DIFFER (steering changed path)
 //!   RECORD vs PLAYBACK must match (zero drift)
+
+use serde::Serialize;
 
 use crate::drift;
 use crate::gates;
 use crate::harness;
 use crate::patterns;
 
-/// Acceptance test verdicts (matches the acceptance_criteria.md contract).
-#[derive(Debug)]
+/// Acceptance verdicts; also the certificate body.
+#[derive(Debug, Serialize)]
 pub struct AcceptanceResult {
     pub baseline_neutral: bool,
     pub steering: Verdict,
@@ -34,11 +36,21 @@ pub struct AcceptanceResult {
     pub play_gate: u32,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum Verdict {
     Pass,
     Fail,
-    Skip,
+}
+
+impl Verdict {
+    fn from_bool(pass: bool) -> Verdict {
+        if pass {
+            Verdict::Pass
+        } else {
+            Verdict::Fail
+        }
+    }
 }
 
 impl std::fmt::Display for Verdict {
@@ -46,7 +58,6 @@ impl std::fmt::Display for Verdict {
         match self {
             Verdict::Pass => write!(f, "PASS"),
             Verdict::Fail => write!(f, "FAIL"),
-            Verdict::Skip => write!(f, "SKIP"),
         }
     }
 }
@@ -180,50 +191,17 @@ pub fn run() -> AcceptanceResult {
     let state = client.state();
     harness::print_results(&client);
 
-    // Steering verdict: BASELINE coords vs RECORD coords must differ in 3D.
-    //
-    // Originally compared X-only with a 1.0-unit threshold, calibrated for a
-    // steering pattern that produced clear lateral X-axis deflection. At the
-    // current F5 spawn the track is steeply downhill and L/R steering produces
-    // little X deviation in the first few seconds — but it DOES produce visible
-    // Y/Z deviation. Compute 3D euclidean distance and keep the 1.0 threshold.
+    // Steering verdict: BASELINE vs RECORD must differ by more than 1.0 in 3D
+    // distance. At the F5 spawn the track is steeply downhill, so L/R steering
+    // shows up in Y/Z before it shows in X.
     let compare_count = baseline_count.min(rec_count) as usize;
-    let mut max_base_vs_rec_x: f64 = 0.0;
-    for i in 0..compare_count {
-        let dx = baseline_coords[i][0] as f64 - rec_coords[i][0] as f64;
-        let dy = baseline_coords[i][1] as f64 - rec_coords[i][1] as f64;
-        let dz = baseline_coords[i][2] as f64 - rec_coords[i][2] as f64;
-        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-        if dist > max_base_vs_rec_x {
-            max_base_vs_rec_x = dist;
-        }
-    }
-    let steering = if max_base_vs_rec_x > 1.0 {
-        Verdict::Pass
-    } else {
-        Verdict::Fail
-    };
+    let max_base_vs_rec_x = max_distance(&baseline_coords[..compare_count], &rec_coords);
+    let steering = Verdict::from_bool(max_base_vs_rec_x > 1.0);
 
-    // Replay steered verdict: PLAY coords vs BASELINE coords must differ in 3D.
-    let mut max_play_vs_base_x: f64 = 0.0;
+    // Replay steered verdict: PLAY vs BASELINE must differ the same way.
     let play_compare = baseline_count.min(state.playback_pos) as usize;
-    for (play, base) in state.play_coords[..play_compare]
-        .iter()
-        .zip(&baseline_coords[..play_compare])
-    {
-        let dx = play[0] as f64 - base[0] as f64;
-        let dy = play[1] as f64 - base[1] as f64;
-        let dz = play[2] as f64 - base[2] as f64;
-        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-        if dist > max_play_vs_base_x {
-            max_play_vs_base_x = dist;
-        }
-    }
-    let replay_steered = if max_play_vs_base_x > 1.0 {
-        Verdict::Pass
-    } else {
-        Verdict::Fail
-    };
+    let max_play_vs_base_x = max_distance(&baseline_coords[..play_compare], &state.play_coords);
+    let replay_steered = Verdict::from_bool(max_play_vs_base_x > 1.0);
 
     // Zero drift: equal offsets from the independently observed gates.
     let compared = state
@@ -238,11 +216,7 @@ pub fn run() -> AcceptanceResult {
             .zip(play.iter())
             .any(|(r, p)| r.to_bits() != p.to_bits())
     });
-    let zero_drift = if drift_result.is_zero() {
-        Verdict::Pass
-    } else {
-        Verdict::Fail
-    };
+    let zero_drift = Verdict::from_bool(drift_result.is_zero());
 
     // 4-gate assessment
     let assessment = gates::run_gates_aligned(state, rec_count, rec_gate, play_gate);
@@ -304,7 +278,21 @@ pub fn run() -> AcceptanceResult {
     result
 }
 
-/// Drive Pico HID for acceptance test Phase 2 (delegates to harness).
+/// Largest 3D distance between corresponding samples of two traces.
+fn max_distance(a: &[[f32; 3]], b: &[[f32; 3]]) -> f64 {
+    a.iter()
+        .zip(b)
+        .map(|(p, q)| {
+            (0..3)
+                .map(|axis| (p[axis] as f64 - q[axis] as f64).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        })
+        .fold(0.0, f64::max)
+}
+
+/// Drive Pico HID for acceptance test Phase 2, then wait for the release to
+/// be recorded.
 fn drive_pico_acceptance(steps: &[patterns::PatternStep]) -> Result<(), String> {
     harness::drive_pico_steps_required(steps)?;
     std::thread::sleep(std::time::Duration::from_millis(
