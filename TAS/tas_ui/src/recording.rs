@@ -342,7 +342,18 @@ impl RecoveryWriteJob {
         self.session.apply_stamps(&mut state);
 
         let tmp_recording_path = temp_path_for(&self.recording_path);
-        RecordingFile::save_with_segments(&state, &tmp_recording_path, &self.segments)?;
+        let identity = IdentityStamps {
+            renderer_id: self.session.renderer_id,
+            fpu_control_word: self.session.fpu_control_word,
+            rider_character: self.session.rider_character,
+            rider_stance: self.session.rider_stance,
+        };
+        RecordingFile::save_with_segments(
+            &state,
+            &tmp_recording_path,
+            &self.segments,
+            Some(&identity),
+        )?;
         atomic_replace_file(&tmp_recording_path, &self.recording_path)?;
 
         let metadata = RecoveryMetadata {
@@ -622,6 +633,72 @@ impl RecordingMetadata {
     }
 }
 
+/// Raw identity stamps of the take a buffer/file/entry holds: the DLL words
+/// the physics and rider labels derive from. `None` = unknown, and unknown
+/// is carried as unknown — never backfilled from the live game (a restored
+/// Keith take saved under a live Vincent session must keep saying Keith,
+/// and a pre-stamp take must keep saying nothing).
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct IdentityStamps {
+    #[serde(default)]
+    pub renderer_id: Option<u32>,
+    #[serde(default)]
+    pub fpu_control_word: Option<u32>,
+    #[serde(default)]
+    pub rider_character: Option<u32>,
+    #[serde(default)]
+    pub rider_stance: Option<u32>,
+}
+
+impl IdentityStamps {
+    /// Capture the live DLL words, mapping its unknown sentinels to `None`
+    /// (same rule `RecoverySessionContext::with_stamps` uses).
+    pub fn from_live(state: &TasSharedState) -> Self {
+        Self {
+            renderer_id: (state.renderer_id != tas_shared::TAS_RENDERER_UNKNOWN)
+                .then_some(state.renderer_id),
+            fpu_control_word: (state.fpu_control_word != 0).then_some(state.fpu_control_word),
+            rider_character: (state.rider_character != tas_shared::TAS_CHARACTER_UNKNOWN)
+                .then_some(state.rider_character),
+            rider_stance: (state.rider_stance != u32::MAX).then_some(state.rider_stance),
+        }
+    }
+
+    /// Recover the stamps from a file's metadata header. Exact: the header
+    /// stores the same names/words, so a load → save round trip preserves
+    /// them bit-for-bit.
+    pub fn from_metadata(meta: &RecordingMetadata) -> Self {
+        Self {
+            renderer_id: meta
+                .renderer
+                .as_deref()
+                .map(tas_shared::renderer_id_from_name)
+                .filter(|&id| id != tas_shared::TAS_RENDERER_UNKNOWN),
+            fpu_control_word: meta.fpu_control_word,
+            rider_character: meta
+                .character
+                .as_deref()
+                .map(tas_shared::character_id_from_name)
+                .filter(|&id| id != tas_shared::TAS_CHARACTER_UNKNOWN),
+            rider_stance: meta.stance,
+        }
+    }
+
+    /// Stamp a file header with these instead of the live DLL words. `None`
+    /// fields write unknown — they never fall back to live.
+    pub fn apply_to_metadata(&self, meta: &mut RecordingMetadata) {
+        meta.renderer = self.renderer_id.and_then(|id| {
+            (id != tas_shared::TAS_RENDERER_UNKNOWN)
+                .then(|| tas_shared::renderer_name(id).to_string())
+        });
+        meta.fpu_control_word = self.fpu_control_word.filter(|&v| v != 0);
+        meta.character = self.rider_character.and_then(|id| {
+            (id != tas_shared::TAS_CHARACTER_UNKNOWN)
+                .then(|| tas_shared::character_name(id).to_string())
+        });
+        meta.stance = self.rider_stance.filter(|&v| v != u32::MAX);
+    }
+}
 pub struct RecordingFile;
 
 impl RecordingFile {
@@ -629,6 +706,7 @@ impl RecordingFile {
         state: &TasSharedState,
         path: &std::path::Path,
         segments: &[Segment],
+        identity: Option<&IdentityStamps>,
     ) -> Result<(), String> {
         let count = state.recorded_count as usize;
         if count == 0 {
@@ -638,7 +716,7 @@ impl RecordingFile {
             return Err(format!("Recording too long: {} ticks", count));
         }
 
-        let meta = RecordingMetadata {
+        let mut meta = RecordingMetadata {
             version: state.version,
             recorded_count: state.recorded_count,
             force_fixed_tick: state.force_fixed_tick,
@@ -654,6 +732,12 @@ impl RecordingFile {
                 .then(|| tas_shared::character_name(state.rider_character).to_string()),
             stance: (state.rider_stance != u32::MAX).then_some(state.rider_stance),
         };
+        // A loaded or restored take carries its own identity: stamp the file
+        // with the take's words, never the live game's. `None` halves stay
+        // unknown rather than falling back to live.
+        if let Some(identity) = identity {
+            identity.apply_to_metadata(&mut meta);
+        }
 
         let meta_json = serde_json::to_string_pretty(&meta).map_err(|e| format!("{}", e))?;
 
@@ -955,6 +1039,8 @@ pub struct HistoryEntry {
     /// entry recorded as another character or stance replays different
     /// physics.
     pub rider: Option<String>,
+    /// Raw identity words behind the stamps, for exact save round trips.
+    pub stamps: IdentityStamps,
     snapshot: SnapshotSlot,
 }
 
@@ -981,6 +1067,7 @@ impl HistoryEntry {
             level: None,   // stamped from live_level by RecordingHistory on push
             physics: None, // stamped from live_physics by RecordingHistory on push
             rider: None,   // stamped from live_rider by RecordingHistory on push
+            stamps: IdentityStamps::default(), // stamped from live_stamps on push
             snapshot: SnapshotSlot::Loaded {
                 snapshot,
                 on_disk: None,
@@ -1005,6 +1092,7 @@ impl HistoryEntry {
             level: None,   // stamped from live_level by RecordingHistory on push
             physics: None, // stamped from live_physics by RecordingHistory on push
             rider: None,   // stamped from live_rider by RecordingHistory on push
+            stamps: IdentityStamps::default(),
             snapshot: SnapshotSlot::Marker,
         }
     }
@@ -1085,6 +1173,9 @@ pub struct RecordingHistory {
     live_physics: Option<String>,
     /// Live rider stamp (character · stance), see `set_live_rider`.
     live_rider: Option<String>,
+    /// Live raw identity words, refreshed alongside the label stamps;
+    /// stamped onto pushed entries for exact save round trips.
+    live_stamps: Option<IdentityStamps>,
 }
 
 impl RecordingHistory {
@@ -1101,6 +1192,7 @@ impl RecordingHistory {
             warnings: Vec::new(),
             live_physics: None,
             live_rider: None,
+            live_stamps: None,
         }
     }
 
@@ -1127,6 +1219,24 @@ impl RecordingHistory {
         self.live_rider.as_deref()
     }
 
+    /// Refresh the raw identity words given to subsequently pushed entries.
+    /// Unknown halves never erase known ones (same rule as the labels).
+    pub fn set_live_stamps(&mut self, stamps: IdentityStamps) {
+        let cur = self.live_stamps.get_or_insert_with(IdentityStamps::default);
+        if stamps.renderer_id.is_some() {
+            cur.renderer_id = stamps.renderer_id;
+        }
+        if stamps.fpu_control_word.is_some() {
+            cur.fpu_control_word = stamps.fpu_control_word;
+        }
+        if stamps.rider_character.is_some() {
+            cur.rider_character = stamps.rider_character;
+        }
+        if stamps.rider_stance.is_some() {
+            cur.rider_stance = stamps.rider_stance;
+        }
+    }
+
     /// Where lazily-loaded entries read their blobs from. Set before
     /// `apply_loaded`; without it an `OnDisk` entry cannot be restored.
     pub fn set_blob_dir(&mut self, dir: PathBuf) {
@@ -1136,7 +1246,6 @@ impl RecordingHistory {
     pub fn take_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.warnings)
     }
-
     /// Make entry `index` resident (reading its blob if needed) and return it.
     /// A blob that fails to read turns the entry `Unavailable` and records a
     /// warning; the cursor is NOT moved here so a failed restore leaves the
@@ -1537,6 +1646,7 @@ impl RecordingHistory {
                     level: e.level.clone(),
                     physics: e.physics.clone(),
                     rider: e.rider.clone(),
+                    stamps: e.stamps.clone(),
                     created_at_iso: e.created_at.to_rfc3339(),
                 },
                 // Bytes travel only for snapshots the store does not have
@@ -1586,6 +1696,36 @@ impl RecordingHistory {
             return false;
         }
         e.rider = rider;
+        self.bump();
+        true
+    }
+
+    /// Stamp the physics mode a recovered entry was recorded under (the
+    /// checkpoint carries it; the live physics is unknown during startup).
+    /// See set_level.
+    pub fn set_physics(&mut self, entry_id: u64, physics: Option<String>) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.physics == physics {
+            return false;
+        }
+        e.physics = physics;
+        self.bump();
+        true
+    }
+
+    /// Stamp the raw identity words a recovered entry was recorded with (the
+    /// checkpoint carries them; the live words are unknown during startup).
+    /// See set_level.
+    pub fn set_stamps(&mut self, entry_id: u64, stamps: IdentityStamps) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.stamps == stamps {
+            return false;
+        }
+        e.stamps = stamps;
         self.bump();
         true
     }
@@ -1693,6 +1833,7 @@ impl RecordingHistory {
                 level: meta.level,
                 physics: meta.physics,
                 rider: meta.rider,
+                stamps: meta.stamps,
                 snapshot,
             });
         }
@@ -1811,6 +1952,7 @@ impl RecordingHistory {
         entry.level = self.live_level.clone();
         entry.physics = self.live_physics.clone();
         entry.rider = self.live_rider.clone();
+        entry.stamps = self.live_stamps.clone().unwrap_or_default();
         entry.finish_time_cs = finish.map(|f| f.cs);
         entry.finish_time_exact = finish.is_some_and(|f| f.exact);
         if let Some((start_tick, end_tick)) = session {
@@ -1945,6 +2087,7 @@ pub fn save_dialog_with_segments(
     segments: &[Segment],
     log: &mut UiLog,
     level: Option<&str>,
+    identity: Option<&IdentityStamps>,
 ) -> Option<PathBuf> {
     // Default name: `<level>-<time>` (e.g. FE-5876). Mis-tagging is permanent —
     // the level filter keys off the saved name and folder — so an unknown level
@@ -1959,7 +2102,7 @@ pub fn save_dialog_with_segments(
         .add_filter("TAS Recording", &["tasrec"])
         .save_file()
     {
-        match RecordingFile::save_with_segments(state, &path, segments) {
+        match RecordingFile::save_with_segments(state, &path, segments, identity) {
             Ok(()) => {
                 log.push(format!("Saved recording to {}", path.display()));
                 return Some(path);
@@ -2562,7 +2705,7 @@ mod tests {
 
         let path = unique_temp_path("rec_rt", "tasrec");
 
-        RecordingFile::save_with_segments(&state, &path, &[]).unwrap();
+        RecordingFile::save_with_segments(&state, &path, &[], None).unwrap();
 
         let mut loaded = tas_shared::zeroed_boxed();
         let (count, segments) = RecordingFile::load(&mut loaded, &path).unwrap();
@@ -2588,7 +2731,7 @@ mod tests {
     fn recording_file_save_empty_errors() {
         let state = tas_shared::zeroed_boxed();
         let path = unique_temp_path("rec_empty", "tasrec");
-        assert!(RecordingFile::save_with_segments(&state, &path, &[]).is_err());
+        assert!(RecordingFile::save_with_segments(&state, &path, &[], None).is_err());
     }
 
     #[test]
@@ -2617,6 +2760,7 @@ mod tests {
                     level: None,
                     physics: None,
                     rider: None,
+                    stamps: IdentityStamps::default(),
                     created_at_iso: "2026-09-02T00:00:00+10:00".to_string(),
                 },
                 snapshot: Some(PersistedSnapshot {
@@ -2721,7 +2865,7 @@ mod tests {
         state.recorded_count = 2;
         state.rider_character = tas_shared::TAS_CHARACTER_KEITH;
         state.rider_stance = 0;
-        RecordingFile::save_with_segments(&state, &path, &[]).unwrap();
+        RecordingFile::save_with_segments(&state, &path, &[], None).unwrap();
         let meta = RecordingFile::read_metadata(&path).unwrap();
         assert_eq!(meta.character.as_deref(), Some("Keith"));
         assert_eq!(meta.stance, Some(0));
@@ -2769,7 +2913,7 @@ mod tests {
 
         let mut unstamped = tas_shared::zeroed_boxed();
         unstamped.recorded_count = 1;
-        RecordingFile::save_with_segments(&unstamped, &path, &[]).unwrap();
+        RecordingFile::save_with_segments(&unstamped, &path, &[], None).unwrap();
         assert_eq!(
             RecordingFile::read_metadata(&path).unwrap().rider_label(),
             None
@@ -2835,7 +2979,7 @@ mod tests {
         state.recorded_count = 2;
         state.renderer_id = tas_shared::TAS_RENDERER_OPENGL;
         state.fpu_control_word = 0x027F;
-        RecordingFile::save_with_segments(&state, &path, &[]).unwrap();
+        RecordingFile::save_with_segments(&state, &path, &[], None).unwrap();
         let meta = RecordingFile::read_metadata(&path).unwrap();
         assert_eq!(meta.renderer.as_deref(), Some("OpenGL"));
         assert_eq!(meta.fpu_control_word, Some(0x027F));
@@ -2872,7 +3016,7 @@ mod tests {
         // the game thread) has no opinion.
         let mut unstamped = tas_shared::zeroed_boxed();
         unstamped.recorded_count = 1;
-        RecordingFile::save_with_segments(&unstamped, &path, &[]).unwrap();
+        RecordingFile::save_with_segments(&unstamped, &path, &[], None).unwrap();
         assert_eq!(
             RecordingFile::read_metadata(&path).unwrap().physics_label(),
             None
@@ -3018,12 +3162,12 @@ mod tests {
         let mut first = tas_shared::zeroed_boxed();
         first.recorded_count = 2;
         first.input_log[..2].copy_from_slice(&[1, 2]);
-        RecordingFile::save_with_segments(&first, &path, &[]).unwrap();
+        RecordingFile::save_with_segments(&first, &path, &[], None).unwrap();
 
         let mut second = tas_shared::zeroed_boxed();
         second.recorded_count = 3;
         second.input_log[..3].copy_from_slice(&[7, 8, 9]);
-        RecordingFile::save_with_segments(&second, &path, &[]).unwrap();
+        RecordingFile::save_with_segments(&second, &path, &[], None).unwrap();
 
         let mut loaded = tas_shared::zeroed_boxed();
         RecordingFile::load(&mut loaded, &path).unwrap();
@@ -3081,7 +3225,7 @@ mod tests {
         ];
 
         let path = unique_temp_path("rec_segments", "tasrec");
-        RecordingFile::save_with_segments(&state, &path, &segments).unwrap();
+        RecordingFile::save_with_segments(&state, &path, &segments, None).unwrap();
 
         // Use RecordingFile::load() for a real round-trip (not manual JSON parse)
         let mut loaded = tas_shared::zeroed_boxed();
@@ -3688,6 +3832,42 @@ mod tests {
     }
 
     #[test]
+    fn save_uses_take_identity_not_live_state() {
+        let path = unique_temp_path("rec_identity", "tasrec");
+        // Live game runs Vincent/DirectX7; the take in the buffer is a
+        // Keith/OpenGL recording whose stance is unknown.
+        let mut live = state_with_ticks(8);
+        live.renderer_id = tas_shared::TAS_RENDERER_DIRECTX7;
+        live.fpu_control_word = 0x007F;
+        live.rider_character = tas_shared::TAS_CHARACTER_VINCENT;
+        live.rider_stance = 0;
+        let identity = IdentityStamps {
+            renderer_id: Some(tas_shared::TAS_RENDERER_OPENGL),
+            fpu_control_word: Some(0x027F),
+            rider_character: Some(tas_shared::TAS_CHARACTER_KEITH),
+            rider_stance: None,
+        };
+        RecordingFile::save_with_segments(&live, &path, &[], Some(&identity)).unwrap();
+        let meta = RecordingFile::read_metadata(&path).unwrap();
+        assert_eq!(meta.renderer.as_deref(), Some("OpenGL"));
+        assert_eq!(meta.fpu_control_word, Some(0x027F));
+        assert_eq!(meta.character.as_deref(), Some("Keith"));
+        assert_eq!(
+            meta.stance, None,
+            "unknown stance stays unknown, not live 0"
+        );
+        assert_eq!(meta.physics_label().as_deref(), Some("OpenGL/53-bit"));
+        // The saved header recovers the same stamps: load → save is exact.
+        assert_eq!(IdentityStamps::from_metadata(&meta), identity);
+        // Without an override the live words are stamped (unchanged behavior).
+        let live_path = unique_temp_path("rec_identity_live", "tasrec");
+        RecordingFile::save_with_segments(&live, &live_path, &[], None).unwrap();
+        let live_meta = RecordingFile::read_metadata(&live_path).unwrap();
+        assert_eq!(live_meta.renderer.as_deref(), Some("DirectX7"));
+        assert_eq!(live_meta.character.as_deref(), Some("Vincent"));
+    }
+
+    #[test]
     fn recovery_checkpoint_becomes_pinned_history_entry() {
         let dir = std::env::temp_dir().join(format!(
             "ssb_recov_{}_{}",
@@ -3697,8 +3877,14 @@ mod tests {
         let mut store = RecoveryStore::new_with(dir.clone(), Duration::from_millis(0)).unwrap();
         let state = state_with_ticks(406); // a 4.06s in-progress recording
         let snap = RecordingSnapshot::from_state(&state);
-        let session =
-            RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 406).unwrap();
+        let session = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 406)
+            .unwrap()
+            .with_level(Some("FE"))
+            .with_stamps(Some((
+                0x027F,
+                tas_shared::TAS_RENDERER_OPENGL,
+                (tas_shared::TAS_CHARACTER_KEITH, 0),
+            )));
         store
             .take_write_job(&snap, &[], &session, true)
             .unwrap()
@@ -3715,13 +3901,46 @@ mod tests {
             cp.session.end_tick,
         ));
         let id = history.entries().last().unwrap().entry_id;
+        // Mirror startup: restore every stamp the checkpoint carries.
+        history.set_level(id, cp.session.level.clone());
+        history.set_rider(id, cp.session.rider_label());
+        history.set_physics(
+            id,
+            tas_shared::physics_mode_label(
+                cp.session
+                    .renderer_id
+                    .unwrap_or(tas_shared::TAS_RENDERER_UNKNOWN),
+                cp.session.fpu_control_word.unwrap_or(0),
+            ),
+        );
+        history.set_stamps(
+            id,
+            IdentityStamps {
+                renderer_id: cp.session.renderer_id,
+                fpu_control_word: cp.session.fpu_control_word,
+                rider_character: cp.session.rider_character,
+                rider_stance: cp.session.rider_stance,
+            },
+        );
         history.set_pinned(id, true);
         history.rename(id, format!("Recovered · {}", cp.session.label));
 
         let e = &history.entries()[0];
         assert!(e.pinned, "recovered entry is pinned");
         assert!(e.custom_name.as_deref().unwrap().starts_with("Recovered"));
-        assert!(e.can_restore(), "recovered snapshot is restorable");
+        assert_eq!(e.level.as_deref(), Some("FE"));
+        assert_eq!(e.physics.as_deref(), Some("OpenGL/53-bit"));
+        assert_eq!(e.rider.as_deref(), Some("Keith · regular"));
+        assert_eq!(
+            e.stamps,
+            IdentityStamps {
+                renderer_id: Some(tas_shared::TAS_RENDERER_OPENGL),
+                fpu_control_word: Some(0x027F),
+                rider_character: Some(tas_shared::TAS_CHARACTER_KEITH),
+                rider_stance: Some(0),
+            },
+            "all three checkpoint stamps survive recovery"
+        );
 
         // DURABILITY: the recovered entry must round-trip through the v2 store —
         // recovery is pointless if it only lives in memory. (Startup persists +
@@ -3750,9 +3969,20 @@ mod tests {
             .as_deref()
             .unwrap()
             .starts_with("Recovered"));
-        assert!(
-            reloaded.snapshot.is_some(),
-            "recovered snapshot persisted to disk (eager open returns bytes)"
+        assert_eq!(
+            reloaded.meta.physics.as_deref(),
+            Some("OpenGL/53-bit"),
+            "physics stamp persisted"
+        );
+        assert_eq!(
+            reloaded.meta.rider.as_deref(),
+            Some("Keith · regular"),
+            "rider stamp persisted"
+        );
+        assert_eq!(
+            reloaded.meta.stamps.rider_character,
+            Some(tas_shared::TAS_CHARACTER_KEITH),
+            "raw stamps persisted"
         );
         let _ = std::fs::remove_dir_all(&v2dir);
 

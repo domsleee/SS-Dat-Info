@@ -66,19 +66,14 @@ fn captured_ui_break_at_4500_exercises_production_banner() {
         play.len(),
         meta["play_tail_samples"].as_u64().unwrap() as usize * 12
     );
-    for (dst, src) in state
-        .rec_coords
-        .iter_mut()
-        .zip(raw[4 + state.recorded_count as usize..].chunks_exact(12))
-    {
+    let (raw_chunks, _) = raw[4 + state.recorded_count as usize..].as_chunks::<12>();
+    for (dst, src) in state.rec_coords.iter_mut().zip(raw_chunks) {
         for axis in 0..3 {
             dst[axis] = f32::from_le_bytes(src[axis * 4..axis * 4 + 4].try_into().unwrap());
         }
     }
-    for (dst, src) in state.play_coords[start..]
-        .iter_mut()
-        .zip(play.chunks_exact(12))
-    {
+    let (play_chunks, _) = play.as_chunks::<12>();
+    for (dst, src) in state.play_coords[start..].iter_mut().zip(play_chunks) {
         for axis in 0..3 {
             dst[axis] = f32::from_le_bytes(src[axis * 4..axis * 4 + 4].try_into().unwrap());
         }
