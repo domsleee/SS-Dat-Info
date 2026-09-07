@@ -159,7 +159,7 @@ struct TasApp {
     /// The reroll/abort messages used to hardcode "CONT" because only CONT was
     /// ever judged; PLAY can be judged now, and a PLAY that exhausts its
     /// rerolls reporting "CONT aborted" would send someone hunting the wrong bug.
-    cont_cycle_label: &'static str,
+    cont_cycle_arm: tas_shared::transport::Arm,
     log_read_cursor: u32,
     /// Finish-line watcher (1.7): scan cursor into rec_coords during REC so
     /// each frame only examines new ticks, and the tick the run crossed the
@@ -392,7 +392,7 @@ impl TasApp {
             last_mode: 0,
             cont_catchup_speed: None,
             cont_catchup_multiplier: settings.cont_catchup_speed,
-            cont_cycle_label: "CONT",
+            cont_cycle_arm: tas_shared::transport::Arm::Continue,
             log_read_cursor: 0,
             finish_scan_cursor: 0,
             finished_at_tick: None,
@@ -859,6 +859,15 @@ impl TasApp {
         }
     }
 
+    /// Display name of the in-flight controller cycle for log lines.
+    fn cont_cycle_label(&self) -> &'static str {
+        match self.cont_cycle_arm {
+            tas_shared::transport::Arm::Continue => "CONT",
+            tas_shared::transport::Arm::Play => "PLAY",
+            tas_shared::transport::Arm::Rec => "REC",
+        }
+    }
+
     fn queue_restart_then(&mut self, command: TasCommand) {
         // Debounce overlapping cycles: a transport cycle (REC/PLAY/CONT
         // restart→arm) is already in flight, so a second F9/F10/F12 press
@@ -1034,8 +1043,8 @@ impl TasApp {
         // Reflect the speed the controller will assert into the live state now
         // so the UI updates immediately (the controller re-asserts it too).
         // For CONT, also stage the RESUME speed so the DLL drops to it
-        // atomically at the splice (Problem B fix) — otherwise the resumed
-        // recording fast-forwards at the catch-up rate until the UI polls.
+        // atomically at the splice — otherwise the resumed recording
+        // fast-forwards at the catch-up rate until the UI polls.
         let cont_resume_speed = if command == TasCommand::ArmContinue {
             self.cont_catchup_speed.unwrap_or(DEFAULT_PLAYBACK_SPEED)
         } else {
@@ -1068,11 +1077,7 @@ impl TasApp {
         };
         self.cont_controller = Some(tas_shared::transport::TransportController::new(cfg));
         self.cont_cycle_deadline = Some(std::time::Instant::now() + CONT_CYCLE_BUDGET);
-        self.cont_cycle_label = match command {
-            TasCommand::ArmContinue => "CONT",
-            TasCommand::ArmPlay => "PLAY",
-            _ => "REC",
-        };
+        self.cont_cycle_arm = arm;
         // Block live input for the restart portion of any replay cycle — set BEFORE the
         // controller's first command so it covers every restart's OFF-mode spawn
         // countdown (the window the mode-based handler block misses). Cleared
@@ -1156,7 +1161,7 @@ impl TasApp {
                             .unwrap_or("?");
                         self.push_log(&format!(
                             "{} gave up: stalled in {} for {}s",
-                            self.cont_cycle_label,
+                            self.cont_cycle_label(),
                             phase,
                             CONT_CYCLE_BUDGET.as_secs()
                         ));
@@ -1206,7 +1211,7 @@ impl TasApp {
                     observed,
                     expected,
                 } => {
-                    if self.cont_cycle_label == "PLAY" {
+                    if self.cont_cycle_arm == tas_shared::transport::Arm::Play {
                         let mismatch = observed
                             .map(|frame| frame.to_string())
                             .unwrap_or_else(|| "?".to_string());
@@ -1217,7 +1222,7 @@ impl TasApp {
                     } else {
                         self.push_log(&format!(
                             "{} bucket reroll {}/{} (observed first-moving={:?} expected={:?})",
-                            self.cont_cycle_label,
+                            self.cont_cycle_label(),
                             attempt,
                             CONT_START_MATCH_MAX_RETRIES,
                             observed,
@@ -1233,7 +1238,7 @@ impl TasApp {
                     completed_via,
                 } => {
                     if retries_used > 0 {
-                        if self.cont_cycle_label == "PLAY" {
+                        if self.cont_cycle_arm == tas_shared::transport::Arm::Play {
                             self.push_log(&format!(
                                 "PLAY watcher accepted after {} restart retr{}",
                                 retries_used,
@@ -1242,7 +1247,7 @@ impl TasApp {
                         } else {
                             self.push_log(&format!(
                                 "{} bucket aligned after {} restart retr{}",
-                                self.cont_cycle_label,
+                                self.cont_cycle_label(),
                                 retries_used,
                                 if retries_used == 1 { "y" } else { "ies" }
                             ));
@@ -1253,7 +1258,7 @@ impl TasApp {
                     // that is left is to stop treating the judge speed as the
                     // user's. CONT must NOT go through here - its catch-up is
                     // still running toward the splice.
-                    if self.cont_cycle_label == "PLAY" {
+                    if self.cont_cycle_arm == tas_shared::transport::Arm::Play {
                         self.clear_cont_catchup();
                     }
                     // Stash for the resume summary emitted at the REC-start splice,
@@ -1268,7 +1273,7 @@ impl TasApp {
                     return;
                 }
                 StepOutcome::Aborted { reason } => {
-                    self.push_log(&format!("{} aborted: {}", self.cont_cycle_label, reason));
+                    self.push_log(&format!("{} aborted: {}", self.cont_cycle_label(), reason));
                     self.clear_cont_catchup();
                     // Drop any handover the aborted attempt had staged, and push
                     // the restored speed through: an aborted PLAY must not leave
@@ -2667,7 +2672,7 @@ impl eframe::App for TasApp {
                 // atomically. Assert THAT resume speed here — not the catch-up
                 // multiplier — so we don't stomp it back to e.g. 64x for the
                 // frame(s) before our mode-transition handler runs. This closes
-                // the post-splice overshoot (Problem B).
+                // the post-splice overshoot.
                 //
                 // A judged PLAY is different again: its handover fires mid-replay
                 // with no mode change to notice it by, and it can be staged and
@@ -3124,7 +3129,7 @@ mod tests {
             last_mode: 0,
             cont_catchup_speed: None,
             cont_catchup_multiplier: 12.0,
-            cont_cycle_label: "CONT",
+            cont_cycle_arm: tas_shared::transport::Arm::Continue,
             log_read_cursor: 0,
             drift_tracker: drift_scan::DriftTracker::default(),
             last_logged_drift_level: 0,

@@ -155,15 +155,11 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState, cache: &mut TrajectoryCac
 mod tests {
     use super::*;
 
-    fn zeroed_state() -> Box<TasSharedState> {
-        tas_shared::zeroed_boxed()
-    }
-
     /// Altitude values are negated for display (game Y-up inverted for downhill view).
     /// Reference: SS-Dat-Info negates Y in transformPosition.
     #[test]
     fn altitude_negates_y_for_rec() {
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 3;
         state.rec_coords[0] = [0.0, 100.0, 0.0];
         state.rec_coords[1] = [1.0, 50.0, 1.0];
@@ -184,7 +180,7 @@ mod tests {
     /// Same negation for PLAY altitude.
     #[test]
     fn altitude_negates_y_for_play() {
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 1;
         state.rec_coords[0] = [0.0, 0.0, 0.0];
         state.playback_pos = 2;
@@ -204,7 +200,7 @@ mod tests {
     /// Top-down X/Z coordinates are NOT negated.
     #[test]
     fn xz_coordinates_not_negated() {
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 1;
         state.rec_coords[0] = [10.0, 999.0, 30.0];
 
@@ -218,7 +214,7 @@ mod tests {
     /// Cache dedup: refresh returns false when data hasn't changed.
     #[test]
     fn cache_dedup_skips_unchanged() {
-        let mut state = zeroed_state();
+        let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 1;
         state.rec_coords[0] = [1.0, 2.0, 3.0];
 
