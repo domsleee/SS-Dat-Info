@@ -691,7 +691,9 @@ impl TasApp {
             .as_ref()
             .map(|s| (s.mode_volatile(), s.command_idle()))
             .unwrap_or((TasMode::Off as u32, true));
-        if stop_is_acknowledged(mode, command_idle) {
+        // The DLL can be idle while the UI still has a restart/arm queued.
+        // Cancel that controller through STOP before replacing its recording.
+        if stop_is_acknowledged(mode, command_idle) && self.cont_controller.is_none() {
             self.sync_live_level();
             return true;
         }
@@ -928,6 +930,9 @@ impl TasApp {
         // would fire into a stopped engine and leave a half-armed cycle.
         // This is the single funnel for the transport buttons AND the
         // F9/F10/F12 hotkeys, so gating here covers both.
+        // A native file dialog can block UI updates for seconds while the game
+        // keeps running. Refresh its heartbeat before applying the menu gate.
+        self.check_game_health();
         let cycle_ticking = self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400);
         let in_level = self
             .shared
@@ -1921,7 +1926,7 @@ impl TasApp {
             let ctrl_z_raw = input.events.iter().any(|e| {
                 matches!(e,
                     egui::Event::Key { key: egui::Key::Z, pressed: true, modifiers, .. }
-                    if modifiers.ctrl || modifiers.mac_cmd
+                    if (modifiers.ctrl || modifiers.mac_cmd) && !modifiers.shift
                 )
             });
             if ctrl_z_raw {
@@ -3394,6 +3399,57 @@ mod tests {
             "Ctrl+Y must produce Redo action"
         );
         assert!(action_has_log(&actions, "Redo"), "Ctrl+Y must log Redo");
+    }
+
+    #[test]
+    fn shortcut_shift_z_only_redoes() {
+        for modifiers in [Modifiers::CTRL, Modifiers::MAC_CMD] {
+            let mut app = test_app();
+            let actions = press_key(
+                &mut app,
+                Key::Z,
+                Modifiers {
+                    shift: true,
+                    ..modifiers
+                },
+            );
+            assert_eq!(
+                actions
+                    .iter()
+                    .filter(|a| matches!(a, transport::Action::Redo))
+                    .count(),
+                1
+            );
+            assert!(!actions.iter().any(|a| matches!(a, transport::Action::Undo)));
+        }
+    }
+
+    #[test]
+    fn restoring_while_idle_cancels_pending_arm() {
+        use tas_shared::transport::{Arm, ArmConfig, TransportController};
+        for arm in [Arm::Rec, Arm::Play, Arm::Continue] {
+            let mut app = test_app();
+            app.cont_controller = Some(TransportController::new(ArmConfig {
+                arm,
+                catchup_speed: 256.0,
+                continue_from_frame: 400,
+                gate_align_rec: 299,
+                target: None,
+                max_retries: 1,
+                resume_speed: 1.0,
+                predict_bucket: false,
+            }));
+            app.cont_catchup_speed = Some(1.0);
+            app.playback_speed = 256.0;
+            app.pending_session_kind = Some(RecordingSessionKind::Continue);
+            app.pending_continue_start_tick = Some(400);
+            assert!(app.stop_active_session_for_load());
+            assert!(app.cont_controller.is_none());
+            assert!(app.pending_session_kind.is_none());
+            assert!(app.pending_continue_start_tick.is_none());
+            assert!(app.cont_catchup_speed.is_none());
+            assert_eq!(app.playback_speed, 1.0);
+        }
     }
 
     // ===== Timeline zoom (keyboard +/-) =====
