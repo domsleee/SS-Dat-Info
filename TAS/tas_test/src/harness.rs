@@ -914,19 +914,6 @@ pub fn print_results(client: &TasSharedMemoryClient) {
     println!("BB3B10 blocks (Cave 1D): {}", s.bb3b10_block_count);
 }
 
-/// Arm continue-from-frame: set the splice point and send ARM_CONTINUE. The DLL
-/// plays 0..frame, then switches to REC.
-pub fn arm_continue(client: &mut TasSharedMemoryClient, frame: u32) {
-    client.state_mut().continue_from_frame = frame;
-    client.send_command(TasCommand::ArmContinue);
-    thread::sleep(Duration::from_millis(50));
-    let mode = client.mode_volatile();
-    println!(
-        "  ARM_CONTINUE(frame={}) -> mode={} (expect 2=PLAY initially)",
-        frame, mode
-    );
-}
-
 /// Wait for the PLAY->REC transition of an ARM_CONTINUE splice.
 pub fn wait_continue_splice(client: &TasSharedMemoryClient, splice_frame: u32) -> bool {
     let start = Instant::now();
@@ -965,113 +952,6 @@ pub fn wait_continue_splice(client: &TasSharedMemoryClient, splice_frame: u32) -
             return false;
         }
     }
-}
-
-/// Pico F5 restart + ARM_CONTINUE with bucket matching, then wait for the splice.
-/// Returns `Some(reroll_count)` on a clean splice, `None` on failure.
-///
-/// The bucket is judged with tas_ui's criteria (`judge_cont_bucket`: spawn bits
-/// plus the first-moving fingerprint) EARLY, before the splice fires, so a wrong
-/// bucket is stopped before it can mutate the recording.
-pub fn restart_continue_and_splice(
-    client: &mut TasSharedMemoryClient,
-    target: [f32; 3],
-    splice_frame: u32,
-    max_retries: u32,
-) -> Option<u32> {
-    use tas_shared::cont::BucketVerdict;
-
-    let expected_start_bits = [
-        target[0].to_bits(),
-        target[1].to_bits(),
-        target[2].to_bits(),
-    ];
-    let expected_first_moving = {
-        let s = client.state();
-        tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count)
-    };
-    match expected_first_moving {
-        Some(fm) => println!(
-            "  CONT bucket criteria (tas_ui): spawn match + first-moving frame {}",
-            fm
-        ),
-        None => {
-            println!("  CONT bucket criteria (tas_ui): recording never moves — spawn match only")
-        }
-    }
-
-    for attempt in 0..=max_retries {
-        stop_competing_tas_ui_writer();
-        if attempt > 0 {
-            println!("  Retry {}/{}: CONT bucket reroll", attempt, max_retries);
-        }
-        if !restart_and_stabilize(client) {
-            eprintln!("  ERROR: Game not alive after restart");
-            return None;
-        }
-        // Arm immediately after the restart (no focus call): every frame spent
-        // here shifts play_coords[0] later into the spawn countdown.
-        arm_continue(client, splice_frame);
-        thread::sleep(Duration::from_millis(100));
-
-        {
-            let s = client.state();
-            if s.playback_pos == 0 && s.mode == TasMode::Off as u32 {
-                eprintln!("  WARNING: CONT didn't start");
-                stop(client);
-                continue;
-            }
-        }
-
-        let verdict = poll_cont_verdict(
-            client,
-            expected_start_bits,
-            expected_first_moving,
-            splice_frame,
-        );
-        match verdict {
-            BucketVerdict::Match | BucketVerdict::NoSignal => {
-                if attempt > 0 {
-                    println!(
-                        "  CONT bucket accepted (tas_ui criteria) on attempt {}",
-                        attempt + 1
-                    );
-                }
-                println!("  CONT bucket accepted, waiting for splice...");
-                if wait_continue_splice(client, splice_frame) {
-                    return Some(attempt);
-                }
-                stop(client);
-                continue;
-            }
-            BucketVerdict::WrongBucket { observed } => {
-                println!(
-                    "  CONT wrong bucket: observed first-moving={:?} expected={:?} (reroll)",
-                    observed, expected_first_moving
-                );
-                stop(client);
-                continue;
-            }
-            BucketVerdict::WrongStart => {
-                let pc0 = client.state().play_coords[0];
-                let dx = (pc0[0] as f64 - target[0] as f64).abs();
-                let dz = (pc0[2] as f64 - target[2] as f64).abs();
-                println!("  CONT start mismatch: dx={:.9} dz={:.9} (reroll)", dx, dz);
-                stop(client);
-                continue;
-            }
-            BucketVerdict::KeepWaiting => {
-                println!("  CONT bucket inconclusive (timeout before enough frames) — reroll");
-                stop(client);
-                continue;
-            }
-        }
-    }
-    eprintln!(
-        "  WARNING: Could not land a tas_ui-acceptable CONT bucket after {} retries",
-        max_retries
-    );
-    None
 }
 
 /// In-process CONT splice through the shared transport controller
@@ -1214,65 +1094,6 @@ pub fn restart_continue_and_splice_inprocess(
                 return None;
             }
         }
-    }
-}
-
-/// Poll `judge_cont_bucket` until a definitive verdict, the way tas_ui's
-/// per-frame guard does. Returns the first non-`KeepWaiting` verdict; on timeout
-/// returns `KeepWaiting`. If the splice already fired (mode REC) or playback
-/// reached the splice, judges once with the full prefix; if CONT bailed to OFF,
-/// reports `WrongStart`.
-fn poll_cont_verdict(
-    client: &TasSharedMemoryClient,
-    expected_start_bits: [u32; 3],
-    expected_first_moving: Option<u32>,
-    splice_frame: u32,
-) -> tas_shared::cont::BucketVerdict {
-    use tas_shared::cont::{judge_cont_bucket, BucketVerdict};
-    let t0 = Instant::now();
-    // The replay advances ~100*speed frames/sec, so a slow speed needs a
-    // proportionally longer window to reach the fingerprint.
-    let speed = (client.state().playback_speed as f64).max(0.05);
-    let timeout = Duration::from_secs_f64(JUDGE_TIMEOUT_SECS as f64 * (1.0 / speed).max(1.0));
-    loop {
-        let (verdict, mode, pos) = {
-            let s = client.state();
-            (
-                judge_cont_bucket(
-                    &s.play_coords[..],
-                    &s.rec_coords[..],
-                    s.recorded_count,
-                    s.playback_pos,
-                    expected_start_bits,
-                    expected_first_moving,
-                    splice_frame,
-                ),
-                s.mode,
-                s.playback_pos,
-            )
-        };
-        if verdict != BucketVerdict::KeepWaiting {
-            return verdict;
-        }
-        if mode == TasMode::Rec as u32 || pos >= splice_frame {
-            let s = client.state();
-            return judge_cont_bucket(
-                &s.play_coords[..],
-                &s.rec_coords[..],
-                s.recorded_count,
-                splice_frame.max(1),
-                expected_start_bits,
-                expected_first_moving,
-                splice_frame,
-            );
-        }
-        if mode == TasMode::Off as u32 {
-            return BucketVerdict::WrongStart;
-        }
-        if t0.elapsed() > timeout {
-            return BucketVerdict::KeepWaiting;
-        }
-        thread::sleep(Duration::from_millis(5));
     }
 }
 
