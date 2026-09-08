@@ -167,40 +167,37 @@ pub fn ensure_exclusive_runtime_ownership(client: &mut TasSharedMemoryClient, fa
     thread::sleep(Duration::from_millis(100));
 }
 
-/// Send F5 via PostMessage (no focus required).
-fn send_f5_postmessage() {
-    match win32::find_game_window() {
-        Some(hwnd) => {
-            win32::post_key(hwnd, win32::VK_F5, Duration::from_millis(50));
-            println!("  F5 sent via PostMessage (hwnd={:#x})", hwnd);
-        }
-        None => eprintln!("  ERROR: Cannot find Supreme window for PostMessage F5"),
-    }
+/// Send a physical F5. A missing or busy Pico is a failure, not synthetic input.
+pub fn send_f5_pico() -> bool {
+    send_pico_key(0x40, "F5", 100)
 }
 
-/// Send F5 via Pico HID to restart the race.
-pub fn send_f5_pico() {
+/// The finish prompt ignores Escape. Select No with RIGHT, then confirm by
+/// physical Enter (firmware command 0xFC), releasing both keys explicitly.
+pub fn dismiss_finish_prompt() -> bool {
+    send_pico_key(0x02, "RIGHT (No)", 80) && send_pico_key(0xFC, "Enter", 80)
+}
+
+fn send_pico_key(command: u8, label: &str, hold_ms: u64) -> bool {
     focus_game();
-    let port = pico_port();
-    match PicoKeys::open() {
-        Some(mut keys) => {
-            if !keys.send(0x40) {
-                eprintln!("  WARNING: Pico F5 press failed to write; using PostMessage fallback.");
-                drop(keys);
-                send_f5_postmessage();
-                return;
-            }
-            thread::sleep(Duration::from_millis(100));
-            println!("  F5 sent via Pico ({})", port);
+    let mut keys = match PicoKeys::open_checked() {
+        Ok(keys) => keys,
+        Err(error) => {
+            eprintln!("ERROR: {error}");
+            return false;
         }
-        None => {
-            eprintln!(
-                "  WARNING: Failed to open {}. Using PostMessage fallback.",
-                port
-            );
-            send_f5_postmessage();
-        }
+    };
+    if !keys.send(command) {
+        eprintln!("ERROR: Pico {label} press failed");
+        return false;
     }
+    thread::sleep(Duration::from_millis(hold_ms));
+    if !keys.send(0xFF) {
+        eprintln!("ERROR: Pico {label} release failed");
+        return false;
+    }
+    println!("  {label} sent via Pico ({})", keys.port_name());
+    true
 }
 
 /// Wait for N frames to pass (based on Cave 2 frame_count).
@@ -232,12 +229,16 @@ pub fn restart_and_stabilize(client: &TasSharedMemoryClient) -> bool {
     dismiss_save_dialog();
 
     println!("  Sending F5 (normalize)...");
-    send_f5_pico();
+    if !send_f5_pico() {
+        return false;
+    }
     thread::sleep(Duration::from_millis(F5_SETTLE_MS));
     wait_frames(client, 100);
 
     println!("  Sending F5 (restart)...");
-    send_f5_pico();
+    if !send_f5_pico() {
+        return false;
+    }
     thread::sleep(Duration::from_millis(F5_SETTLE_MS));
     wait_frames(client, STABILIZE_FRAMES);
     println!("  Stabilized at frame {}", client.frame_count_volatile());

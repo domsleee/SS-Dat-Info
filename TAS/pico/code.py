@@ -5,6 +5,7 @@ import time
 TIMEOUT_S = 0.5
 RETRY_S = 0.05
 ACK_VERSION = 1
+ENTER_COMMAND = 0xFC
 
 
 class Controller:
@@ -66,6 +67,8 @@ class Controller:
             return True
         if self.release_pending:
             return True  # Discard stale input while HID state is uncertain.
+        if cmd == ENTER_COMMAND:
+            cmd = 1 << 8  # Menu confirmation, exclusive of the eight game keys.
         try:
             changed = self.mask ^ cmd
             for index, key in enumerate(self.keys):
@@ -113,7 +116,7 @@ def main():
 
     keys = (Keycode.LEFT_ARROW, Keycode.RIGHT_ARROW, Keycode.UP_ARROW,
             Keycode.DOWN_ARROW, Keycode.LEFT_CONTROL, Keycode.LEFT_SHIFT,
-            Keycode.F5, Keycode.ESCAPE)
+            Keycode.F5, Keycode.ESCAPE, Keycode.ENTER)
     controller = Controller(lambda: Keyboard(usb_hid.devices), usb_cdc.data,
                             keys, microcontroller.reset)
     while True:

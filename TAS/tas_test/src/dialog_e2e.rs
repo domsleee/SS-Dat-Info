@@ -9,7 +9,7 @@
 //! One continuous session, driven with real input:
 //!
 //!   PHASE A — aligned PLAY of a finishing recording at 1x, idle at the save
-//!             dialog, dismiss with a REAL Pico Escape. No tick burst allowed.
+//!             dialog, decline with physical RIGHT + Enter. No tick burst allowed.
 //!   PHASE B — the TAS user's actual flow: CONT near the finish, the splice
 //!             flips to REC, the run crosses the line RECORDING, the dialog
 //!             appears in REC mode. Idle, real Pico Escape, no burst.
@@ -57,6 +57,14 @@ fn wait_engine_frozen(client: &tas_shared::TasSharedMemoryClient, deadline_secs:
             return false;
         }
         thread::sleep(Duration::from_millis(100));
+        let state = client.state();
+        if state.mode == TasMode::Off as u32
+            && state.recorded_count > CONT_SPLICE_FRAME
+            && state.playback_pos >= state.recorded_count
+        {
+            eprintln!("FAIL: fixture finished without the save prompt; use an isolated game copy with fresh Forest Easy scores, not your personal score table");
+            return false;
+        }
         let fc = client.state().frame_count;
         if fc != last_fc {
             last_fc = fc;
@@ -93,7 +101,7 @@ fn wait_engine_frozen(client: &tas_shared::TasSharedMemoryClient, deadline_secs:
     }
 }
 
-/// Idle at the dialog, dismiss with a REAL Pico Escape, profile the tick rate.
+/// Idle at the dialog, physically select No and confirm, profile the tick rate.
 /// Returns (max_ticks_per_sec, ok).
 fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str) -> (f64, bool) {
     println!(
@@ -108,10 +116,9 @@ fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str)
         label, idled
     );
 
-    // A hardware HID Escape from the Pico, exactly what a user's keyboard
-    // sends. The Pico mask has no Enter; any key resumes the engine and would
-    // replay the backlog if the drain were broken.
-    if !harness::send_escape() {
+    // Escape does not confirm the "Save attack player?" prompt. Selecting
+    // No avoids writing a ghost; Enter remains physical HID, not PostMessage.
+    if !harness::dismiss_finish_prompt() {
         eprintln!("FAIL: {label}: physical dialog dismissal failed");
         return (f64::INFINITY, false);
     }
@@ -131,6 +138,10 @@ fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str)
     let ok = idle_profile_passes(idled, resumed_ticks, rate);
     if !resumed || idled > 1 {
         eprintln!("FAIL: {label}: idle ticks={idled}, resumed={resumed}");
+        eprintln!(
+            "Menu after dismissal: {:?}",
+            tas_shared::menu_doc(client.state())
+        );
     }
     println!(
         "  [{}] post-dismiss max rate {:.0} ticks/sec (ceiling {:.0}) -> {}",
@@ -143,6 +154,13 @@ fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str)
 }
 
 pub fn run() -> bool {
+    // Enter uses a reserved firmware command; an older firmware must never
+    // interpret it as a combination of game keys.
+    harness::stop_competing_tas_ui_writer();
+    if let Err(error) = crate::pico::discover(true) {
+        eprintln!("ERROR: Finish-dialog firmware preflight: {error}");
+        return false;
+    }
     let path = match harness::fixture_path(RECORDING) {
         Ok(p) => p,
         Err(e) => {
@@ -186,6 +204,9 @@ pub fn run() -> bool {
         client.state().race_time_cs
     );
     let (_rate_a, pass_a) = idle_dismiss_profile(&client, "A/PLAY");
+    if !pass_a {
+        return false;
+    }
 
     println!(
         "--- PHASE B: CONT from {} -> splice -> REC crosses the finish ---",
@@ -198,6 +219,7 @@ pub fn run() -> bool {
     replay::write_to_shared(&mut client, &loaded);
     let target = client.state().rec_coords[0];
     client.state_mut().cont_resume_speed = 1.0; // ride the ending at 1x, like a user
+    client.state_mut().playback_speed = 64.0;
     if harness::restart_continue_and_splice_inprocess(&mut client, target, CONT_SPLICE_FRAME, 30)
         .is_none()
     {
@@ -238,10 +260,10 @@ pub fn run() -> bool {
         eprintln!("ERROR: opening the pause menu failed; Phase C would measure the wrong screen");
         return false;
     }
-    let confirm = match crate::menu::activate_label_and_wait(
+    let arcade = match crate::menu::activate_and_wait(
         &mut client,
         "Return To Menu",
-        None,
+        Some("ID_ARCADE_MENU"),
         Duration::from_secs(10),
     ) {
         Ok(screen) => screen,
@@ -250,19 +272,18 @@ pub fn run() -> bool {
             return false;
         }
     };
-    println!("  pause menu -> {}", confirm);
-    // The confirm dialog's affirmative button, by label: the old blind
-    // recipe (LEFT then ENTER) assumed its position, which no protocol
-    // change can verify. Fail loud with the live labels if this is wrong.
-    match crate::menu::activate_label_and_wait(
+    println!("  pause menu -> {}", arcade);
+    // Finish-menu Return To Menu goes directly to Arcade. Its back button
+    // has no label, so select the published id rather than inventing a Yes.
+    match crate::menu::activate_and_wait(
         &mut client,
-        "Yes",
+        "ID_BACK",
         Some("ID_MAIN_MENU"),
         Duration::from_secs(10),
     ) {
-        Ok(screen) => println!("  confirm dialog -> {}", screen),
+        Ok(screen) => println!("  arcade menu -> {}", screen),
         Err(e) => {
-            eprintln!("ERROR: confirm-dialog navigation failed: {}", e);
+            eprintln!("ERROR: arcade back navigation failed: {}", e);
             return false;
         }
     }

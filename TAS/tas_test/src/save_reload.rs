@@ -16,6 +16,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use crate::drift;
+use crate::gates;
 use crate::harness;
 use crate::patterns;
 use crate::replay;
@@ -32,11 +33,10 @@ pub fn run() -> bool {
 
     println!("--- Phase 1: Record fresh trajectory ---");
     let mut client = harness::ensure_game_running();
+    harness::ensure_exclusive_runtime_ownership(&mut client, "save/reload recording");
     harness::print_status(&client);
 
-    // Pico F5 for both REC and PLAY, so the boarder slides the same amount
-    // before rec_coords[0] / play_coords[0] is captured.
-    if !harness::restart_and_stabilize(&client) {
+    if !harness::restart_and_stabilize_inprocess(&mut client) {
         eprintln!("ERROR: Game not alive for REC");
         return false;
     }
@@ -63,25 +63,16 @@ pub fn run() -> bool {
 
     let rec_count = client.state().recorded_count;
     let rec_start = client.state().rec_coords[0];
-    let rec_rotation_at_stop = client.state().rotation_matrix;
-    let rec_velocity_at_stop = [
-        client.state().velocity_x,
-        client.state().velocity_y,
-        client.state().velocity_z,
-    ];
-    println!(
-        "  REC rotation[0..3] at stop: ({:.4}, {:.4}, {:.4})  velocity: ({:.6}, {:.6}, {:.6})",
-        rec_rotation_at_stop[0],
-        rec_rotation_at_stop[1],
-        rec_rotation_at_stop[2],
-        rec_velocity_at_stop[0],
-        rec_velocity_at_stop[1],
-        rec_velocity_at_stop[2]
-    );
     harness::stop(&mut client);
 
     if rec_count < 100 {
         eprintln!("ERROR: Too few ticks recorded ({})", rec_count);
+        return false;
+    }
+    if let Err(error) =
+        patterns::verify_capture(&steps, &client.state().input_log[..rec_count as usize], 12)
+    {
+        eprintln!("ERROR: Input capture: {error}");
         return false;
     }
 
@@ -127,6 +118,8 @@ pub fn run() -> bool {
 
     println!("\n--- Phase 4: Revive game + reload recording ---");
     let mut client = harness::ensure_game_running();
+    // Revival may start a new UI that owns COM7 and the command channel.
+    harness::ensure_exclusive_runtime_ownership(&mut client, "save/reload replay");
     harness::print_status(&client);
 
     let loaded = match replay::load_tasrec(&tasrec_path) {
@@ -141,83 +134,36 @@ pub fn run() -> bool {
         loaded.count,
         tasrec_path.display()
     );
+    if loaded.count as usize != count
+        || loaded.input_log != input_log
+        || loaded.rec_coords != rec_coords
+    {
+        eprintln!("ERROR: Saved recording did not round-trip exactly");
+        return false;
+    }
 
     replay::write_to_shared(&mut client, &loaded);
 
-    let target = loaded.rec_coords[0];
-
     println!("\n--- Phase 5: Replay reloaded recording ---");
-    let matched =
-        harness::restart_play_and_match(&mut client, target, harness::START_MATCH_RETRIES);
-    if !matched {
-        eprintln!(
-            "ERROR: Position match failed after {} retries",
-            harness::START_MATCH_RETRIES
-        );
+    let Some((rec_gate, play_gate)) = harness::restart_play_aligned_inprocess(&mut client) else {
+        eprintln!("ERROR: Reloaded recording failed product PLAY alignment");
         return false;
-    }
-    let play_rotation_at_match = client.state().rotation_matrix;
-    let play_velocity_at_match = [
-        client.state().velocity_x,
-        client.state().velocity_y,
-        client.state().velocity_z,
-    ];
-    println!(
-        "  PLAY rotation[0..3] at match: ({:.4}, {:.4}, {:.4})  velocity: ({:.6}, {:.6}, {:.6})",
-        play_rotation_at_match[0],
-        play_rotation_at_match[1],
-        play_rotation_at_match[2],
-        play_velocity_at_match[0],
-        play_velocity_at_match[1],
-        play_velocity_at_match[2]
-    );
-
-    let play_ok = harness::wait_playback(&client, loaded.count);
+    };
+    let expected_end = play_gate.saturating_add(loaded.count.saturating_sub(rec_gate));
+    let play_ok = harness::wait_playback(&client, expected_end);
     if !play_ok {
         eprintln!("ERROR: Playback did not complete");
         return false;
     }
 
     let state = client.state();
-    let drift_result = drift::compute_drift(state, loaded.count.min(state.playback_pos));
-
+    let assessment = gates::run_gates_aligned(state, loaded.count, rec_gate, play_gate);
+    assessment.print_summary();
+    let zero_drift = assessment.all_pass();
     println!(
-        "\n  Drift: X={:.9} (frame {}) Z={:.9} (frame {})",
-        drift_result.max_drift_x,
-        drift_result.max_drift_frame_x,
-        drift_result.max_drift_z,
-        drift_result.max_drift_frame_z
+        "\n*** SAVE/RELOAD/REPLAY {}: complete gate-relative comparison across game restart ***",
+        if zero_drift { "PASSED" } else { "FAILED" }
     );
-
-    // Find first divergence to characterize any failure mode.
-    let played = loaded.count.min(state.playback_pos) as usize;
-    let mut first_div: Option<usize> = None;
-    for i in 0..played {
-        let p = state.play_coords[i];
-        let r = state.rec_coords[i];
-        if p[0].to_bits() != r[0].to_bits()
-            || p[1].to_bits() != r[1].to_bits()
-            || p[2].to_bits() != r[2].to_bits()
-        {
-            first_div = Some(i);
-            break;
-        }
-    }
-
-    let zero_drift = drift_result.is_zero();
-    if zero_drift {
-        println!("\n*** SAVE/RELOAD/REPLAY PASSED: zero drift across game restart ***");
-    } else if let Some(i) = first_div {
-        let p = state.play_coords[i];
-        let r = state.rec_coords[i];
-        println!(
-            "\n  First divergence at frame {}: rec=({:.6}, {:.6}, {:.6}) play=({:.6}, {:.6}, {:.6})",
-            i, r[0], r[1], r[2], p[0], p[1], p[2]
-        );
-        println!("\n*** SAVE/RELOAD/REPLAY FAILED: trajectory diverges across save+reload ***");
-    } else {
-        println!("\n*** SAVE/RELOAD/REPLAY FAILED: drift > 0 but no bit-divergence found (?) ***");
-    }
 
     zero_drift
 }
