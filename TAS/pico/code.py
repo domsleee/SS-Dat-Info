@@ -48,7 +48,8 @@ class Controller:
         try:
             # Older hosts do not read replies. Never wait for them or build a queue.
             if self.serial.out_waiting == 0:
-                self.serial.write(bytes((0x5A, int(ok), ACK_VERSION)))
+                if self.serial.write(bytes((0x5A, int(ok), ACK_VERSION))) != 3:
+                    self.serial.reset_output_buffer()
         except Exception:
             pass  # Losing diagnostics must not prevent key release.
 
@@ -77,6 +78,10 @@ class Controller:
         except Exception:
             self.fault()
             self.release()
+            # Discard the rest of this batch and anything queued during the fault.
+            # Applying it after recovery could resurrect stale steering.
+            self.serial.reset_input_buffer()
+            return False
         return True
 
     def step(self):

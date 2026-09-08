@@ -27,6 +27,7 @@ mod load;
 mod menu;
 mod patterns;
 mod pause_resume;
+mod pico;
 mod play_judge;
 mod play_pace;
 mod rec_repro;
@@ -61,6 +62,12 @@ struct Mode {
 }
 
 const MODES: &[Mode] = &[
+    Mode {
+        name: "pico",
+        usage: "",
+        summary: "Identify the Pico's physical USB parent, drive and ports; verify firmware and ACK",
+        run: |args| no_args(args) && report(pico::run(), "PICO CHECK FAILED"),
+    },
     Mode {
         name: "live",
         usage: "[--recording PATH] [--splice N] [--iterations N]",

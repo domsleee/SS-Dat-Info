@@ -40,6 +40,14 @@ class Serial:
         self.replies = []
         self.fail_read = False
         self.fail_write = False
+        self.short_write = False
+        self.output_resets = 0
+
+    def reset_input_buffer(self):
+        self.data = b""
+
+    def reset_output_buffer(self):
+        self.output_resets += 1
 
     @property
     def in_waiting(self):
@@ -55,7 +63,7 @@ class Serial:
         if self.fail_write:
             raise OSError("CDC reply unavailable")
         self.replies.append(data)
-        return len(data)
+        return 1 if self.short_write else len(data)
 
 
 class FirmwareTests(unittest.TestCase):
@@ -156,6 +164,20 @@ class FirmwareTests(unittest.TestCase):
     def test_serial_work_is_bounded_per_pass(self):
         self.step(bytes([1, 0]) * 100)
         self.assertEqual(len(self.serial.data), 136)
+
+    def test_failed_press_discards_same_batch_and_queued_input(self):
+        self.device.failures = 1
+        self.step(bytes([1, 2]) * 100)
+        self.assertFalse(self.device.held)
+        self.assertEqual(self.serial.data, b"")
+        self.step(b"\x02", now=0.1)
+        self.assertEqual(self.device.held, {1})
+
+    def test_partial_ack_is_not_left_queued(self):
+        self.serial.short_write = True
+        self.step(b"\xff\x01")
+        self.assertEqual(self.serial.output_resets, 1)
+        self.assertEqual(self.device.held, {0})
 
 
 if __name__ == "__main__":

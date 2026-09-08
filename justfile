@@ -106,6 +106,7 @@ check_all: test_all
 test_tools:
     python -m unittest discover -s TAS/tools -p test_tools.py -v
     python -m unittest discover -s TAS/pico -p test_firmware.py -v
+    pwsh -NoProfile -File TAS/pico/test_device.ps1
 
 test_smoke: tas_rust
     cd TAS && cargo run --release --bin tas_test -- smoke
