@@ -1,91 +1,96 @@
-# deploy.ps1 - flash this repo's Pico firmware (code.py, boot.py) onto the board.
-#
-#   .\TAS\pico\deploy.ps1              # find CIRCUITPY, show diff, ask, copy
-#   .\TAS\pico\deploy.ps1 -Check       # compare only, change nothing
-#   .\TAS\pico\deploy.ps1 -Force       # skip the confirmation
-#
-# Run -Check before a test session: a difference means the board is not running
-# the committed firmware.
+# Updates are maintenance operations: stop game/TAS controllers first.
+param([switch]$Check, [switch]$Force, [switch]$Recover,
+      [string]$Drive, [string]$Serial=$env:TAS_PICO_SERIAL)
+$ErrorActionPreference='Stop'
+. "$PSScriptRoot/device.ps1"
 
-param(
-    [switch]$Check,
-    [switch]$Force,
-    [string]$Drive
-)
-
-$ErrorActionPreference = 'Stop'
-$src = Split-Path -Parent $MyInvocation.MyCommand.Path
-
-function Find-Circuitpy {
-    if ($Drive) { return $Drive }
-    $vol = Get-Volume | Where-Object { $_.FileSystemLabel -eq 'CIRCUITPY' } | Select-Object -First 1
-    if (-not $vol -or -not $vol.DriveLetter) { return $null }
-    return "$($vol.DriveLetter):"
-}
-
-$dest = Find-Circuitpy
-if (-not $dest) {
-    Write-Host "CIRCUITPY volume not found." -ForegroundColor Red
-    Write-Host "The board may be unplugged, or boot.py may have disabled the USB drive."
-    Write-Host "Recovery: CircuitPython safe mode bypasses boot.py; BOOTSEL reflashes."
-    exit 1
-}
-Write-Host "CIRCUITPY: $dest"
-
-# test.py runs on the PC and is not copied.
-$files = @('code.py', 'boot.py')
-$differs = @()
-
-foreach ($f in $files) {
-    $a = Join-Path $src $f
-    $b = Join-Path $dest $f
-    if (-not (Test-Path $b)) {
-        Write-Host "  $f : MISSING on device" -ForegroundColor Yellow
-        $differs += $f
-        continue
-    }
-    # Byte compare: Get-FileHash needs PowerShell 4.0+ and this runs under
-    # whatever `powershell` is on PATH.
-    $ba = [System.IO.File]::ReadAllBytes($a)
-    $bb = [System.IO.File]::ReadAllBytes($b)
-    $same = $ba.Length -eq $bb.Length
-    if ($same) {
-        for ($i = 0; $i -lt $ba.Length; $i++) {
-            if ($ba[$i] -ne $bb[$i]) { $same = $false; break }
+function Enter-PicoConsole($Board) {
+    $port = Open-PicoPort $Board.console_port
+    try {
+        $ready=$false
+        for ($attempt=0; $attempt -lt 8; $attempt++) {
+            $port.Write([byte[]]@(3),0,1)
+            Start-Sleep -Milliseconds 200
+            $port.Write("`r`n")
+            Start-Sleep -Milliseconds 200
+            if ($port.ReadExisting() -match '>>> ') { $ready=$true; break }
         }
+        if (!$ready) { throw 'Console did not reach the REPL prompt within its deadline' }
+        $port.DiscardInBuffer()
+        $port.Write("print('TAS_UPDATE_READY')`r`n")
+        Start-Sleep -Milliseconds 200
+        $response = $port.ReadExisting()
+        if ($response -notmatch "(?m)^TAS_UPDATE_READY\r?$") { throw "No live REPL response: $response" }
+        return $port
+    } catch { Close-PicoPort $port; throw }
+}
+function Reset-PicoConsole($Board) {
+    $port = Enter-PicoConsole $Board
+    try { $port.Write("import microcontroller; microcontroller.reset()`r`n") }
+    finally { Close-PicoPort $port }
+    Start-Sleep -Seconds 3
+}
+function Wait-Pico($Identity) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        try { return Find-PicoDevice -Serial $Identity }
+        catch { $lastFailure=$_; Start-Sleep -Milliseconds 300 }
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Pico $Identity did not reappear: $lastFailure"
+}
+$console=$null
+try {
+    if ($Check -and $Recover) { throw '-Check cannot be combined with -Recover' }
+    $board = Find-PicoDevice -Serial $Serial -Drive $Drive
+    Write-Host "Pico $($board.serial): $($board.drive), data $($board.data_port), console $($board.console_port)"
+    if ($Check) {
+        Test-PicoFiles $board $PSScriptRoot
+        Write-Host 'PASS: both files match (read-only check; no HID commands sent)'
+        exit 0
     }
-    if ($same) {
-        Write-Host "  $f : identical" -ForegroundColor Green
-    } else {
-        Write-Host "  $f : DIFFERS" -ForegroundColor Yellow
-        $differs += $f
+    if (Get-Process tas_ui,tas_test,Supreme -ErrorAction SilentlyContinue) { throw 'Close game and TAS controllers before updating firmware' }
+    if (!$Force -and (Read-Host "Update Pico $($board.serial)? Type yes") -ne 'yes') { throw 'Cancelled' }
+    $backup = Join-Path $PSScriptRoot "../artifacts/pico-updates/$($board.serial)/$([guid]::NewGuid())"
+    New-Item -ItemType Directory -Path $backup | Out-Null
+    foreach ($name in 'boot.py','code.py','boot_out.txt') {
+        $path = Join-Path $board.drive $name
+        if (Test-Path -LiteralPath $path) { Copy-Item -LiteralPath $path -Destination (Join-Path $backup $name) }
     }
+    Write-Host "Backup: $backup"
+    if ($Recover) {
+        # Exact composite USB device only. Run this script with sudo for this option.
+        & pnputil /restart-device $board.instance_id
+        if ($LASTEXITCODE -ne 0) { throw 'USB restart failed; run sudo pwsh -File deploy.ps1 -Recover -Force' }
+        $board = Wait-Pico $board.serial
+    }
+    # Full reset clears stale device-level storage protection. Pausing in REPL then
+    # prevents auto-reload from executing partially copied code or mixed boot/code.
+    Reset-PicoConsole $board
+    $board = Wait-Pico $board.serial
+    $console = Enter-PicoConsole $board
+    foreach ($name in 'boot.py','code.py') {
+        $board = Find-PicoDevice -Serial $board.serial
+        $source = Join-Path $PSScriptRoot $name
+        $target = Join-Path $board.drive $name
+        $bytes = [System.IO.File]::ReadAllBytes($source)
+        $staged = "$target.$([guid]::NewGuid()).tmp"
+        $file = [System.IO.File]::Open($staged,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::Write,[System.IO.FileShare]::None)
+        try { $file.Write($bytes,0,$bytes.Length); $file.Flush($true) } finally { $file.Dispose() }
+        if ((Get-FileHash -LiteralPath $source).Hash -ne (Get-FileHash -LiteralPath $staged).Hash) { throw "Staged $name hash mismatch" }
+        Move-Item -LiteralPath $staged -Destination $target -Force
+    }
+    Test-PicoFiles $board $PSScriptRoot
+    $console.Write("import microcontroller; microcontroller.reset()`r`n")
+    Close-PicoPort $console; $console=$null
+    Start-Sleep -Seconds 3
+    $board = Wait-Pico $board.serial
+    Test-PicoFiles $board $PSScriptRoot
+    Test-PicoAck $board
+    Write-Host "PASS: Pico $($board.serial) updated, rebooted, files verified and live release acknowledged"
+} catch {
+    [Console]::Error.WriteLine("Pico update FAILED: $_")
+    [Console]::Error.WriteLine('No success is claimed. If copying began, restore the printed backup before restarting a partial update.')
+    exit 1
+} finally {
+    if ($console) { Close-PicoPort $console }
 }
-
-if ($differs.Count -eq 0) {
-    Write-Host "Device matches the repo." -ForegroundColor Green
-    exit 0
-}
-
-if ($Check) {
-    Write-Host ""
-    Write-Host "Device does NOT match the repo: $($differs -join ', ')" -ForegroundColor Red
-    Write-Host "Run without -Check to copy the repo's files to the board."
-    exit 2
-}
-
-if (-not $Force) {
-    Write-Host ""
-    Write-Host "About to overwrite on ${dest}: $($differs -join ', ')" -ForegroundColor Yellow
-    $ans = Read-Host "Type 'yes' to copy"
-    if ($ans -ne 'yes') { Write-Host "Aborted."; exit 1 }
-}
-
-foreach ($f in $differs) {
-    Copy-Item (Join-Path $src $f) (Join-Path $dest $f) -Force
-    Write-Host "  copied $f" -ForegroundColor Green
-}
-
-Write-Host ""
-Write-Host "Done. CircuitPython restarts code.py on write, so the board re-runs"
-Write-Host "immediately; the CDC port may drop briefly while it does."

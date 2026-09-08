@@ -127,6 +127,7 @@ These run on whatever track is loaded; the track guard below is skipped.
 | Mode | Output | What it does |
 |---|---|---|
 | `shm [--command record\|play\|stop\|restart]` | `version=... command_idle=... renderer_id=... fpu_cw=...`, rider and status lines | Version-checked shared-memory read; never launches or restarts the game. With `--command` it publishes one named command when none is pending. |
+| `pico` | JSON physical USB serial, drive, data and console ports; exit 0 | Shares updater discovery, verifies both firmware files and a fresh release acknowledgement. Does not launch the game. Requires the checkout's `TAS/pico` scripts and PowerShell. |
 | `load <file.tasrec>` | `loaded N ticks from PATH` | Writes a recording into shared memory and exits, for arming through the real UI afterwards; refuses while the DLL is in REC or PLAY. |
 | `menu [activate <id\|label> \| focus <id\|label> \| up \| down \| left \| right \| trigger]` | one JSON line `{"result":..,"doc":..}`, exit 0 on ok | Prints the menu document (page, selector, focusable items with labels and ids) or executes one command on the menu thread through the game's own entry points and prints the settled document. |
 | `gamestate` | six status prints | Launches or reuses the game and prints `game_in_game` with the rest of the status. |
@@ -164,6 +165,7 @@ not classify.
 | `TAS_TEST_LEVEL` | `tas_test` | Expected track code (default `FE`); `any` disables the track guard. |
 | `TAS_TEST_OUTPUT` | `tas_test` | Artifact directory; default is next to `tas_test.exe`. |
 | `TAS_PICO_PORT` | `tas_test`, `tas_ui` | Pico CDC data port (default `COM7`). |
+| `TAS_PICO_SERIAL` | Pico updater and live-suite preflight | Select a physical board by USB serial. Discovery joins its disk and both CDC ports by PnP ancestry; multiple boards without a selector fail. Live preflight verifies files/ACK and forwards the discovered data port to children. |
 | `SSB_INSPECT_DATA_DIR` | `tas_ui` | Root for history, recovery, recordings, settings and the session log; default is `data/` next to a deployed exe, or `~/.ssb-inspector` for a dev build. |
 | `TAS_RACE_DIAG` | `TAS_Helper.dll` | `1` before launch: log every race-timer HUD line event. |
 | `TAS_MENU_DIAG` | `TAS_Helper.dll` | `1` before launch: log the menu item list on every change. |

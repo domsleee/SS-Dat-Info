@@ -9,19 +9,47 @@ and requires the Adafruit HID library on the board.
 Edit the repository files, not the board. From the repository root:
 
 ```powershell
-.\TAS\pico\deploy.ps1 -Check   # Compare firmware without changing the board
-.\TAS\pico\deploy.ps1          # Show differences and ask before copying
+.\TAS\pico\deploy.ps1 -Check   # Read-only file comparison
+.\TAS\pico\deploy.ps1          # Confirm, back up, pause, update, reboot, verify
+.\TAS\target\release\tas_test.exe pico  # Discover drive/ports, verify files and live ACK
+sudo pwsh -File .\TAS\pico\deploy.ps1 -Recover -Force  # Restart this USB device first
 ```
 
-The script finds the CIRCUITPY volume; use `-Drive E:` to select it explicitly.
-It copies only `code.py` and `boot.py`. Their line endings are pinned in
-`.gitattributes` because deployment checks compare bytes.
+Discovery follows Windows PnP parent chains from the disk and both CDC interfaces
+to one physical Pico USB device. Volume labels, disk numbers and COM numbers are
+not identities. Multiple boards are rejected unless selected with `-Serial UID`
+(or `TAS_PICO_SERIAL`); the updater also accepts `-Drive E:` as a selector, never
+as a substitute for the physical-device check. After resets it rediscovers the
+same USB serial even if drive letters or ports change. `tas_test pico` prints the
+identity as JSON and the live-suite preflight uses the same discovery and verification.
+An explicit `TAS_PICO_PORT` belonging to a different board is rejected.
+
+Close the game and TAS controllers before updating. The updater backs up board
+files under `TAS/artifacts/pico-updates/<serial>/<unique-id>/`, then resets through
+the console to clear stale device storage state. It waits for a verified REPL
+prompt before staging, flushing, hashing and replacing `boot.py` and `code.py`.
+REPL pause prevents auto-reload while the pair is incomplete. A final full reset
+applies boot.py too; success requires matching hashes AND a live release ACK.
+On failure it retains the backup and reports failure, never formats the board,
+disables filesystem protection or automatically restarts a partial copy.
+The two-file replacement is not power-loss atomic; restore the backup if interrupted.
+
+If even the console is unresponsive, `-Recover` uses elevated `pnputil` to restart
+only the selected composite USB device before resetting via the console. This is
+the recovery sequence that cleared the observed read-only/serial-timeout state;
+clearing Windows disk attributes alone did not. `-Check` never resets or sends HID
+commands and cannot be combined with `-Recover`. Firmware line endings remain pinned.
 
 A firmware change is trusted only after it has been flashed with `deploy.ps1`
 and `just test_live` has passed against it. The current recovery rewrite has
-offline fault-injection coverage, but has not yet passed board/live validation.
+offline fault-injection coverage and basic board verification; the full game suite
+is still separate and has not yet passed against this rewrite.
 Run `python -m unittest discover -s TAS/pico -p test_firmware.py -v`, or
 `just check_all`, to run its production controller against simulated HID/CDC failures.
+That gate also tests physical-device selection with mocked Windows ancestry.
+`pwsh -File TAS/pico/test_live.ps1` separately checks real Windows LEFT delivery,
+timeout/explicit release, 100 ACKs and reset/reopen. It sends real keys: close other
+controllers and keep the interactive desktop available (no pending UAC prompt).
 
 `test.py` is a manual, host-side keyboard check, not firmware or an automated
 regression test. It requires pyserial and sends real keys to the focused window:
@@ -65,6 +93,9 @@ Reset discards the rest of its batch. Keys latch until another mask changes them
 or 500 ms passes without a command. A successful serial write alone is not proof
 that the firmware processed it. ACK writes are non-blocking and skipped while a
 reply is queued, so write-only hosts cannot stall the firmware by leaving replies unread.
+Partial acknowledgement writes clear their unsent tail rather than poisoning the
+next response. A HID fault discards the remainder of its input batch and queued
+bytes before accepting new steering.
 
 Startup sends an unconditional neutral HID report. After a HID error, the firmware
 recreates the keyboard and keeps retrying neutral reports at 50 ms intervals until

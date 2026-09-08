@@ -59,6 +59,10 @@ const FULL_CASES: &[(&str, &[&str])] = &[
 // Every mode is either run or explicitly accounted for. New modes must update this contract.
 #[cfg(test)]
 const EXCLUDED: &[(&str, &str)] = &[
+    (
+        "pico",
+        "physical identity, firmware and ACK verified by suite preflight",
+    ),
     ("live", "suite entry point"),
     ("live-full", "suite entry point"),
     (
@@ -107,7 +111,7 @@ fn execute(
     Ok(true)
 }
 
-fn wait_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus, String> {
+pub(crate) fn wait_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus, String> {
     let start = Instant::now();
     loop {
         match child.try_wait() {
@@ -135,6 +139,12 @@ fn wait_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus, String
 }
 
 fn preflight(stages: &mut [Stage], full: bool, executable: &Path) -> Result<(), String> {
+    let pico = crate::pico::discover(true)?;
+    println!(
+        "Verified Pico {} on {} ({})",
+        pico.serial, pico.drive, pico.data_port
+    );
+    std::env::set_var("TAS_PICO_PORT", &pico.data_port);
     if !executable.with_file_name("tas_ui.exe").is_file() {
         return Err("Build tas_ui beside tas_test".into());
     }
