@@ -73,7 +73,7 @@ class FirmwareTests(unittest.TestCase):
         self.now = 0.0
         self.resets = 0
         self.controller = firmware.Controller(lambda: self.device, self.serial,
-                                              range(8), self.reset, lambda: self.now)
+                                              range(9), self.reset, lambda: self.now)
 
     def reset(self):
         self.resets += 1
@@ -86,6 +86,17 @@ class FirmwareTests(unittest.TestCase):
 
     def test_startup_sends_neutral(self):
         self.assertEqual(self.device.events, [("neutral",)])
+
+    def test_enter_is_exclusive_and_uses_the_same_release_and_timeout(self):
+        self.step(bytes((1, firmware.ENTER_COMMAND)))
+        self.assertEqual(self.device.held, {8})
+        self.step(bytes((0xFF,)))
+        self.assertEqual(self.device.held, set())
+        self.step(bytes((firmware.ENTER_COMMAND,)))
+        self.step(now=0.6)
+        self.assertEqual(self.device.held, set())
+        self.step(bytes((firmware.ENTER_COMMAND, 2)))
+        self.assertEqual(self.device.held, {1})
 
     def test_batched_edges_in_order(self):
         self.step(bytes([1, 0, 2, 0]))

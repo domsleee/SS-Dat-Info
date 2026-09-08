@@ -1,7 +1,7 @@
 # Pico HID keyboard
 
 The TAS live tests use a Raspberry Pi Pico 2 as a USB HID keyboard for
-Escape, F5 and steering. The firmware targets CircuitPython 10.1.3 on RP2350
+Escape, F5, menu confirmation and steering. The firmware targets CircuitPython 10.1.3 on RP2350
 and requires the Adafruit HID library on the board.
 
 ## Deploy and check
@@ -80,6 +80,8 @@ Each byte sets the held-key mask, except the reserved commands below.
 | Key | LEFT | RIGHT | UP | DOWN | LCTRL (jump) | SHIFT | F5 | ESCAPE |
 
 - `0x00` or `0xFF`: release all keys.
+- `0xFC`: hold Enter exclusively for menu confirmation. The normal release and
+  500 ms timeout apply; this does not add Enter to the recording's input mask.
 - `0xFD` or `0xFE`: attempt to release keys, then reset the MCU using CircuitPython's
   reset API. The former register-level soft reconnect is removed. Reopen the COM
   port after it reappears; the UI's Reset Pico button closes its stale handle.

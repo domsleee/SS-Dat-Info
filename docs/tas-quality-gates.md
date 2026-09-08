@@ -89,7 +89,7 @@ refreshes its long holds; other steered patterns do not silently acquire keepali
 | `replay <file.tasrec> [--iterations N] [--verbose] [--no-match]` | no | `Result: ZERO DRIFT in all N iterations` | Loads a `.tasrec` and replays it N times; drift, incomplete playback or a failed start match fails. `just test_replay FILE`. |
 | `reliability [--iterations N] [--speed X]` | yes | `*** RELIABILITY TEST PASSED ***` | N consecutive steered REC+PLAY cycles at one speed (default 10 at 12x). Shares the procedure with drift-speed, preserving its 50-tick rather than 100-tick neutral tail and mandatory movement gates. |
 | `drift-speed` | yes | `*** DRIFT-AT-SPEED TEST PASSED ***` | REC 2x/PLAY 2x and REC 1x/PLAY 2x both replay with zero drift. |
-| `save-reload` | yes | `*** SAVE/RELOAD/REPLAY PASSED: zero drift across game restart ***` | Steered REC, save to disk, kill and relaunch the game, reload, replay, zero drift. |
+| `save-reload` | yes | `*** SAVE/RELOAD/REPLAY PASSED: complete gate-relative comparison across game restart ***` | Verify steered REC, save to disk, kill/relaunch, reclaim Pico and command ownership, require exact input/coordinate round-trip and complete product-aligned zero-drift replay. |
 | `pause-resume` | yes | `*** PAUSE/RESUME REPLAY PASSED: ...` | Escape pause and resume during PLAY; the first 1000 frames stay bit-identical. |
 | `stop-play-flake [--iterations N]` | no | `*** STOP+PLAY FLAKE TEST PASSED: N/N iterations matched the reference ...` | PLAY, STOP at varying frames, PLAY again; second playbacks match a reference over their first 1000 frames. Default ten stop points, functional suite two. |
 | `rec-start [--file PATH]` | no | `*** REC-START OK: recording begins at the spawn ...` | A fresh recording starts at the stationary spawn with the countdown, not mid-fall; `--file` judges a saved `.tasrec` instead. |
@@ -240,6 +240,17 @@ game/injector/DLL, and a `tas_ui.exe` beside the harness. `NO_REVIVE=1` and
 `TAS_TEST_CASE_FILTER` are refused for this lane. Preflight checks the on-disk
 DLL against the local build; this cannot identify an older DLL already injected
 in a running game. Deploy and restart before testing a native change.
+
+Use a dedicated game copy with fresh Forest Easy scores for the full lane.
+Finishing races can update scores, and an established score table can prevent
+the finish fixture from showing the "Save attack player?" prompt. Do not erase
+personal scores to make the test pass. Point `supreme_folder` at the test copy
+and make the revival script honor its exported `SUPREME_FOLDER`, for example
+`just --set supreme_folder 'C:\Games\Supreme-Test' final test_live_full`.
+The prompt is declined using physical Pico RIGHT + Enter (`0xFC`, current
+firmware required), not Escape. Navigation then verifies Arcade followed by
+the main menu through the published `ID_BACK` item. Missing prompts, no resumed
+ticks, wrong pages and stale input protection all fail.
 
 Each stage has a 1,800-second deadline, overridable by the positive integer
 `TAS_STAGE_TIMEOUT_SECONDS`. The report is atomically updated before and after

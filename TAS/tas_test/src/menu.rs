@@ -160,15 +160,15 @@ struct MenuDocItemLite {
 }
 
 /// Navigate one step through the menu protocol: wait for the live document,
-/// find `label` (case-insensitive, trimmed), activate it by its published id
+/// find an id or label (case-insensitive, trimmed), activate its published id
 /// (falling back to the label when the item has none — the DLL matches
 /// either), wait for the ack, and verify the destination page. Returns the
 /// destination screen id. `expect_screen` pins it; `None` accepts any page
 /// change. Entering a menu still needs a physical key — everything after
 /// goes through here instead of blind cursor counting.
-pub fn activate_label_and_wait(
+pub fn activate_and_wait(
     client: &mut TasSharedMemoryClient,
-    label: &str,
+    target: &str,
     expect_screen: Option<&str>,
     timeout: Duration,
 ) -> Result<String, String> {
@@ -183,19 +183,15 @@ pub fn activate_label_and_wait(
     };
     let doc: MenuDocLite = serde_json::from_str(&before)
         .map_err(|e| format!("menu document does not parse: {}", e))?;
-    let item = doc
-        .items
-        .iter()
-        .find(|i| i.label.trim().eq_ignore_ascii_case(label.trim()))
-        .ok_or_else(|| {
-            let labels: Vec<&str> = doc.items.iter().map(|i| i.label.as_str()).collect();
-            format!(
-                "menu page {} has no {:?} item (items: [{}])",
-                doc.screen,
-                label,
-                labels.join(", ")
-            )
-        })?;
+    let item = find_item(&doc.items, target).ok_or_else(|| {
+        let labels: Vec<&str> = doc.items.iter().map(|i| i.label.as_str()).collect();
+        format!(
+            "menu page {} has no {:?} item (items: [{}])",
+            doc.screen,
+            target,
+            labels.join(", ")
+        )
+    })?;
     let target = if item.id.is_empty() {
         item.label.clone()
     } else {
@@ -237,12 +233,46 @@ pub fn activate_label_and_wait(
                 dest, expected
             ));
         }
+    } else if dest == doc.screen {
+        return Err(format!("navigation did not leave {}", doc.screen));
     }
     Ok(dest)
+}
+
+fn find_item<'a>(items: &'a [MenuDocItemLite], target: &str) -> Option<&'a MenuDocItemLite> {
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+    items
+        .iter()
+        .find(|i| i.id.eq_ignore_ascii_case(target))
+        .or_else(|| {
+            items
+                .iter()
+                .find(|i| i.label.trim().eq_ignore_ascii_case(target))
+        })
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_resolves_ids_before_labels_and_supports_unlabelled_back() {
+        let items = vec![
+            MenuDocItemLite {
+                id: "wrong".into(),
+                label: "ID_BACK".into(),
+            },
+            MenuDocItemLite {
+                id: "ID_BACK".into(),
+                label: "".into(),
+            },
+        ];
+        assert_eq!(find_item(&items, " id_back ").unwrap().id, "ID_BACK");
+        assert!(find_item(&items, "").is_none());
+        assert!(find_item(&items, "Yes").is_none());
+    }
 
     #[test]
     fn screen_in_doc_reads_the_named_page() {
