@@ -294,7 +294,7 @@ fn max_distance(a: &[[f32; 3]], b: &[[f32; 3]]) -> f64 {
 /// Drive Pico HID for acceptance test Phase 2, then wait for the release to
 /// be recorded.
 fn drive_pico_acceptance(steps: &[patterns::PatternStep]) -> Result<(), String> {
-    harness::drive_pico_steps_required(steps)?;
+    harness::drive_pico_steps(steps)?;
     std::thread::sleep(std::time::Duration::from_millis(
         STEER_RELEASE_TICKS as u64 * 10,
     ));

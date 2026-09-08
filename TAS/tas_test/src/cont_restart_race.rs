@@ -1,13 +1,6 @@
-//! Stop→Restart race against the live DLL.
-//!
-//! The shared `command` slot is a single u32, not a queue, so `CMD_STOP` and
-//! `CMD_RESTART` written on the same UI frame lose the Stop: cave2 only sees
-//! the Restart, mode stays REC/PLAY, and the following `CMD_ARM_CONTINUE`
-//! hits cave2's mid-run guard ("ARM_CONTINUE: refused — game is REC/PLAY").
-//! tas_ui therefore sends Stop, waits for mode OFF, then sends Restart. Both
-//! halves of that contract are asserted here:
-//!   1. back-to-back Stop+Restart loses the Stop, so ArmContinue is refused;
-//!   2. the serialised sequence gets ArmContinue accepted.
+//! The product controller must serialize STOP/restart/arm against the live DLL.
+//! Single-slot overwrites are covered deterministically by transport unit tests;
+//! this test does not require an unsynchronized race to lose on a live machine.
 
 use std::thread;
 use std::time::{Duration, Instant};
@@ -20,7 +13,6 @@ use crate::replay;
 const RECORDING: &str = "FE-tremendous.tasrec";
 const SPLICE_FRAME: u32 = 2200;
 const REC_WAIT_TIMEOUT_SECS: u64 = 30;
-const MODE_OFF_WAIT_TIMEOUT_MS: u64 = 2000;
 
 /// Drive a CONT cycle past the splice so the game ends up in REC mode.
 fn drive_to_rec_mode(client: &mut TasSharedMemoryClient) -> bool {
@@ -47,57 +39,38 @@ fn drive_to_rec_mode(client: &mut TasSharedMemoryClient) -> bool {
     }
 }
 
-/// Send ArmContinue and report whether cave2 accepted it (mode goes to PLAY)
-/// or refused (mode stays OFF; cave2 sets OFF on refusal).
-fn send_arm_continue_and_observe_outcome(client: &mut TasSharedMemoryClient) -> bool {
-    client.state_mut().continue_from_frame = SPLICE_FRAME;
-    client.send_command(TasCommand::ArmContinue);
-    let start = Instant::now();
-    loop {
-        let mode = client.mode_volatile();
-        if mode == TasMode::Play as u32 {
-            return true;
-        }
-        // Wait past the window between the command write and cave2 picking
-        // it up before calling OFF a refusal.
-        if start.elapsed() > Duration::from_millis(500) && mode == TasMode::Off as u32 {
-            return false;
-        }
-        if start.elapsed() > Duration::from_secs(3) {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-/// Half 1: Stop and Restart back-to-back, then ArmContinue. Returns true when
-/// cave2 refused, i.e. the Stop was lost.
-fn race_loses_stop(client: &mut TasSharedMemoryClient) -> bool {
-    client.send_command(TasCommand::Stop);
-    if !harness::restart_inprocess(client) {
-        eprintln!("  race: restart didn't complete");
-        return false;
-    }
-    !send_arm_continue_and_observe_outcome(client)
-}
-
-/// Half 2: Stop, wait for mode OFF, Restart, then ArmContinue. Returns true
-/// when cave2 accepted.
 fn serialised_stop_then_restart(client: &mut TasSharedMemoryClient) -> bool {
-    client.send_command(TasCommand::Stop);
-    let start = Instant::now();
-    while client.mode_volatile() != TasMode::Off as u32 {
-        if start.elapsed() > Duration::from_millis(MODE_OFF_WAIT_TIMEOUT_MS) {
-            eprintln!("  serialised: mode didn't reach OFF after Stop");
-            return false;
+    use tas_shared::transport::{Arm, ArmConfig, StepOutcome, TransportController};
+    let mut controller = TransportController::new(ArmConfig {
+        arm: Arm::Continue,
+        catchup_speed: 1.0,
+        continue_from_frame: SPLICE_FRAME,
+        gate_align_rec: 0,
+        target: None,
+        max_retries: 0,
+        resume_speed: 0.0,
+        predict_bucket: false,
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        match controller.step(client) {
+            StepOutcome::Done { .. } => {
+                // With no trajectory judge, Done means ARM was submitted, not
+                // that the DLL has consumed it. Observe acknowledgement first.
+                if client.command_idle() {
+                    return client.mode_volatile() == TasMode::Play as u32;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            StepOutcome::InProgress => thread::sleep(Duration::from_millis(5)),
+            StepOutcome::Wait { ms } => thread::sleep(Duration::from_millis(ms)),
+            outcome => {
+                eprintln!("FAIL: serialized controller: {outcome:?}");
+                return false;
+            }
         }
-        thread::sleep(Duration::from_millis(5));
     }
-    if !harness::restart_inprocess(client) {
-        eprintln!("  serialised: restart didn't complete");
-        return false;
-    }
-    send_arm_continue_and_observe_outcome(client)
+    false
 }
 
 /// Exercise the real controller and injected DLL up to the first restart
@@ -170,7 +143,7 @@ pub fn run_input_protection() -> bool {
 }
 
 pub fn run() -> bool {
-    println!("=== Stop→Restart race vs serialised, against live DLL ===\n");
+    println!("=== Product STOP/restart controller against live DLL ===\n");
 
     let path = match harness::fixture_path(RECORDING) {
         Ok(p) => p,
@@ -192,23 +165,7 @@ pub fn run() -> bool {
 
     replay::write_to_shared(&mut client, &rec);
 
-    println!("[1/2] Race: send Stop + Restart same frame, expect refusal");
-    if !drive_to_rec_mode(&mut client) {
-        eprintln!("FAIL: couldn't reach REC mode for race test");
-        return false;
-    }
-    println!("  Now in REC mode. Sending Stop + Restart back-to-back...");
-    let race_refused = race_loses_stop(&mut client);
-    if race_refused {
-        println!("  Race loses the Stop: ArmContinue refused");
-    } else {
-        println!("  Race did NOT refuse: the single-slot command contract has changed");
-    }
-
-    client.send_command(TasCommand::Stop);
-    thread::sleep(Duration::from_millis(200));
-
-    println!("\n[2/2] Serialised: Stop → wait mode==OFF → Restart, expect acceptance");
+    println!("Serialised: Stop → wait mode==OFF → Restart, expect acceptance");
     if !drive_to_rec_mode(&mut client) {
         eprintln!("FAIL: couldn't reach REC mode for serialised test");
         return false;
@@ -224,9 +181,8 @@ pub fn run() -> bool {
     client.send_command(TasCommand::Stop);
 
     println!("\n=== RESULT ===");
-    println!("  race_refused        = {} (expected true)", race_refused);
     println!("  serialised_accepted = {} (expected true)", serialised_ok);
-    let pass = race_refused && serialised_ok;
+    let pass = serialised_ok;
     if pass {
         println!("\n*** PASS: serialised Stop→Restart is accepted by cave2 ***");
     } else {

@@ -96,10 +96,8 @@ pub fn focus_game() {
     thread::sleep(Duration::from_millis(200));
 }
 
-/// Send Escape through the Pico (mask bit 7). The Pico is a real HID keyboard,
-/// so the press reaches the game's pause handler; the synthetic fallback for
-/// machines without one generally does not, and the caller's verdict must
-/// notice (pause-resume checks that the frame counter actually stalled).
+/// Send Escape through the Pico (mask bit 7), never substitute synthetic input
+/// for the hardware delivery that pause/dialog tests claim to exercise.
 pub fn send_escape() -> bool {
     focus_game();
     if let Some(mut keys) = PicoKeys::open() {
@@ -115,11 +113,10 @@ pub fn send_escape() -> bool {
         return true;
     }
     eprintln!(
-        "  WARNING: Pico not available on {} — falling back to keybd_event (likely won't pause the game)",
+        "  ERROR: Pico not available on {} — cannot send physical Escape",
         pico_port()
     );
-    win32::tap_key(win32::VK_ESCAPE, Duration::from_millis(80));
-    true
+    false
 }
 
 /// Post Enter to the game window to dismiss the post-run "Save attempt" dialog.
@@ -1279,27 +1276,10 @@ fn poll_cont_verdict(
     }
 }
 
-/// Strict delivery with the historical watchdog-sensitive hold timing.
+/// Refresh held keys before the firmware's safety timeout. Timeout behavior is
+/// tested separately by the firmware tests, never implicitly inside a pattern.
 pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep]) -> Result<(), String> {
-    drive_pico_steps_inner(steps, None)
-}
-
-/// Acceptance must not substitute an unsteered recording for missing hardware,
-/// and refreshes its long hold before the firmware watchdog releases it.
-pub fn drive_pico_steps_required(steps: &[crate::patterns::PatternStep]) -> Result<(), String> {
-    drive_pico_steps_inner(steps, Some(200))
-}
-
-fn drive_pico_steps_inner(
-    steps: &[crate::patterns::PatternStep],
-    keepalive_ms: Option<u64>,
-) -> Result<(), String> {
     let port_name = pico_port();
-    // The firmware (TAS/pico/code.py, TIMEOUT_S) releases every key 500 ms
-    // after the last byte and this loop writes only on mask changes, so long
-    // holds are truncated. The regression gates are baselined with that release
-    // inside the recording window: do not add a default keepalive without
-    // re-baselining them. Acceptance opts in via `keepalive_ms`.
     let mut port = PicoKeys::open_checked()?;
     let total = crate::patterns::total_ticks(steps);
     let ms_per_tick = 10u64;
@@ -1318,10 +1298,8 @@ fn drive_pico_steps_inner(
             0
         };
 
-        let keepalive_due = mask != 0
-            && keepalive_ms.is_some_and(|ms| {
-                last_send.is_some_and(|sent| sent.elapsed() >= Duration::from_millis(ms))
-            });
+        let keepalive_due =
+            mask != 0 && last_send.is_some_and(|sent| sent.elapsed() >= Duration::from_millis(200));
         if mask != prev_mask || keepalive_due {
             let send_byte = if mask == 0 { 0xFF } else { mask };
             let sent = port.send(send_byte);

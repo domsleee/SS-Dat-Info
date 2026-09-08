@@ -1,4 +1,4 @@
-//! Regression suite: 15 scripted steering patterns, each REC -> PLAY -> drift
+//! Regression suite: distinct input contracts, each REC -> PLAY -> drift
 //! check -> CSV row.
 
 use std::collections::HashSet;
@@ -43,7 +43,7 @@ pub struct WindowMetrics {
 pub struct CaseResult {
     pub name: String,
     pub pattern: String,
-    pub start_matched: bool,
+    pub alignment_accepted: bool,
     pub rec_count: u32,
     pub transitions: u32,
     pub first_input_tick: i32,
@@ -56,9 +56,6 @@ pub struct CaseResult {
     pub active_window_ticks: u32,
     pub active_norm_drift_x: f64,
     pub active_norm_drift_z: f64,
-    pub live_drift_x: f64,
-    pub live_drift_z: f64,
-    pub live_zero: bool,
     pub replay_drift_x: f64,
     pub replay_drift_z: f64,
     pub replay_zero: bool,
@@ -66,25 +63,18 @@ pub struct CaseResult {
     pub error: Option<String>,
 }
 
-/// Build the 15 regression test cases.
+/// Cover direction, duration, release/repress, jump and modifier behavior without
+/// repeating prefixes of the same alternating sequence.
 pub fn build_cases() -> Vec<RegressionCase> {
     let hold = patterns::DEFAULT_HOLD_TICKS;
     let gap = patterns::DEFAULT_GAP_TICKS;
 
     let mut cases = vec![
-        // 1-4: Single directions and simple alternations
-        case_pattern("L", "L", hold, gap),
-        case_pattern("R", "R", hold, gap),
-        case_pattern("LR", "LR", hold, gap),
-        case_pattern("RL", "RL", hold, gap),
-        // 5-8: Longer alternation patterns
-        case_pattern("LRL", "LRL", hold, gap),
-        case_pattern("RLR", "RLR", hold, gap),
-        case_pattern("LRLRL", "LRLRL", hold, gap),
-        case_pattern("RLRLR", "RLRLR", hold, gap),
-        // 9: Short hold variant
-        case_pattern("LRLRL_short", "LRLRL", 36, gap),
-        // 10: Asymmetric hold durations
+        case_pattern("right_first", "RLR", hold, gap),
+        case_explicit(
+            "release_repress",
+            &[(input_bits::LEFT, 36), (0, 20), (input_bits::LEFT, 36)],
+        ),
         case_explicit(
             "L_long_R_short_L",
             &[
@@ -93,13 +83,17 @@ pub fn build_cases() -> Vec<RegressionCase> {
                 (input_bits::LEFT, 72),
             ],
         ),
-        // 11-12: Jump variants
         case_pattern("jump_tap", "J", 20, 0),
         case_pattern("jump_hold", "J", 56, 0),
-        // 13-14: Shift variants
-        case_pattern("shift_left", "SL", hold, 0),
-        case_pattern("shift_right", "SR", hold, 0),
-        // 15: Combined shift + left + right
+        case_explicit(
+            "modifier_edges",
+            &[
+                (input_bits::LEFT, 36),
+                (input_bits::LEFT | input_bits::SHIFT, 36),
+                (input_bits::SHIFT, 36),
+                (0, 20),
+            ],
+        ),
         case_explicit(
             "shift_left_right",
             &[
@@ -192,11 +186,14 @@ pub fn run(csv_path: &Path) -> Vec<CaseResult> {
         );
 
         let result = run_single_case(&mut client, case);
+        if let Some(error) = &result.error {
+            eprintln!("FAIL {}: {error}", case.name);
+        }
         append_csv(csv_path, &result);
 
         println!(
-            "  Result: startMatched={} rawDrift=({:.9}, {:.9}) fullNorm=({:.9}, {:.9}) rawZero={} gates={}",
-            result.start_matched,
+            "  Result: alignmentAccepted={} gateRelativeDrift=({:.9}, {:.9}) fullNorm=({:.9}, {:.9}) replayZero={} gates={}",
+            result.alignment_accepted,
             result.replay_drift_x,
             result.replay_drift_z,
             result.full_norm_drift_x,
@@ -221,14 +218,14 @@ pub fn run(csv_path: &Path) -> Vec<CaseResult> {
     );
     for r in &results {
         println!(
-            "  {} {} — raw({:.9}, {:.9}) fullNorm({:.9}, {:.9}) startMatched={}",
+            "  {} {} — gate-relative({:.9}, {:.9}) fullNorm({:.9}, {:.9}) alignmentAccepted={}",
             if r.all_gates_pass { "PASS" } else { "FAIL" },
             r.name,
             r.replay_drift_x,
             r.replay_drift_z,
             r.full_norm_drift_x,
             r.full_norm_drift_z,
-            r.start_matched,
+            r.alignment_accepted,
         );
     }
 
@@ -240,16 +237,21 @@ fn run_single_case(
     case: &RegressionCase,
 ) -> CaseResult {
     // Phase 1: Record
-    if !harness::restart_and_stabilize(client) {
+    if !harness::restart_and_stabilize_inprocess(client) {
         return error_result(case, "Game not alive after restart (REC phase)");
     }
 
     harness::arm_rec(client);
+    // Include the stationary countdown so the product's gate-aligned replay
+    // can reconstruct the run. Drive short patterns only after physics starts.
+    std::thread::sleep(std::time::Duration::from_millis(3500));
     if let Err(error) = harness::drive_pico_steps(&case.steps) {
         harness::stop(client);
         return error_result(case, &error);
     }
 
+    // Capture the final hardware release before stopping the recorder.
+    std::thread::sleep(std::time::Duration::from_millis(200));
     let rec_count = client.state().recorded_count;
     harness::stop(client);
     println!("  Recorded {} ticks", rec_count);
@@ -257,36 +259,39 @@ fn run_single_case(
     if rec_count == 0 {
         return error_result(case, "No ticks recorded");
     }
+    if let Err(error) = patterns::verify_capture(
+        &case.steps,
+        &client.state().input_log[..rec_count.min(tas_shared::TAS_MAX_TICKS as u32) as usize],
+        12,
+    ) {
+        return error_result(case, &error);
+    }
 
-    // Compute live drift (REC vs itself is always zero, but we track the recording quality)
     let live_transitions = drift::count_transitions(&client.state().input_log, rec_count as usize);
     println!("  Live transitions: {}", live_transitions);
 
     // Phase 2: Playback
-    let rec_start = client.state().rec_coords[0];
-    let start_matched = match start_playback_with_fallback(client, rec_start, "playback") {
-        Ok(matched) => matched,
-        Err(err) => return error_result(case, &err),
+    let (rec_gate, play_gate) = match harness::restart_play_aligned_inprocess(client) {
+        Some(gates) => gates,
+        None => return error_result(case, "Product PLAY alignment failed"),
     };
-    let play_ok = harness::wait_playback(client, rec_count);
+    let expected_end = play_gate.saturating_add(rec_count.saturating_sub(rec_gate));
+    let play_ok = harness::wait_playback(client, expected_end);
 
     if !play_ok {
         return error_result(case, "Playback timeout");
     }
 
     // Assess
-    let assessment = gates::run_gates(client.state(), rec_count);
+    let assessment = gates::run_gates_aligned(client.state(), rec_count, rec_gate, play_gate);
     assessment.print_summary();
     let metrics = collect_window_metrics(client.state(), rec_count);
     print_window_metrics(&metrics);
-    print_translation_verdict(start_matched, &metrics);
-    let start_match_error =
-        (!start_matched).then(|| "Could not position-match playback start".to_string());
 
     CaseResult {
         name: case.name.clone(),
         pattern: case.pattern_str.clone(),
-        start_matched,
+        alignment_accepted: true,
         rec_count,
         transitions: metrics.transitions,
         first_input_tick: metrics.first_input_tick,
@@ -299,45 +304,19 @@ fn run_single_case(
         active_window_ticks: metrics.active_window_ticks,
         active_norm_drift_x: metrics.active_norm_drift_x,
         active_norm_drift_z: metrics.active_norm_drift_z,
-        live_drift_x: 0.0, // REC vs itself
-        live_drift_z: 0.0,
-        live_zero: true,
         replay_drift_x: assessment.drift.max_drift_x,
         replay_drift_z: assessment.drift.max_drift_z,
         replay_zero: assessment.drift.is_zero(),
-        all_gates_pass: start_matched && assessment.all_pass(),
-        error: start_match_error,
+        all_gates_pass: assessment.all_pass(),
+        error: None,
     }
-}
-
-fn start_playback_with_fallback(
-    client: &mut tas_shared::TasSharedMemoryClient,
-    target: [f32; 3],
-    label: &str,
-) -> Result<bool, String> {
-    if harness::restart_play_and_match(client, target, harness::START_MATCH_RETRIES) {
-        return Ok(true);
-    }
-
-    println!(
-        "  WARNING: Could not exact-match {} start after retries; retrying once without exact matching",
-        label
-    );
-    if !harness::restart_and_stabilize(client) {
-        return Err(format!(
-            "Game not alive after restart ({} fallback phase)",
-            label
-        ));
-    }
-    harness::arm_play(client);
-    Ok(false)
 }
 
 fn error_result(case: &RegressionCase, msg: &str) -> CaseResult {
     CaseResult {
         name: case.name.clone(),
         pattern: case.pattern_str.clone(),
-        start_matched: false,
+        alignment_accepted: false,
         rec_count: 0,
         transitions: 0,
         first_input_tick: -1,
@@ -350,9 +329,6 @@ fn error_result(case: &RegressionCase, msg: &str) -> CaseResult {
         active_window_ticks: 0,
         active_norm_drift_x: 999.0,
         active_norm_drift_z: 999.0,
-        live_drift_x: 999.0,
-        live_drift_z: 999.0,
-        live_zero: false,
         replay_drift_x: 999.0,
         replay_drift_z: 999.0,
         replay_zero: false,
@@ -368,7 +344,7 @@ fn write_csv_header(path: &Path) {
     if let Ok(mut f) = fs::File::create(path) {
         let _ = writeln!(
             f,
-            "case_name,pattern,start_matched,rec_count,transitions,first_input_tick,frame0_dx,frame0_dz,full_norm_drift_x,full_norm_drift_z,active_start_dx,active_start_dz,active_window_ticks,active_norm_drift_x,active_norm_drift_z,live_drift_x,live_drift_z,live_zero,replay_drift_x,replay_drift_z,replay_zero,all_gates_pass,error"
+            "case_name,pattern,alignment_accepted,rec_count,transitions,first_input_tick,frame0_dx,frame0_dz,full_norm_drift_x,full_norm_drift_z,active_start_dx,active_start_dz,active_window_ticks,active_norm_drift_x,active_norm_drift_z,replay_drift_x,replay_drift_z,replay_zero,all_gates_pass,error"
         );
     }
 }
@@ -377,10 +353,10 @@ fn append_csv(path: &Path, r: &CaseResult) {
     if let Ok(mut f) = fs::OpenOptions::new().append(true).open(path) {
         let _ = writeln!(
             f,
-            "\"{}\",\"{}\",{},{},{},{},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{},{},\"{}\"",
+            "\"{}\",\"{}\",{},{},{},{},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{:.9},{:.9},{},{},\"{}\"",
             r.name,
             r.pattern,
-            r.start_matched,
+            r.alignment_accepted,
             r.rec_count,
             r.transitions,
             r.first_input_tick,
@@ -393,9 +369,6 @@ fn append_csv(path: &Path, r: &CaseResult) {
             r.active_window_ticks,
             r.active_norm_drift_x,
             r.active_norm_drift_z,
-            r.live_drift_x,
-            r.live_drift_z,
-            r.live_zero,
             r.replay_drift_x,
             r.replay_drift_z,
             r.replay_zero,
@@ -462,18 +435,6 @@ fn print_window_metrics(metrics: &WindowMetrics) {
     );
 }
 
-fn print_translation_verdict(start_matched: bool, metrics: &WindowMetrics) {
-    // X/Z only: a translation diagnostic feeding the CSV schema. The zero-drift
-    // verdict (Gate 3 / `replay_zero`) checks all three axes.
-    println!(
-        "  Translation diagnostic: startMatched={} fullNormZeroXZ={} fullNormXZ=({:.9}, {:.9})",
-        start_matched,
-        metrics.full_norm_drift_x == 0.0 && metrics.full_norm_drift_z == 0.0,
-        metrics.full_norm_drift_x,
-        metrics.full_norm_drift_z,
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,7 +452,7 @@ mod tests {
 
     #[test]
     fn filter_cases_keeps_only_requested_names() {
-        let filters = parse_case_filter(Some("jump_tap,shift_right")).expect("filters");
+        let filters = parse_case_filter(Some("jump_tap,modifier_edges")).expect("filters");
         let filtered: Vec<_> = build_cases()
             .into_iter()
             .filter(|case| filters.contains(&case.name.to_ascii_lowercase()))
@@ -499,16 +460,15 @@ mod tests {
 
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].name, "jump_tap");
-        assert_eq!(filtered[1].name, "shift_right");
+        assert_eq!(filtered[1].name, "modifier_edges");
     }
 
     #[test]
     fn build_cases_assigns_stable_ordinals() {
         let cases = build_cases();
         assert_eq!(cases[0].ordinal, 1);
-        assert_eq!(cases[13].ordinal, 14);
-        assert_eq!(cases[14].ordinal, 15);
-        assert_eq!(cases[13].name, "shift_right");
-        assert_eq!(cases[14].name, "shift_left_right");
+        assert_eq!(cases.len(), 7);
+        assert_eq!(cases[6].ordinal, 7);
+        assert_eq!(cases[6].name, "shift_left_right");
     }
 }

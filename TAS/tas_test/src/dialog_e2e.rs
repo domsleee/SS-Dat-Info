@@ -36,6 +36,10 @@ const DIALOG_IDLE_SECS: u64 = 12;
 /// an order of magnitude out, so a generous ceiling still separates them.
 const MAX_TICKS_PER_SEC: f64 = 140.0;
 
+fn idle_profile_passes(idle_ticks: u32, resumed_ticks: u32, peak_rate: f64) -> bool {
+    idle_ticks <= 1 && resumed_ticks > 0 && (0.0..=MAX_TICKS_PER_SEC).contains(&peak_rate)
+}
+
 /// Wait until the engine freezes at the post-race dialog: frame_count stops
 /// advancing for >2s. Returns false on the deadline.
 fn wait_engine_frozen(client: &tas_shared::TasSharedMemoryClient, deadline_secs: u64) -> bool {
@@ -58,7 +62,25 @@ fn wait_engine_frozen(client: &tas_shared::TasSharedMemoryClient, deadline_secs:
             last_fc = fc;
             stable_since = Instant::now();
         } else if stable_since.elapsed() > Duration::from_secs(2) {
-            return true;
+            let state = client.state();
+            let progress = if state.mode == TasMode::Rec as u32 {
+                state.recorded_count
+            } else {
+                state.playback_pos
+            };
+            // A stalled restart or an early pause is not the finishing dialog.
+            // This fixture crosses the line after the near-finish splice.
+            if progress > CONT_SPLICE_FRAME
+                && state.race_time_cs != u32::MAX
+                && state.race_time_cs > 0
+            {
+                return true;
+            }
+            eprintln!(
+                "FAIL: engine froze before a finishing run (progress={progress}, race_time={})",
+                state.race_time_cs
+            );
+            return false;
         }
         if last_beat.elapsed() > Duration::from_secs(5) {
             last_beat = Instant::now();
@@ -90,14 +112,12 @@ fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str)
     // sends. The Pico mask has no Enter; any key resumes the engine and would
     // replay the backlog if the drain were broken.
     if !harness::send_escape() {
-        eprintln!(
-            "  [{}] WARNING: Pico Escape failed — falling back to PostMessage Enter",
-            label
-        );
-        harness::dismiss_save_dialog();
+        eprintln!("FAIL: {label}: physical dialog dismissal failed");
+        return (f64::INFINITY, false);
     }
 
     let mut prev = client.state().tick_count;
+    let after_dismiss = prev;
     let mut max_bucket = 0u32;
     for _ in 0..30 {
         thread::sleep(Duration::from_millis(100));
@@ -106,7 +126,12 @@ fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str)
         prev = tc;
     }
     let rate = f64::from(max_bucket) * 10.0;
-    let ok = rate <= MAX_TICKS_PER_SEC;
+    let resumed_ticks = prev.wrapping_sub(after_dismiss);
+    let resumed = resumed_ticks > 0;
+    let ok = idle_profile_passes(idled, resumed_ticks, rate);
+    if !resumed || idled > 1 {
+        eprintln!("FAIL: {label}: idle ticks={idled}, resumed={resumed}");
+    }
     println!(
         "  [{}] post-dismiss max rate {:.0} ticks/sec (ceiling {:.0}) -> {}",
         label,
@@ -276,4 +301,17 @@ pub fn run() -> bool {
         println!("\n*** DIALOG-E2E FAILED ***");
     }
     ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_frozen_game_or_failed_idle_cannot_pass_as_no_burst() {
+        assert!(idle_profile_passes(0, 300, 110.0));
+        assert!(!idle_profile_passes(0, 0, 0.0));
+        assert!(!idle_profile_passes(30, 300, 110.0));
+        assert!(!idle_profile_passes(0, 300, 150.0));
+        assert!(!idle_profile_passes(0, 300, f64::NAN));
+    }
 }

@@ -72,6 +72,11 @@ pub fn run() -> bool {
         thread::sleep(Duration::from_millis(2));
     }
     let pos_at_inject = client.playback_pos_volatile();
+    if pos_at_inject >= SPLICE_AT || client.mode_volatile() != TasMode::Play as u32 {
+        eprintln!("FAIL: missed the pre-splice injection window ({pos_at_inject})");
+        harness::stop(&mut client);
+        return false;
+    }
     println!(
         "  Replay running (pos={}); injecting stray continue_from_frame={} mid-PLAY",
         pos_at_inject, SPLICE_AT

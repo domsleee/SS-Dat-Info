@@ -6,6 +6,8 @@
 //! What this does NOT judge: trajectory equality. The two passes get their
 //! real keys at different wall instants (OS delivery), so a ±few-tick jitter
 //! per transition is physical, not a bug. The judge is therefore:
+//!   - each pass captures the requested per-key edges and hold durations,
+//!     and includes a stationary spawn followed by real movement;
 //!   - same number of input transitions in both passes (nothing dropped or
 //!     invented), and
 //!   - each transition lands within TOL ticks of its counterpart after
@@ -57,6 +59,17 @@ fn record_pass(
     let log = client.state().input_log[..(count as usize).min(tas_shared::TAS_MAX_TICKS)].to_vec();
     harness::stop(client);
     println!("    recorded {} ticks", count);
+    // Reuse this fresh capture for the spawn/countdown contract rather than
+    // recording a separate neutral run solely for rec-start.
+    let start = crate::rec_start::analyze_start(
+        &client.state().rec_coords[..(count as usize).min(tas_shared::TAS_MAX_TICKS)],
+        count as usize,
+    );
+    if !crate::rec_start::passes(&start) {
+        eprintln!("FAIL: capture did not include a stationary spawn and subsequent motion");
+        return None;
+    }
+    println!("    spawn/countdown and subsequent movement: PASS");
     Some((log, count))
 }
 
@@ -91,6 +104,12 @@ pub fn run() -> bool {
     };
 
     let ta = transitions(&log_a, count_a);
+    for log in [&log_a, &log_b] {
+        if let Err(error) = patterns::verify_capture(&steps, log, TOL_TICKS as u32) {
+            eprintln!("FAIL: driven input was not captured: {error}");
+            return false;
+        }
+    }
     let tb = transitions(&log_b, count_b);
     println!(
         "  pass1: {} transitions / {} ticks · pass2: {} transitions / {} ticks",

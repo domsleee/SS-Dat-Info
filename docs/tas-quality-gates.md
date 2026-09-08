@@ -73,10 +73,11 @@ refreshes its long holds; other steered patterns do not silently acquire keepali
 | Mode | Pico | Pass signature | What it checks |
 |---|---|---|---|
 | `live-full` | yes | `Live suite report: .../summary.json`, every stage `passed` | Full ordered regression plan: short live suite plus replay/cycles, timing, CONT races, pause/resume, save/reload and dialog/menu navigation. `just test_live_full`. |
+| `live-soak` | yes | `Live suite report: .../summary.json`, every stage `passed` | Same functional contracts with extended repetition counts. `just test_live_soak`. |
 | `live [--recording PATH] [--splice N] [--iterations N]` | yes | `Live suite report: .../summary.json`, every stage `passed` | Runs `cont-ui-left-spam`, then `acceptance`, then `regression` as child processes; a failing stage stops the rest. `just test_live [splice] [iterations]`. |
 | `cont-ui-left-spam [--recording PATH] [--splice N] [--iterations N]` | yes | `CONT UI LEFT-SPAM PASSED` | Launches an isolated `tas_ui.exe`, loads the captured 4500 recording, sends F12 and physical LEFT taps, checks first-attempt resume and zero splice mismatch on each of N splices, stops with F11. `just test_cont_ui_left_spam`. |
 | `acceptance [N]` | yes | `*** ACCEPTANCE TEST PASSED ***` per run, `=== Acceptance: N/N runs passed ===` | Three phases: unsteered baseline REC, Pico-steered REC that must differ from it, PLAY that must match the steered REC. `just test_acceptance`. |
-| `regression` | yes | `=== Regression Summary: 15/15 passed ===` | 15 scripted steering patterns, each REC then PLAY with zero drift; writes the CSV and certificate. `just test_regression`. |
+| `regression` | yes | `=== Regression Summary: 7/7 passed ===` | Seven distinct input contracts: captured edges must match the intended schedule, then REC/PLAY must have zero drift; writes the CSV and certificate. `just test_regression`. |
 
 ### Drift and replay
 
@@ -90,7 +91,7 @@ refreshes its long holds; other steered patterns do not silently acquire keepali
 | `drift-speed` | yes | `*** DRIFT-AT-SPEED TEST PASSED ***` | REC 2x/PLAY 2x and REC 1x/PLAY 2x both replay with zero drift. |
 | `save-reload` | yes | `*** SAVE/RELOAD/REPLAY PASSED: zero drift across game restart ***` | Steered REC, save to disk, kill and relaunch the game, reload, replay, zero drift. |
 | `pause-resume` | yes | `*** PAUSE/RESUME REPLAY PASSED: ...` | Escape pause and resume during PLAY; the first 1000 frames stay bit-identical. |
-| `stop-play-flake` | no | `*** STOP+PLAY FLAKE TEST PASSED: N/N iterations matched the reference ...` | PLAY, STOP at varying frames, PLAY again; ten second playbacks match a reference over their first 1000 frames. |
+| `stop-play-flake [--iterations N]` | no | `*** STOP+PLAY FLAKE TEST PASSED: N/N iterations matched the reference ...` | PLAY, STOP at varying frames, PLAY again; second playbacks match a reference over their first 1000 frames. Default ten stop points, functional suite two. |
 | `rec-start [--file PATH]` | no | `*** REC-START OK: recording begins at the spawn ...` | A fresh recording starts at the stationary spawn with the countdown, not mid-fall; `--file` judges a saved `.tasrec` instead. |
 | `rec-repro` | yes | `*** REC-REPRO OK: N transitions match in order+mask ...` | The same driven input recorded twice yields the same transitions within tolerance. |
 | `steer-impact` | no | `*** STEER-IMPACT OK: ...` | Injected steering moves the player, and only with a live Kernel::Time stamp on the injection. |
@@ -113,10 +114,10 @@ refreshes its long holds; other steered patterns do not silently acquire keepali
 | Mode | Pico | Pass signature | What it checks |
 |---|---|---|---|
 | `cont-reliability [--iterations N] [--speed X] [--splice N] [--file PATH \| --synthetic] [--profile taps\|sweep] [--tap-ticks N]` | synthetic baseline only | `*** CONT RELIABILITY PASSED: N/N splice cycles clean ***` | Repeated CONT splices at the given frame: zero drift in the replayed prefix, replay coverage and forward progress. Defaults to FE-tremendous at splice 2200; `--synthetic` records a fresh Pico-driven baseline instead. |
-| `fe-cont-reliability` | no | `*** FE-CONT-RELIABILITY PASSED ***` | FE-tremendous, five splices at 2200 at 12x. |
-| `fe10065-cont` | no | `*** FE-10065 CONT PASSED ***` | FE-10065, eight splices at 6200 at each of 64x and 256x, resume overshoot at most one frame and best resume time at most 3000 ms. |
+| `fe-cont-reliability [--iterations N]` | no | `*** FE-CONT-RELIABILITY PASSED ***` | FE-tremendous, splices at 2200 at 12x. Default five cycles, functional suite two. |
+| `fe10065-cont [--iterations N]` | no | `*** FE-10065 CONT PASSED ***` | FE-10065, splices at 6200 at each of 64x and 256x, resume overshoot at most one frame and every resume at most 3000 ms. Default eight cycles per speed, functional suite two. |
 | `cont-hijack` | no | `*** BUG #2 PASSED: replay crossed frame N still in PLAY — no REC hijack ***` | A `continue_from_frame` written during a plain PLAY leaves it in PLAY. |
-| `cont-restart-race` | no | `*** PASS: serialised Stop→Restart is accepted by cave2 ***` | Stop and Restart sent together lose the Stop; Stop, wait for OFF, then Restart is accepted. |
+| `cont-restart-race` | no | `*** PASS: serialised Stop→Restart is accepted by cave2 ***` | The product controller serializes STOP/restart/arm and the DLL acknowledges CONT. Command-overwrite behavior is tested deterministically offline, not by requiring an uncontrolled live race to lose. |
 | `cont-input-protection` | no | every `PASS:` line, ending `PASS: ordinary STOP releases input protection (cont_suppress_input=0)` | Live input stays blocked through the CONT restart and STOP releases it, driven through the real transport controller. |
 | `gate-align [N] [recording]` | no | `*** Gate-offset input indexing matched the control in this sample. ***` | Gate-relative input indexing reproduces the recording's run over N aligned replays. |
 
@@ -225,7 +226,13 @@ close the UI and replace the active recording. A missing UI, a missing splice
 verdict or any failing stage fails the workflow and the later stages stay
 `not-run` in `summary.json`.
 
-Use `just test_live_full` for the full regression plan. It includes a fresh-game
+Use `just test_live_full` for functional coverage, or `just test_live_soak` for
+the same cases with extended UI, acceptance, replay, STOP and CONT repetitions.
+The short lane uses two UI trials, one acceptance run and seven input cases.
+The functional lane uses two repeated STOP/CONT/reliability cycles per
+configuration; timing medians still require three samples. `smoke` and `f5`
+remain standalone diagnostics; `play-judge` is an explicit legacy-path test,
+not a routine product gate. Both full lanes include a fresh-game
 save/reload and ends at the main menu after dialog navigation, so save your work
 first and do not run it alongside another controller. It requires a Pico, all
 three committed FE fixtures, Nushell and `REVIVE_SUPREME_SCRIPT`, the deployed

@@ -77,7 +77,11 @@ fn restart_play_match_reference(
             continue;
         }
 
-        let _ = wait_for_pos(client, RETRY_VERIFY_FRAMES, Duration::from_secs(20));
+        if wait_for_pos(client, RETRY_VERIFY_FRAMES, Duration::from_secs(20)) < RETRY_VERIFY_FRAMES
+        {
+            harness::stop(client);
+            return false;
+        }
 
         let window = RETRY_VERIFY_FRAMES as usize;
         let state = client.state();
@@ -120,8 +124,11 @@ fn wait_for_pos(client: &tas_shared::TasSharedMemoryClient, target: u32, timeout
     }
 }
 
-pub fn run() -> bool {
-    let iterations = STOP_AT_FRAMES.len() as u32;
+pub fn run(iterations: u32) -> bool {
+    if iterations == 0 || iterations > STOP_AT_FRAMES.len() as u32 {
+        eprintln!("Require 1..={} stop points", STOP_AT_FRAMES.len());
+        return false;
+    }
     println!(
         "=== Stop+Play Flakiness Test (FE-tremendous, baseline-comparison, {}× iters) ===\n",
         iterations
@@ -155,7 +162,10 @@ pub fn run() -> bool {
         eprintln!("ERROR: Reference playback couldn't start");
         return false;
     }
-    let _ = wait_for_pos(&client, VERIFY_FRAMES, Duration::from_secs(60));
+    if wait_for_pos(&client, VERIFY_FRAMES, Duration::from_secs(60)) < VERIFY_FRAMES {
+        harness::stop(&mut client);
+        return false;
+    }
     let reference: Vec<[f32; 3]> = client.state().play_coords[..VERIFY_FRAMES as usize].to_vec();
     let player_ptr = client.state().player_ptr;
     harness::stop(&mut client);
@@ -190,7 +200,7 @@ pub fn run() -> bool {
     );
 
     let mut results: Vec<CycleResult> = Vec::with_capacity(STOP_AT_FRAMES.len());
-    for (i, &stop_at) in STOP_AT_FRAMES.iter().enumerate() {
+    for (i, &stop_at) in STOP_AT_FRAMES.iter().take(iterations as usize).enumerate() {
         let iteration = i as u32 + 1;
         println!(
             "\n--- Iteration {}/{} (stop at frame {}) ---",
@@ -214,6 +224,11 @@ pub fn run() -> bool {
         }
 
         let actual_stop = wait_for_pos(&client, stop_at, Duration::from_secs(60));
+        if actual_stop < stop_at || client.mode_volatile() != tas_shared::TasMode::Play as u32 {
+            eprintln!("FAIL: did not reach the requested mid-PLAY stop point {stop_at}");
+            harness::stop(&mut client);
+            return false;
+        }
         println!("  STOP at playback_pos={}", actual_stop);
         harness::stop(&mut client);
         thread::sleep(Duration::from_millis(200));
@@ -234,7 +249,10 @@ pub fn run() -> bool {
             continue;
         }
 
-        let _ = wait_for_pos(&client, VERIFY_FRAMES, Duration::from_secs(60));
+        if wait_for_pos(&client, VERIFY_FRAMES, Duration::from_secs(60)) < VERIFY_FRAMES {
+            harness::stop(&mut client);
+            return false;
+        }
 
         let state = client.state();
         let play = &state.play_coords[..VERIFY_FRAMES as usize];
