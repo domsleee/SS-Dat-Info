@@ -1,110 +1,119 @@
-# code.py — Pico 2 TAS HID keyboard spoofer
-# Listens on CDC data serial for single-byte bitmask commands.
-# Each byte = keys to hold (same format as TAS input log).
-# Translates to real USB HID keyboard press/release events.
-
-import usb_hid
-import usb_cdc
+# Pico 2 TAS keyboard. Masks and the 500ms safety timeout are unchanged.
+# Importable on the host so tests execute the same controller as the board.
 import time
-import microcontroller
-import memorymap
-from adafruit_hid.keyboard import Keyboard
-from adafruit_hid.keycode import Keycode
 
-# RP2350 USB device register access for D+ pullup control.
-# Clearing the PULLUP_EN bit in SIE_CTRL is electrically identical to
-# unplugging the USB cable — the host sees a real disconnect event.
-# SIE_CTRL is at USBCTRL_REGS_BASE (0x50110000) + 0x4C, PULLUP_EN = bit 16.
-_USB_REGS = memorymap.AddressRange(start=0x50110000, length=0x100)
-_SIE_CTRL_OFFSET = 0x4C
-_PULLUP_EN_BIT = 16
+TIMEOUT_S = 0.5
+RETRY_S = 0.05
+ACK_VERSION = 1
 
-def _usb_disconnect_reconnect():
-    """Pull D+ low (disconnect), wait, pull D+ high (reconnect).
-    Host sees a real unplug/replug cycle and fully re-enumerates."""
-    # Read current SIE_CTRL value (4 bytes, little-endian)
-    raw = _USB_REGS[_SIE_CTRL_OFFSET:_SIE_CTRL_OFFSET + 4]
-    val = int.from_bytes(raw, "little")
-    # Clear PULLUP_EN — host sees disconnect
-    val_off = val & ~(1 << _PULLUP_EN_BIT)
-    _USB_REGS[_SIE_CTRL_OFFSET:_SIE_CTRL_OFFSET + 4] = val_off.to_bytes(4, "little")
-    time.sleep(0.3)  # let host process disconnect
-    # Set PULLUP_EN — host sees new device, re-enumerates
-    val_on = val | (1 << _PULLUP_EN_BIT)
-    _USB_REGS[_SIE_CTRL_OFFSET:_SIE_CTRL_OFFSET + 4] = val_on.to_bytes(4, "little")
 
-kbd = Keyboard(usb_hid.devices)
-# Use DATA port only (binary-safe). Never consume commands from console CDC:
-# bytes like 0x03 can be interpreted as Ctrl-C on console and kill code.py.
-serial = usb_cdc.data
+class Controller:
+    def __init__(self, keyboard_factory, serial, keys, reset, clock=time.monotonic):
+        self.factory = keyboard_factory
+        self.serial = serial
+        self.keys = keys
+        self.reset = reset
+        self.clock = clock
+        self.keyboard = None
+        self.mask = 0
+        # A soft reload can inherit keys held by the previous interpreter.
+        self.release_pending = True
+        self.retry_at = 0
+        self.last_rx = clock()
+        self.serial.timeout = 0
+        self.serial.write_timeout = 0
+        self.release()
 
-# TAS input log bitmask -> HID keycode
-BIT_TO_KEY = [
-    Keycode.LEFT_ARROW,    # bit 0 = LEFT
-    Keycode.RIGHT_ARROW,   # bit 1 = RIGHT
-    Keycode.UP_ARROW,      # bit 2 = UP
-    Keycode.DOWN_ARROW,    # bit 3 = DOWN
-    Keycode.LEFT_CONTROL,  # bit 4 = JUMP (CTRL)
-    Keycode.LEFT_SHIFT,    # bit 5 = SHIFT
-    Keycode.F5,            # bit 6 = F5 (restart race)
-    Keycode.ESCAPE,        # bit 7 = Escape (pause/resume in-race)
-]
+    def fault(self):
+        # Adafruit's report buffer may have changed before send_report failed.
+        # Rebuild it and send an unconditional neutral report before more input.
+        self.keyboard = None
+        self.release_pending = True
+        self.retry_at = self.clock() + RETRY_S
 
-current_mask = 0
-last_rx_time = time.monotonic()
-TIMEOUT_S = 0.5  # release all if no command in 500ms
+    def release(self):
+        self.release_pending = True
+        try:
+            if self.keyboard is None:
+                self.keyboard = self.factory()
+            self.keyboard.release_all()
+        except Exception:
+            self.fault()
+            return False
+        self.mask = 0
+        self.release_pending = False
+        return True
 
-while True:
-    try:
-        if serial and serial.in_waiting > 0:
-            data = serial.read(serial.in_waiting)
+    def acknowledge(self, ok):
+        try:
+            # Older hosts do not read replies. Never wait for them or build a queue.
+            if self.serial.out_waiting == 0:
+                self.serial.write(bytes((0x5A, int(ok), ACK_VERSION)))
+        except Exception:
+            pass  # Losing diagnostics must not prevent key release.
 
-            # The host writes a byte only when the mask changes, so every byte
-            # is an edge. Process all of them in order: a press and release
-            # that arrive in one read must both happen, and a control byte
-            # must not swallow the mask that follows it.
-            for cmd in data:
-                if cmd == 0xFD:
-                    # Soft USB reconnect: toggle D+ pullup to simulate unplug/replug.
-                    # Recovers dead HID without full MCU reset. COM port reopens on
-                    # same port number. Takes ~2s total (disconnect + re-enumeration).
-                    kbd.release_all()
-                    current_mask = 0
-                    _usb_disconnect_reconnect()
-                    # After reconnect, TinyUSB re-enumerates. Reinit keyboard.
-                    time.sleep(2)  # let host finish enumeration
-                    kbd = Keyboard(usb_hid.devices)
-                    serial = usb_cdc.data
-                elif cmd == 0xFE:
-                    # Hard reset: D+ pullup disconnect then full MCU reset.
-                    # More aggressive than 0xFD — resets all CircuitPython state.
-                    kbd.release_all()
-                    _usb_disconnect_reconnect()
-                    time.sleep(0.2)
-                    microcontroller.reset()
-                    # never reached
-                elif cmd == 0xFF:
-                    kbd.release_all()
-                    current_mask = 0
-                else:
-                    changed = current_mask ^ cmd
-                    for i in range(8):
-                        bit = 1 << i
-                        if changed & bit:
-                            if cmd & bit:
-                                kbd.press(BIT_TO_KEY[i])
-                            else:
-                                kbd.release(BIT_TO_KEY[i])
-                    current_mask = cmd
-                last_rx_time = time.monotonic()
-    except Exception as e:
-        # Keep HID alive even if a transient serial/USB error occurs.
-        print("code.py: releasing all keys after", repr(e))
-        kbd.release_all()
-        current_mask = 0
-        time.sleep(0.05)
+    def command(self, cmd):
+        self.last_rx = self.clock()
+        if cmd in (0xFD, 0xFE):
+            self.release()
+            # Use the supported reset API, not USB register writes behind TinyUSB.
+            # Both recovery commands now require the host to reopen the port.
+            self.reset()
+            return False  # Never apply buffered commands from before the reset.
+        if cmd == 0xFF:
+            self.acknowledge(self.release())
+            return True
+        if self.release_pending:
+            return True  # Discard stale input while HID state is uncertain.
+        try:
+            changed = self.mask ^ cmd
+            for index, key in enumerate(self.keys):
+                if changed & (1 << index):
+                    if cmd & (1 << index):
+                        self.keyboard.press(key)
+                    else:
+                        self.keyboard.release(key)
+            self.mask = cmd  # Commit only after every report succeeds.
+        except Exception:
+            self.fault()
+            self.release()
+        return True
 
-    # safety timeout
-    if current_mask != 0 and (time.monotonic() - last_rx_time) > TIMEOUT_S:
-        kbd.release_all()
-        current_mask = 0
+    def step(self):
+        now = self.clock()
+        if self.release_pending and now >= self.retry_at:
+            self.release()
+        if self.mask and now - self.last_rx > TIMEOUT_S:
+            if not self.release_pending:
+                self.release()
+        try:
+            count = self.serial.in_waiting
+            if count:
+                # Bound work per pass so traffic cannot starve safety/recovery.
+                data = self.serial.read(min(count, 64))
+                for cmd in data or b"":
+                    if not self.command(cmd):
+                        break
+        except Exception:
+            self.fault()
+            self.release()
+
+
+def main():
+    import usb_cdc
+    import usb_hid
+    import microcontroller
+    from adafruit_hid.keyboard import Keyboard
+    from adafruit_hid.keycode import Keycode
+
+    keys = (Keycode.LEFT_ARROW, Keycode.RIGHT_ARROW, Keycode.UP_ARROW,
+            Keycode.DOWN_ARROW, Keycode.LEFT_CONTROL, Keycode.LEFT_SHIFT,
+            Keycode.F5, Keycode.ESCAPE)
+    controller = Controller(lambda: Keyboard(usb_hid.devices), usb_cdc.data,
+                            keys, microcontroller.reset)
+    while True:
+        controller.step()
+
+
+if __name__ == "__main__":
+    main()
