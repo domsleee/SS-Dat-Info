@@ -39,10 +39,13 @@ pub fn run() -> bool {
     let rec_start = s.rec_coords[0];
 
     println!("\n--- Phase 2: F5 + PLAY ---");
-    if !harness::restart_play_and_match(&mut client, rec_start, harness::START_MATCH_RETRIES) {
-        eprintln!("WARNING: Could not match REC position for PLAY (continuing anyway)");
+    if !harness::restart_play_and_match(&mut client, rec_start, harness::START_MATCH_RETRIES)
+        || !harness::wait_playback(&client, rec_count)
+    {
+        eprintln!("FAIL: PLAY did not match and complete");
+        harness::stop(&mut client);
+        return false;
     }
-    harness::wait_playback(&client, rec_count);
 
     let s = client.state();
     let n = rec_count as usize;

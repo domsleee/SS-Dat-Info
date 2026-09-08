@@ -47,7 +47,11 @@ fn record_pass(
         return None;
     }
     harness::arm_rec(client);
-    harness::drive_pico_steps(steps, None);
+    if let Err(error) = harness::drive_pico_steps(steps) {
+        eprintln!("{error}");
+        harness::stop(client);
+        return None;
+    }
     thread::sleep(Duration::from_millis(300));
     let count = client.state().recorded_count;
     let log = client.state().input_log[..(count as usize).min(tas_shared::TAS_MAX_TICKS)].to_vec();

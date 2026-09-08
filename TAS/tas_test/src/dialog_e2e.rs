@@ -18,7 +18,6 @@
 //!             flag here kills the keyboard), and the menu VIDEO must move at
 //!             a plausible rate (video-rate's screen sampler).
 
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -118,40 +117,6 @@ fn idle_dismiss_profile(client: &tas_shared::TasSharedMemoryClient, label: &str)
     (rate, ok)
 }
 
-/// Drive `TAS/tools/keys.ps1` for the one thing that needs a physical key:
-/// opening the pause menu. Everything after goes through the menu protocol.
-fn run_keys(keys: &str, delay_ms: u32) -> bool {
-    let script = match harness::repo_path("TAS/tools/keys.ps1") {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("  WARNING: {e}");
-            return false;
-        }
-    };
-    match Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-File",
-            &script.to_string_lossy(),
-            "-Keys",
-            keys,
-            "-DelayMs",
-            &delay_ms.to_string(),
-        ])
-        .output()
-    {
-        Ok(o) if o.status.success() => true,
-        Ok(o) => {
-            eprintln!("  WARNING: keys.ps1 exited {} for {:?}", o.status, keys);
-            false
-        }
-        Err(e) => {
-            eprintln!("  WARNING: keys.ps1 failed to run: {}", e);
-            false
-        }
-    }
-}
-
 pub fn run() -> bool {
     let path = match harness::fixture_path(RECORDING) {
         Ok(p) => p,
@@ -244,7 +209,7 @@ pub fn run() -> bool {
     // through the menu protocol — read the document, activate by published
     // id, wait for the ack, verify the destination page. No blind cursor
     // counting: a wrong screen fails here instead of silently measuring it.
-    if !run_keys("ESC", 700) {
+    if !harness::send_escape() {
         eprintln!("ERROR: opening the pause menu failed; Phase C would measure the wrong screen");
         return false;
     }

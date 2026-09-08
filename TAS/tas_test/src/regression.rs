@@ -245,7 +245,10 @@ fn run_single_case(
     }
 
     harness::arm_rec(client);
-    harness::drive_pico_steps(&case.steps, None);
+    if let Err(error) = harness::drive_pico_steps(&case.steps) {
+        harness::stop(client);
+        return error_result(case, &error);
+    }
 
     let rec_count = client.state().recorded_count;
     harness::stop(client);

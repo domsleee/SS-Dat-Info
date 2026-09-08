@@ -26,7 +26,11 @@ pub fn run() -> bool {
     println!("  Recording with LEFT steering via Pico HID...");
     let seg0_steps =
         patterns::build_from_explicit(&[(input_bits::LEFT, SPLICE_FRAME), (0x00, 100)]);
-    harness::drive_pico_steps(&seg0_steps, None);
+    if let Err(error) = harness::drive_pico_steps(&seg0_steps) {
+        eprintln!("{error}");
+        harness::stop(&mut client);
+        return false;
+    }
 
     let seg0_count = client.state().recorded_count;
     harness::stop(&mut client);
@@ -55,7 +59,11 @@ pub fn run() -> bool {
 
     println!("  Recording segment 1 with RIGHT steering via Pico HID...");
     let seg1_steps = patterns::build_from_explicit(&[(input_bits::RIGHT, 200), (0x00, 100)]);
-    harness::drive_pico_steps(&seg1_steps, None);
+    if let Err(error) = harness::drive_pico_steps(&seg1_steps) {
+        eprintln!("{error}");
+        harness::stop(&mut client);
+        return false;
+    }
 
     let total_count = client.state().recorded_count;
     harness::stop(&mut client);

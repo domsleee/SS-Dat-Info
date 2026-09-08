@@ -13,15 +13,15 @@ The `tas:test` job in `.github/workflows/ci.yaml` runs on every pull request
 and on pushes to `main`:
 
 ```
-cd TAS && cargo fmt --all --check
-cd TAS && cargo clippy --workspace --all-targets -- -D warnings
-python -m unittest discover -s TAS/tools -p test_tools.py -v
-cd TAS && cargo test --release
+just check_all
 MSBuild TAS/TAS_Helper/TAS_Helper.vcxproj /p:Configuration=Release /p:Platform=Win32
-./TAS/tools/test_dll_hidden.ps1
 ```
 
-`just test`, `just test_tools` and `just test_dll` run the same steps locally.
+`just test_all` runs all offline TAS tests: Rust workspace tests, Python tools,
+and standalone x86 C++ policy tests. `just check_all` adds fmt and Clippy.
+CI invokes that same recipe. Prerequisites are Rust, Python, Just and Visual
+Studio's x86 C++ toolchain. Individual `just test`, `just test_tools` and
+`just test_dll` recipes remain available; unit tests do not first build the UI binary.
 Windows Rust unit tests use private unnamed mappings, never the running game's
 shared memory. The C++ policy suites compile the pure gate-policy headers
 (input gate, replay capture, gate alignment, level path, rider identity, menu
@@ -35,7 +35,7 @@ them hidden because a console window taking focus pauses a running game.
 (`cargo test --release -p tas_ui cont_splice`):
 
 - `recording.tasrec` is the saved FE recording, history entry 2431 (5,032 ticks).
-- `play-tail.bin` is 4,500 captured playback XYZ samples (54 KB) whose coverage
+- `play-tail.bin` is 3,555 captured playback XYZ samples (42,660 bytes) whose coverage
   starts at recording tick 945. Intermediate differences reproduce the false
   banner while the actual splice endpoint matches.
 - `capture.json` records the binary layouts, alignment and capture provenance.
@@ -63,15 +63,16 @@ play manually during a test. Prerequisites:
 Every mode requires exit code `0` in addition to its pass signature. Run a mode
 from `TAS/` with `cargo run --release --bin tas_test -- <mode>`, or from the
 repository root through the `just test_*` recipes named below. Modes marked
-Pico drive steering or a keypress through the board; `acceptance`,
-`cont-ui-left-spam` and `live` fail fast without it, the others log
-`Cannot open COM7` and wait through the steering window instead, which makes
-their drift verdict vacuous.
+Pico drive steering or a keypress through the board. Scripted steering fails
+on missing hardware or failed writes; it never substitutes a neutral recording.
+The existing watchdog-sensitive hold timing is preserved. Acceptance explicitly
+refreshes its long holds; other steered patterns do not silently acquire keepalives.
 
 ### Suites
 
 | Mode | Pico | Pass signature | What it checks |
 |---|---|---|---|
+| `live-full` | yes | `Live suite report: .../summary.json`, every stage `passed` | Full ordered regression plan: short live suite plus replay/cycles, timing, CONT races, pause/resume, save/reload and dialog/menu navigation. `just test_live_full`. |
 | `live [--recording PATH] [--splice N] [--iterations N]` | yes | `Live suite report: .../summary.json`, every stage `passed` | Runs `cont-ui-left-spam`, then `acceptance`, then `regression` as child processes; a failing stage stops the rest. `just test_live [splice] [iterations]`. |
 | `cont-ui-left-spam [--recording PATH] [--splice N] [--iterations N]` | yes | `CONT UI LEFT-SPAM PASSED` | Launches an isolated `tas_ui.exe`, loads the captured 4500 recording, sends F12 and physical LEFT taps, checks first-attempt resume and zero splice mismatch on each of N splices, stops with F11. `just test_cont_ui_left_spam`. |
 | `acceptance [N]` | yes | `*** ACCEPTANCE TEST PASSED ***` per run, `=== Acceptance: N/N runs passed ===` | Three phases: unsteered baseline REC, Pico-steered REC that must differ from it, PLAY that must match the steered REC. `just test_acceptance`. |
@@ -85,7 +86,7 @@ their drift verdict vacuous.
 | `f5` | no | `=== Overall: ALL GATES PASS ===` | F5-aligned straight-line REC then PLAY through the gate checks. |
 | `segment` | yes | `*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***` | Two-segment CONT: LEFT segment, F5-matched CONT into a RIGHT segment, full replay with zero drift at the boundary. |
 | `replay <file.tasrec> [--iterations N] [--verbose] [--no-match]` | no | `Result: ZERO DRIFT in all N iterations` | Loads a `.tasrec` and replays it N times; drift, incomplete playback or a failed start match fails. `just test_replay FILE`. |
-| `reliability [--iterations N] [--speed X]` | yes | `*** RELIABILITY TEST PASSED: N/N zero drift at Xx ***` | N consecutive steered REC+PLAY cycles at one speed (default 10 at 12x). |
+| `reliability [--iterations N] [--speed X]` | yes | `*** RELIABILITY TEST PASSED ***` | N consecutive steered REC+PLAY cycles at one speed (default 10 at 12x). Shares the procedure with drift-speed, preserving its 50-tick rather than 100-tick neutral tail and mandatory movement gates. |
 | `drift-speed` | yes | `*** DRIFT-AT-SPEED TEST PASSED ***` | REC 2x/PLAY 2x and REC 1x/PLAY 2x both replay with zero drift. |
 | `save-reload` | yes | `*** SAVE/RELOAD/REPLAY PASSED: zero drift across game restart ***` | Steered REC, save to disk, kill and relaunch the game, reload, replay, zero drift. |
 | `pause-resume` | yes | `*** PAUSE/RESUME REPLAY PASSED: ...` | Escape pause and resume during PLAY; the first 1000 frames stay bit-identical. |
@@ -175,7 +176,7 @@ not classify.
 `regression_cache/` from `regression`; `acceptance_certificate.json` from
 `acceptance`; `cont-ui-<timestamp>-<pid>/` from `cont-ui-left-spam` with the
 child UI's isolated data directory and logs; and `live-<timestamp>-<pid>/`
-from `live` with `summary.json` and a per-stage `output.log`, each stage's
+from `live`/`live-full` with `summary.json` and a per-stage `output.log`, each stage's
 own artifacts landing in its stage directory. `TAS/artifacts/` is git-ignored
 for keeping these inside the checkout:
 
@@ -216,11 +217,30 @@ exit and nonzero splice differences fail the test; historical
 `CONT prefix difference` diagnostics alone do not. The child UI is closed on
 success or failure and its logs and data stay under `TAS_TEST_OUTPUT`.
 
-The complete live workflow is `just test_live` (or `just test_live 2200`).
+The short acceptance workflow is `just test_live` (or `just test_live 2200`).
 The UI stage runs first because the later harness stages take ownership,
 close the UI and replace the active recording. A missing UI, a missing splice
 verdict or any failing stage fails the workflow and the later stages stay
 `not-run` in `summary.json`.
+
+Use `just test_live_full` for the full regression plan. It includes a fresh-game
+save/reload and ends at the main menu after dialog navigation, so save your work
+first and do not run it alongside another controller. It requires a Pico, all
+three committed FE fixtures, Nushell and `REVIVE_SUPREME_SCRIPT`, the deployed
+game/injector/DLL, and a `tas_ui.exe` beside the harness. `NO_REVIVE=1` and
+`TAS_TEST_CASE_FILTER` are refused for this lane. Preflight checks the on-disk
+DLL against the local build; this cannot identify an older DLL already injected
+in a running game. Deploy and restart before testing a native change.
+
+Each stage has a 1,800-second deadline, overridable by the positive integer
+`TAS_STAGE_TIMEOUT_SECONDS`. The report is atomically updated before and after
+each stage, with `running`, `passed`, `failed` or `not-run` states under `stages`.
+Preflight failures are reported separately. Timeout kills only the owned child
+process tree and fails the run. `TAS_SUITE_PID` identifies the parent to reset
+helpers; custom revival scripts must preserve it as well as `TAS_TEST_PID`.
+The checked-in plan explicitly excludes utilities and redundant CLI wrappers;
+an offline test requires every mode to be classified. Timing gates require all
+three successful finite measurements, not a median of surviving trials.
 
 ## Troubleshooting
 
@@ -238,5 +258,5 @@ verdict or any failing stage fails the workflow and the later stages stay
   retries; reproduce on an idle machine before calling it a regression.
 - **Pico problems:** `TAS\pico\deploy.ps1 -Check` confirms the board runs the
   committed firmware; the harness releases all keys on the port before every
-  run, and a `Cannot open COM7` line in a steered mode's log means its drift
-  verdict was reached without steering.
+  run. A missing port or failed steering write fails a steered mode; fix the
+  hardware connection before retrying.

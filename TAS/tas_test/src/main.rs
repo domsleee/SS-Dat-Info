@@ -13,6 +13,7 @@ mod cont_hijack;
 mod cont_reliability;
 mod cont_restart_race;
 mod cont_ui;
+mod cycles;
 mod dialog_e2e;
 mod drift;
 mod drift_speed;
@@ -42,6 +43,7 @@ mod speed;
 mod speed_reset;
 mod steer_impact;
 mod stop_play_flake;
+mod timing;
 mod video_rate;
 mod win32;
 
@@ -64,6 +66,12 @@ const MODES: &[Mode] = &[
         usage: "[--recording PATH] [--splice N] [--iterations N]",
         summary: "cont-ui-left-spam, then acceptance, then regression as child processes",
         run: |args| report(live_suite::run(args, output_dir()), "LIVE SUITE FAILED"),
+    },
+    Mode {
+        name: "live-full",
+        usage: "",
+        summary: "Full live regression plan, including timing, persistence and menu navigation",
+        run: |args| no_args(args) && report(live_suite::run_full(output_dir()), "LIVE SUITE FAILED"),
     },
     Mode {
         name: "cont-ui-left-spam",

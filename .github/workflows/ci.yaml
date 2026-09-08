@@ -102,19 +102,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cd TAS && cargo fmt --all --check
-      - run: cd TAS && cargo clippy --workspace --all-targets -- -D warnings
-      - name: Test TAS offline tools
-        run: python -m unittest discover -s TAS/tools -p test_tools.py -v
-      - run: cd TAS && cargo test --release
+      - name: Install task runner
+        run: cargo install just --locked --version 1.55.1
+      - name: Run the local TAS quality gate
+        run: just check_all
       - name: Build TAS native DLL
         shell: pwsh
         run: |
           $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           & "$vsPath\MSBuild\Current\Bin\MSBuild.exe" TAS/TAS_Helper/TAS_Helper.vcxproj /v:minimal /p:Configuration=Release /p:Platform=Win32 /m
-      - name: Test TAS native policies
-        shell: pwsh
-        run: ./TAS/tools/test_dll_hidden.ps1
       - name: Build TAS Rust binaries for staging
         run: cd TAS && cargo build --release
       - name: Build injector (TAS payload)
