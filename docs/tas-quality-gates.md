@@ -244,6 +244,10 @@ in a running game. Deploy and restart before testing a native change.
 Each stage has a 1,800-second deadline, overridable by the positive integer
 `TAS_STAGE_TIMEOUT_SECONDS`. The report is atomically updated before and after
 each stage, with `running`, `passed`, `failed` or `not-run` states under `stages`.
+After each child, including failure/timeout, the suite requires an acknowledged
+ordinary STOP, cleared input protection and Pico key release, and restores 1x
+speed. Natural PLAY completion alone is not sufficient cleanup. A cleanup failure
+fails the stage and prevents the next child from starting.
 Preflight failures are reported separately. Timeout kills only the owned child
 process tree and fails the run. `TAS_SUITE_PID` identifies the parent to reset
 helpers; custom revival scripts must preserve it as well as `TAS_TEST_PID`.
