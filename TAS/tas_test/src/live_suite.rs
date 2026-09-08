@@ -327,13 +327,18 @@ fn run_plan(
                 command.creation_flags(0x08000000);
             }
             let mut child = command.spawn().map_err(|e| e.to_string())?;
-            let status = wait_child(&mut child, Duration::from_secs(timeout))?;
-            println!("END {}: {}", stage.name, status);
-            if status.success() {
-                Ok(())
-            } else {
-                Err(format!("{status}; see {}", log_path.display()))
-            }
+            let result = wait_child(&mut child, Duration::from_secs(timeout)).and_then(|status| {
+                println!("END {}: {}", stage.name, status);
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("{status}; see {}", log_path.display()))
+                }
+            });
+            // Natural PLAY completion is not ordinary STOP: aligned transport
+            // can leave restart/input protection installed. Retire that state
+            // even if the child failed or timed out, before another case starts.
+            finish_stage(result, cleanup_stage)
         },
         |stages| {
             tas_codec::save_atomic(&summary, &serde_json::to_vec_pretty(&serde_json::json!({
@@ -353,9 +358,73 @@ fn run_plan(
     }
 }
 
+fn finish_stage(
+    result: Result<(), String>,
+    cleanup: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match (result, cleanup()) {
+        (Ok(()), cleanup) => cleanup,
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup)) => Err(format!("{error}; cleanup failed: {cleanup}")),
+    }
+}
+
+fn cleanup_stage() -> Result<(), String> {
+    use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
+    let mut client = TasSharedMemoryClient::open().map_err(|e| format!("Stage cleanup: {e}"))?;
+    client.send_command(TasCommand::Stop);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !client.command_idle() || client.mode_volatile() != TasMode::Off as u32 {
+        if Instant::now() >= deadline {
+            return Err("Stage cleanup: STOP was not acknowledged".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if client.state().cont_suppress_input != 0 {
+        return Err("Stage cleanup: input protection remained set after STOP".into());
+    }
+    client.state_mut().playback_speed = 1.0;
+    let mut pico = crate::harness::PicoKeys::open_checked()?;
+    if !pico.send(255) {
+        return Err("Stage cleanup: Pico key release failed".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cleanup_always_runs_and_its_failure_cannot_pass_the_stage() {
+        for stage_ok in [false, true] {
+            for cleanup_ok in [false, true] {
+                let mut calls = 0;
+                let result = finish_stage(
+                    if stage_ok {
+                        Ok(())
+                    } else {
+                        Err("stage failed".into())
+                    },
+                    || {
+                        calls += 1;
+                        if cleanup_ok {
+                            Ok(())
+                        } else {
+                            Err("STOP failed".into())
+                        }
+                    },
+                );
+                assert_eq!(calls, 1);
+                assert_eq!(result.is_ok(), stage_ok && cleanup_ok);
+                if !stage_ok {
+                    assert!(result.as_ref().unwrap_err().contains("stage failed"));
+                }
+                if !cleanup_ok {
+                    assert!(result.as_ref().unwrap_err().contains("STOP failed"));
+                }
+            }
+        }
+    }
     #[test]
     fn soak_changes_repetitions_without_dropping_functional_contracts() {
         let functional = plan(&[], true);
