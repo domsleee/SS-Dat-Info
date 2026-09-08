@@ -670,6 +670,50 @@ static void FlushPendingLog() {
     }
 }
 
+// Complete before processing a cycle as well as after the last prefix tick.
+// The controller may only approve after cave5 has parked at the splice;
+// processing another PLAY tick on resume duplicates that tick in the saved run.
+static void CompleteContinueSplice(TasSharedState* s) {
+    uint32_t aligned_splice = GateAlignedSplicePos(
+        s->continue_from_frame, s->gate_index, s->gate_align_rec);
+    // Aligned splice interlock: only a watcher-approved prefix may be
+    // spliced. cave5 parks playback AT the splice while unapproved.
+    if (g_cave2_contArmed && s->continue_from_frame > 0
+            && s->playback_pos >= aligned_splice
+            && (s->gate_align_rec == 0 || s->cont_splice_approved != 0)) {
+        uint32_t rec_splice = s->continue_from_frame;
+        s->recorded_count = rec_splice;
+        // Drop to the user's resume speed ATOMICALLY here, at the exact
+        // splice tick. Otherwise the recording keeps fast-forwarding at the
+        // catch-up rate (e.g. 64x) for the whole window until the UI polls,
+        // sees PLAY->REC, and restores the speed — a variable post-splice
+        // overshoot. Cave5 picks this up next tick.
+        if (s->cont_resume_speed > 0.0f) {
+            s->playback_speed = s->cont_resume_speed;
+        }
+        // Signal cave5 to clear the catch-up clock backlog on its next tick
+        // (advance the game-time accumulator to "now" without processing the
+        // backlog ticks) so the resume is frame-exact at full speed — no
+        // end-of-replay deceleration needed.
+        g_contResetPending = 1;
+
+        // Record new segment boundary
+        uint32_t segIdx = s->segment_count;
+        if (segIdx < TAS_MAX_SEGMENTS) {
+            s->segment_boundaries[segIdx].frame = rec_splice;
+            s->segment_boundaries[segIdx].input_log_offset = rec_splice;
+            s->segment_count = segIdx + 1;
+        }
+        s->segment_start_frame = rec_splice;
+
+        s->mode = MODE_REC;
+        s->continue_from_frame = 0;  // Clear splice marker
+        g_cave2_contArmed = 0;       // splice consumed — close the gate
+        g_cave2_logParam = rec_splice;
+        g_cave2_pendingLog = 6;
+    }
+}
+
 // Cave 2 callback logic — called with FPU state saved/restored.
 // Separated from the FSAVE wrapper because MSVC forbids __asm in functions with SEH.
 static void __declspec(noinline) Cave2_Logic() {
@@ -781,6 +825,8 @@ static void __declspec(noinline) Cave2_Logic() {
 
     uint32_t kbobj = GetKeyboardObject(addr);
     if (!kbobj) return;
+
+    if (s->mode == MODE_PLAY) CompleteContinueSplice(s);
 
     if (s->mode == MODE_REC) {
         uint32_t index = s->recorded_count;
@@ -924,61 +970,7 @@ static void __declspec(noinline) Cave2_Logic() {
             g_cave2_pendingLog = 11;
         }
 
-        // Continue Record: auto-switch to REC AFTER processing the splice frame.
-        // This ensures the splice frame gets normal PLAY processing (input injection
-        // + coordinate capture), maintaining symmetry with the final PLAY phase.
-        // Gated on g_cave2_contArmed: only a PLAY entered via CMD_ARM_CONTINUE may
-        // splice. A marker that lands in shared memory by any other route (stray
-        // writer mid-replay, stale value, UI setting continue_from during PLAY)
-        // must never hijack a plain replay into REC.
-        // Gate-aligned CONT: the splice fires at the aligned PLAY index, but
-        // the recording stays in rec-index space — recorded_count and the
-        // segment boundary are the ORIGINAL continue_from_frame, so the saved
-        // recording is byte-consistent with the one that was loaded and needs
-        // no input_log rewrite. Unaligned CONT: aligned==continue_from_frame
-        // and rec_splice==splice_pos, so this is byte-identical to before.
-        uint32_t aligned_splice = GateAlignedSplicePos(
-            s->continue_from_frame, s->gate_index, s->gate_align_rec);
-        // Aligned splice interlock: only a watcher-approved prefix may be
-        // spliced. cave5 parks playback AT the splice while unapproved, so
-        // this condition is normally decided long before it is reached —
-        // the check here is the second lock on the same door.
-        if (g_cave2_contArmed && s->continue_from_frame > 0
-                && s->playback_pos >= aligned_splice
-                && (s->gate_align_rec == 0 || s->cont_splice_approved != 0)) {
-            uint32_t rec_splice = s->continue_from_frame;
-            s->recorded_count = rec_splice;
-
-
-            // Drop to the user's resume speed ATOMICALLY here, at the exact
-            // splice tick. Otherwise the recording keeps fast-forwarding at the
-            // catch-up rate (e.g. 64x) for the whole window until the UI polls,
-            // sees PLAY->REC, and restores the speed — a variable post-splice
-            // overshoot. Cave5 picks this up next tick.
-            if (s->cont_resume_speed > 0.0f) {
-                s->playback_speed = s->cont_resume_speed;
-            }
-            // Signal cave5 to clear the catch-up clock backlog on its next tick
-            // (advance the game-time accumulator to "now" without processing the
-            // backlog ticks) so the resume is frame-exact at full speed — no
-            // end-of-replay deceleration needed.
-            g_contResetPending = 1;
-
-            // Record new segment boundary
-            uint32_t segIdx = s->segment_count;
-            if (segIdx < TAS_MAX_SEGMENTS) {
-                s->segment_boundaries[segIdx].frame = rec_splice;
-                s->segment_boundaries[segIdx].input_log_offset = rec_splice;
-                s->segment_count = segIdx + 1;
-            }
-            s->segment_start_frame = rec_splice;
-
-            s->mode = MODE_REC;
-            s->continue_from_frame = 0;  // Clear splice marker
-            g_cave2_contArmed = 0;       // splice consumed — close the gate
-            g_cave2_logParam = rec_splice;
-            g_cave2_pendingLog = 6;
-        }
+        CompleteContinueSplice(s);
     }
 }
 

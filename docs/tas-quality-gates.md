@@ -85,7 +85,7 @@ refreshes its long holds; other steered patterns do not silently acquire keepali
 |---|---|---|---|
 | `smoke` | no | `*** SMOKE TEST PASSED ***` | Pipeline liveness (~40 s): ticks captured, playback ran to completion, player moved in REC and PLAY. REC and PLAY start from different spawns here, so liveness is the whole verdict. `just test_smoke`. |
 | `f5` | no | `=== Overall: ALL GATES PASS ===` | F5-aligned straight-line REC then PLAY through the gate checks. |
-| `segment` | yes | `*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***` | Two-segment CONT: LEFT segment, F5-matched CONT into a RIGHT segment, full replay with zero drift at the boundary. |
+| `segment` | yes | `*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***` | Product-aligned CONT at frame 500 while LEFT is held, then RIGHT steering. Requires two exact segment boundaries, released tail and complete gate-relative zero drift; covers approval arriving at the parked splice. |
 | `replay <file.tasrec> [--iterations N] [--verbose] [--no-match]` | no | `Result: ZERO DRIFT in all N iterations` | Loads a `.tasrec` and replays it N times; drift, incomplete playback or a failed start match fails. `just test_replay FILE`. |
 | `reliability [--iterations N] [--speed X]` | yes | `*** RELIABILITY TEST PASSED ***` | N consecutive steered REC+PLAY cycles at one speed (default 10 at 12x). Shares the procedure with drift-speed, preserving its 50-tick rather than 100-tick neutral tail and mandatory movement gates. |
 | `drift-speed` | yes | `*** DRIFT-AT-SPEED TEST PASSED ***` | REC 2x/PLAY 2x and REC 1x/PLAY 2x both replay with zero drift. |

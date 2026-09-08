@@ -32,6 +32,13 @@ inline uint32_t GateAlignedSplicePos(uint32_t continue_from_frame,
     return live_gate + (continue_from_frame - rec_gate);
 }
 
+// Approval can arrive while parked exactly at the splice. That next cycle
+// belongs to REC, not an additional PLAY tick; cap its batch to one so the
+// old catch-up speed cannot spill into recording before the clock reset.
+inline uint32_t ContinueSpliceTickLimit(uint32_t pos, uint32_t splice, bool approved) {
+    return pos < splice ? splice - pos : (approved ? 1u : 0u);
+}
+
 inline uint32_t GateAlignedInputSource(uint32_t pos, uint32_t live_gate,
                                        uint32_t rec_gate, uint32_t recorded_count) {
     if (rec_gate == 0 || rec_gate >= recorded_count) {

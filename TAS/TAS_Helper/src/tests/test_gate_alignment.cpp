@@ -40,5 +40,11 @@ int main() {
     check(GateAlignedSplicePos(299, 301, 299) == 299, "splice_at_the_gate_is_not_aligned");
     check(GateAlignedSplicePos(100, 301, 299) == 100, "splice_inside_the_countdown_is_not_aligned");
 
+    check(ContinueSpliceTickLimit(497, 498, false) == 1, "last_prefix_tick_can_run_before_approval");
+    check(ContinueSpliceTickLimit(498, 498, false) == 0, "unapproved_splice_stays_parked");
+    check(ContinueSpliceTickLimit(498, 498, true) == 1, "late_approval_allows_only_one_resume_tick");
+    check(ContinueSpliceTickLimit(497, 498, true) == 1, "early_approval_still_lands_on_splice");
+    check(ContinueSpliceTickLimit(495, 498, true) == 3, "catchup_batch_cannot_cross_splice");
+
     return FinishTests();
 }
