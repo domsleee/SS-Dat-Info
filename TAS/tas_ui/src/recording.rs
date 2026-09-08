@@ -2,7 +2,6 @@ use crate::history_store_v2::BlobRef;
 use crate::ui_log::UiLog;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 use tas_shared::{TasSharedState, TAS_MAX_TICKS};
 
@@ -216,15 +215,6 @@ impl RecoverySessionContext {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct RecoveryMetadata {
-    version: u32,
-    saved_at: String,
-    recorded_count: u32,
-    segment_count: usize,
-    session: RecoverySessionContext,
-}
-
 pub struct RecoveryCheckpoint {
     pub session: RecoverySessionContext,
     pub snapshot: RecordingSnapshot,
@@ -315,7 +305,6 @@ impl RecoveryStore {
             segments: segments.to_vec(),
             session: session.clone(),
             recording_path: self.recording_path.clone(),
-            metadata_path: self.metadata_path.clone(),
         })
     }
 }
@@ -328,175 +317,116 @@ pub struct RecoveryWriteJob {
     segments: Vec<Segment>,
     session: RecoverySessionContext,
     recording_path: PathBuf,
-    metadata_path: PathBuf,
 }
 
 impl RecoveryWriteJob {
     pub fn write(self) -> Result<(), String> {
+        if self.session.end_tick != self.snapshot.recorded_count
+            || self.session.start_tick >= self.session.end_tick
+        {
+            return Err("Recovery session does not match its recording".into());
+        }
         let mut state = tas_shared::zeroed_boxed();
         self.snapshot.restore_to(&mut state);
         self.session.apply_stamps(&mut state);
 
-        let tmp_recording_path = temp_path_for(&self.recording_path);
         let identity = IdentityStamps {
             renderer_id: self.session.renderer_id,
             fpu_control_word: self.session.fpu_control_word,
             rider_character: self.session.rider_character,
             rider_stance: self.session.rider_stance,
         };
-        RecordingFile::save_with_segments(
+        let bytes = RecordingFile::encode_with_segments(
             &state,
-            &tmp_recording_path,
             &self.segments,
             Some(&identity),
+            Some(self.session),
         )?;
-        atomic_replace_file(&tmp_recording_path, &self.recording_path)?;
-
-        let metadata = RecoveryMetadata {
-            version: 1,
-            saved_at: chrono::Local::now().to_rfc3339(),
-            recorded_count: self.snapshot.recorded_count,
-            segment_count: self.segments.len(),
-            session: self.session,
-        };
-        let metadata_json = serde_json::to_vec_pretty(&metadata)
-            .map_err(|e| format!("failed to serialize recovery metadata: {}", e))?;
-
-        let tmp_metadata_path = temp_path_for(&self.metadata_path);
-        std::fs::write(&tmp_metadata_path, metadata_json).map_err(|e| {
-            format!(
-                "failed to write temp recovery metadata {}: {}",
-                tmp_metadata_path.display(),
-                e
-            )
-        })?;
-        atomic_replace_file(&tmp_metadata_path, &self.metadata_path)?;
-        Ok(())
+        tas_codec::save_atomic(&self.recording_path, &bytes)
     }
 }
 
-/// Serialized off-thread recovery-checkpoint writer. Replaces the old
-/// fire-and-forget `thread::spawn` per write, which had no ordering and could
-/// land AFTER `clear_pending()` — resurrecting a stale checkpoint into a
-/// duplicate "Recovered" entry on the next launch. Jobs are processed in
-/// submission order; within a coalesced batch only the newest job runs (older
-/// ones are superseded on disk anyway). `flush()` is a drain barrier: it blocks
-/// until every queued job has been written, so the caller can safely
-/// `clear_pending()` afterwards with no in-flight write able to recreate the
-/// files.
+/// Recovery and history share the same coalescing and flush/error contract.
 pub struct RecoveryWriter {
-    tx: Option<Sender<RecoveryMsg>>,
-    worker: Option<std::thread::JoinHandle<()>>,
-}
-
-enum RecoveryMsg {
-    Write(RecoveryWriteJob),
-    Flush(Sender<()>),
+    inner: Result<crate::worker::CoalescingWriter<RecoveryWriteJob>, String>,
 }
 
 impl RecoveryWriter {
     pub fn new() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<RecoveryMsg>();
-        let worker = std::thread::Builder::new()
-            .name("recovery-writer".into())
-            .spawn(move || {
-                while let Ok(msg) = rx.recv() {
-                    // Coalesce a burst: keep only the newest write (older
-                    // checkpoints are superseded), then answer any flushes.
-                    let mut latest: Option<RecoveryWriteJob> = None;
-                    let mut acks: Vec<Sender<()>> = Vec::new();
-                    let mut next = Some(msg);
-                    while let Some(m) = next {
-                        match m {
-                            RecoveryMsg::Write(job) => latest = Some(job),
-                            RecoveryMsg::Flush(ack) => acks.push(ack),
-                        }
-                        next = rx.try_recv().ok();
-                    }
-                    if let Some(job) = latest {
-                        if let Err(e) = job.write() {
-                            eprintln!("[recovery] checkpoint write failed: {}", e);
-                        }
-                    }
-                    for ack in acks {
-                        let _ = ack.send(());
-                    }
-                }
-            })
-            .ok();
         Self {
-            tx: Some(tx),
-            worker,
+            inner: crate::worker::CoalescingWriter::spawn("recovery", RecoveryWriteJob::write),
         }
     }
-
-    pub fn submit(&self, job: RecoveryWriteJob) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(RecoveryMsg::Write(job));
-        }
+    pub fn submit(&self, job: RecoveryWriteJob) -> bool {
+        self.inner.as_ref().is_ok_and(|writer| writer.submit(job))
     }
-
-    /// Block until every queued checkpoint write has hit disk. Call this before
-    /// `RecoveryStore::clear_pending()` so no late write resurrects the files.
-    pub fn flush(&self) {
-        if let Some(tx) = &self.tx {
-            let (a, r) = std::sync::mpsc::channel();
-            if tx.send(RecoveryMsg::Flush(a)).is_ok() {
-                let _ = r.recv();
-            }
+    pub fn flush(&self) -> Result<(), String> {
+        self.inner.as_ref().map_err(Clone::clone)?.flush()
+    }
+    pub fn take_errors(&self) -> Vec<String> {
+        match &self.inner {
+            Ok(writer) => writer.take_errors(),
+            Err(error) => vec![error.clone()],
         }
     }
 }
-
 impl Default for RecoveryWriter {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Drop for RecoveryWriter {
-    fn drop(&mut self) {
-        self.flush();
-        self.tx = None;
-        if let Some(w) = self.worker.take() {
-            let _ = w.join();
-        }
-    }
-}
-
 impl RecoveryStore {
     pub fn load_pending(&self) -> Result<Option<RecoveryCheckpoint>, String> {
-        if !self.metadata_path.exists() || !self.recording_path.exists() {
-            return Ok(None);
+        if !self.recording_path.exists() {
+            return if self.metadata_path.exists() {
+                Err("Recovery metadata exists without its recording; files retained".into())
+            } else {
+                Ok(None)
+            };
         }
-
-        let metadata_json = std::fs::read_to_string(&self.metadata_path).map_err(|e| {
-            format!(
-                "failed to read recovery metadata {}: {}",
-                self.metadata_path.display(),
-                e
-            )
-        })?;
-        let metadata: RecoveryMetadata = serde_json::from_str(&metadata_json)
-            .map_err(|e| format!("failed to parse recovery metadata: {}", e))?;
-
+        let data = tas_codec::read_bounded(&self.recording_path)?;
         let mut state = tas_shared::zeroed_boxed();
-        let _ = RecordingFile::load(&mut state, &self.recording_path).map_err(|e| {
-            format!(
-                "failed to load recovery recording {}: {}",
-                self.recording_path.display(),
-                e
-            )
-        })?;
-
+        let meta = RecordingFile::load_bytes(&mut state, &data)?;
         if state.recorded_count == 0 {
             return Ok(None);
         }
-
+        // Old sidecars cannot be bound to these bytes, even when counts match.
+        // Recover the take, but never adopt possibly unrelated track/session stamps.
+        let session = match meta.recovery_session {
+            Some(session) => {
+                if session.end_tick != state.recorded_count
+                    || session.start_tick >= session.end_tick
+                {
+                    return Err("Recovery session does not match its recording".into());
+                }
+                session
+            }
+            None => {
+                let mut session = RecoverySessionContext::from_ticks(
+                    RecordingSessionKind::Rec,
+                    0,
+                    state.recorded_count,
+                )
+                .ok_or("Empty recovery recording")?;
+                session.label = "Recovered recording (legacy session unknown)".into();
+                let identity = IdentityStamps::from_metadata(&meta);
+                session.renderer_id = identity.renderer_id;
+                session.fpu_control_word = identity.fpu_control_word;
+                session.rider_character = identity.rider_character;
+                session.rider_stance = identity.rider_stance;
+                session
+            }
+        };
         Ok(Some(RecoveryCheckpoint {
-            session: metadata.session,
+            session,
             snapshot: RecordingSnapshot::from_state(&state),
         }))
+    }
+
+    pub fn retry_failed_write(&mut self) {
+        self.last_recorded_count = 0;
+        self.last_write_at = None;
     }
 
     pub fn clear_pending(&mut self) -> Result<(), String> {
@@ -506,36 +436,6 @@ impl RecoveryStore {
         self.last_write_at = None;
         Ok(())
     }
-}
-
-fn temp_path_for(path: &Path) -> PathBuf {
-    let nonce = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "recovery".to_string());
-    path.with_file_name(format!("{}.{}.tmp", name, nonce))
-}
-
-/// Atomically replace `final_path` with `temp_path`. `std::fs::rename` performs
-/// an atomic replace of an EXISTING destination (MoveFileExW with
-/// MOVEFILE_REPLACE_EXISTING on Windows; `rename(2)` on Unix) — the destination
-/// is always old-or-new, never missing. This mirrors the v2 store's manifest
-/// publish (proven in production, replacing `manifest.json` every persist).
-///
-/// The previous remove-then-rename fallback opened a crash window where the
-/// destination was briefly absent — exactly the wrong property for a
-/// crash-recovery file — so it is gone. On failure the temp is cleaned up.
-fn atomic_replace_file(temp_path: &Path, final_path: &Path) -> Result<(), String> {
-    std::fs::rename(temp_path, final_path).map_err(|e| {
-        let _ = std::fs::remove_file(temp_path);
-        format!(
-            "failed to replace {} with {}: {}",
-            final_path.display(),
-            temp_path.display(),
-            e
-        )
-    })
 }
 
 fn remove_if_exists(path: &Path) -> Result<(), String> {
@@ -581,6 +481,8 @@ pub struct RecordingMetadata {
     /// the trajectory too. `None` = unknown / pre-stamp file.
     #[serde(default)]
     pub stance: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_session: Option<RecoverySessionContext>,
 }
 
 impl RecordingMetadata {
@@ -683,6 +585,16 @@ impl RecordingFile {
         segments: &[Segment],
         identity: Option<&IdentityStamps>,
     ) -> Result<(), String> {
+        let bytes = Self::encode_with_segments(state, segments, identity, None)?;
+        tas_codec::save_atomic(path, &bytes)
+    }
+
+    fn encode_with_segments(
+        state: &TasSharedState,
+        segments: &[Segment],
+        identity: Option<&IdentityStamps>,
+        recovery_session: Option<RecoverySessionContext>,
+    ) -> Result<Vec<u8>, String> {
         let count = state.recorded_count as usize;
         if count == 0 {
             return Err("Nothing recorded".into());
@@ -700,6 +612,7 @@ impl RecordingFile {
             timestamp: chrono::Local::now().to_rfc3339(),
             notes: String::new(),
             segments: segments.to_vec(),
+            recovery_session,
             renderer: (state.renderer_id != tas_shared::TAS_RENDERER_UNKNOWN)
                 .then(|| tas_shared::renderer_name(state.renderer_id).to_string()),
             fpu_control_word: (state.fpu_control_word != 0).then_some(state.fpu_control_word),
@@ -715,12 +628,11 @@ impl RecordingFile {
         }
 
         let meta_json = serde_json::to_string_pretty(&meta).map_err(|e| format!("{}", e))?;
-        let data = tas_codec::encode(
+        tas_codec::encode(
             meta_json.as_bytes(),
             &state.input_log[..count],
             &state.rec_coords[..count],
-        )?;
-        tas_codec::save_atomic(path, &data)
+        )
     }
 
     /// Parse only the JSON header of a `.tasrec` (same bounds as `load`).
@@ -736,7 +648,12 @@ impl RecordingFile {
         path: &std::path::Path,
     ) -> Result<(u32, Vec<Segment>), String> {
         let data = tas_codec::read_bounded(path)?;
-        let meta_len = tas_codec::header_meta_len(&data)?;
+        let meta = Self::load_bytes(state, &data)?;
+        Ok((meta.recorded_count, meta.segments))
+    }
+
+    fn load_bytes(state: &mut TasSharedState, data: &[u8]) -> Result<RecordingMetadata, String> {
+        let meta_len = tas_codec::header_meta_len(data)?;
         let meta: RecordingMetadata =
             serde_json::from_slice(&data[4..4 + meta_len]).map_err(|e| format!("{}", e))?;
 
@@ -745,7 +662,7 @@ impl RecordingFile {
             return Err(format!("Recording too long: {} ticks", count));
         }
         // Legacy files may end after the input log: coordinates stay zeroed.
-        let body = tas_codec::decode_body(&data, meta_len, count, false)?;
+        let body = tas_codec::decode_body(data, meta_len, count, false)?;
 
         // Clear and load input log
         state.input_log[..count].copy_from_slice(&body.input_log);
@@ -765,8 +682,7 @@ impl RecordingFile {
         state.recorded_count = meta.recorded_count;
         state.force_fixed_tick = 0; // always force fft=0 (proven zero-drift config)
 
-        let segments = meta.segments;
-        Ok((meta.recorded_count, segments))
+        Ok(meta)
     }
 }
 
@@ -2471,6 +2387,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn recovery_ignores_unbound_legacy_sidecar_and_recovers_first_recording() {
+        let root = unique_temp_root("recovery_legacy_pair");
+        let store = RecoveryStore::new_in_root(root.clone(), Duration::ZERO).unwrap();
+        let mut state = tas_shared::zeroed_boxed();
+        state.recorded_count = 2;
+        state.input_log[0] = 8;
+        RecordingFile::save_with_segments(&state, &store.recording_path, &[], None).unwrap();
+        for sidecar in [None, Some(r#"{"session":{"level":"FE"}}"#)] {
+            if let Some(json) = sidecar {
+                std::fs::write(&store.metadata_path, json).unwrap();
+            }
+            let loaded = store.load_pending().unwrap().unwrap();
+            assert_eq!(loaded.snapshot.input_log[0], 8);
+            assert_eq!(loaded.session.level, None);
+            assert!(loaded.session.label.contains("legacy session unknown"));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_checkpoint_publish_preserves_old_complete_session() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = unique_temp_root("recovery_failed_publish");
+        let mut store = RecoveryStore::new_in_root(root.clone(), Duration::ZERO).unwrap();
+        let mut state = tas_shared::zeroed_boxed();
+        state.recorded_count = 2;
+        state.input_log[0] = 1;
+        let old = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 2)
+            .unwrap()
+            .with_level(Some("FE"));
+        persist_checkpoint(&mut store, &state, &[], &old, true).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&store.recording_path)
+            .unwrap();
+        state.input_log[0] = 8;
+        let new = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 2)
+            .unwrap()
+            .with_level(Some("AM"));
+        let writer = RecoveryWriter::new();
+        assert!(writer.submit(
+            store
+                .take_write_job(&RecordingSnapshot::from_state(&state), &[], &new, true)
+                .unwrap()
+        ));
+        assert!(writer.flush().is_err());
+        assert!(!writer.take_errors().is_empty());
+        drop(lock);
+        let loaded = store.load_pending().unwrap().unwrap();
+        assert_eq!(loaded.snapshot.input_log[0], 1);
+        assert_eq!(loaded.session.level.as_deref(), Some("FE"));
+        store.retry_failed_write();
+        persist_checkpoint(&mut store, &state, &[], &new, false).unwrap();
+        let loaded = store.load_pending().unwrap().unwrap();
+        assert_eq!(loaded.snapshot.input_log[0], 8);
+        assert_eq!(loaded.session.level.as_deref(), Some("AM"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn truncated_load_does_not_replace_the_current_recording() {
+        let path = unique_temp_path("truncated_coords", "tasrec");
+        let mut original = tas_shared::zeroed_boxed();
+        original.recorded_count = 2;
+        original.input_log[0] = 3;
+        original.rec_coords[0] = [1.0, 2.0, 3.0];
+        RecordingFile::save_with_segments(&original, &path, &[], None).unwrap();
+        let mut data = std::fs::read(&path).unwrap();
+        data.pop();
+        std::fs::write(&path, data).unwrap();
+        original.input_log[0] = 9;
+        assert!(RecordingFile::load(&mut original, &path).is_err());
+        assert_eq!(original.recorded_count, 2);
+        assert_eq!(original.input_log[0], 9);
+        assert_eq!(original.rec_coords[0], [1.0, 2.0, 3.0]);
+        let _ = std::fs::remove_file(path);
+    }
+
     /// #7: a `recorded_count` beyond the fixed buffer size (corrupt shared
     /// memory / a misbehaving DLL) must clamp, not panic-slice the hot path.
     #[test]
@@ -2538,7 +2535,7 @@ mod tests {
 
         let writer = RecoveryWriter::new();
         writer.submit(job);
-        writer.flush(); // blocks until the write lands
+        writer.flush().unwrap(); // blocks until the write lands
 
         assert!(
             store.load_pending().unwrap().is_some(),
@@ -2593,10 +2590,11 @@ mod tests {
         let session6 = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 6).unwrap();
         assert!(persist_checkpoint(&mut store, &state, &[], &session6, true).unwrap());
 
-        let metadata_path = root.join("recovery_checkpoint.json");
-        let metadata_json = std::fs::read_to_string(metadata_path).unwrap();
-        let metadata: serde_json::Value = serde_json::from_str(&metadata_json).unwrap();
-        assert_eq!(metadata["recorded_count"], 6);
+        let metadata =
+            RecordingFile::read_metadata(&root.join("recovery_checkpoint.tasrec")).unwrap();
+        assert_eq!(metadata.recorded_count, 6);
+        assert_eq!(metadata.recovery_session.unwrap().end_tick, 6);
+        assert!(!root.join("recovery_checkpoint.json").exists());
 
         let tmp_files = std::fs::read_dir(&root)
             .unwrap()
