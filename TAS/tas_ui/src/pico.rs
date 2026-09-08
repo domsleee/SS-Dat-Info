@@ -2,6 +2,19 @@ use eframe::egui;
 
 use crate::ui_log::UiLog;
 
+fn probe_firmware(port: &mut (impl std::io::Read + std::io::Write + ?Sized)) -> Result<(), String> {
+    port.write_all(&[0xFF]).map_err(|e| e.to_string())?;
+    let mut reply = [0; 3];
+    port.read_exact(&mut reply)
+        .map_err(|e| format!("No firmware acknowledgement (update firmware or reset Pico): {e}"))?;
+    if reply != [0x5A, 1, 1] {
+        return Err(format!(
+            "Pico release failed or unsupported firmware reply: {reply:?}"
+        ));
+    }
+    Ok(())
+}
+
 fn is_pico_data_port(info: &serialport::SerialPortInfo) -> bool {
     // boot.py enables console (interface 0) and binary data (interface 2).
     matches!(&info.port_type, serialport::SerialPortType::UsbPort(usb)
@@ -163,17 +176,29 @@ impl PicoState {
     }
 
     pub fn soft_reconnect(&mut self) -> Result<(), String> {
-        self.send_mask(0xFD)
+        self.send_mask(0xFD)?;
+        self.disconnect();
+        Ok(())
     }
 
-    /// Quick health check: try writing 0xFF (release all). Returns true if alive.
+    /// Require a fresh firmware acknowledgement, not just a successful driver write.
     pub fn health_check(&mut self) -> bool {
         if !self.connected {
             return false;
         }
-        match self.send_mask(0xFF) {
+        let result = self
+            .port
+            .as_mut()
+            .ok_or_else(|| "Not connected".to_string())
+            .and_then(|port| {
+                port.clear(serialport::ClearBuffer::Input)
+                    .map_err(|e| e.to_string())?;
+                probe_firmware(port.as_mut())
+            });
+        match result {
             Ok(()) => true,
-            Err(_) => {
+            Err(error) => {
+                self.error = Some(error);
                 self.connected = false;
                 self.port = None;
                 false
@@ -220,9 +245,9 @@ pub fn show_panel(ui: &mut egui::Ui, pico: &mut PicoState, log: &mut UiLog) {
                     Err(e) => log.push(format!("Pico F5 error: {}", e)),
                 }
             }
-            if ui.button("Soft Reconnect").clicked() {
+            if ui.button("Reset Pico").clicked() {
                 match pico.soft_reconnect() {
-                    Ok(()) => log.push("Pico: soft reconnect sent"),
+                    Ok(()) => log.push("Pico: reset requested; reconnect after the port reappears"),
                     Err(e) => log.push(format!("Pico reconnect error: {}", e)),
                 }
             }
@@ -261,6 +286,37 @@ pub fn show_panel(ui: &mut egui::Ui, pico: &mut PicoState, log: &mut UiLog) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn firmware_probe_requires_complete_success_ack() {
+        struct Port(std::io::Cursor<Vec<u8>>, Vec<u8>);
+        impl std::io::Read for Port {
+            fn read(&mut self, data: &mut [u8]) -> std::io::Result<usize> {
+                self.0.read(data)
+            }
+        }
+        impl std::io::Write for Port {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.1.extend(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for reply in [
+            vec![],
+            vec![0x5A],
+            vec![0x5A, 0, 1],
+            vec![0x5A, 1, 2],
+            vec![0x5A, 1, 1],
+        ] {
+            let expected = reply == [0x5A, 1, 1];
+            let mut port = Port(std::io::Cursor::new(reply), vec![]);
+            assert_eq!(probe_firmware(&mut port).is_ok(), expected);
+            assert_eq!(port.1, [0xFF]);
+        }
+    }
 
     #[test]
     fn disconnect_clears_connected() {

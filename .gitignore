@@ -10,3 +10,4 @@ replays/**/*Clark*.dat
 # TAS automation artifacts and logs
 TAS/artifacts/
 TAS/tools/__pycache__/
+TAS/pico/__pycache__/
