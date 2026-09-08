@@ -146,6 +146,26 @@ pub fn judge_cont_bucket(
     if playback_pos == 0 || play_coords.is_empty() {
         return BucketVerdict::KeepWaiting;
     }
+    let end = (playback_pos as usize)
+        .min(play_coords.len())
+        .min(rec_coords.len())
+        .min(recorded_count as usize)
+        .min(
+            expected_first_moving
+                .unwrap_or(0)
+                .saturating_add(BUCKET_VALIDATE_WINDOW) as usize,
+        );
+    for k in 0..end {
+        if !play_coords[k]
+            .iter()
+            .chain(&rec_coords[k])
+            .all(|v| v.is_finite())
+        {
+            return BucketVerdict::WrongBucket {
+                observed: Some(k as u32),
+            };
+        }
+    }
     let play0 = play_coords[0];
     let play0_bits = [play0[0].to_bits(), play0[1].to_bits(), play0[2].to_bits()];
     if play0_bits != expected_start_bits {
@@ -228,6 +248,42 @@ pub fn judge_cont_bucket(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_coordinates_never_match_or_become_no_signal() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for axis in 0..3 {
+                for tick in [0, 10, 20] {
+                    for recording_side in [false, true] {
+                        let mut rec = vec![[1.0, 2.0, 3.0]; 100];
+                        for c in &mut rec[10..] {
+                            c[2] += 1.0;
+                        }
+                        let mut play = rec.clone();
+                        if recording_side {
+                            rec[tick][axis] = bad;
+                        } else {
+                            play[tick][axis] = bad;
+                        }
+                        for fingerprint in [None, Some(10)] {
+                            assert!(matches!(
+                                judge_cont_bucket(
+                                    &play,
+                                    &rec,
+                                    100,
+                                    100,
+                                    [1.0f32, 2.0, 3.0].map(f32::to_bits),
+                                    fingerprint,
+                                    100
+                                ),
+                                BucketVerdict::WrongBucket { .. }
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fn bits(x: f32, y: f32, z: f32) -> [u32; 3] {
         [x.to_bits(), y.to_bits(), z.to_bits()]

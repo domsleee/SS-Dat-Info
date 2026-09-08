@@ -1,6 +1,7 @@
 #pragma once
 #include "../stdafx.h"
 #include <atomic>
+#include "../cycle_stop_gate.hpp"
 #include "../log.hpp"
 #include "../gate_alignment.hpp"
 #include "../input_gate.hpp"
@@ -26,6 +27,7 @@
 
 // Globals accessed by hook callback
 inline TasSharedState* g_cave2State = nullptr;
+inline std::atomic_flag g_cycleStopGate = ATOMIC_FLAG_INIT;
 inline GameAddresses* g_cave2Addr = nullptr;
 static SafetyHookMid cave2Hook{};
 
@@ -452,6 +454,8 @@ static void ApplyStopTransition(TasSharedState* s, bool notifyObserverNow, bool 
 // and cleanup write. Compare-exchange on the final step avoids erasing a newer
 // command if a misbehaving writer ignored the non-idle slot while cleanup ran.
 static bool TryProcessStopCommand(TasSharedState* s, bool notifyObserverNow) {
+    CycleStopGuard guard(g_cycleStopGate, !notifyObserverNow);
+    if (!guard) return false;
     LONG expected = InterlockedCompareExchange((volatile LONG*)&s->command, CMD_IDLE, CMD_IDLE);
     if (expected != CMD_STOP && expected != CMD_STOP_FOR_RESTART) return false;
     LONG previous = InterlockedCompareExchange(
@@ -476,8 +480,7 @@ static bool ProcessCommand(TasSharedState* s) {
     if (cmd == CMD_IDLE) return true;
     if ((LONG)cmd == CAVE2_CMD_CLAIMED_STOP) return false;
     if (cmd == CMD_STOP || cmd == CMD_STOP_FOR_RESTART) {
-        TryProcessStopCommand(s, true);
-        return true;
+        return TryProcessStopCommand(s, true);
     }
 
     // Integer zero for clearing float fields without x87 instructions
@@ -997,10 +1000,11 @@ static void Cave2_MidCallback(SafetyHookContext& ctx) {
         memcpy(&cw, fpu_buf, sizeof(cw));
         s->fpu_control_word = cw;
     }
-    Cave2_Logic();
-    __asm { frstor [fpu_buf] }
-    if (s) {
+    {
+        CycleStopGuard guard(g_cycleStopGate);
+        if (guard) Cave2_Logic();
     }
+    __asm { frstor [fpu_buf] }
 }
 
 bool InstallCave2(GameAddresses& addr, TasSharedState* state) {

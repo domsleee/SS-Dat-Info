@@ -1354,10 +1354,17 @@ impl TasApp {
             self.log_lines.push(notice);
         }
         // Drain in-flight recovery writes BEFORE clearing the files.
-        self.recovery_writer.flush();
+        if let Err(error) = self.recovery_writer.flush() {
+            self.log_lines
+                .push(format!("Recovery flush failed: {error}"));
+        }
         if durable {
             if let Some(store) = self.recovery_store.as_mut() {
-                let _ = store.clear_pending();
+                if let Err(error) = store.clear_pending() {
+                    self.log_lines.push(format!(
+                        "Could not clear durable recovery checkpoint: {error}"
+                    ));
+                }
             }
         }
     }
@@ -1591,6 +1598,13 @@ impl TasApp {
         session: &recording::RecoverySessionContext,
         force: bool,
     ) {
+        for error in self.recovery_writer.take_errors() {
+            self.log_lines
+                .push(format!("Recovery persistence failed: {error}"));
+            if let Some(store) = self.recovery_store.as_mut() {
+                store.retry_failed_write();
+            }
+        }
         // Decide on the UI thread (throttle to one write per ~1.5s of recording
         // GROWTH — see DEFAULT_RECOVERY_DEBOUNCE_MS), but run the disk write OFF
         // it via the serialized RecoveryWriter so REC never hitches. STOP no
@@ -1607,7 +1621,13 @@ impl TasApp {
             // Submit to the single serialized writer (ordered + flushable),
             // NOT a detached thread — a detached write could complete after a
             // later `clear_pending()` and resurrect the checkpoint.
-            self.recovery_writer.submit(job);
+            if !self.recovery_writer.submit(job) {
+                self.log_lines
+                    .push("Recovery writer unavailable; checkpoint was not queued");
+                if let Some(store) = self.recovery_store.as_mut() {
+                    store.retry_failed_write();
+                }
+            }
         }
     }
 

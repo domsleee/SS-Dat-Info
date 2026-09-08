@@ -89,6 +89,9 @@ pub fn decode_body(
     if count > TAS_MAX_TICKS {
         return Err(format!("Recording too long: {} ticks", count));
     }
+    if meta_len > MAX_TASREC_METADATA_BYTES {
+        return Err("Recording metadata too large".into());
+    }
     let input_start = 4 + meta_len;
     let input_end = input_start
         .checked_add(count)
@@ -108,6 +111,9 @@ pub fn decode_body(
     // corrupt CONT start-matching, drift analysis, or a re-save.
     let mut rec_coords = vec![[0.0f32; 3]; count];
     let has_coords = bytes.len() >= coords_end;
+    if !has_coords && bytes.len() != input_end {
+        return Err("Truncated rec_coords".into());
+    }
     if has_coords {
         let mut offset = coords_start;
         for coord in rec_coords.iter_mut() {
@@ -118,6 +124,9 @@ pub fn decode_body(
                     bytes[offset + 2],
                     bytes[offset + 3],
                 ]);
+                if !val.is_finite() {
+                    return Err("Non-finite recording coordinate".into());
+                }
                 offset += 4;
             }
         }
@@ -145,6 +154,12 @@ pub fn encode(
             input_log.len(),
             rec_coords.len()
         ));
+    }
+    if meta_json.len() > MAX_TASREC_METADATA_BYTES || input_log.len() > TAS_MAX_TICKS {
+        return Err("Recording exceeds format limits".into());
+    }
+    if rec_coords.iter().flatten().any(|v| !v.is_finite()) {
+        return Err("Non-finite recording coordinate".into());
     }
     let mut data =
         Vec::with_capacity(4 + meta_json.len() + input_log.len() + rec_coords.len() * 12);
@@ -187,6 +202,7 @@ pub fn save_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
         .write_all(data)
         .map_err(|e| format!("failed to write {}: {}", tmp.display(), e))
     {
+        drop(file);
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
@@ -194,6 +210,7 @@ pub fn save_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
         .sync_all()
         .map_err(|e| format!("failed to flush {}: {}", tmp.display(), e))
     {
+        drop(file);
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
@@ -210,6 +227,67 @@ pub fn save_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_saves_publish_one_complete_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "codec_concurrent_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("run.tasrec");
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for byte in [1, 2] {
+                let path = &path;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    save_atomic(path, &vec![byte; 100_000]).unwrap();
+                });
+            }
+        });
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(bytes.len(), 100_000);
+        assert!(bytes.iter().all(|b| *b == bytes[0]));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn non_finite_coordinates_are_rejected_on_both_load_paths() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for axis in 0..3 {
+                let mut coord = [0.0; 3];
+                coord[axis] = bad;
+                assert!(encode(b"{}", &[0], &[coord]).is_err());
+                let mut bytes = encode(b"{}", &[0], &[[0.0; 3]]).unwrap();
+                let offset = 4 + 2 + 1 + axis * 4;
+                bytes[offset..offset + 4].copy_from_slice(&bad.to_le_bytes());
+                for required in [false, true] {
+                    assert!(decode_body(&bytes, 2, 1, required).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_every_partial_coordinate_block() {
+        let bytes = file_for(2, true);
+        let header = header_meta_len(&bytes).unwrap();
+        let input_end = 4 + header + 2;
+        assert!(decode_body(&bytes[..input_end], header, 2, false).is_ok());
+        for end in input_end + 1..bytes.len() {
+            assert!(
+                decode_body(&bytes[..end], header, 2, false).is_err(),
+                "length {end}"
+            );
+        }
+    }
 
     fn file_for(count: usize, with_coords: bool) -> Vec<u8> {
         let meta = b"{\"recorded_count\":0}";

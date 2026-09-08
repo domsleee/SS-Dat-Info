@@ -220,7 +220,7 @@ impl HistoryStoreV2 {
                             }
                             Err(BlobError::Corrupt) => {
                                 // Quarantine so we don't re-hit it every launch.
-                                quarantine_blob(&dir, id);
+                                let _ = quarantine_blob(&dir, id);
                                 warnings.push(format!(
                                     "history entry {} ('{}') blob corrupt — quarantined, unavailable",
                                     id, me.meta.name
@@ -287,7 +287,12 @@ impl HistoryStoreV2 {
             }
         }
 
-        let max_disk_id = disk_ids.iter().copied().max().unwrap_or(0);
+        let max_disk_id = disk_ids
+            .iter()
+            .copied()
+            .chain(preserved_blob_ids(&dir))
+            .max()
+            .unwrap_or(0);
         let next_entry_id = stored_next
             .max(max_manifest_id.saturating_add(1))
             .max(max_disk_id.saturating_add(1));
@@ -406,15 +411,9 @@ impl HistoryStoreV2 {
         // Immutable blobs are never overwritten. A pre-existing file at this id
         // is a stray (ids are never reused) — quarantine it before writing.
         if final_path.exists() {
-            quarantine_blob(&self.dir, id);
+            quarantine_blob(&self.dir, id)?;
         }
-        let tmp = self.dir.join(format!("{}.tasrec.tmp", id));
-        std::fs::write(&tmp, &bytes)
-            .map_err(|e| format!("failed to write blob tmp {}: {}", tmp.display(), e))?;
-        std::fs::rename(&tmp, &final_path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            format!("failed to finalize blob {}: {}", final_path.display(), e)
-        })?;
+        tas_codec::save_atomic(&final_path, &bytes)?;
         Ok(BlobRef { size, checksum })
     }
 
@@ -614,7 +613,7 @@ pub fn load_blob(dir: &Path, id: u64, blob: BlobRef) -> Result<PersistedSnapshot
         Ok(snapshot) => Ok(snapshot),
         Err(BlobError::Missing) => Err(format!("blob {} missing", blob_path(dir, id).display())),
         Err(BlobError::Corrupt) => {
-            quarantine_blob(dir, id);
+            let _ = quarantine_blob(dir, id);
             Err(format!(
                 "blob {} corrupt (quarantined)",
                 blob_path(dir, id).display()
@@ -677,7 +676,7 @@ fn quarantine_unmanifested_blobs(dir: &Path, ids: &[u64]) -> Result<(), Vec<u64>
     let mut failed = Vec::new();
     for &id in ids {
         let to = dir.join(format!("{}.tasrec.orphaned", id));
-        if std::fs::rename(blob_path(dir, id), &to).is_err() {
+        if preserve_file(&blob_path(dir, id), &to).is_err() {
             failed.push(id);
         }
     }
@@ -688,22 +687,77 @@ fn quarantine_unmanifested_blobs(dir: &Path, ids: &[u64]) -> Result<(), Vec<u64>
     }
 }
 
-/// Rename a present-but-unusable `manifest.json` aside so the next persist
+/// Preserve a present-but-unusable `manifest.json` aside so the next persist
 /// starts clean instead of re-triggering quarantine on an empty store.
-/// Best-effort: if the rename fails the corrupt file stays and the next open
+/// Best-effort: if preservation fails the corrupt file stays and the next open
 /// simply quarantines nothing (no blobs left) and warns again.
 fn set_aside_unusable_manifest(dir: &Path, warnings: &mut Vec<String>) {
-    if std::fs::rename(dir.join("manifest.json"), dir.join("manifest.corrupt.json")).is_err() {
+    if preserve_file(
+        &dir.join("manifest.json"),
+        &dir.join("manifest.corrupt.json"),
+    )
+    .is_err()
+    {
         warnings.push("unusable manifest could not be set aside".to_string());
     }
 }
 
-fn quarantine_blob(dir: &Path, id: u64) {
+fn quarantine_blob(dir: &Path, id: u64) -> Result<(), String> {
     let from = blob_path(dir, id);
     let to = dir.join(format!("{}.tasrec.corrupt", id));
-    if std::fs::rename(&from, &to).is_err() {
-        let _ = std::fs::remove_file(&from);
+    preserve_file(&from, &to).map_err(|e| format!("failed to preserve {}: {e}", from.display()))
+}
+
+// Quarantine never overwrites an earlier recovery or deletes bytes on failure.
+fn preserve_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut source = std::fs::File::open(from)?;
+    for attempt in 0u64.. {
+        let destination = if attempt == 0 {
+            to.to_path_buf()
+        } else {
+            to.with_file_name(format!(
+                "{}.{}",
+                to.file_name().unwrap().to_string_lossy(),
+                attempt
+            ))
+        };
+        let mut output = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && destination.is_file() => {
+                continue
+            }
+            Err(e) => return Err(e),
+        };
+        let result = std::io::copy(&mut source, &mut output).and_then(|_| output.sync_all());
+        drop(output);
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(destination);
+            return Err(error);
+        }
+        drop(source);
+        return std::fs::remove_file(from);
     }
+    unreachable!()
+}
+
+fn preserved_blob_ids(dir: &Path) -> Vec<u64> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let (id, suffix) = name.split_once(".tasrec.")?;
+            (suffix.starts_with("orphaned") || suffix.starts_with("corrupt"))
+                .then(|| id.parse().ok())
+                .flatten()
+        })
+        .collect()
 }
 
 fn list_blob_ids(dir: &Path) -> Vec<u64> {
@@ -770,14 +824,7 @@ fn read_manifest(dir: &Path, warnings: &mut Vec<String>) -> Option<Manifest> {
 fn write_manifest_atomic(dir: &Path, manifest: &Manifest) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(manifest)
         .map_err(|e| format!("failed to serialize manifest: {}", e))?;
-    let tmp = dir.join("manifest.json.tmp");
-    std::fs::write(&tmp, &json).map_err(|e| format!("failed to write manifest tmp: {}", e))?;
-    // std::fs::rename atomically replaces the destination (MoveFileExW with
-    // MOVEFILE_REPLACE_EXISTING on Windows): old-or-new, never missing.
-    std::fs::rename(&tmp, dir.join("manifest.json")).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("failed to publish manifest: {}", e)
-    })
+    tas_codec::save_atomic(&dir.join("manifest.json"), &json)
 }
 
 /// Resolve the persisted cursor against availability, by row order: keep it if
@@ -824,6 +871,27 @@ fn resolve_current(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_quarantine_preserves_both_generations_and_id_floor() {
+        let dir = tmp_dir("repeat_quarantine");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(blob_path(&dir, 7), b"first").unwrap();
+        HistoryStoreV2::open_lazy(dir.clone()).unwrap();
+        let (_, load) = HistoryStoreV2::open_lazy(dir.clone()).unwrap();
+        assert!(load.next_entry_id > 7);
+        std::fs::write(blob_path(&dir, 7), b"second").unwrap();
+        HistoryStoreV2::open_lazy(dir.clone()).unwrap();
+        assert_eq!(
+            std::fs::read(dir.join("7.tasrec.orphaned")).unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("7.tasrec.orphaned.1")).unwrap(),
+            b"second"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()

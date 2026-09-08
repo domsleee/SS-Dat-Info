@@ -152,7 +152,7 @@ impl DriftTracker {
             let play = state.play_coords[play_base + i];
             let rec = state.rec_coords[rec_tick];
             for (axis, max) in [(0, &mut self.max_dx), (2, &mut self.max_dz)] {
-                let d = (play[axis] - rec[axis]).abs();
+                let d = coordinate_delta(play[axis], rec[axis]);
                 if d > 0.0 && self.first_drift_tick.is_none() {
                     self.first_drift_tick = Some(rec_tick);
                 }
@@ -241,6 +241,29 @@ pub fn cont_verdict_boundary(state: &TasSharedState) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_play_banners_non_finite_ground_coordinates() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for axis in [0, 2] {
+                for recording_side in [false, true] {
+                    let mut state = tas_shared::zeroed_boxed();
+                    state.mode = TasMode::Play as u32;
+                    state.recorded_count = 2;
+                    state.playback_pos = 2;
+                    if recording_side {
+                        state.rec_coords[1][axis] = bad;
+                    } else {
+                        state.play_coords[1][axis] = bad;
+                    }
+                    let mut tracker = DriftTracker::default();
+                    tracker.scan(&state);
+                    assert!(tracker.banner_visible(&state));
+                    assert!(tracker.max_drift().is_infinite());
+                }
+            }
+        }
+    }
 
     #[test]
     fn scan_accumulates_incrementally_and_resets_when_playback_restarts() {
