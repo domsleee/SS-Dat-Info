@@ -1013,7 +1013,16 @@ mod level_seqlock_tests {
         let mut clean = 0usize;
         let mut saw_a = false;
         let mut saw_b = false;
-        for _ in 0..20_000 {
+        // Deadline, not a fixed iteration budget: a fixed burst can drain
+        // before the spawned writer thread is even scheduled (thread-spawn
+        // latency on a loaded machine), which proves nothing and fails
+        // intermittently. Loop until both publications have been observed
+        // through clean reads; every clean read still asserts coherence.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !(saw_a && saw_b) {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
             if let Some((id, path)) = level_context(s) {
                 if path.is_empty() {
                     continue; // pre-first-publication zeros
@@ -1038,8 +1047,7 @@ mod level_seqlock_tests {
         // Reads must succeed, not merely never splice — a reader that always
         // returned None would pass every assertion above. And BOTH publications
         // must have been seen, which is what proves the reader was actually
-        // running concurrently with the writer rather than sampling one quiet
-        // value 20,000 times.
+        // running concurrently with the writer.
         assert!(
             clean > 0,
             "no clean read ever completed — reader is starving"
