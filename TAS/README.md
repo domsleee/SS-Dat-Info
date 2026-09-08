@@ -15,7 +15,42 @@ just test_all         # all offline TAS tests: Rust, Python and x86 C++
 just check_all        # the same tests plus fmt and Clippy, also used by CI
 just test_live        # real game: UI LEFT-spam, acceptance, regression
 just test_live_full   # full live regression plan, ends at the main menu
+just test_live_soak   # same functional coverage, extended repetition counts
+just final           # final TAS build: full LTO, one codegen unit, stripping
+just final deploy    # keep the final settings through build and deployment
+just final test_live_full # validate the final binaries (same live prerequisites)
 ```
+
+Normal TAS `--release` builds stay optimized without whole-program LTO. The
+`final` wrapper sets Cargo's `CARGO_PROFILE_RELEASE_LTO=fat`,
+`CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1` and `CARGO_PROFILE_RELEASE_STRIP=symbols`
+only for the child workflow. Debug builds are unaffected; speed optimization and
+panic unwinding are retained. Outputs remain in `target/release`, so wrap the
+whole build/deploy/test recipe: a subsequent ordinary build replaces those outputs.
+Display_Config is a separate workspace and keeps its existing final release profile.
+
+`test_live` is the short UI/input gate (two UI trials, one acceptance run, seven
+input contracts). `test_live_full` adds distinct transport, timing, persistence
+and menu checks; repeated STOP/CONT/reliability checks use two cycles per
+configuration. Timing medians retain three samples. `test_live_soak` increases
+UI, acceptance, replay, STOP and CONT repetitions without changing their judges.
+Standalone `smoke` and `f5` remain diagnostics; `play-judge` exercises the retired
+PLAY handover path and is not a routine product gate.
+The spawn/countdown checks from `rec-start` run on both `rec-repro` captures,
+avoiding a separate recording procedure. Its standalone/file-check mode remains.
+
+Pattern holds refresh the Pico every 200 ms. Input regression and reproducibility
+compare each key's captured edges with the requested schedule, including releases,
+with 12 ticks of timing tolerance after aligning one shared first-edge origin.
+Multi-key HID changes may span adjacent game ticks; missing keys and extra edges
+still fail. The schedule uses
+10 ms per tick and these capture checks run at 1x. Firmware timeout behavior is
+tested separately, not used to shorten holds inside a game test. Old live reports
+do not validate these corrected input schedules; rerun them after rebuilding.
+The input matrix records the countdown, then drives its short patterns and
+replays through the product's gate-aligned transport. Its zero-drift verdict
+compares corresponding gate-relative frames and requires the shifted endpoint;
+arm-relative offset metrics are diagnostic, not the verdict.
 
 `just deploy_run` is the one deploy flow. It stops the game and every TAS
 process, copies `TAS_Helper.dll`, `tas_ui.exe`, `tas_test.exe` and

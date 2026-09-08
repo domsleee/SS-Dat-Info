@@ -2,6 +2,7 @@
 use crate::cont_reliability::{self, ContReliabilityReport};
 use crate::harness;
 
+#[derive(Clone)]
 pub struct Case {
     recording: &'static str,
     splice: u32,
@@ -29,9 +30,9 @@ pub const FE_10065: Case = Case {
     signature: "FE-10065 CONT",
 };
 
-fn timing_passes(case: &Case, max_overshoot: u32, best_resume_ms: f64) -> bool {
+fn timing_passes(case: &Case, max_overshoot: u32, worst_resume_ms: f64) -> bool {
     case.timing
-        .is_none_or(|(frames, ms)| max_overshoot <= frames && best_resume_ms <= ms)
+        .is_none_or(|(frames, ms)| max_overshoot <= frames && worst_resume_ms <= ms)
 }
 
 fn judge(case: &Case, report: &ContReliabilityReport) -> bool {
@@ -42,16 +43,32 @@ fn judge(case: &Case, report: &ContReliabilityReport) -> bool {
         .map(|r| r.splice_recorded_count.saturating_sub(case.splice))
         .max()
         .unwrap_or(u32::MAX);
-    let best_resume_ms = report
+    let worst_resume_ms = report
         .results
         .iter()
         .filter(|r| r.spliced)
         .map(|r| r.resume_ms)
-        .fold(f64::INFINITY, f64::min);
+        .fold(0.0, |worst, sample| {
+            if sample.is_finite() && sample >= 0.0 {
+                f64::max(worst, sample)
+            } else {
+                f64::INFINITY
+            }
+        });
     let clean = report.all_pass() && report.results.len() == case.iterations as usize;
-    let timing = timing_passes(case, max_overshoot, best_resume_ms);
-    println!("  {}x: clean={clean}, overshoot={max_overshoot}, best_resume_ms={best_resume_ms:.0}, timing_ok={timing}", report.speed);
+    let timing = timing_passes(case, max_overshoot, worst_resume_ms);
+    println!("  {}x: clean={clean}, overshoot={max_overshoot}, worst_resume_ms={worst_resume_ms:.0}, timing_ok={timing}", report.speed);
     clean && timing
+}
+
+pub fn run_iterations(case: &Case, iterations: u32) -> bool {
+    if iterations == 0 {
+        return false;
+    }
+    run(&Case {
+        iterations,
+        ..case.clone()
+    })
 }
 
 pub fn run(case: &Case) -> bool {
@@ -177,9 +194,7 @@ mod tests {
             report.results[0].splice_recorded_count += 2;
             assert_eq!(judge(case, &report), case.timing.is_none());
             report.results[0].splice_recorded_count = case.splice;
-            for r in &mut report.results {
-                r.resume_ms = 3001.0;
-            }
+            report.results[0].resume_ms = 3001.0;
             assert_eq!(judge(case, &report), case.timing.is_none());
             report.results.pop();
             assert!(!judge(case, &report));

@@ -39,7 +39,6 @@ pub struct BitmapInfo {
 pub const WM_KEYDOWN: u32 = 0x0100;
 pub const WM_KEYUP: u32 = 0x0101;
 pub const VK_RETURN: u8 = 0x0D;
-pub const VK_ESCAPE: u8 = 0x1B;
 pub const VK_LEFT: i32 = 0x25;
 pub const VK_F5: u8 = 0x74;
 pub const VK_F11: u8 = 0x7A;

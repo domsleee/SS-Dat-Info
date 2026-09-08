@@ -87,9 +87,109 @@ pub fn total_ticks(steps: &[PatternStep]) -> u32 {
     steps.last().map(|s| s.stop_tick).unwrap_or(0)
 }
 
+/// Compare the captured sequence with the requested 100 Hz input schedule.
+/// Ignore only the initial arm-to-drive offset; every subsequent edge, including
+/// the final release, must arrive within tolerance. Call after capturing a tail.
+pub fn verify_capture(steps: &[PatternStep], log: &[u8], tolerance: u32) -> Result<(), String> {
+    let mut expected = Vec::new();
+    let mut tick = 0;
+    let mut mask = 0;
+    for step in steps {
+        if step.stop_tick <= tick {
+            return Err("Input schedule contains an empty or reversed hold".into());
+        }
+        if step.mask != mask {
+            expected.push((tick, step.mask));
+            mask = step.mask;
+        }
+        tick = step.stop_tick;
+    }
+    if mask != 0 {
+        expected.push((tick, 0));
+    }
+    let mut actual = Vec::new();
+    mask = 0;
+    for (tick, &next) in log.iter().enumerate() {
+        if next != mask {
+            actual.push((tick as u32, next));
+            mask = next;
+        }
+    }
+    if expected.is_empty() || actual.is_empty() {
+        return Err(format!(
+            "Input edges: expected {expected:?}, captured {actual:?}"
+        ));
+    }
+    let offset = actual[0].0 as i64 - expected[0].0 as i64;
+    // HID/game dispatch can split a multi-key change across adjacent ticks.
+    // Compare each key's edges, sharing ONE time origin across all keys: this
+    // permits delivery skew, not dropped keys, extra presses or shortened holds.
+    for bit in 0..8 {
+        let edges = |changes: &[(u32, u8)]| {
+            let mut previous = false;
+            changes
+                .iter()
+                .filter_map(|&(tick, mask)| {
+                    let down = mask & (1 << bit) != 0;
+                    let changed = down != previous;
+                    previous = down;
+                    changed.then_some((tick, down))
+                })
+                .collect::<Vec<_>>()
+        };
+        let wanted = edges(&expected);
+        let captured = edges(&actual);
+        if wanted.len() != captured.len() {
+            return Err(format!(
+                "Key bit {bit}: expected edges {wanted:?}, captured {captured:?}"
+            ));
+        }
+        for ((want_tick, want_down), (got_tick, got_down)) in wanted.iter().zip(&captured) {
+            let skew = (*got_tick as i64 - *want_tick as i64 - offset).unsigned_abs();
+            if want_down != got_down || skew > u64::from(tolerance) {
+                return Err(format!("Key bit {bit}: expected ({want_tick}, {want_down}), captured ({got_tick}, {got_down}), aligned skew {skew} ticks"));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_checks_schedule_not_just_reproducibility() {
+        let steps = build_from_explicit(&[
+            (input_bits::LEFT | input_bits::SHIFT, 72),
+            (0, 20),
+            (input_bits::RIGHT, 36),
+        ]);
+        let mut log = vec![0; 5];
+        log.extend(vec![input_bits::LEFT | input_bits::SHIFT; 72]);
+        log.extend(vec![0; 20]);
+        log.extend(vec![input_bits::RIGHT; 36]);
+        log.extend(vec![0; 10]);
+        assert!(verify_capture(&steps, &log, 12).is_ok());
+        let mut split_report = log.clone();
+        split_report[5] = input_bits::LEFT;
+        assert!(verify_capture(&steps, &split_report, 12).is_ok());
+        split_report[6..19].fill(input_bits::LEFT);
+        assert!(verify_capture(&steps, &split_report, 12).is_err());
+        let mut extra_press = log.clone();
+        extra_press[85] = input_bits::JUMP;
+        assert!(verify_capture(&steps, &extra_press, 12).is_err());
+        let mut lost_modifier = log.clone();
+        for mask in &mut lost_modifier {
+            *mask &= !input_bits::SHIFT;
+        }
+        assert!(verify_capture(&steps, &lost_modifier, 12).is_err());
+        let mut timed_out = log.clone();
+        timed_out[55..77].fill(0);
+        assert!(verify_capture(&steps, &timed_out, 12).is_err());
+        assert!(verify_capture(&steps, &log[..133], 12).is_err());
+        assert!(verify_capture(&steps, &[], 12).is_err());
+    }
 
     #[test]
     fn test_simple_pattern() {

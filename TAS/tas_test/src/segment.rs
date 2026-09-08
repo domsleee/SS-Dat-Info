@@ -96,10 +96,14 @@ pub fn run() -> bool {
         total_count
     );
     if !harness::restart_play_and_match(&mut client, rec_start, harness::START_MATCH_RETRIES) {
-        eprintln!("WARNING: Could not match position for PLAY (continuing anyway)");
+        eprintln!("FAIL: Could not match position for PLAY");
+        harness::stop(&mut client);
+        return false;
     }
     if !harness::wait_playback(&client, total_count) {
-        eprintln!("WARNING: Playback did not complete normally");
+        eprintln!("FAIL: Playback did not complete normally");
+        harness::stop(&mut client);
+        return false;
     }
 
     harness::print_results(&client);

@@ -1,5 +1,5 @@
 //! Shared steered REC/PLAY procedure. Case data changes coverage, not failure handling.
-use crate::{drift, gates, harness, patterns};
+use crate::{gates, harness, patterns};
 use tas_shared::TasSharedMemoryClient;
 
 pub struct Case {
@@ -13,18 +13,22 @@ pub struct Case {
 
 fn cycle(client: &mut TasSharedMemoryClient, case: &Case) -> Result<bool, String> {
     client.state_mut().playback_speed = case.rec_speed;
-    if !harness::restart_and_stabilize(client) {
+    if !harness::restart_and_stabilize_inprocess(client) {
         return Err("REC restart failed".into());
     }
     client.state_mut().playback_speed = case.rec_speed;
     harness::arm_rec(client);
+    // Capture the countdown before steering, including when recording faster
+    // than real time. Product PLAY aligns input relative to this captured gate.
+    std::thread::sleep(std::time::Duration::from_secs_f64(
+        3.5 / f64::from(case.rec_speed),
+    ));
     let steps =
         patterns::with_neutral_tail(patterns::build_from_pattern("LRLR", 56, 0), case.tail_ticks);
     harness::drive_pico_steps(&steps)?;
     std::thread::sleep(std::time::Duration::from_millis(200));
     let rec_speed = client.state().playback_speed;
     let count = client.recorded_count_volatile();
-    let start = client.state().rec_coords[0];
     harness::stop(client);
     if count < 100 {
         return Err(format!("Only {count} ticks recorded"));
@@ -43,17 +47,17 @@ fn cycle(client: &mut TasSharedMemoryClient, case: &Case) -> Result<bool, String
         return Err("REC speed was overwritten".into());
     }
     client.state_mut().playback_speed = case.play_speed;
-    if !harness::restart_play_and_match(client, start, harness::START_MATCH_RETRIES) {
-        return Err("PLAY start did not match".into());
-    }
-    if !harness::wait_playback(client, count) {
+    let (rec_gate, play_gate) =
+        harness::restart_play_aligned_inprocess(client).ok_or("Product PLAY alignment failed")?;
+    let expected_end = play_gate.saturating_add(count.saturating_sub(rec_gate));
+    if !harness::wait_playback(client, expected_end) {
         return Err("PLAY did not complete".into());
     }
     if client.state().playback_speed != case.play_speed {
         return Err("PLAY speed was overwritten".into());
     }
-    let drift = drift::compute_drift(client.state(), count);
-    let assessment = gates::run_gates(client.state(), count);
+    let assessment = gates::run_gates_aligned(client.state(), count, rec_gate, play_gate);
+    let drift = &assessment.drift;
     assessment.print_summary();
     println!(
         "{}: {count} ticks, drift X={} Y={} Z={}",

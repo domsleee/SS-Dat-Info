@@ -81,6 +81,12 @@ const MODES: &[Mode] = &[
         run: |args| no_args(args) && report(live_suite::run_full(output_dir()), "LIVE SUITE FAILED"),
     },
     Mode {
+        name: "live-soak",
+        usage: "",
+        summary: "Extended live functional plan with repeated UI, acceptance and replay cycles",
+        run: |args| no_args(args) && report(live_suite::run_soak(output_dir()), "LIVE SOAK FAILED"),
+    },
+    Mode {
         name: "cont-ui-left-spam",
         usage: "[--recording PATH] [--splice N] [--iterations N]",
         summary: "Isolated tas_ui: F12 CONT with physical Pico LEFT taps, zero splice mismatch",
@@ -95,7 +101,7 @@ const MODES: &[Mode] = &[
     Mode {
         name: "regression",
         usage: "",
-        summary: "15 scripted steering patterns, REC then PLAY with zero drift; CSV + certificate",
+        summary: "Seven input contracts: verify captured keys, then REC/PLAY zero drift; CSV + certificate",
         run: run_regression,
     },
     Mode {
@@ -151,9 +157,9 @@ const MODES: &[Mode] = &[
     },
     Mode {
         name: "stop-play-flake",
-        usage: "",
+        usage: "[--iterations N]",
         summary: "PLAY, STOP at varying frames, PLAY again; second playbacks match a reference",
-        run: |args| no_args(args) && stop_play_flake::run(),
+        run: |args| { let flags = parse(args, &[flag("--iterations", None)], 0); stop_play_flake::run(num(&flags, "--iterations", 10)) },
     },
     Mode {
         name: "rec-start",
@@ -255,15 +261,15 @@ const MODES: &[Mode] = &[
     },
     Mode {
         name: "fe-cont-reliability",
-        usage: "",
+        usage: "[--iterations N]",
         summary: "FE-tremendous, five splices at 2200 at 12x",
-        run: |args| no_args(args) && cont_cases::run(&cont_cases::FE_TREMENDOUS),
+        run: |args| { let flags = parse(args, &[flag("--iterations", None)], 0); cont_cases::run_iterations(&cont_cases::FE_TREMENDOUS, num(&flags, "--iterations", 5)) },
     },
     Mode {
         name: "fe10065-cont",
-        usage: "",
+        usage: "[--iterations N]",
         summary: "FE-10065, eight splices at 6200 at 64x and 256x with resume-timing limits",
-        run: |args| no_args(args) && cont_cases::run(&cont_cases::FE_10065),
+        run: |args| { let flags = parse(args, &[flag("--iterations", None)], 0); cont_cases::run_iterations(&cont_cases::FE_10065, num(&flags, "--iterations", 8)) },
     },
     Mode {
         name: "cont-hijack",
@@ -274,7 +280,7 @@ const MODES: &[Mode] = &[
     Mode {
         name: "cont-restart-race",
         usage: "",
-        summary: "Stop+Restart together lose the Stop; Stop, wait for OFF, then Restart is accepted",
+        summary: "Product controller serializes STOP/restart/CONT and the DLL acknowledges the arm",
         run: |args| no_args(args) && cont_restart_race::run(),
     },
     Mode {

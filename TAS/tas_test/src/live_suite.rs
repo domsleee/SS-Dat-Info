@@ -29,24 +29,20 @@ fn stage(name: &'static str, args: &[&str]) -> Stage {
 
 // @ arguments resolve through the same fixture locator as individual modes.
 const FULL_CASES: &[(&str, &[&str])] = &[
-    ("smoke", &[]),
-    ("f5", &[]),
     ("segment", &[]),
-    ("replay", &["@FE-tremendous.tasrec"]),
-    ("reliability", &[]),
+    ("replay", &["@FE-tremendous.tasrec", "--iterations", "1"]),
+    ("reliability", &["--iterations", "2"]),
     ("drift-speed", &[]),
     ("pause-resume", &[]),
-    ("stop-play-flake", &[]),
-    ("rec-start", &[]),
+    ("stop-play-flake", &["--iterations", "2"]),
     ("rec-repro", &[]),
     ("steer-impact", &[]),
     ("speed", &[]),
     ("speed-reset", &[]),
     ("catchup-speed", &[]),
     ("play-pace", &[]),
-    ("play-judge", &[]),
-    ("fe-cont-reliability", &[]),
-    ("fe10065-cont", &[]),
+    ("fe-cont-reliability", &["--iterations", "2"]),
+    ("fe10065-cont", &["--iterations", "2"]),
     ("cont-hijack", &[]),
     ("cont-restart-race", &[]),
     ("cont-input-protection", &[]),
@@ -65,6 +61,23 @@ const EXCLUDED: &[(&str, &str)] = &[
     ),
     ("live", "suite entry point"),
     ("live-full", "suite entry point"),
+    ("live-soak", "extended suite entry point"),
+    (
+        "rec-start",
+        "spawn/countdown assertions run on both rec-repro captures",
+    ),
+    (
+        "smoke",
+        "standalone liveness diagnostic; acceptance checks movement and replay",
+    ),
+    (
+        "f5",
+        "standalone physical restart diagnostic; product gate uses aligned transport",
+    ),
+    (
+        "play-judge",
+        "retired PLAY handover path; run explicitly for legacy changes",
+    ),
     (
         "cont-reliability",
         "covered by the two named CONT case presets",
@@ -79,8 +92,11 @@ const EXCLUDED: &[(&str, &str)] = &[
 
 fn plan(ui_args: &[String], full: bool) -> Vec<Stage> {
     let mut ui = stage("cont-ui-left-spam", &[]);
+    if !ui_args.iter().any(|arg| arg == "--iterations") {
+        ui.args.extend(["--iterations".into(), "2".into()]);
+    }
     ui.args.extend_from_slice(ui_args);
-    let mut stages = vec![ui, stage("acceptance", &[]), stage("regression", &[])];
+    let mut stages = vec![ui, stage("acceptance", &["1"]), stage("regression", &[])];
     if full {
         stages.extend(FULL_CASES.iter().map(|(name, args)| stage(name, args)));
     }
@@ -224,14 +240,42 @@ fn preflight(stages: &mut [Stage], full: bool, executable: &Path) -> Result<(), 
 
 pub fn run(args: &[String], output: PathBuf) -> Result<(), String> {
     crate::cont_ui::validate_options(args)?;
-    run_plan(plan(args, false), false, output)
+    run_plan(plan(args, false), false, "live", output)
 }
 
 pub fn run_full(output: PathBuf) -> Result<(), String> {
-    run_plan(plan(&[], true), true, output)
+    run_plan(plan(&[], true), true, "live-full", output)
 }
 
-fn run_plan(mut stages: Vec<Stage>, full: bool, output: PathBuf) -> Result<(), String> {
+pub fn run_soak(output: PathBuf) -> Result<(), String> {
+    run_plan(soak_plan(), true, "live-soak", output)
+}
+
+fn soak_plan() -> Vec<Stage> {
+    let mut stages = plan(&[], true);
+    for stage in &mut stages {
+        match stage.name {
+            "cont-ui-left-spam" => {
+                stage.args = vec![stage.name.into(), "--iterations".into(), "10".into()]
+            }
+            "acceptance" => stage.args = vec![stage.name.into(), "5".into()],
+            "replay" => *stage.args.last_mut().unwrap() = "5".into(),
+            "reliability" => *stage.args.last_mut().unwrap() = "10".into(),
+            "stop-play-flake" => *stage.args.last_mut().unwrap() = "10".into(),
+            "fe-cont-reliability" => *stage.args.last_mut().unwrap() = "5".into(),
+            "fe10065-cont" => *stage.args.last_mut().unwrap() = "8".into(),
+            _ => (),
+        }
+    }
+    stages
+}
+
+fn run_plan(
+    mut stages: Vec<Stage>,
+    full: bool,
+    suite: &str,
+    output: PathBuf,
+) -> Result<(), String> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -250,7 +294,7 @@ fn run_plan(mut stages: Vec<Stage>, full: bool, output: PathBuf) -> Result<(), S
         tas_codec::save_atomic(
             &summary,
             &serde_json::to_vec_pretty(&serde_json::json!({
-                "preflight_error": error, "stages": stages,
+                "suite": suite, "preflight_error": error, "stages": stages,
             }))
             .map_err(|e| e.to_string())?,
         )?;
@@ -293,7 +337,7 @@ fn run_plan(mut stages: Vec<Stage>, full: bool, output: PathBuf) -> Result<(), S
         },
         |stages| {
             tas_codec::save_atomic(&summary, &serde_json::to_vec_pretty(&serde_json::json!({
-            "checkout_revision": revision, "full": full, "stages": stages,
+            "suite": suite, "checkout_revision": revision, "full": full, "stages": stages,
             "deployment_check": if full { "on-disk DLL matches local build; loaded DLL identity not verified" } else { "not checked" },
         })).map_err(|e| e.to_string())?)
         },
@@ -312,6 +356,45 @@ fn run_plan(mut stages: Vec<Stage>, full: bool, output: PathBuf) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn soak_changes_repetitions_without_dropping_functional_contracts() {
+        let functional = plan(&[], true);
+        let soak = soak_plan();
+        assert_eq!(
+            functional.iter().map(|s| s.name).collect::<Vec<_>>(),
+            soak.iter().map(|s| s.name).collect::<Vec<_>>()
+        );
+        for name in [
+            "reliability",
+            "stop-play-flake",
+            "fe-cont-reliability",
+            "fe10065-cont",
+        ] {
+            assert_eq!(
+                functional
+                    .iter()
+                    .find(|s| s.name == name)
+                    .unwrap()
+                    .args
+                    .last()
+                    .unwrap(),
+                "2"
+            );
+            assert_ne!(
+                soak.iter()
+                    .find(|s| s.name == name)
+                    .unwrap()
+                    .args
+                    .last()
+                    .unwrap(),
+                "2"
+            );
+        }
+        assert!(!functional
+            .iter()
+            .any(|s| matches!(s.name, "smoke" | "f5" | "play-judge")));
+        assert_eq!(functional[1].args, ["acceptance", "1"]);
+    }
     #[test]
     fn every_mode_is_run_or_explicitly_excluded() {
         let stages = plan(&[], true);
@@ -373,7 +456,7 @@ mod tests {
     fn short_plan_forwards_ui_arguments() {
         let args = vec!["--splice".into(), "4500".into()];
         let stages = plan(&args, false);
-        assert_eq!(&stages[0].args[1..], &args);
+        assert_eq!(&stages[0].args[3..], &args);
         assert_eq!(stages.len(), 3);
     }
     #[cfg(windows)]

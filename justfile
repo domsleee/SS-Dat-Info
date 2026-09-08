@@ -24,6 +24,10 @@ display_config_helper:
 [parallel]
 tas: tas_dll tas_rust
 
+# Opt in for an entire final build/deploy/test workflow; ordinary release stays fast.
+final recipe="tas":
+    $env:CARGO_PROFILE_RELEASE_LTO = 'fat'; $env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = '1'; $env:CARGO_PROFILE_RELEASE_STRIP = 'symbols'; just --set supreme_folder '{{supreme_folder}}' --set dc_profile '{{dc_profile}}' {{recipe}}
+
 tas_dll:
     $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath; \
     & "$vsPath\MSBuild\Current\Bin\MSBuild.exe" .\TAS\TAS_Helper\TAS_Helper.vcxproj /v:minimal /p:Configuration=Release /p:Platform=Win32 /m
@@ -125,12 +129,15 @@ test_replay file iterations="5":
     cd TAS && cargo run --release --bin tas_test -- replay {{file}} --iterations {{iterations}} --verbose
 
 # UI runs first: later harness stages stop the competing UI and replace the run.
-test_live splice="4500" iterations="5": tas_rust
+test_live splice="4500" iterations="2": tas_rust
     cd TAS && cargo run --release --bin tas_test -- live --splice {{splice}} --iterations {{iterations}}
 
 # Destructive live lane: save your recording first; see docs/tas-quality-gates.md.
 test_live_full: tas_rust
     cd TAS && cargo run --release --bin tas_test -- live-full
+
+test_live_soak: tas_rust
+    cd TAS && cargo run --release --bin tas_test -- live-soak
 
 clean:
     $ErrorActionPreference = 'Stop'; \

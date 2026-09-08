@@ -193,7 +193,7 @@ mod live {
             recording.display(),
             loaded.count
         );
-        config.log = root.join("tas_ui.log");
+        config.log = root.join("history").join("tas_ui.log");
         let stderr = std::fs::File::create(root.join("startup.log")).map_err(|e| e.to_string())?;
         let mut ui = UiProcess(
             std::process::Command::new(executable)
