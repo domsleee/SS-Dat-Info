@@ -23,7 +23,6 @@ use crate::replay;
 /// Long enough that the 1000-frame trajectory match covers real post-input
 /// motion: pattern + tail is ~1200 ticks, so the match window closes with the
 /// recording still running.
-const REC_DURATION_SECS: u64 = 13;
 const PATTERN: &str = "LR";
 const HOLD_TICKS: u32 = 500;
 const TAIL_NEUTRAL_TICKS: u32 = 200;
@@ -55,7 +54,11 @@ pub fn run() -> bool {
         TAIL_NEUTRAL_TICKS,
         patterns::total_ticks(&steps)
     );
-    harness::drive_pico_steps(&steps, Some(REC_DURATION_SECS * 1000));
+    if let Err(error) = harness::drive_pico_steps(&steps) {
+        eprintln!("{error}");
+        harness::stop(&mut client);
+        return false;
+    }
     thread::sleep(Duration::from_millis(200));
 
     let rec_count = client.state().recorded_count;

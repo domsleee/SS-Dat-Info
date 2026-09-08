@@ -545,7 +545,12 @@ pub fn run(
                     patterns::total_ticks(&baseline_steps),
                     baseline_profile.label(tap_ticks)
                 );
-                harness::drive_pico_steps(&baseline_steps, None);
+                if let Err(error) = harness::drive_pico_steps(&baseline_steps) {
+                    eprintln!("{error}");
+                    harness::stop(&mut client);
+                    client.state_mut().playback_speed = 1.0;
+                    std::process::exit(1);
+                }
                 thread::sleep(Duration::from_millis(200));
                 let baseline_ticks = client.state().recorded_count;
                 let rec_start = client.state().rec_coords[0];

@@ -76,19 +76,6 @@ fn time_to_splice(client: &mut tas_shared::TasSharedMemoryClient) -> Option<(f64
     }
 }
 
-fn median(v: &mut [f64]) -> f64 {
-    if v.is_empty() {
-        return 0.0;
-    }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = v.len();
-    if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        (v[n / 2 - 1] + v[n / 2]) / 2.0
-    }
-}
-
 struct SpeedTiming {
     speed: f32,
     median_secs: f64,
@@ -138,7 +125,8 @@ fn measure_speed(
         harness::stop(client);
         thread::sleep(Duration::from_millis(200));
     }
-    let median_secs = median(&mut samples);
+    let median_secs =
+        crate::timing::complete_median(&mut samples, TRIALS as usize).unwrap_or(f64::NAN);
     println!(
         "    median = {:.3}s  ({} samples)",
         median_secs,
@@ -205,11 +193,11 @@ pub fn run() -> bool {
         );
     }
 
-    if slow.samples == 0 || fast.samples == 0 {
-        println!("*** CATCH-UP SPEED INCONCLUSIVE: a speed produced no samples — splice path not working. ***");
+    if slow.samples != TRIALS as usize || fast.samples != TRIALS as usize {
+        println!("*** CATCH-UP SPEED INCONCLUSIVE: not all planned trials completed — splice path not working. ***");
         return false;
     }
-    if fast.median_secs <= 0.0 {
+    if !slow.median_secs.is_finite() || !fast.median_secs.is_finite() || fast.median_secs <= 0.0 {
         println!("*** CATCH-UP SPEED INCONCLUSIVE: 64× median is zero — timing resolution too coarse. ***");
         return false;
     }

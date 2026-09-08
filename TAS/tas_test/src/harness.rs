@@ -470,16 +470,10 @@ fn hide_console(command: &mut Command) {
 /// Matches exact image names, and never `supreme-service.exe`.
 fn kill_image(image: &str, exclude_pid: Option<u32>) -> u32 {
     let mut command = Command::new("taskkill");
-    command.args([
-        "/F",
-        "/IM",
-        image,
-        "/FI",
-        "IMAGENAME ne supreme-service.exe",
-    ]);
-    if let Some(pid) = exclude_pid {
-        command.args(["/FI", &format!("PID ne {pid}")]);
-    }
+    let suite_pid = std::env::var("TAS_SUITE_PID")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    command.args(kill_arguments(image, exclude_pid, suite_pid));
     hide_console(&mut command);
     match command.output() {
         Ok(out) => String::from_utf8_lossy(&out.stdout)
@@ -490,7 +484,24 @@ fn kill_image(image: &str, exclude_pid: Option<u32>) -> u32 {
     }
 }
 
-/// Kill every game, launcher and TAS process except ourselves (the same list
+fn kill_arguments(image: &str, me: Option<u32>, suite: Option<u32>) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "/F",
+        "/IM",
+        image,
+        "/FI",
+        "IMAGENAME ne supreme-service.exe",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    for pid in me.into_iter().chain(suite) {
+        args.extend(["/FI".into(), format!("PID ne {pid}")]);
+    }
+    args
+}
+
+/// Kill every game, launcher and TAS process except ourselves and our suite (the same list
 /// and `supreme-service` exclusion as the justfile's `stop_game`).
 pub fn kill_game() {
     let me = std::process::id();
@@ -1268,25 +1279,20 @@ fn poll_cont_verdict(
     }
 }
 
-/// Drive Pico HID through a sequence of pattern steps.
-///
-/// `fallback_ms` is how long to sleep instead if the Pico port cannot be opened,
-/// so the recording window still elapses.
-pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep], fallback_ms: Option<u64>) {
-    let _ = drive_pico_steps_inner(steps, fallback_ms, None, false);
+/// Strict delivery with the historical watchdog-sensitive hold timing.
+pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep]) -> Result<(), String> {
+    drive_pico_steps_inner(steps, None)
 }
 
 /// Acceptance must not substitute an unsteered recording for missing hardware,
 /// and refreshes its long hold before the firmware watchdog releases it.
 pub fn drive_pico_steps_required(steps: &[crate::patterns::PatternStep]) -> Result<(), String> {
-    drive_pico_steps_inner(steps, None, Some(200), true)
+    drive_pico_steps_inner(steps, Some(200))
 }
 
 fn drive_pico_steps_inner(
     steps: &[crate::patterns::PatternStep],
-    fallback_ms: Option<u64>,
     keepalive_ms: Option<u64>,
-    required: bool,
 ) -> Result<(), String> {
     let port_name = pico_port();
     // The firmware (TAS/pico/code.py, TIMEOUT_S) releases every key 500 ms
@@ -1294,21 +1300,7 @@ fn drive_pico_steps_inner(
     // holds are truncated. The regression gates are baselined with that release
     // inside the recording window: do not add a default keepalive without
     // re-baselining them. Acceptance opts in via `keepalive_ms`.
-    let mut port = match PicoKeys::open_checked() {
-        Ok(p) => p,
-        Err(error) => {
-            if required {
-                return Err(error);
-            }
-            eprintln!(
-                "  ERROR: Cannot open {}. Steering will be absent.",
-                port_name
-            );
-            let ms = fallback_ms.unwrap_or_else(|| crate::patterns::total_ticks(steps) as u64 * 10);
-            thread::sleep(Duration::from_millis(ms));
-            return Ok(());
-        }
-    };
+    let mut port = PicoKeys::open_checked()?;
     let total = crate::patterns::total_ticks(steps);
     let ms_per_tick = 10u64;
     let start = Instant::now();
@@ -1333,9 +1325,7 @@ fn drive_pico_steps_inner(
         if mask != prev_mask || keepalive_due {
             let send_byte = if mask == 0 { 0xFF } else { mask };
             let sent = port.send(send_byte);
-            if required {
-                require_pico_write(sent, &port_name)?;
-            }
+            require_pico_write(sent, &port_name)?;
             prev_mask = mask;
             last_send = Some(Instant::now());
         }
@@ -1349,9 +1339,7 @@ fn drive_pico_steps_inner(
     // Explicit release on the normal path so the keys go up at a known instant
     // rather than whenever `port` happens to drop; Drop then makes it idempotent.
     let released = port.send(0xFF);
-    if required {
-        require_pico_write(released, &port_name)?;
-    }
+    require_pico_write(released, &port_name)?;
     Ok(())
 }
 
@@ -1359,9 +1347,7 @@ fn require_pico_write(sent: bool, port: &str) -> Result<(), String> {
     if sent {
         Ok(())
     } else {
-        Err(format!(
-            "Pico {port} write failed; acceptance cannot verify steering"
-        ))
+        Err(format!("Pico {port} write failed; cannot verify steering"))
     }
 }
 
@@ -1450,6 +1436,18 @@ pub fn fixture_path(name: &str) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn game_reset_excludes_both_child_and_suite_parent() {
+        let args = super::kill_arguments("tas_test.exe", Some(123), Some(456));
+        for filter in [
+            "PID ne 123",
+            "PID ne 456",
+            "IMAGENAME ne supreme-service.exe",
+        ] {
+            assert!(args.windows(2).any(|pair| pair == ["/FI", filter]));
+        }
+        assert!(!args.iter().any(|a| a == "/T"));
+    }
     #[test]
     fn failed_steering_or_release_write_is_an_error() {
         assert!(super::require_pico_write(true, "test-port").is_ok());

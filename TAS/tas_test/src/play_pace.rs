@@ -67,19 +67,6 @@ fn time_play_window(client: &mut tas_shared::TasSharedMemoryClient) -> Option<f6
     }
 }
 
-fn median(v: &mut [f64]) -> f64 {
-    if v.is_empty() {
-        return 0.0;
-    }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let n = v.len();
-    if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        (v[n / 2 - 1] + v[n / 2]) / 2.0
-    }
-}
-
 pub fn run() -> bool {
     println!(
         "=== PLAY-PACE test (1× PLAY of {} frames must take ~native wall time) ===",
@@ -135,12 +122,14 @@ pub fn run() -> bool {
         thread::sleep(Duration::from_millis(200));
     }
 
-    if samples.is_empty() {
-        println!("*** PLAY-PACE INCONCLUSIVE: no successful PLAY windows — playback path not working. ***");
+    if samples.len() != TRIALS as usize {
+        println!("*** PLAY-PACE INCONCLUSIVE: not all planned PLAY windows completed — playback path not working. ***");
         return false;
     }
 
-    let measured = median(&mut samples);
+    let Some(measured) = crate::timing::complete_median(&mut samples, TRIALS as usize) else {
+        return false;
+    };
     let expected = PACE_TARGET as f64 * NATIVE_SECS_PER_FRAME;
     let ratio = measured / expected;
     println!("\n=== PLAY-PACE SUMMARY ===");

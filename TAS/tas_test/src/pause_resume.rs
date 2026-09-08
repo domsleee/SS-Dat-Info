@@ -12,7 +12,6 @@ use crate::drift;
 use crate::harness;
 use crate::patterns;
 
-const REC_DURATION_SECS: u64 = 25;
 const PATTERN: &str = "LRLR";
 const HOLD_TICKS: u32 = 500;
 const TAIL_NEUTRAL_TICKS: u32 = 200;
@@ -51,7 +50,11 @@ pub fn run() -> bool {
         TAIL_NEUTRAL_TICKS,
         patterns::total_ticks(&steps)
     );
-    harness::drive_pico_steps(&steps, Some(REC_DURATION_SECS * 1000));
+    if let Err(error) = harness::drive_pico_steps(&steps) {
+        eprintln!("{error}");
+        harness::stop(&mut client);
+        return false;
+    }
     thread::sleep(Duration::from_millis(200));
 
     let rec_count = client.state().recorded_count;

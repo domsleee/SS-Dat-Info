@@ -93,8 +93,15 @@ deploy_all: deploy deploy_display_config
 
 deploy_all_fast: deploy display_config_debug (stage_display_config "debug")
 
-test: tas_rust
-    cd TAS && cargo test --release
+test:
+    cd TAS && cargo test --release --workspace
+
+# All TAS suites that require neither a game nor Pico hardware.
+test_all: test test_tools test_dll
+
+check_all: test_all
+    cd TAS && cargo fmt --all --check
+    cd TAS && cargo clippy --workspace --all-targets -- -D warnings
 
 test_tools:
     python -m unittest discover -s TAS/tools -p test_tools.py -v
@@ -118,6 +125,10 @@ test_replay file iterations="5":
 # UI runs first: later harness stages stop the competing UI and replace the run.
 test_live splice="4500" iterations="5": tas_rust
     cd TAS && cargo run --release --bin tas_test -- live --splice {{splice}} --iterations {{iterations}}
+
+# Destructive live lane: save your recording first; see docs/tas-quality-gates.md.
+test_live_full: tas_rust
+    cd TAS && cargo run --release --bin tas_test -- live-full
 
 clean:
     $ErrorActionPreference = 'Stop'; \
