@@ -324,70 +324,6 @@ impl TasApp {
         let recovery_store_notice = recovery_store
             .as_ref()
             .map(|store| format!("Crash recovery: {}", store.root().display()));
-        // Recovery-as-history (no banner): an existing checkpoint means an
-        // unsaved recording that never reached history (STOP clears it), i.e.
-        // the app crashed/closed mid-recording. Bring it back as a PINNED entry.
-        // We persist + flush the history BEFORE clearing the checkpoint (done
-        // after `app` is built) so a crash can never lose it — at worst a
-        // duplicate on the next launch.
-        let mut recovered_checkpoint = false;
-        let mut recovery_notice = None;
-        if let Some(store) = recovery_store.as_ref() {
-            match store.load_pending() {
-                Ok(Some(cp)) => {
-                    let session_label = cp.session.label.clone();
-                    let (start, end) = (cp.session.start_tick, cp.session.end_tick);
-                    let cp_level = cp.session.level.clone();
-                    let cp_rider = cp.session.rider_label();
-                    let cp_physics = tas_shared::physics_mode_label(
-                        cp.session
-                            .renderer_id
-                            .unwrap_or(tas_shared::TAS_RENDERER_UNKNOWN),
-                        cp.session.fpu_control_word.unwrap_or(0),
-                    );
-                    let cp_stamps = recording::IdentityStamps {
-                        renderer_id: cp.session.renderer_id,
-                        fpu_control_word: cp.session.fpu_control_word,
-                        rider_character: cp.session.rider_character,
-                        rider_stance: cp.session.rider_stance,
-                    };
-                    if history.push_snapshot_data_with_session(
-                        cp.snapshot,
-                        session_label.clone(),
-                        start,
-                        end,
-                        Some(cp_stamps),
-                    ) {
-                        if let Some(id) = history.entries().last().map(|e| e.entry_id) {
-                            // Restore the track the checkpoint was RECORDED on.
-                            // push_* stamps from the live level, which is None
-                            // here — we are still in the constructor, before any
-                            // level sync — so without this every recovered entry
-                            // lands untagged AND pinned, i.e. permanently
-                            // floating at the top of every track's history. That
-                            // is the "my favourited FE runs show on FM" report.
-                            history.set_level(id, cp_level);
-                            history.set_rider(id, cp_rider);
-                            history.set_physics(id, cp_physics);
-                            history.set_pinned(id, true);
-                            // Mark recovery with a compact ⟲ glyph and let the
-                            // panel render the duration via the normal parsed
-                            // format (total + dimmed "from …"), instead of dumping
-                            // the whole verbose "Recovered · Continued from …,
-                            // total …" string into the name.
-                            history.rename(id, "⟲".to_string());
-                        }
-                        recovered_checkpoint = true;
-                        recovery_notice = Some(format!(
-                            "Recovered an unsaved recording ({}) → pinned in history",
-                            session_label
-                        ));
-                    }
-                }
-                Ok(None) => {}
-                Err(err) => recovery_notice = Some(format!("Crash recovery check failed: {}", err)),
-            }
-        }
         let mut app = Self {
             shared,
             connect_error,
@@ -469,9 +405,10 @@ impl TasApp {
         if let Some(msg) = recovery_store_notice {
             app.push_log(&msg);
         }
-        if let Some(msg) = recovery_notice {
-            app.push_log(&msg);
-        }
+        // Recovery-as-history (no banner): an existing checkpoint means an
+        // unsaved recording that never reached history (STOP clears it), i.e.
+        // the app crashed/closed mid-recording. Bring it back as a PINNED entry.
+        let recovered_checkpoint = app.recover_pending_checkpoint();
         app.persist_history_if_needed();
 
         // Recovery-as-history: only AFTER the recovered entry is durably in the
@@ -481,6 +418,7 @@ impl TasApp {
         if recovered_checkpoint {
             app.clear_recovery_after_durable_persist();
         }
+        app.clear_stale_input_protection();
 
         if let Some(path) = std::env::var_os("SSB_INSPECT_E2E_RECORDING") {
             let setup = (|| -> Result<(), String> {
@@ -552,9 +490,173 @@ impl TasApp {
                 // sample as an advance (transport gate false-positive).
                 self.cycle_fc_seeded = false;
                 self.push_log("Connected to TAS_Helper.dll shared memory");
+                self.clear_stale_input_protection();
             }
             Err(e) => self.connect_error = Some(e),
         }
+    }
+
+    /// Bring a pending crash-recovery checkpoint back as a PINNED history
+    /// entry, tagged with the track / rider / physics it was recorded under.
+    /// Runs at startup and whenever the live recording buffer is lost while a
+    /// session is active (the game exited, or a relaunched game re-initialised
+    /// the shared memory). Returns `true` when an entry was pushed; the caller
+    /// clears the checkpoint only after the history flush is confirmed durable.
+    fn recover_pending_checkpoint(&mut self) -> bool {
+        let Some(store) = self.recovery_store.as_ref() else {
+            return false;
+        };
+        let cp = match store.load_pending() {
+            Ok(Some(cp)) => cp,
+            Ok(None) => return false,
+            Err(err) => {
+                self.push_log(&format!("Crash recovery check failed: {}", err));
+                return false;
+            }
+        };
+        let session_label = cp.session.label.clone();
+        let (start, end) = (cp.session.start_tick, cp.session.end_tick);
+        let cp_level = cp.session.level.clone();
+        let cp_rider = cp.session.rider_label();
+        let cp_physics = tas_shared::physics_mode_label(
+            cp.session
+                .renderer_id
+                .unwrap_or(tas_shared::TAS_RENDERER_UNKNOWN),
+            cp.session.fpu_control_word.unwrap_or(0),
+        );
+        let cp_stamps = recording::IdentityStamps {
+            renderer_id: cp.session.renderer_id,
+            fpu_control_word: cp.session.fpu_control_word,
+            rider_character: cp.session.rider_character,
+            rider_stance: cp.session.rider_stance,
+        };
+        if !self.history.push_snapshot_data_with_session(
+            cp.snapshot,
+            session_label.clone(),
+            start,
+            end,
+            Some(cp_stamps),
+        ) {
+            return false;
+        }
+        if let Some(id) = self.history.entries().last().map(|e| e.entry_id) {
+            // Restore the track the checkpoint was RECORDED on. push_* stamps
+            // from the live level, which may be None here (startup runs before
+            // any level sync) — without this every recovered entry lands
+            // untagged AND pinned, i.e. permanently floating at the top of
+            // every track's history ("my favourited FE runs show on FM").
+            self.history.set_level(id, cp_level);
+            self.history.set_rider(id, cp_rider);
+            self.history.set_physics(id, cp_physics);
+            self.history.set_pinned(id, true);
+            // Mark recovery with a compact ⟲ glyph and let the panel render
+            // the duration via the normal parsed format.
+            self.history.rename(id, "⟲".to_string());
+        }
+        self.push_log(&format!(
+            "Recovered an unsaved recording ({}) → pinned in history",
+            session_label
+        ));
+        true
+    }
+
+    /// A controller that died mid-cycle (crash, kill) leaves
+    /// `cont_suppress_input` set while the game keeps running: every live key
+    /// except ESC is swallowed until a menu trip longer than 5 s or an explicit
+    /// STOP, and nothing tells the player why. On connect, with no cycle of our
+    /// own in flight and the DLL idle, release it and say so.
+    fn clear_stale_input_protection(&mut self) {
+        if self.cont_controller.is_some() {
+            return;
+        }
+        let Some(shared) = self.shared.as_mut() else {
+            return;
+        };
+        let (mode, suppressed) = {
+            let state = shared.state();
+            (state.mode, state.cont_suppress_input)
+        };
+        if mode == TasMode::Off as u32 && suppressed != 0 {
+            shared.state_mut().cont_suppress_input = 0;
+            self.push_log(
+                "Cleared stale input protection (cont_suppress_input) left by a previous \
+                 controller: live keys were being swallowed",
+            );
+        }
+    }
+
+    /// The DLL re-initialised the shared memory underneath us: the game was
+    /// restarted while tas_ui stayed open and its fresh `TAS_Helper.dll` reused
+    /// the section this process still maps (memset to zero, `frame_count`
+    /// restarts from 0). Nothing else notices — the version matches, the
+    /// mapping never went away — so treat it as a reconnect: the log cursor,
+    /// the cached game PID (global F9–F12), the session view and any in-flight
+    /// cycle all belong to the dead process.
+    fn on_dll_reinitialised(&mut self, fc: u32) {
+        self.push_log(&format!(
+            "TAS_Helper.dll re-initialised its shared memory (frame counter {} → {}): \
+             the game was restarted with tas_ui open — resetting the session view",
+            self.cycle_fc, fc
+        ));
+        self.cycle_fc = fc;
+        self.last_frame_count = fc;
+        self.stale_frame_ticks = 0;
+        self.log_read_cursor = 0;
+        self.game_pid_cached = None;
+        self.clear_cont_catchup();
+        self.reset_continue_runtime_state();
+        self.detach_input_editor();
+        self.loaded_physics = None;
+        self.loaded_rider = None;
+        self.loaded_identity = None;
+        self.last_mode = TasMode::Off as u32;
+        if self.active_recording_session.take().is_some() {
+            // The buffer that held the take was zeroed with the old process;
+            // its last checkpoint on disk is all that is left of it.
+            self.push_log(
+                "The recording in progress was lost with the old game process; \
+                 recovering its last checkpoint",
+            );
+            if self.recover_pending_checkpoint() {
+                self.clear_recovery_after_durable_persist();
+            }
+        }
+    }
+
+    /// Supreme.exe is gone. The section this process maps still holds the
+    /// dead DLL's last state, so a recording that was in progress is captured
+    /// from it into history NOW — waiting for a REC→OFF transition that can
+    /// only come from a fresh, empty mapping used to push an empty snapshot and
+    /// then delete the checkpoint, losing the take.
+    fn disconnect_from_dead_game(&mut self) {
+        self.push_log("Game process not found — disconnecting shared memory");
+        if self.active_recording_session.is_some() {
+            let capture = self.shared.as_ref().map(|shared| {
+                let snapshot = recording::RecordingSnapshot::from_state(shared.state());
+                let recorded = snapshot.recorded_count;
+                (snapshot, recorded)
+            });
+            if let Some((snapshot, recorded)) = capture {
+                self.push_log(&format!(
+                    "Game exited during a recording — captured its {} ticks from shared memory",
+                    recorded
+                ));
+                self.finalize_recording_session(&snapshot, recorded);
+            }
+        }
+        self.shared = None;
+        self.detach_input_editor();
+        self.connect_error =
+            Some("Supreme.exe has exited. Inject TAS_Helper.dll after restarting the game.".into());
+        self.stale_frame_ticks = 0;
+        self.log_read_cursor = 0;
+        // Invalidate cached game PID — a fresh Supreme.exe launch will get a
+        // different PID and our global-shortcut foreground gate would
+        // otherwise stay stale.
+        self.game_pid_cached = None;
+        self.clear_cont_catchup();
+        self.reset_continue_runtime_state();
+        self.last_mode = TasMode::Off as u32;
     }
 
     /// After a history restore: remember the entry's physics-mode stamp for
@@ -1723,13 +1825,24 @@ impl TasApp {
             Some(f) => recording::finished_session_label(f),
             None => session_context.label.clone(),
         };
-        let _ = self.history.push_completed_session(
+        let pushed = self.history.push_completed_session(
             snapshot.clone(),
             label,
             session_context.start_tick,
             session_context.end_tick,
             finish,
         );
+        if !pushed {
+            // An empty snapshot (a fresh mapping after the game restarted,
+            // for one) cannot stand in for the take: the checkpoint on disk
+            // is the only copy left, so it must survive to the next launch.
+            self.push_log(&format!(
+                "Recording session ({}) was not added to history: the buffer is empty — \
+                 recovery checkpoint kept",
+                session_context.label
+            ));
+            return;
+        }
         // Make the recording DURABLE in history BEFORE clearing the recovery
         // checkpoint — otherwise a crash between "pushed to in-memory history"
         // and "background writer committed" would lose it (checkpoint gone,
@@ -1744,8 +1857,11 @@ impl TasApp {
         // game_in_game freezes at its last value when the Supreme::Cycle hook
         // stops running (quit to menu / pause / dialog), so a fresh frame_count
         // advance is the real "ticking a level" signal.
-        if let Some(ref shared) = self.shared {
-            let fc = shared.frame_count_volatile();
+        if let Some(fc) = self
+            .shared
+            .as_ref()
+            .map(|shared| shared.frame_count_volatile())
+        {
             if !self.cycle_fc_seeded {
                 // Baseline only. The FIRST sample after launch or reconnect is
                 // not an advance — a frozen menu has a nonzero frame_count
@@ -1753,6 +1869,10 @@ impl TasApp {
                 // transport gate read "ticking" against a stopped engine.
                 self.cycle_fc_seeded = true;
                 self.cycle_fc = fc;
+            } else if fc < self.cycle_fc {
+                // The counter only ever increments (cave2, once per cycle) —
+                // it goes backwards only when a fresh DLL zeroed the section.
+                self.on_dll_reinitialised(fc);
             } else if fc != self.cycle_fc {
                 self.cycle_fc = fc;
                 self.cycle_advance_at = std::time::Instant::now();
@@ -1777,19 +1897,7 @@ impl TasApp {
                 if self.stale_frame_ticks.is_multiple_of(5) {
                     // Check if Supreme.exe is actually running
                     if !win32::is_supreme_running() {
-                        self.push_log("Game process not found — disconnecting shared memory");
-                        self.shared = None;
-                        self.detach_input_editor();
-                        self.connect_error = Some(
-                            "Supreme.exe has exited. Inject TAS_Helper.dll after restarting the game."
-                                .into(),
-                        );
-                        self.stale_frame_ticks = 0;
-                        self.log_read_cursor = 0;
-                        // Invalidate cached game PID — a fresh Supreme.exe
-                        // launch will get a different PID and our global-
-                        // shortcut foreground gate would otherwise stay stale.
-                        self.game_pid_cached = None;
+                        self.disconnect_from_dead_game();
                     }
                 }
             } else {
@@ -1839,24 +1947,66 @@ impl TasApp {
         // Step 4: emit actions for each newly-pressed key.
         let mut actions = Vec::new();
         if edges[GlobalShortcutSlot::F9 as usize] {
-            actions.push(transport::Action::RestartThen(TasCommand::ArmRec));
-            actions.push(transport::Action::Log("Global F9 (in-game): REC".into()));
+            actions.extend(self.shortcut_arm("Global F9 (in-game): REC", TasCommand::ArmRec));
         }
         if edges[GlobalShortcutSlot::F10 as usize] {
-            actions.push(transport::Action::RestartThen(TasCommand::ArmPlay));
-            actions.push(transport::Action::Log("Global F10 (in-game): PLAY".into()));
+            actions.extend(self.shortcut_arm("Global F10 (in-game): PLAY", TasCommand::ArmPlay));
         }
         if edges[GlobalShortcutSlot::F11 as usize] {
             actions.push(transport::Action::Send(TasCommand::Stop));
             actions.push(transport::Action::Log("Global F11 (in-game): STOP".into()));
         }
         if edges[GlobalShortcutSlot::F12 as usize] {
-            actions.push(transport::Action::SetContinueFrame(
-                self.continue_from_frame,
-            ));
-            actions.push(transport::Action::RestartThen(TasCommand::ArmContinue));
-            actions.push(transport::Action::Log("Global F12 (in-game): CONT".into()));
+            actions
+                .extend(self.shortcut_arm("Global F12 (in-game): CONT", TasCommand::ArmContinue));
         }
+        actions
+    }
+
+    /// The buttons' enablement rule, for the keyboard. Same live inputs as the
+    /// transport panel (`arming_allowed` = in a level whose cycle ticked in the
+    /// last 400 ms), so F9 / F10 / F12 never arm what the greyed-out button
+    /// refuses: a REC while one is running, a PLAY of an empty buffer, a CONT
+    /// from a "From:" box that does not hold a frame number.
+    fn arming_allowed(&self) -> bool {
+        self.shared.as_ref().is_some_and(|shared| {
+            shared.state().game_in_game != 0
+                && self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400)
+        })
+    }
+
+    fn shortcut_arm(&mut self, source: &str, command: TasCommand) -> Vec<transport::Action> {
+        let (mode, recorded) = match self.shared.as_ref() {
+            Some(shared) => (shared.state().mode_enum(), shared.recorded_count_volatile()),
+            None => {
+                return vec![transport::Action::Log(format!(
+                    "{source} ignored: not connected to the game"
+                ))]
+            }
+        };
+        if let Some(reason) = transport::arm_refusal(command, mode, recorded, self.arming_allowed())
+        {
+            return vec![transport::Action::Log(format!(
+                "{source} ignored: {reason}"
+            ))];
+        }
+        let mut actions = Vec::new();
+        if command == TasCommand::ArmContinue {
+            match transport::resolve_continue_frame(
+                &mut self.continue_from_text,
+                &mut self.continue_from_frame,
+                recorded,
+            ) {
+                Ok(frame) => actions.push(transport::Action::SetContinueFrame(frame)),
+                Err(reason) => {
+                    return vec![transport::Action::Log(format!(
+                        "{source} ignored: {reason}"
+                    ))]
+                }
+            }
+        }
+        actions.push(transport::Action::RestartThen(command));
+        actions.push(transport::Action::Log(source.to_string()));
         actions
     }
 
@@ -1886,14 +2036,12 @@ impl TasApp {
 
             // F9: Arm REC — same as clicking REC button (restart first)
             if input.key_pressed(egui::Key::F9) {
-                actions.push(transport::Action::RestartThen(TasCommand::ArmRec));
-                actions.push(transport::Action::Log("Shortcut: F9 REC".into()));
+                actions.extend(self.shortcut_arm("Shortcut: F9 REC", TasCommand::ArmRec));
             }
 
             // F10: Arm PLAY — same as clicking PLAY button (restart first)
             if input.key_pressed(egui::Key::F10) {
-                actions.push(transport::Action::RestartThen(TasCommand::ArmPlay));
-                actions.push(transport::Action::Log("Shortcut: F10 PLAY".into()));
+                actions.extend(self.shortcut_arm("Shortcut: F10 PLAY", TasCommand::ArmPlay));
             }
 
             // F11: STOP
@@ -1904,11 +2052,7 @@ impl TasApp {
 
             // F12: Continue record — same as clicking CONT button (restart first)
             if input.key_pressed(egui::Key::F12) {
-                actions.push(transport::Action::SetContinueFrame(
-                    self.continue_from_frame,
-                ));
-                actions.push(transport::Action::RestartThen(TasCommand::ArmContinue));
-                actions.push(transport::Action::Log("Shortcut: F12 CONT".into()));
+                actions.extend(self.shortcut_arm("Shortcut: F12 CONT", TasCommand::ArmContinue));
             }
 
             // Skip remaining shortcuts if text input has focus
@@ -3330,9 +3474,21 @@ mod tests {
 
     // ===== Keyboard shortcuts =====
 
+    /// An app connected to an idle DLL in a ticking level holding `recorded`
+    /// ticks: the state in which the REC / PLAY / CONT buttons are enabled.
+    fn idle_in_level_app(recorded: u32) -> TasApp {
+        let mut app = test_app();
+        let mut shared = TasSharedMemoryClient::new_test_mapping();
+        shared.state_mut().game_in_game = 1;
+        shared.state_mut().recorded_count = recorded;
+        app.shared = Some(shared);
+        app.cycle_advance_at = std::time::Instant::now();
+        app
+    }
+
     #[test]
     fn shortcut_f9_arms_rec() {
-        let mut app = test_app();
+        let mut app = idle_in_level_app(0);
         let actions = press_key(&mut app, Key::F9, Modifiers::NONE);
         assert!(action_has_restart_then(&actions, TasCommand::ArmRec));
         assert!(action_has_log(&actions, "F9"));
@@ -3340,10 +3496,22 @@ mod tests {
 
     #[test]
     fn shortcut_f10_arms_play() {
-        let mut app = test_app();
+        let mut app = idle_in_level_app(100);
         let actions = press_key(&mut app, Key::F10, Modifiers::NONE);
         assert!(action_has_restart_then(&actions, TasCommand::ArmPlay));
         assert!(action_has_log(&actions, "F10"));
+    }
+
+    #[test]
+    fn shortcuts_are_inert_without_a_game() {
+        let mut app = test_app();
+        for key in [Key::F9, Key::F10, Key::F12] {
+            let actions = press_key(&mut app, key, Modifiers::NONE);
+            assert!(!action_has_restart_then(&actions, TasCommand::ArmRec));
+            assert!(!action_has_restart_then(&actions, TasCommand::ArmPlay));
+            assert!(!action_has_restart_then(&actions, TasCommand::ArmContinue));
+            assert!(action_has_log(&actions, "not connected"));
+        }
     }
 
     #[test]
@@ -3356,8 +3524,13 @@ mod tests {
 
     #[test]
     fn shortcut_f12_arms_continue() {
-        let mut app = test_app();
+        let mut app = idle_in_level_app(100);
+        app.continue_from_text = "50".into();
         let actions = press_key(&mut app, Key::F12, Modifiers::NONE);
+        assert!(matches!(
+            actions.first(),
+            Some(transport::Action::SetContinueFrame(50))
+        ));
         assert!(action_has_restart_then(&actions, TasCommand::ArmContinue));
         assert!(action_has_log(&actions, "F12"));
     }
@@ -3625,6 +3798,205 @@ mod tests {
             state.rec_coords[i] = [i as f32, 0.0, i as f32];
         }
         state
+    }
+
+    fn scratch_recovery_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("ssb_inspect_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
+    fn write_checkpoint(store: &mut recording::RecoveryStore, ticks: u32) {
+        let state = state_with_recorded_count(ticks);
+        let snapshot = recording::RecordingSnapshot::from_state(&state);
+        let session =
+            recording::RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, ticks)
+                .unwrap();
+        store
+            .take_write_job(&snapshot, &[], &session, true)
+            .unwrap()
+            .write()
+            .unwrap();
+    }
+
+    #[test]
+    fn finalize_with_an_empty_buffer_keeps_the_recovery_checkpoint() {
+        let root = scratch_recovery_root("finalize_keep");
+        let mut store =
+            recording::RecoveryStore::new_in_root(root.clone(), std::time::Duration::ZERO).unwrap();
+        write_checkpoint(&mut store, 300);
+        let checkpoint = root.join("recovery_checkpoint.tasrec");
+        assert!(checkpoint.exists());
+
+        let mut app = test_app();
+        app.recovery_store = Some(store);
+        app.active_recording_session = Some(ActiveRecordingSession {
+            kind: RecordingSessionKind::Rec,
+            start_tick: 0,
+            max_recorded_count: 300,
+        });
+        // The game died; the only buffer in sight is a fresh, zeroed mapping.
+        let empty = recording::RecordingSnapshot::from_state(&state_with_recorded_count(0));
+        app.finalize_recording_session(&empty, 0);
+
+        assert_eq!(app.history.len(), 0);
+        assert!(
+            checkpoint.exists(),
+            "a rejected push must not delete the only copy of the take"
+        );
+        assert!(app
+            .log_lines
+            .lines()
+            .iter()
+            .any(|l| l.contains("recovery checkpoint kept")));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn game_exit_mid_rec_captures_the_take_from_the_dead_mapping() {
+        let mut app = test_app();
+        let mut shared = TasSharedMemoryClient::new_test_mapping();
+        let state = state_with_recorded_count(450);
+        {
+            let dst = shared.state_mut();
+            dst.mode = TasMode::Rec as u32;
+            dst.recorded_count = 450;
+            dst.input_log[..450].copy_from_slice(&state.input_log[..450]);
+            dst.rec_coords[..450].copy_from_slice(&state.rec_coords[..450]);
+        }
+        app.shared = Some(shared);
+        app.last_mode = TasMode::Rec as u32;
+        app.active_recording_session = Some(ActiveRecordingSession {
+            kind: RecordingSessionKind::Rec,
+            start_tick: 0,
+            max_recorded_count: 400,
+        });
+
+        app.disconnect_from_dead_game();
+
+        assert!(app.shared.is_none());
+        assert_eq!(app.last_mode, TasMode::Off as u32);
+        assert!(app.active_recording_session.is_none());
+        assert_eq!(app.history.len(), 1);
+        assert_eq!(app.history.entries()[0].label, "Recorded 0:04.50");
+    }
+
+    #[test]
+    fn dll_reinitialisation_resets_the_session_view() {
+        let mut app = test_app();
+        let mut shared = TasSharedMemoryClient::new_test_mapping();
+        shared.state_mut().frame_count = 500_000;
+        app.shared = Some(shared);
+        app.game_pid_cached = Some(1234);
+        app.log_read_cursor = 40;
+        app.last_mode = TasMode::Rec as u32;
+        app.check_game_health(); // seeds the baseline
+        app.check_game_health(); // unchanged counter: nothing happens
+        assert_eq!(app.game_pid_cached, Some(1234));
+
+        // A fresh DLL zeroed the section and started counting again.
+        app.shared.as_mut().unwrap().state_mut().frame_count = 7;
+        app.check_game_health();
+
+        assert!(app
+            .log_lines
+            .lines()
+            .iter()
+            .any(|l| l.contains("re-initialised its shared memory")));
+        assert_eq!(app.game_pid_cached, None);
+        assert_eq!(app.log_read_cursor, 0);
+        assert_eq!(app.last_mode, TasMode::Off as u32);
+        assert_eq!(app.cycle_fc, 7);
+        // A later advance is still recognised from the new baseline.
+        app.shared.as_mut().unwrap().state_mut().frame_count = 8;
+        app.check_game_health();
+        assert_eq!(app.cycle_fc, 8);
+    }
+
+    #[test]
+    fn stale_input_protection_is_released_on_connect_only_when_idle() {
+        let mut app = test_app();
+        let mut shared = TasSharedMemoryClient::new_test_mapping();
+        shared.state_mut().cont_suppress_input = 1;
+        shared.state_mut().mode = TasMode::Rec as u32;
+        app.shared = Some(shared);
+        app.clear_stale_input_protection();
+        assert_eq!(
+            app.shared.as_ref().unwrap().state().cont_suppress_input,
+            1,
+            "a running REC keeps its protection"
+        );
+
+        app.shared.as_mut().unwrap().state_mut().mode = TasMode::Off as u32;
+        app.clear_stale_input_protection();
+        assert_eq!(app.shared.as_ref().unwrap().state().cont_suppress_input, 0);
+        assert!(app
+            .log_lines
+            .lines()
+            .iter()
+            .any(|l| l.contains("Cleared stale input protection")));
+    }
+
+    fn only_log(actions: &[transport::Action]) -> String {
+        match actions {
+            [transport::Action::Log(line)] => line.clone(),
+            other => panic!("expected a single log line, got {}", other.len()),
+        }
+    }
+
+    #[test]
+    fn shortcuts_follow_the_button_rule() {
+        let mut app = test_app();
+        let mut shared = TasSharedMemoryClient::new_test_mapping();
+        shared.state_mut().game_in_game = 1;
+        shared.state_mut().mode = TasMode::Rec as u32;
+        shared.state_mut().recorded_count = 100;
+        app.shared = Some(shared);
+        app.cycle_advance_at = std::time::Instant::now(); // the level is ticking
+
+        // F9 during a REC: the button is grey, so the key refuses too.
+        let line = only_log(&app.shortcut_arm("Shortcut: F9 REC", TasCommand::ArmRec));
+        assert!(
+            line.contains("ignored") && line.contains("STOP first"),
+            "{line}"
+        );
+
+        app.shared.as_mut().unwrap().state_mut().mode = TasMode::Off as u32;
+        app.shared.as_mut().unwrap().state_mut().recorded_count = 0;
+        let line = only_log(&app.shortcut_arm("Shortcut: F10 PLAY", TasCommand::ArmPlay));
+        assert!(line.contains("nothing is recorded"), "{line}");
+
+        // F12 with a typo in From: refused, the typo stays for the user to see.
+        app.shared.as_mut().unwrap().state_mut().recorded_count = 100;
+        app.continue_from_text = "abc".into();
+        app.continue_from_frame = 40;
+        let line = only_log(&app.shortcut_arm("Shortcut: F12 CONT", TasCommand::ArmContinue));
+        assert!(line.contains("\"abc\""), "{line}");
+        assert_eq!(
+            (app.continue_from_text.as_str(), app.continue_from_frame),
+            ("abc", 40)
+        );
+
+        // F12 with a frame past the end: clamped, displayed, and armed.
+        app.continue_from_text = "500".into();
+        let actions = app.shortcut_arm("Shortcut: F12 CONT", TasCommand::ArmContinue);
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                transport::Action::SetContinueFrame(100),
+                transport::Action::RestartThen(TasCommand::ArmContinue),
+                transport::Action::Log(_)
+            ]
+        ));
+        assert_eq!(
+            (app.continue_from_text.as_str(), app.continue_from_frame),
+            ("100", 100)
+        );
+
+        // At a menu nothing arms.
+        app.cycle_advance_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        let line = only_log(&app.shortcut_arm("Global F9 (in-game): REC", TasCommand::ArmRec));
+        assert!(line.contains("enter a level first"), "{line}");
     }
 
     #[test]
