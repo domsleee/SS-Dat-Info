@@ -40,6 +40,8 @@ inline SafetyHookMid g_changePageHook{};
 inline SafetyHookMid g_executeHook{};
 inline bool g_cmdInstalled = false;
 inline bool g_menuDiag = false;   // TAS_MENU_DIAG=1: log the item list on change
+using GetModalFn = uint32_t(__fastcall*)(uint32_t);
+inline GetModalFn g_getModal = nullptr;
 
 // Image ranges of the UI modules: a component's vtable must lie in
 // Main_Menu.dll or UIT.dll and a text line's in SR_UIT.dll.
@@ -186,6 +188,10 @@ static bool ReadMenu(uint32_t uiMenu, MenuSnapshot& out) {
         if (comp < 0x10000) return false;
         const uint32_t parent = *(uint32_t*)(comp + 0xC);
         if (parent < 0x10000) return false;
+        const uint32_t page = *(uint32_t*)(uiMenu + 0x10C);
+        // GetActiveComponent still returns the underlying pause-menu item
+        // while an "Are you sure?" modal is on top. Never expose or activate it.
+        if (!g_getModal || !menumodel::UnobscuredMenu(page, parent, g_getModal)) return false;
         begin = *(uint32_t*)(parent + 0x2C);
         end = *(uint32_t*)(parent + 0x30);
         if (begin < 0x10000 || end < begin || (end - begin) > 0x1000) return false;
@@ -354,6 +360,8 @@ static constexpr uint8_t kRequestFocusSig[] = { 0x53, 0x56, 0x8B, 0xF1, 0x8B, 0x
 static uint32_t RunCommand(uint32_t uiMenu, uint32_t kind, const char* target, const char* screen) {
     const uint32_t page = ValidateScreen(screen);
     if (page != TAS_MENU_RESULT_OK) return page;
+    MenuSnapshot snap;
+    if (!ReadMenu(uiMenu, snap)) return TAS_MENU_RESULT_NO_MENU;
     switch (kind) {
     case TAS_MENU_CMD_UP: g_up(uiMenu); return TAS_MENU_RESULT_OK;
     case TAS_MENU_CMD_DOWN: g_down(uiMenu); return TAS_MENU_RESULT_OK;
@@ -362,8 +370,6 @@ static uint32_t RunCommand(uint32_t uiMenu, uint32_t kind, const char* target, c
     case TAS_MENU_CMD_TRIGGER: g_trigger(uiMenu); return TAS_MENU_RESULT_OK;
     case TAS_MENU_CMD_ACTIVATE:
     case TAS_MENU_CMD_FOCUS: {
-        MenuSnapshot snap;
-        if (!ReadMenu(uiMenu, snap)) return TAS_MENU_RESULT_NO_MENU;
         const int i = menumodel::FindTarget(snap, target);
         if (i < 0) return TAS_MENU_RESULT_NOT_FOUND;
         if (!snap.items[i].enabled) return TAS_MENU_RESULT_DISABLED;
@@ -483,6 +489,12 @@ static void InstallCommands(uint8_t* base) {
         return;
     }
     using GA = GameAddresses;
+    const auto getModal = GetProcAddress((HMODULE)uit,
+        "?Get_Modal@UI_Container@UIT@Housemarque@@QBIPAV123@XZ");
+    if (!getModal) {
+        Log("Menu cmd: Get_Modal unavailable - refusing to expose obscured menus");
+        return;
+    }
     const bool ok =
         GA::ValidateCode("Main_Menu.dll+0x1A680 (UI_Menu::Execute)", base + 0x1A680, kExecuteSig) &&
         GA::ValidateCode("Main_Menu.dll+0x19F50 (UI_Menu::Trigger)", base + 0x19F50, kMenuActionSig) &&
@@ -501,6 +513,7 @@ static void InstallCommands(uint8_t* base) {
     g_left = (MenuAction)(uintptr_t)(base + 0x19F10);
     g_right = (MenuAction)(uintptr_t)(base + 0x19F30);
     g_requestFocus = (RequestFocusFn)(uintptr_t)(uit + 0x196D0);
+    g_getModal = (GetModalFn)getModal;
     g_executeHook = safetyhook::create_mid(base + 0x1A680, ExecuteCb);
     g_cmdInstalled = (bool)g_executeHook;
     Log(g_cmdInstalled

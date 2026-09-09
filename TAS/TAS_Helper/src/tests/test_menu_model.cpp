@@ -92,5 +92,17 @@ int main() {
     Put(t, "Race", "Something else");   // an id that reads like a label
     check(FindTarget(t, "Race") == 1, "an exact id match beats a label match");
 
+    uint32_t modal_owner = 0;
+    auto modal = [&](uint32_t owner) { return owner == modal_owner ? 0x30000u : 0u; };
+    check(UnobscuredMenu(0x10000, 0x20000, modal), "unobscured page is actionable");
+    check(!UnobscuredMenu(0, 0x20000, modal), "missing page is not actionable");
+    modal_owner = 0x10000;
+    check(!UnobscuredMenu(0x10000, 0x20000, modal), "page modal hides the underlying items");
+    modal_owner = 0x20000;
+    check(!UnobscuredMenu(0x10000, 0x20000, modal), "container modal hides the underlying items");
+    check(!UnobscuredMenu(0x20000, 0x20000, modal), "same page/container still checks its modal");
+    modal_owner = 0;
+    check(UnobscuredMenu(0x10000, 0x20000, modal), "dismissed modal restores menu access");
+
     return FinishTests();
 }
