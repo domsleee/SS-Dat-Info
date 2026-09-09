@@ -55,10 +55,21 @@ fn wide(s: &str) -> Vec<u16> {
 /// PID of the running game (`Supreme.exe` or the versioned `Supreme_v1.035.exe`;
 /// the injector accepts both, so the shortcut gate must too).
 pub fn find_supreme_pid() -> Option<u32> {
-    let targets: [Vec<u16>; 2] = [
-        "Supreme.exe".encode_utf16().collect(),
-        "Supreme_v1.035.exe".encode_utf16().collect(),
-    ];
+    find_process_pid(&["Supreme.exe", "Supreme_v1.035.exe"])
+}
+
+/// Whether a process with this image name (e.g. `tas_test.exe`) exists.
+pub fn is_process_running(image_name: &str) -> bool {
+    find_process_pid(&[image_name]).is_some()
+}
+
+/// PID of the first process whose image name matches one of `names`
+/// (exact, case-sensitive UTF-16 compare against the snapshot entry).
+fn find_process_pid(names: &[&str]) -> Option<u32> {
+    let targets: Vec<Vec<u16>> = names
+        .iter()
+        .map(|name| name.encode_utf16().collect())
+        .collect();
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snap == INVALID_HANDLE_VALUE {
