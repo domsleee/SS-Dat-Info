@@ -213,6 +213,10 @@ struct TasApp {
     /// noticed by identity even when the frame counter cannot show it (a game
     /// replaced at the main menu goes 0 → 0).
     game_pid_seen: Option<u32>,
+    /// The PID watcher reset the session for a relaunch whose memset has not
+    /// been seen yet: the coming frame-counter regression only restarts the
+    /// ring, it must not reset (and cancel) whatever started in between.
+    expect_ring_restart: bool,
     /// When `cont_suppress_input` was first seen set with the DLL idle and no
     /// cycle of ours in flight, plus the arm generation at that moment. The
     /// flag is released only after it has stayed that way for the grace
@@ -391,6 +395,7 @@ impl TasApp {
             prev_global_keys: [false; 4],
             game_pid_cached: None,
             game_pid_seen: None,
+            expect_ring_restart: false,
             stale_protection_since: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
@@ -598,6 +603,15 @@ impl TasApp {
     /// so. A live controller's restart/settle phase holds it in OFF for a
     /// couple of seconds at most and then arms, which cancels the countdown.
     fn poll_stale_input_protection(&mut self) {
+        // The live harness (`tas_test`) drives the same controller from its
+        // own process, and a slow restart can hold its interlock in OFF well
+        // past any grace. While such a process exists the flag may be its:
+        // never touch it.
+        let external_controller_alive = win32::is_process_running("tas_test.exe");
+        self.poll_stale_input_protection_with(external_controller_alive);
+    }
+
+    fn poll_stale_input_protection_with(&mut self, external_controller_alive: bool) {
         let observed = self.shared.as_ref().and_then(|shared| {
             let state = shared.state();
             (self.cont_controller.is_none()
@@ -609,6 +623,10 @@ impl TasApp {
             self.stale_protection_since = None;
             return;
         };
+        if external_controller_alive {
+            self.stale_protection_since = None;
+            return;
+        }
         match self.stale_protection_since {
             Some((since, generation)) if generation == arm_generation => {
                 if since.elapsed() < STALE_PROTECTION_GRACE {
@@ -636,13 +654,34 @@ impl TasApp {
     /// the cached game PID (global F9–F12), the session view and any in-flight
     /// cycle all belong to the dead process.
     fn on_dll_reinitialised(&mut self, fc: u32) {
+        if self.expect_ring_restart {
+            // The PID watcher already reset the session for this relaunch;
+            // the memset is the second half of the same event. Only the
+            // ring and the heartbeat baseline start over — a cycle the user
+            // started in between keeps running.
+            self.expect_ring_restart = false;
+            self.push_log(&format!(
+                "TAS_Helper.dll re-initialised its shared memory (frame counter {} → {})",
+                self.cycle_fc, fc
+            ));
+            self.cycle_fc = fc;
+            self.last_frame_count = fc;
+            self.stale_frame_ticks = 0;
+            self.log_read_cursor = 0;
+            return;
+        }
         let why = format!(
             "TAS_Helper.dll re-initialised its shared memory (frame counter {} → {}): \
              the game was restarted with tas_ui open — resetting the session view",
             self.cycle_fc, fc
         );
+        self.reset_session_view_for_new_game(&why, fc);
         // The section was just zeroed: the new DLL's ring starts over.
-        self.reset_session_view_for_new_game(&why, fc, true);
+        self.log_read_cursor = 0;
+        // Same relaunch: bring the PID watcher up to date so it does not
+        // fire a second reset up to a second later, on top of whatever the
+        // user started in between.
+        self.game_pid_seen = win32::find_supreme_pid();
     }
 
     /// The frame counter cannot show a relaunch that happens before the old
@@ -657,41 +696,86 @@ impl TasApp {
             "Supreme.exe was replaced (pid {old_pid} → {new_pid}) with tas_ui still mapped: \
              resetting the session view"
         );
-        // The mapping may still hold the dead DLL's ring (or already the new
-        // one's): rewinding the cursor here would replay lines already shown.
-        // The memset that follows is what restarts the ring, and it is
-        // detected on its own.
-        self.reset_session_view_for_new_game(&why, fc, false);
+        self.reset_session_view_for_new_game(&why, fc);
+        // The mapping may still hold the dead DLL's ring: rewinding the
+        // cursor now would replay lines already shown. The memset that
+        // follows (frame counter going backwards) restarts the ring, and
+        // the log drain also rewinds on its own when the ring's sequence
+        // drops below the cursor — which covers a relaunch the counter
+        // never shows (0 → 0 at the menu).
+        self.expect_ring_restart = true;
     }
 
-    fn reset_session_view_for_new_game(&mut self, why: &str, fc: u32, ring_restarted: bool) {
+    /// Poll the DLL's log ring into the UI log.
+    fn drain_dll_log(&mut self) {
+        let Some(ref shared) = self.shared else {
+            return;
+        };
+        use tas_shared::TasLogSeverity;
+        // The ring's sequence only ever grows — until a fresh DLL zeroes the
+        // section. A sequence below the cursor is that restart: rewind, or
+        // the new DLL's first lines are skipped until it catches up.
+        if shared.state().log_write_seq < self.log_read_cursor {
+            self.log_read_cursor = 0;
+        }
+        let (entries, new_cursor) = shared.state().read_log_entries(self.log_read_cursor);
+        self.log_read_cursor = new_cursor;
+        for (_, severity, text) in entries {
+            let prefix = match severity {
+                TasLogSeverity::Debug => "[DLL:DBG]",
+                TasLogSeverity::Info => "[DLL]",
+                TasLogSeverity::Warn => "[DLL:WARN]",
+                TasLogSeverity::Error => "[DLL:ERR]",
+            };
+            self.log_lines.push(format!("{} {}", prefix, text));
+        }
+    }
+
+    /// One relaunch, one reset — whichever signal saw it first.
+    fn reset_session_view_for_new_game(&mut self, why: &str, fc: u32) {
         self.push_log(why);
+        // Capture BEFORE resetting anything. Until the new DLL injects and
+        // zeroes the section, the mapping still holds the dead DLL's complete
+        // take — better than its last checkpoint, which lags by a debounce
+        // interval. If the memset already happened the snapshot is empty and
+        // the rejected push recovers the checkpoint instead.
+        if self.active_recording_session.is_some() {
+            let capture = self.shared.as_ref().map(|shared| {
+                let snapshot = recording::RecordingSnapshot::from_state(shared.state());
+                let recorded = snapshot.recorded_count;
+                (snapshot, recorded)
+            });
+            if let Some((snapshot, recorded)) = capture {
+                self.push_log(&format!(
+                    "The game process that owned the recording in progress is gone — \
+                     capturing {} ticks from shared memory",
+                    recorded
+                ));
+                self.finalize_recording_session(&snapshot, recorded);
+            }
+        }
         self.cycle_fc = fc;
         self.last_frame_count = fc;
         self.stale_frame_ticks = 0;
         self.stale_protection_since = None;
-        if ring_restarted {
-            self.log_read_cursor = 0;
-        }
         self.game_pid_cached = None;
         self.clear_cont_catchup();
-        self.reset_continue_runtime_state();
+        // Tear down a cycle of OURS. Only ours may release the interlock:
+        // a controller in another process may already own the new game's
+        // restart, and its protection is not ours to clear.
+        let owned_cycle = self.cont_controller.is_some();
+        self.pending_session_kind = None;
+        self.pending_continue_start_tick = None;
+        self.cont_cycle_deadline = None;
+        self.cont_controller = None;
+        if owned_cycle {
+            self.set_cont_suppress_input(false);
+        }
         self.detach_input_editor();
         self.loaded_physics = None;
         self.loaded_rider = None;
         self.loaded_identity = None;
         self.last_mode = TasMode::Off as u32;
-        if self.active_recording_session.take().is_some() {
-            // The buffer that held the take was zeroed with the old process;
-            // its last checkpoint on disk is all that is left of it.
-            self.push_log(
-                "The recording in progress was lost with the old game process; \
-                 recovering its last checkpoint",
-            );
-            if self.recover_pending_checkpoint() {
-                self.clear_recovery_after_durable_persist();
-            }
-        }
     }
 
     /// Supreme.exe is gone. The section this process maps still holds the
@@ -3169,21 +3253,7 @@ impl eframe::App for TasApp {
             }
         });
 
-        // Poll DLL log ring buffer
-        if let Some(ref shared) = self.shared {
-            use tas_shared::TasLogSeverity;
-            let (entries, new_cursor) = shared.state().read_log_entries(self.log_read_cursor);
-            self.log_read_cursor = new_cursor;
-            for (_, severity, text) in entries {
-                let prefix = match severity {
-                    TasLogSeverity::Debug => "[DLL:DBG]",
-                    TasLogSeverity::Info => "[DLL]",
-                    TasLogSeverity::Warn => "[DLL:WARN]",
-                    TasLogSeverity::Error => "[DLL:ERR]",
-                };
-                self.log_lines.push(format!("{} {}", prefix, text));
-            }
-        }
+        self.drain_dll_log();
 
         for w in self.history.take_warnings() {
             self.log_lines.push(format!("History: {}", w));
@@ -3498,6 +3568,7 @@ mod tests {
             prev_global_keys: [false; 4],
             game_pid_cached: None,
             game_pid_seen: None,
+            expect_ring_restart: false,
             stale_protection_since: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
@@ -4147,6 +4218,124 @@ mod tests {
         app.cycle_advance_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
         let line = only_log(&app.shortcut_arm("Global F9 (in-game): REC", TasCommand::ArmRec));
         assert!(line.contains("enter a level first"), "{line}");
+    }
+
+    /// A mapping that still holds a dead DLL's take: `ticks` of REC, seeded
+    /// heartbeat, the app mid-session.
+    fn app_recording_in_dead_mapping(ticks: usize) -> TasApp {
+        let mut app = test_app();
+        let mut shared = TasSharedMemoryClient::new_test_mapping();
+        let state = state_with_recorded_count(ticks as u32);
+        {
+            let dst = shared.state_mut();
+            dst.mode = TasMode::Rec as u32;
+            dst.recorded_count = ticks as u32;
+            dst.frame_count = 700_000;
+            dst.input_log[..ticks].copy_from_slice(&state.input_log[..ticks]);
+            dst.rec_coords[..ticks].copy_from_slice(&state.rec_coords[..ticks]);
+        }
+        app.shared = Some(shared);
+        app.last_mode = TasMode::Rec as u32;
+        app.active_recording_session = Some(ActiveRecordingSession {
+            kind: RecordingSessionKind::Rec,
+            start_tick: 0,
+            max_recorded_count: 400,
+        });
+        app
+    }
+
+    #[test]
+    fn game_process_change_captures_the_take_still_in_the_mapping() {
+        let mut app = app_recording_in_dead_mapping(450);
+        app.on_game_process_changed(11, 22);
+        assert_eq!(app.history.len(), 1);
+        assert_eq!(app.history.entries()[0].label, "Recorded 0:04.50");
+        assert!(app.active_recording_session.is_none());
+        assert!(app.expect_ring_restart);
+        assert!(app
+            .log_lines
+            .lines()
+            .iter()
+            .any(|l| l.contains("capturing 450 ticks")));
+    }
+
+    #[test]
+    fn expected_ring_restart_does_not_reset_the_session_twice() {
+        let mut app = app_recording_in_dead_mapping(450);
+        app.check_game_health(); // seed the heartbeat at 700_000
+        app.on_game_process_changed(11, 22);
+        // The user restored a take and started work before the memset.
+        app.loaded_physics = Some("OpenGL/53-bit".into());
+        app.log_read_cursor = 40;
+        app.shared.as_mut().unwrap().state_mut().frame_count = 3;
+        app.check_game_health();
+        assert!(!app.expect_ring_restart);
+        assert_eq!(app.cycle_fc, 3);
+        assert_eq!(app.log_read_cursor, 0, "the ring restarted with the memset");
+        assert_eq!(
+            app.loaded_physics.as_deref(),
+            Some("OpenGL/53-bit"),
+            "the second signal of one relaunch must not reset again"
+        );
+        assert_eq!(app.history.len(), 1, "the take was captured once");
+    }
+
+    #[test]
+    fn relaunch_reset_never_releases_a_foreign_interlock() {
+        let mut app = test_app();
+        let mut shared = TasSharedMemoryClient::new_test_mapping();
+        shared.state_mut().cont_suppress_input = 1;
+        app.shared = Some(shared);
+        app.on_game_process_changed(11, 22);
+        assert_eq!(
+            app.shared.as_ref().unwrap().state().cont_suppress_input,
+            1,
+            "no cycle of ours was running, so the flag is someone else's"
+        );
+    }
+
+    #[test]
+    fn a_live_harness_process_blocks_the_stale_release() {
+        let mut app = test_app();
+        let mut shared = TasSharedMemoryClient::new_test_mapping();
+        shared.state_mut().cont_suppress_input = 1;
+        app.shared = Some(shared);
+        app.stale_protection_since =
+            Some((std::time::Instant::now() - STALE_PROTECTION_GRACE * 2, 0));
+        app.poll_stale_input_protection_with(true);
+        assert_eq!(app.shared.as_ref().unwrap().state().cont_suppress_input, 1);
+        assert!(
+            app.stale_protection_since.is_none(),
+            "no countdown while it lives"
+        );
+    }
+
+    #[test]
+    fn log_cursor_rewinds_when_the_ring_sequence_drops() {
+        let mut app = test_app();
+        let mut shared = TasSharedMemoryClient::new_test_mapping();
+        // A fresh DLL wrote 2 lines; our cursor is from the dead one.
+        {
+            let state = shared.state_mut();
+            for (seq, text) in ["first line", "second line"].iter().enumerate() {
+                let entry = &mut state.log_ring[seq];
+                entry.severity = tas_shared::TasLogSeverity::Info as u32;
+                let bytes = text.as_bytes();
+                entry.text[..bytes.len()].copy_from_slice(bytes);
+                entry.text[bytes.len()] = 0;
+                entry.sequence = seq as u32 + 1;
+            }
+            state.log_write_seq = 2;
+        }
+        app.shared = Some(shared);
+        app.log_read_cursor = 40;
+        app.drain_dll_log();
+        assert_eq!(app.log_read_cursor, 2);
+        assert!(app
+            .log_lines
+            .lines()
+            .iter()
+            .any(|l| l.contains("second line")));
     }
 
     #[test]
