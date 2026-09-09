@@ -5,6 +5,7 @@
 #include "../game_addresses.hpp"
 #include "../replay_capture_policy.hpp"
 #include "../replay_identity.hpp"
+#include "../restart_release.hpp"
 #include <safetyhook.hpp>
 
 // Replay object capture hook at SG+0x9E8F0.
@@ -112,6 +113,9 @@ bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
             const bool adopted = ReplayCaptureAdopt(s->mode == MODE_OFF, newPtr, human, g_capture);
             if (adopted) {
                 s->replay_ptr = newPtr;
+                // A new human recorder = the level just restarted: if Cave 2 pressed
+                // F5 for it, the key goes up NOW, before the level polls again.
+                restartrelease::OnLevelRestartObserved();
             }
             // Ring-log adoptions and rejections (rate-limited) with the owner
             // and its class.

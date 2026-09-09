@@ -284,3 +284,16 @@ three successful finite measurements, not a median of surviving trials.
   committed firmware; the harness releases all keys on the port before every
   run. A missing port or failed steering write fails a steered mode; fix the
   hardware connection before retrying.
+- **The game crashes at a restart, a save or a quit to the menu:** the game
+  restarts the level on every input poll that sees F5 down, and a restart
+  takes about 30 ms, so a held F5 re-enters the level teardown several times
+  and corrupts the heap (`sr.dll+0x13568` in the srConfig unlink, freed
+  callbacks in the text-input and sound threads). `TAS_Helper.dll` releases
+  F5 the moment a restart is observed, for its own arms and for physical taps
+  (`restart_release.hpp`; the log line `Restart F5: byte up after N ms`
+  should read about 30 ms), and skips a corrupt srConfig unlink instead of
+  crashing (`srconfig_guard.hpp`; a `SKIPPED corrupt unlink` line means the
+  heap was already damaged). Count `Player reset (2)` lines in `HMGEHLOG.TXT`
+  per restart: one restart must add exactly one. Crash dumps land in
+  `%LOCALAPPDATA%\CrashDumps`; WinDbg reads them with
+  `WinDbgX -z <dump> -logo <file> -c ".ecxr; !analyze -v; kb; q"`.
