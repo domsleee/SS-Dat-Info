@@ -7,6 +7,7 @@
 #include "../input_gate.hpp"
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
+#include "../restart_release.hpp"
 #include <safetyhook.hpp>
 #include "cave5.hpp"   // g_contResetPending (cave2 sets at the splice, cave5 consumes)
 
@@ -282,15 +283,28 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
     }
 }
 
-// In-process F5 restart constants
-static constexpr uint32_t RESTART_F5_HOLD_FRAMES = 10;  // Hold F5 for 10 frames
-static uint32_t g_restartFramesHeld = 0;                 // Frames F5 has been held down
+// In-process F5 restart constants.
+//
+// The game polls the DI buffer for F5 and restarts the level every time it
+// sees the key down - and a restart takes only a few cycles, so a key held
+// for 10 cycles was seen by ~4 polls and restarted the level FOUR times per
+// arm (measured 2026-09-09: +4 "Player reset" per CMD_RESTART). Each
+// re-entry tears the level down again while the previous rebuild is still in
+// flight; the field crashes at the next save/teardown (sr.dll+0x13568 in the
+// srConfig unlink, a use-after-free in the text-input callback) are the debt
+// that leaves behind. A single cycle is NOT enough either (the poll runs
+// less often than the cycle: 0 restarts per press, measured), so the hold is
+// measured in wall time - long enough for one poll, and released on the
+// first cycle after the reload freeze in any case.
+// The byte itself is released by restart_release.hpp the moment the level
+// restart is observed (replay-capture hook) or after its wall-clock cap
+// (worker thread); this cap only bounds the observer "up" if both fail.
+static constexpr uint32_t RESTART_F5_MAX_HOLD_FRAMES = 30;
+static uint32_t g_restartFramesHeld = 0;                    // Cycles since the press
 
 // Helper: press or release F5 in the DI buffer + notify BB3B10
 static void SafeWriteF5Buffer(uint32_t buffer, bool pressed) {
-    __try {
-        ((uint8_t*)buffer)[GameAddresses::KEY_F5] = pressed ? 0x01 : 0x00;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    restartrelease::SafeWriteF5(buffer, pressed);
 }
 
 static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, bool pressed) {
@@ -770,16 +784,26 @@ static void __declspec(noinline) Cave2_Logic() {
 
     if (!ProcessCommand(s)) return;
 
+    // The restart hook cuts a PHYSICAL F5 short too (restart_release.hpp);
+    // it needs the key buffer, which only this thread can resolve.
+    if (uint32_t kb = GetKeyboardObject(addr)) restartrelease::NoteBuffer(GetDIBuffer(kb));
+
     // In-process F5 restart state machine (runs regardless of mode)
     if (s->restart_state == 1) {
         uint32_t kbobj = GetKeyboardObject(addr);
         if (kbobj) {
             if (g_restartFramesHeld == 0) {
+                // Press: the byte AND the observer. restart_release.hpp
+                // takes the byte back the moment the restart is observed.
+                restartrelease::Pressed(GetDIBuffer(kbobj));
                 InjectF5(s, addr, kbobj, true);
             }
             g_restartFramesHeld++;
-            if (g_restartFramesHeld >= RESTART_F5_HOLD_FRAMES) {
-                // Release F5 after holding long enough
+            // Finish once the byte is up (the restart hook or the worker's
+            // wall-clock cap released it): observer "up" + done. The cycle
+            // cap only bounds a run where neither ever fires.
+            if (!restartrelease::Pending() || g_restartFramesHeld >= RESTART_F5_MAX_HOLD_FRAMES) {
+                restartrelease::ReleaseByteNow(3);
                 InjectF5(s, addr, kbobj, false);
                 s->restart_done_tick = s->tick_count;
                 s->restart_state = 2;  // Done

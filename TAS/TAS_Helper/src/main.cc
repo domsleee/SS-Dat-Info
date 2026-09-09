@@ -10,6 +10,7 @@
 #include "caves/race_timer.hpp"
 #include "caves/menu_state.hpp"
 #include "level_scan.hpp"
+#include "srconfig_guard.hpp"
 
 static TasSharedMemory g_sharedMem;
 static GameAddresses g_addr;
@@ -42,6 +43,8 @@ bool run() {
     bool cave1c_ok = InstallCave1C(g_addr, state);
     bool cave2_ok = InstallCave2(g_addr, state);
     bool cave5_ok = InstallCave5(g_addr, state);
+    // Defence in depth for the sr.dll srConfig unlink crash (srconfig_guard.hpp).
+    srconfigguard::Install();
 
     // These hooks are one functional unit. Reporting ready after any of them
     // failed leaves a partially intercepted input/game loop in production and

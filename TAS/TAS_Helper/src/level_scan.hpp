@@ -5,6 +5,7 @@
 #include <cstddef>
 #include "shared_state.hpp"
 #include "caves/cave2.hpp"
+#include "srconfig_guard.hpp"
 #include "renderer_info.hpp"
 #include "caves/menu_state.hpp"
 #include "setup_object.hpp"
@@ -400,6 +401,8 @@ static DWORD WINAPI threadProc(LPVOID param) {
         for (int i = 0; i < slices && !g_stop.load(std::memory_order_relaxed); i++) {
             Sleep(100);
             FlushPendingLog();           // cave2's mode-transition lines (queued inside the hook)
+            srconfigguard::FlushLog();   // corrupt unlinks the guard skipped (srconfig_guard.hpp)
+            restartrelease::FlushLog();  // F5 hold timing per restart (restart_release.hpp)
             pollLevelContext(s);
             renderer::Refresh(s);
             rider::Refresh(s);
