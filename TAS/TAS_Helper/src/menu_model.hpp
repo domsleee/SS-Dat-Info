@@ -12,6 +12,12 @@ constexpr uint32_t kMaxItems = 24;
 constexpr uint32_t kNameMax = 32;
 constexpr uint32_t kLabelMax = 40;
 
+template <typename GetModal>
+bool UnobscuredMenu(uint32_t page, uint32_t container, GetModal get_modal) {
+    return page >= 0x10000 && container >= 0x10000 &&
+           !get_modal(page) && (page == container || !get_modal(container));
+}
+
 struct MenuItem {
     uint32_t comp = 0;              // the UI_Component - valid for THIS visit of the page only
     char name[kNameMax] = {};       // UI_Component name (+0x10): the stable id; may be empty

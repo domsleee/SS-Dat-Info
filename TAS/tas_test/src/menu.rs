@@ -17,6 +17,17 @@ use tas_shared::TasSharedMemoryClient;
 
 use crate::cli;
 
+pub fn wait_for_ack(client: &TasSharedMemoryClient, seq: u32) -> Option<u32> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if let Some(result) = tas_shared::menu_command_result(client.state(), seq) {
+            return Some(result);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    None
+}
+
 /// The page id named by a menu document (`{"screen":"ID_...","sel":..}`).
 /// Screen ids are C identifiers (no quotes or escapes), so a prefix scan is
 /// exact — no JSON parser needed for this one field.
@@ -118,16 +129,7 @@ pub fn run(sub: Option<&str>, target: Option<&str>) -> bool {
             return false;
         }
     };
-    let t0 = Instant::now();
-    let result = loop {
-        if let Some(r) = tas_shared::menu_command_result(client.state(), seq) {
-            break Some(r);
-        }
-        if t0.elapsed() > Duration::from_millis(3000) {
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    let result = wait_for_ack(&client, seq);
     let name = match result {
         Some(r) => tas_shared::menu_result_name(r).to_string(),
         None => "timeout".to_string(),
@@ -201,16 +203,7 @@ pub fn activate_and_wait(
         tas_shared::menu_command_kind("activate").ok_or_else(|| "unknown command".to_string())?;
     let seq = tas_shared::menu_command_submit(client.state_mut(), kind, &target, &doc.screen)
         .map_err(|_| "menu busy (a command is already outstanding)".to_string())?;
-    let t0 = Instant::now();
-    let result = loop {
-        if let Some(r) = tas_shared::menu_command_result(client.state(), seq) {
-            break Some(r);
-        }
-        if t0.elapsed() > Duration::from_millis(3000) {
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    let result = wait_for_ack(client, seq);
     match result {
         Some(r) if r == tas_shared::TAS_MENU_RESULT_OK => {}
         Some(r) => {

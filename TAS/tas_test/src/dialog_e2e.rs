@@ -8,11 +8,14 @@
 //!
 //! One continuous session, driven with real input:
 //!
+//!   PRECHECK — unfinished-race quit confirmation hides the underlying menu,
+//!              refuses stale commands, and restores navigation after No.
+//!
 //!   PHASE A — aligned PLAY of a finishing recording at 1x, idle at the save
 //!             dialog, decline with physical RIGHT + Enter. No tick burst allowed.
 //!   PHASE B — the TAS user's actual flow: CONT near the finish, the splice
 //!             flips to REC, the run crosses the line RECORDING, the dialog
-//!             appears in REC mode. Idle, real Pico Escape, no burst.
+//!             appears in REC mode. Idle, physical RIGHT + Enter, no burst.
 //!   PHASE C — quit to the REAL main menu (pause-menu recipe) and measure
 //!             what the user sees: cont_suppress_input must read 0 (a stale
 //!             flag here kills the keyboard), and the menu VIDEO must move at
@@ -35,6 +38,59 @@ const DIALOG_IDLE_SECS: u64 = 12;
 /// Native is 100 ticks/sec; the 100ms buckets read ~10-11. A backlog burst is
 /// an order of magnitude out, so a generous ceiling still separates them.
 const MAX_TICKS_PER_SEC: f64 = 140.0;
+
+fn unfinished_quit_modal(client: &mut tas_shared::TasSharedMemoryClient) -> bool {
+    const SCREEN: &str = "ID_ARCADE_IN_GAME_MENU";
+    fn command(
+        client: &mut tas_shared::TasSharedMemoryClient,
+        kind: u32,
+        target: &str,
+    ) -> Option<u32> {
+        let seq = tas_shared::menu_command_submit(client.state_mut(), kind, target, SCREEN).ok()?;
+        crate::menu::wait_for_ack(client, seq)
+    }
+    println!("--- Unfinished race: confirmation must hide and protect the pause menu ---");
+    if !harness::restart_and_stabilize_inprocess(client) || !harness::send_escape() {
+        return false;
+    }
+    thread::sleep(Duration::from_millis(300));
+    if command(
+        client,
+        tas_shared::TAS_MENU_CMD_ACTIVATE,
+        "ID_IN_GAME_QUIT_GAME",
+    ) != Some(tas_shared::TAS_MENU_RESULT_OK)
+    {
+        eprintln!("FAIL: could not open unfinished-race quit confirmation");
+        return false;
+    }
+    thread::sleep(Duration::from_millis(300));
+    let hidden = tas_shared::menu_doc(client.state()).is_none();
+    let mut protected = true;
+    for kind in [
+        tas_shared::TAS_MENU_CMD_ACTIVATE,
+        tas_shared::TAS_MENU_CMD_FOCUS,
+        tas_shared::TAS_MENU_CMD_UP,
+        tas_shared::TAS_MENU_CMD_DOWN,
+        tas_shared::TAS_MENU_CMD_LEFT,
+        tas_shared::TAS_MENU_CMD_RIGHT,
+        tas_shared::TAS_MENU_CMD_TRIGGER,
+    ] {
+        // A previously read target must not act through the modal, even if
+        // its expected underlying screen still matches.
+        protected &= command(client, kind, "ID_IN_GAME_QUIT_GAME")
+            == Some(tas_shared::TAS_MENU_RESULT_NO_MENU);
+    }
+    // This confirmation has the same physical Yes/No controls as the finish prompt.
+    if !harness::dismiss_finish_prompt() {
+        return false;
+    }
+    thread::sleep(Duration::from_millis(300));
+    let restored = tas_shared::menu_doc(client.state()).is_some()
+        && command(client, tas_shared::TAS_MENU_CMD_ACTIVATE, "ID_CONTINUE")
+            == Some(tas_shared::TAS_MENU_RESULT_OK);
+    println!("  hidden={hidden}, all commands refused={protected}, Continue restored={restored}");
+    hidden && protected && restored
+}
 
 fn idle_profile_passes(idle_ticks: u32, resumed_ticks: u32, peak_rate: f64) -> bool {
     idle_ticks <= 1 && resumed_ticks > 0 && (0.0..=MAX_TICKS_PER_SEC).contains(&peak_rate)
@@ -177,6 +233,11 @@ pub fn run() -> bool {
     harness::stop_competing_tas_ui_writer();
     harness::stop(&mut client);
     thread::sleep(Duration::from_millis(200));
+
+    if !unfinished_quit_modal(&mut client) {
+        eprintln!("FAIL: unfinished-race modal protection");
+        return false;
+    }
 
     let loaded = match replay::load_tasrec(&path) {
         Ok(r) => r,
