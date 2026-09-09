@@ -250,7 +250,7 @@ impl RecoveryStore {
     }
 
     #[cfg(test)]
-    fn new_in_root(root: PathBuf, debounce: Duration) -> Result<Self, String> {
+    pub(crate) fn new_in_root(root: PathBuf, debounce: Duration) -> Result<Self, String> {
         Self::new_with(root, debounce)
     }
 

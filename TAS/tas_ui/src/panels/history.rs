@@ -199,10 +199,15 @@ pub fn show(
             });
 
             let mut last_date: Option<NaiveDate> = None;
+            // The header of the day being rendered. A reveal scrolls to the
+            // span from this header down to the new row, so the day label and
+            // the pinned rows that float above the newest take stay in view;
+            // revealing the row alone pushed them just off the top.
+            let mut day_header: Option<egui::Rect> = None;
             for (idx, entry) in visible {
                 let entry_date = entry.created_at.date_naive();
                 if last_date != Some(entry_date) {
-                    render_day_header(ui, entry_date, today, yesterday);
+                    day_header = Some(render_day_header(ui, entry_date, today, yesterday));
                     last_date = Some(entry_date);
                 }
                 let is_current = current == Some(idx);
@@ -216,7 +221,14 @@ pub fn show(
                     (history.live_physics(), history.live_rider()),
                 );
                 if reveal == Some(entry.entry_id) {
-                    row.scroll_to_me(Some(egui::Align::Min));
+                    let span = day_header.map_or(row.rect, |header| header.union(row.rect));
+                    // A day with more pinned rows than fit: the new row wins.
+                    let target = if span.height() > ui.clip_rect().height() {
+                        row.rect
+                    } else {
+                        span
+                    };
+                    ui.scroll_to_rect(target, Some(egui::Align::Min));
                     ui.ctx().request_repaint();
                 }
             }
@@ -255,12 +267,15 @@ pub fn show(
     actions
 }
 
+/// Returns the header's full extent (leading space included) so a reveal can
+/// scroll it into view together with the first row beneath it.
 fn render_day_header(
     ui: &mut egui::Ui,
     date: NaiveDate,
     today: NaiveDate,
     yesterday: Option<NaiveDate>,
-) {
+) -> egui::Rect {
+    let top = ui.cursor().min;
     // Avoid chrono's `%-d` (POSIX no-pad day) which is unsupported on
     // Windows' strftime — would render the literal `-d` instead of the
     // day number. Build the day-month string by hand.
@@ -279,12 +294,13 @@ fn render_day_header(
         )
     };
     ui.add_space(6.0);
-    ui.label(
+    let label = ui.label(
         egui::RichText::new(label)
             .size(10.0)
             .color(egui::Color32::from_gray(120)),
     );
     ui.add_space(2.0);
+    egui::Rect::from_min_max(top, label.rect.max)
 }
 
 fn month_abbr(m: u32) -> &'static str {
@@ -765,8 +781,32 @@ mod tests {
         assert_eq!(history.len(), count, "eviction keeps the count unchanged");
         history_frame(&ctx, &history, None);
         assert!(
-            history_frame(&ctx, &history, None) < 50.0,
-            "new run must be visible"
+            history_frame(&ctx, &history, None) < 1.0,
+            "new run must be visible together with its day header"
+        );
+    }
+
+    #[test]
+    fn reveal_from_the_top_keeps_the_day_header_in_view() {
+        // The live sequence: a fresh UI shows the list from the top, a take
+        // ends, the new row is revealed. The "Today" header above it must not
+        // be scrolled out by the reveal.
+        let ctx = egui::Context::default();
+        let (mut history, snapshot) = full_history();
+        // A pinned take floats above the newest row within its day, so the
+        // revealed row is NOT the first under the header.
+        let pinned = history.entries()[0].entry_id;
+        history.set_pinned(pinned, true);
+        for _ in 0..3 {
+            assert_eq!(history_frame(&ctx, &history, None), 0.0);
+        }
+        history.push_snapshot_data(snapshot, "Recorded 0:00.11");
+        let offsets: Vec<f32> = (0..4)
+            .map(|_| history_frame(&ctx, &history, None))
+            .collect();
+        assert!(
+            offsets.iter().all(|y| *y < 1.0),
+            "reveal scrolled the header away: {offsets:?}"
         );
     }
 

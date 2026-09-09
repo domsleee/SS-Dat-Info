@@ -761,6 +761,32 @@ pub fn print_status(client: &TasSharedMemoryClient) {
         s.replay_ptr, s.player_ptr, s.level_id, s.race_time_cs,
         s.player_x, s.player_y, s.player_z
     );
+    // The CONT interlock and gate-alignment fields: what a controller left
+    // behind (suppressed input, an unapproved parked splice) is otherwise
+    // invisible from outside the UI process.
+    let last_input = s
+        .recorded_count
+        .checked_sub(1)
+        .and_then(|i| s.input_log.get(i as usize))
+        .copied();
+    println!(
+        "Cont: from={} suppress_input={} splice_approved={} gate_align_rec={} gate_index={} \
+         arm_gen={} restart_state={} speed={} resume_speed={} last_input={} \
+         bb3b10_calls={} bb3b10_blocked={} handler_blocked={}",
+        s.continue_from_frame,
+        s.cont_suppress_input,
+        s.cont_splice_approved,
+        s.gate_align_rec,
+        s.gate_index,
+        s.arm_generation,
+        s.restart_state,
+        s.playback_speed,
+        s.cont_resume_speed,
+        last_input.map_or("-".to_string(), |b| format!("{b:#04x}")),
+        s.bb3b10_call_count,
+        s.bb3b10_block_count,
+        s.handler_block_count
+    );
 }
 
 /// Pico F5 restart, then PLAY, retrying until play_coords[0] and the leading

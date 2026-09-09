@@ -46,6 +46,54 @@ fn can_arm_continue(mode: TasMode, recorded: u32) -> bool {
     matches!(mode, TasMode::Off | TasMode::Rec | TasMode::Play)
 }
 
+/// Why an arm would be refused right now, or `None` when it may go ahead.
+/// The ONE rule behind the REC / PLAY / CONT buttons' enablement and the
+/// F9 / F10 / F12 shortcuts (in-window and global): a key must never do what
+/// the greyed-out button refuses.
+pub(crate) fn arm_refusal(
+    command: TasCommand,
+    mode: TasMode,
+    recorded: u32,
+    arming_allowed: bool,
+) -> Option<&'static str> {
+    match command {
+        TasCommand::ArmRec | TasCommand::ArmPlay if mode != TasMode::Off => {
+            Some("a recording or replay is running — STOP first")
+        }
+        TasCommand::ArmPlay if recorded == 0 => Some("nothing is recorded"),
+        TasCommand::ArmContinue if !can_arm_continue(mode, recorded) => {
+            Some("nothing to continue from")
+        }
+        TasCommand::ArmRec | TasCommand::ArmPlay | TasCommand::ArmContinue if !arming_allowed => {
+            Some("enter a level first")
+        }
+        _ => None,
+    }
+}
+
+/// Resolve the "From:" box into the splice frame an arm will use. Unparsable
+/// text is an error — the box keeps what the user typed so they can see why —
+/// a number is clamped to the recording and written back to both the value and
+/// the box, so the frame that arms is always the frame that is displayed.
+pub(crate) fn resolve_continue_frame(
+    text: &mut String,
+    continue_from: &mut u32,
+    recorded: u32,
+) -> Result<u32, String> {
+    match parse_continue_frame(text, recorded) {
+        Some(parsed) => {
+            *continue_from = parsed;
+            *text = parsed.to_string();
+            Ok(parsed)
+        }
+        None => Err(format!(
+            "From \"{}\" is not a frame number (0..={})",
+            text.trim(),
+            recorded
+        )),
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
     let TransportProps {
         mode,
@@ -66,7 +114,6 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
         let is_off = mode == TasMode::Off;
         let is_rec = mode == TasMode::Rec;
         let is_play = mode == TasMode::Play;
-        let can_continue = can_arm_continue(mode, recorded);
 
         // F-key labels live in tooltips so the buttons stay narrow.
         let rec_text = egui::RichText::new("\u{23FA} REC");
@@ -78,7 +125,10 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
             rec_text
         };
         if ui
-            .add_enabled(is_off && arming_allowed, egui::Button::new(rec_text))
+            .add_enabled(
+                arm_refusal(TasCommand::ArmRec, mode, recorded, arming_allowed).is_none(),
+                egui::Button::new(rec_text),
+            )
             .on_disabled_hover_text("Enter a level first - can't record from a menu")
             .on_hover_text("Record (F9)")
             .clicked()
@@ -97,7 +147,7 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
         };
         if ui
             .add_enabled(
-                is_off && recorded > 0 && arming_allowed,
+                arm_refusal(TasCommand::ArmPlay, mode, recorded, arming_allowed).is_none(),
                 egui::Button::new(play_text),
             )
             .on_disabled_hover_text("Enter a level first - can't replay from a menu")
@@ -127,7 +177,10 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
             cont_text
         };
         if ui
-            .add_enabled(can_continue && arming_allowed, egui::Button::new(cont_text))
+            .add_enabled(
+                arm_refusal(TasCommand::ArmContinue, mode, recorded, arming_allowed).is_none(),
+                egui::Button::new(cont_text),
+            )
             .on_disabled_hover_text("Enter a level first - can't continue from a menu")
             .on_hover_text(format!(
                 "Continue from a specific frame · catch-up ×{}  (F12)",
@@ -135,13 +188,17 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
             ))
             .clicked()
         {
-            normalize_continue_frame_text(continue_from_text, continue_from, recorded);
-            actions.push(Action::Log(format!(
-                "Continue recording from frame {} ({}x catch-up)",
-                *continue_from, cont_catchup_speed
-            )));
-            actions.push(Action::SetContinueFrame(*continue_from));
-            actions.push(Action::RestartThen(TasCommand::ArmContinue));
+            match resolve_continue_frame(continue_from_text, continue_from, recorded) {
+                Ok(frame) => {
+                    actions.push(Action::Log(format!(
+                        "Continue recording from frame {} ({}x catch-up)",
+                        frame, cont_catchup_speed
+                    )));
+                    actions.push(Action::SetContinueFrame(frame));
+                    actions.push(Action::RestartThen(TasCommand::ArmContinue));
+                }
+                Err(reason) => actions.push(Action::Log(format!("CONT ignored: {reason}"))),
+            }
         }
 
         if recorded > 0 {
@@ -274,6 +331,60 @@ fn normalize_continue_frame_text(text: &mut String, continue_from: &mut u32, rec
 mod tests {
     use super::can_arm_continue;
     use tas_shared::TasMode;
+
+    #[test]
+    fn arm_refusal_mirrors_button_enablement() {
+        use super::arm_refusal;
+        use tas_shared::TasCommand;
+        // Idle in a level with a take: everything may arm.
+        for cmd in [
+            TasCommand::ArmRec,
+            TasCommand::ArmPlay,
+            TasCommand::ArmContinue,
+        ] {
+            assert_eq!(arm_refusal(cmd, TasMode::Off, 100, true), None);
+        }
+        // REC / PLAY refuse while a take is running; CONT may splice a running one.
+        assert!(arm_refusal(TasCommand::ArmRec, TasMode::Rec, 100, true).is_some());
+        assert!(arm_refusal(TasCommand::ArmPlay, TasMode::Play, 100, true).is_some());
+        assert_eq!(
+            arm_refusal(TasCommand::ArmContinue, TasMode::Rec, 100, true),
+            None
+        );
+        // An empty buffer has nothing to replay or continue, but can record.
+        assert!(arm_refusal(TasCommand::ArmPlay, TasMode::Off, 0, true).is_some());
+        assert!(arm_refusal(TasCommand::ArmContinue, TasMode::Off, 0, true).is_some());
+        assert_eq!(arm_refusal(TasCommand::ArmRec, TasMode::Off, 0, true), None);
+        // A menu (cycle not ticking) refuses every arm.
+        for cmd in [
+            TasCommand::ArmRec,
+            TasCommand::ArmPlay,
+            TasCommand::ArmContinue,
+        ] {
+            assert_eq!(
+                arm_refusal(cmd, TasMode::Off, 100, false),
+                Some("enter a level first")
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_continue_frame_refuses_text_and_clamps_numbers() {
+        use super::resolve_continue_frame;
+        let mut text = "abc".to_string();
+        let mut from = 100;
+        let err = resolve_continue_frame(&mut text, &mut from, 4696).unwrap_err();
+        assert!(err.contains("\"abc\""), "{err}");
+        assert_eq!(
+            (text.as_str(), from),
+            ("abc", 100),
+            "the typo stays visible"
+        );
+
+        text = " 9000 ".into();
+        assert_eq!(resolve_continue_frame(&mut text, &mut from, 4696), Ok(4696));
+        assert_eq!((text.as_str(), from), ("4696", 4696));
+    }
 
     #[test]
     fn continue_requires_recorded_ticks() {

@@ -15,7 +15,7 @@ type Handle = *mut std::ffi::c_void;
 const FILE_MAP_ALL_ACCESS: u32 = 0xF001F;
 
 extern "system" {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-mapping"))]
     fn CreateFileMappingA(
         file: Handle,
         attrs: *const std::ffi::c_void,
@@ -78,7 +78,7 @@ impl TasSharedMemoryClient {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-mapping"))]
     pub fn new_test_mapping() -> Self {
         unsafe {
             // Unnamed pagefile-backed mapping: same Windows client code,
