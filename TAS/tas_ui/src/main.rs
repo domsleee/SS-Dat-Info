@@ -209,6 +209,17 @@ struct TasApp {
     /// Stored as Option so a re-resolution attempt is just `.take()`
     /// followed by re-call.
     game_pid_cached: Option<u32>,
+    /// Supreme.exe PID seen by the last 1 Hz health check: a relaunch is
+    /// noticed by identity even when the frame counter cannot show it (a game
+    /// replaced at the main menu goes 0 → 0).
+    game_pid_seen: Option<u32>,
+    /// When `cont_suppress_input` was first seen set with the DLL idle and no
+    /// cycle of ours in flight, plus the arm generation at that moment. The
+    /// flag is released only after it has stayed that way for the grace
+    /// period — a harness cycle's restart/settle phase legitimately holds it
+    /// in OFF for a couple of seconds, and must not lose it to a UI that
+    /// happens to connect then.
+    stale_protection_since: Option<(std::time::Instant, u32)>,
     // Crash recovery
     last_frame_count: u32,
     stale_frame_ticks: u32,
@@ -272,6 +283,12 @@ fn checkpoint_clear_decision(flush: Option<Result<(), String>>) -> (bool, Option
         ),
     }
 }
+
+/// How long `cont_suppress_input` may stay set with the DLL idle in OFF and
+/// no arm landing before the UI treats it as abandoned by a dead controller.
+/// A live cycle's restart/settle phase (the only legitimate OFF-mode holder)
+/// arms within a few seconds; the DLL's own menu-side retirement is 5 s.
+const STALE_PROTECTION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl TasApp {
     fn new() -> Self {
@@ -373,6 +390,8 @@ impl TasApp {
             cont_last_outcome: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
+            game_pid_seen: None,
+            stale_protection_since: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
@@ -418,7 +437,7 @@ impl TasApp {
         if recovered_checkpoint {
             app.clear_recovery_after_durable_persist();
         }
-        app.clear_stale_input_protection();
+        app.poll_stale_input_protection();
 
         if let Some(path) = std::env::var_os("SSB_INSPECT_E2E_RECORDING") {
             let setup = (|| -> Result<(), String> {
@@ -490,7 +509,7 @@ impl TasApp {
                 // sample as an advance (transport gate false-positive).
                 self.cycle_fc_seeded = false;
                 self.push_log("Connected to TAS_Helper.dll shared memory");
-                self.clear_stale_input_protection();
+                self.poll_stale_input_protection();
             }
             Err(e) => self.connect_error = Some(e),
         }
@@ -503,6 +522,15 @@ impl TasApp {
     /// the shared memory). Returns `true` when an entry was pushed; the caller
     /// clears the checkpoint only after the history flush is confirmed durable.
     fn recover_pending_checkpoint(&mut self) -> bool {
+        if self.recovery_store.is_none() {
+            return false;
+        }
+        // Drain queued checkpoint writes FIRST. The newest one may still be in
+        // flight; recovering the older file and then clearing "after durable
+        // persist" would let that newer write land only to be deleted.
+        if let Err(error) = self.recovery_writer.flush() {
+            self.push_log(&format!("Recovery flush failed: {error}"));
+        }
         let Some(store) = self.recovery_store.as_ref() else {
             return false;
         };
@@ -563,25 +591,40 @@ impl TasApp {
     /// A controller that died mid-cycle (crash, kill) leaves
     /// `cont_suppress_input` set while the game keeps running: every live key
     /// except ESC is swallowed until a menu trip longer than 5 s or an explicit
-    /// STOP, and nothing tells the player why. On connect, with no cycle of our
-    /// own in flight and the DLL idle, release it and say so.
-    fn clear_stale_input_protection(&mut self) {
-        if self.cont_controller.is_some() {
-            return;
-        }
-        let Some(shared) = self.shared.as_mut() else {
-            return;
-        };
-        let (mode, suppressed) = {
+    /// STOP, and nothing tells the player why. Polled at 1 Hz (and seeded on
+    /// connect): once the flag has stayed set with the DLL idle in OFF, no
+    /// cycle of ours in flight and no arm landing for
+    /// `STALE_PROTECTION_GRACE`, nobody owns it any more — release it and say
+    /// so. A live controller's restart/settle phase holds it in OFF for a
+    /// couple of seconds at most and then arms, which cancels the countdown.
+    fn poll_stale_input_protection(&mut self) {
+        let observed = self.shared.as_ref().and_then(|shared| {
             let state = shared.state();
-            (state.mode, state.cont_suppress_input)
+            (self.cont_controller.is_none()
+                && state.mode == TasMode::Off as u32
+                && state.cont_suppress_input != 0)
+                .then_some(state.arm_generation)
+        });
+        let Some(arm_generation) = observed else {
+            self.stale_protection_since = None;
+            return;
         };
-        if mode == TasMode::Off as u32 && suppressed != 0 {
-            shared.state_mut().cont_suppress_input = 0;
-            self.push_log(
-                "Cleared stale input protection (cont_suppress_input) left by a previous \
-                 controller: live keys were being swallowed",
-            );
+        match self.stale_protection_since {
+            Some((since, generation)) if generation == arm_generation => {
+                if since.elapsed() < STALE_PROTECTION_GRACE {
+                    return;
+                }
+                if let Some(shared) = self.shared.as_mut() {
+                    shared.state_mut().cont_suppress_input = 0;
+                }
+                self.stale_protection_since = None;
+                self.push_log(&format!(
+                    "Cleared stale input protection (cont_suppress_input) left by a previous \
+                     controller: live keys were being swallowed for {} s",
+                    STALE_PROTECTION_GRACE.as_secs()
+                ));
+            }
+            _ => self.stale_protection_since = Some((std::time::Instant::now(), arm_generation)),
         }
     }
 
@@ -593,15 +636,43 @@ impl TasApp {
     /// the cached game PID (global F9–F12), the session view and any in-flight
     /// cycle all belong to the dead process.
     fn on_dll_reinitialised(&mut self, fc: u32) {
-        self.push_log(&format!(
+        let why = format!(
             "TAS_Helper.dll re-initialised its shared memory (frame counter {} → {}): \
              the game was restarted with tas_ui open — resetting the session view",
             self.cycle_fc, fc
-        ));
+        );
+        // The section was just zeroed: the new DLL's ring starts over.
+        self.reset_session_view_for_new_game(&why, fc, true);
+    }
+
+    /// The frame counter cannot show a relaunch that happens before the old
+    /// process ever ticked (0 → 0 at the main menu), so the health check also
+    /// watches Supreme.exe's identity.
+    fn on_game_process_changed(&mut self, old_pid: u32, new_pid: u32) {
+        let fc = self
+            .shared
+            .as_ref()
+            .map_or(0, |shared| shared.frame_count_volatile());
+        let why = format!(
+            "Supreme.exe was replaced (pid {old_pid} → {new_pid}) with tas_ui still mapped: \
+             resetting the session view"
+        );
+        // The mapping may still hold the dead DLL's ring (or already the new
+        // one's): rewinding the cursor here would replay lines already shown.
+        // The memset that follows is what restarts the ring, and it is
+        // detected on its own.
+        self.reset_session_view_for_new_game(&why, fc, false);
+    }
+
+    fn reset_session_view_for_new_game(&mut self, why: &str, fc: u32, ring_restarted: bool) {
+        self.push_log(why);
         self.cycle_fc = fc;
         self.last_frame_count = fc;
         self.stale_frame_ticks = 0;
-        self.log_read_cursor = 0;
+        self.stale_protection_since = None;
+        if ring_restarted {
+            self.log_read_cursor = 0;
+        }
         self.game_pid_cached = None;
         self.clear_cont_catchup();
         self.reset_continue_runtime_state();
@@ -649,11 +720,13 @@ impl TasApp {
         self.connect_error =
             Some("Supreme.exe has exited. Inject TAS_Helper.dll after restarting the game.".into());
         self.stale_frame_ticks = 0;
+        self.stale_protection_since = None;
         self.log_read_cursor = 0;
         // Invalidate cached game PID — a fresh Supreme.exe launch will get a
         // different PID and our global-shortcut foreground gate would
         // otherwise stay stale.
         self.game_pid_cached = None;
+        self.game_pid_seen = None;
         self.clear_cont_catchup();
         self.reset_continue_runtime_state();
         self.last_mode = TasMode::Off as u32;
@@ -1835,12 +1908,17 @@ impl TasApp {
         if !pushed {
             // An empty snapshot (a fresh mapping after the game restarted,
             // for one) cannot stand in for the take: the checkpoint on disk
-            // is the only copy left, so it must survive to the next launch.
+            // is the only copy left. Bring it into history NOW — left on disk
+            // it would only survive until the next take's checkpoint replaced
+            // it or a later STOP cleared it.
             self.push_log(&format!(
                 "Recording session ({}) was not added to history: the buffer is empty — \
-                 recovery checkpoint kept",
+                 recovering its checkpoint instead",
                 session_context.label
             ));
+            if self.recover_pending_checkpoint() {
+                self.clear_recovery_after_durable_persist();
+            }
             return;
         }
         // Make the recording DURABLE in history BEFORE clearing the recovery
@@ -1882,6 +1960,22 @@ impl TasApp {
             return;
         }
         self.last_health_check = std::time::Instant::now();
+
+        // Game identity: a relaunch that reuses our mapped section is only
+        // visible here when the old process never ticked (see
+        // on_game_process_changed). Sampled once a second, so a process
+        // snapshot is affordable.
+        if self.shared.is_some() {
+            if let Some(pid) = win32::find_supreme_pid() {
+                if let Some(seen) = self.game_pid_seen {
+                    if seen != pid {
+                        self.on_game_process_changed(seen, pid);
+                    }
+                }
+                self.game_pid_seen = Some(pid);
+            }
+        }
+        self.poll_stale_input_protection();
 
         if let Some(ref shared) = self.shared {
             let current_frame = shared.frame_count_volatile();
@@ -3403,6 +3497,8 @@ mod tests {
             cont_last_outcome: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
+            game_pid_seen: None,
+            stale_protection_since: None,
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
@@ -3820,7 +3916,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_with_an_empty_buffer_keeps_the_recovery_checkpoint() {
+    fn finalize_with_an_empty_buffer_recovers_the_checkpoint_into_history() {
         let root = scratch_recovery_root("finalize_keep");
         let mut store =
             recording::RecoveryStore::new_in_root(root.clone(), std::time::Duration::ZERO).unwrap();
@@ -3839,16 +3935,48 @@ mod tests {
         let empty = recording::RecordingSnapshot::from_state(&state_with_recorded_count(0));
         app.finalize_recording_session(&empty, 0);
 
-        assert_eq!(app.history.len(), 0);
+        // The empty snapshot is not the take — the checkpoint is, and it lands
+        // in history right away (pinned, ⟲) instead of waiting for a restart
+        // that a later take's checkpoint could pre-empt.
+        assert_eq!(app.history.len(), 1);
+        let recovered = &app.history.entries()[0];
+        assert_eq!((recovered.end_tick, recovered.pinned), (300, true));
+        assert_eq!(recovered.custom_name.as_deref(), Some("⟲"));
+        // No history writer in the test app = nothing durable yet, so the
+        // file stays until a confirmed persist.
         assert!(
             checkpoint.exists(),
-            "a rejected push must not delete the only copy of the take"
+            "the checkpoint is cleared only after a durable persist"
         );
-        assert!(app
-            .log_lines
-            .lines()
-            .iter()
-            .any(|l| l.contains("recovery checkpoint kept")));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn recovery_drains_queued_checkpoint_writes_before_reading() {
+        let root = scratch_recovery_root("recover_flush");
+        let mut store =
+            recording::RecoveryStore::new_in_root(root.clone(), std::time::Duration::ZERO).unwrap();
+        // Checkpoint A is on disk; checkpoint B (longer) is still queued in the
+        // background writer when recovery runs.
+        write_checkpoint(&mut store, 300);
+        let app_state = state_with_recorded_count(500);
+        let snapshot = recording::RecordingSnapshot::from_state(&app_state);
+        let session =
+            recording::RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 500)
+                .unwrap();
+        let job = store
+            .take_write_job(&snapshot, &[], &session, true)
+            .unwrap();
+
+        let mut app = test_app();
+        app.recovery_store = Some(store);
+        assert!(app.recovery_writer.submit(job));
+        assert!(app.recover_pending_checkpoint());
+        assert_eq!(
+            app.history.entries()[0].end_tick,
+            500,
+            "the newest checkpoint must be the one recovered"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -3914,22 +4042,44 @@ mod tests {
     }
 
     #[test]
-    fn stale_input_protection_is_released_on_connect_only_when_idle() {
+    fn stale_input_protection_is_released_only_after_the_grace_period() {
+        let suppressed = |app: &TasApp| app.shared.as_ref().unwrap().state().cont_suppress_input;
         let mut app = test_app();
         let mut shared = TasSharedMemoryClient::new_test_mapping();
         shared.state_mut().cont_suppress_input = 1;
         shared.state_mut().mode = TasMode::Rec as u32;
         app.shared = Some(shared);
-        app.clear_stale_input_protection();
-        assert_eq!(
-            app.shared.as_ref().unwrap().state().cont_suppress_input,
-            1,
-            "a running REC keeps its protection"
-        );
+        app.poll_stale_input_protection();
+        assert_eq!(suppressed(&app), 1, "a running REC keeps its protection");
+        assert!(app.stale_protection_since.is_none());
 
+        // Idle in OFF with the flag set: the countdown starts, nothing clears yet
+        // — this is exactly what a live controller's restart/settle looks like.
         app.shared.as_mut().unwrap().state_mut().mode = TasMode::Off as u32;
-        app.clear_stale_input_protection();
-        assert_eq!(app.shared.as_ref().unwrap().state().cont_suppress_input, 0);
+        app.poll_stale_input_protection();
+        app.poll_stale_input_protection();
+        assert_eq!(
+            suppressed(&app),
+            1,
+            "a fresh OFF-mode hold is not stale yet"
+        );
+        let (since, generation) = app.stale_protection_since.unwrap();
+
+        // An arm landing (generation bump) restarts the countdown.
+        app.shared.as_mut().unwrap().state_mut().arm_generation = generation + 1;
+        app.stale_protection_since = Some((since - STALE_PROTECTION_GRACE * 2, generation));
+        app.poll_stale_input_protection();
+        assert_eq!(suppressed(&app), 1, "a new arm means a live controller");
+        assert_eq!(app.stale_protection_since.unwrap().1, generation + 1);
+
+        // Held past the grace period with no arm: abandoned — release it.
+        app.stale_protection_since = Some((
+            std::time::Instant::now() - STALE_PROTECTION_GRACE * 2,
+            generation + 1,
+        ));
+        app.poll_stale_input_protection();
+        assert_eq!(suppressed(&app), 0);
+        assert!(app.stale_protection_since.is_none());
         assert!(app
             .log_lines
             .lines()

@@ -315,16 +315,15 @@ fn parse_continue_frame(text: &str, recorded: u32) -> Option<u32> {
         .map(|v| if recorded > 0 { v.min(recorded) } else { 0 })
 }
 
+/// On blur: a number is clamped to the recording and written back; text that
+/// is not a number is LEFT ALONE. Replacing it with the last valid frame here
+/// would turn a typo into a silent arm — the next F12 would splice at a frame
+/// the user never saw confirmed. The arm paths refuse the typo instead.
 fn normalize_continue_frame_text(text: &mut String, continue_from: &mut u32, recorded: u32) {
     if let Some(parsed) = parse_continue_frame(text, recorded) {
         *continue_from = parsed;
+        *text = parsed.to_string();
     }
-    if recorded > 0 {
-        *continue_from = (*continue_from).min(recorded);
-    } else {
-        *continue_from = 0;
-    }
-    *text = continue_from.to_string();
 }
 
 #[cfg(test)]
@@ -366,6 +365,23 @@ mod tests {
                 Some("enter a level first")
             );
         }
+    }
+
+    #[test]
+    fn blur_keeps_a_typo_visible_and_clamps_numbers() {
+        use super::normalize_continue_frame_text;
+        let mut text = "abc".to_string();
+        let mut from = 100;
+        normalize_continue_frame_text(&mut text, &mut from, 4696);
+        assert_eq!(
+            (text.as_str(), from),
+            ("abc", 100),
+            "a typo must not become a frame"
+        );
+
+        text = "9000".into();
+        normalize_continue_frame_text(&mut text, &mut from, 4696);
+        assert_eq!((text.as_str(), from), ("4696", 4696));
     }
 
     #[test]
