@@ -105,14 +105,7 @@ fn compute_drift_between(
 
 /// Compute drift between rec_coords and play_coords over `count` ticks.
 pub fn compute_drift(state: &TasSharedState, count: u32) -> DriftResult {
-    compute_drift_between(
-        &state.rec_coords,
-        &state.play_coords,
-        0,
-        0,
-        count as usize,
-        false,
-    )
+    compute_drift_window(state, 0, count)
 }
 
 /// Compute drift between rec_coords and play_coords over the window `[start, count)`.
