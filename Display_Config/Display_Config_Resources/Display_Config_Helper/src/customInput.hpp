@@ -12,8 +12,10 @@ bool CheckKeyState(void** keyboardPtr, int keyValue);
 void HandleF7(safetyhook::Context& ctx);
 namespace hideresults {
     static void TrackMode(void* supreme);
+    static bool InReplay();
     static void Pump();
     static void OnSpaceSeen();
+    static void Cancel();
 }
 static void TrackLevelRoot();
 void HandleG();
@@ -181,9 +183,19 @@ void HandleM(bool isShiftDown) {
 // finish is observed where the game writes that run (saveReplayTimestamp.hpp
 // sets GlobalState::replayReady); a new level (TrackLevelRoot) or leaving the
 // replay for a new run (hideresults::TrackMode) clears it.
+//
+// On top of the flag the game must currently be in replay mode: after a
+// finish the auto replay starts within a frame of the results dialog (and no
+// key reaches this loop in between), so a finished run is only ever replayed
+// from inside a replay. Every other game-mode situation - a new run after F5,
+// a level re-entered from the menu with a stale flag - has no run to parse.
 static bool F7ReplayAvailable() {
     if (!GlobalState::replayReady) {
         Log("F7: no finished run in this level to replay - ignored");
+        return false;
+    }
+    if (!hideresults::InReplay()) {
+        Log("F7: not in a replay - the finished run belongs to an earlier run - ignored");
         return false;
     }
     return true;
@@ -208,6 +220,7 @@ static void TrackLevelRoot() {
     g_lastLevelRoot = root;
     GlobalState::replayReady = false;
     GlobalState::resultsVisible = false;
+    hideresults::Cancel();
 }
 
 // Set_Replay_Mode on a run the game cannot parse throws a C++ exception the
@@ -216,8 +229,11 @@ static void TrackLevelRoot() {
 // invalidated by something this DLL does not see): the game's frames unwind
 // normally, the press is ignored, and the reason is logged. It does not
 // cover the game throwing later, from its own cycle, once a bad replay has
-// been switched on - keeping the ready flag right (F7ReplayAvailable,
-// TrackLevelRoot, hideresults::TrackMode) is what prevents the dialog.
+// been switched on, and if Set_Replay_Mode throws after Set_AI_Learning_Mode
+// took effect nothing here rolls the first call back - the game is left as
+// the throw left it, which is still better than the fatal dialog. Keeping
+// the gate right (F7ReplayAvailable, TrackLevelRoot, hideresults::TrackMode)
+// is what actually prevents the dialog.
 static bool EnterReplayMode(void* supreme) {
     try {
         Housemarque::Supreme_Snowboarding::Supreme::Set_AI_Learning_Mode(supreme);
@@ -311,12 +327,25 @@ namespace hideresults {
     static void TrackMode(void* supreme) {
         const int mode = ReadMode(supreme);
         if (mode == g_lastMode) return;
-        if (g_lastMode == MODE_REPLAY && GlobalState::replayReady) {
-            Log("F7: replay left - the finished run is gone until the next finish");
+        Log(std::format("F7: game mode {} -> {}", g_lastMode, mode));
+        if (g_lastMode == MODE_REPLAY) {
+            if (GlobalState::replayReady) Log("F7: replay left - the finished run is gone until the next finish");
             GlobalState::replayReady = false;
             GlobalState::resultsVisible = false;
+            Cancel();
         }
         g_lastMode = mode;
+    }
+
+    static bool InReplay() { return g_lastMode == MODE_REPLAY; }
+
+    // Drops a pending press (releasing the key) when the replay or the level
+    // it belonged to is gone, so it cannot land in the next run.
+    static void Cancel() {
+        if (!g_active) return;
+        Log("F7: pending SPACE press cancelled - the replay is gone");
+        PostSpace(false);
+        g_active = false;
     }
 
     // Called from the key loop when it sees a SPACE press (edge).
