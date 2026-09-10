@@ -2,7 +2,6 @@
 #include "external/safetyhook.hpp"
 #include "helper.hpp"
 #include "Log.hpp"
-#include "globalState.hpp"
 #include <string>
 #include <regex>
 #include <ctime>
@@ -33,10 +32,6 @@ void DoSaveReplayToTimestamp() {
         char* replayLocation = reinterpret_cast<char*>(ctx.ebx); // example "Data/Levels/Alpine/Tracks/Easy/Replays/Replay.dat"
         modifiedPath = std::string(replayLocation);
         Log(std::format("Existing string {}", replayLocation));
-        // The game writes the finished run here: from now on F7 has a replay to
-        // play, and the results overlay is about to come up.
-        GlobalState::replayReady = true;
-        GlobalState::resultsVisible = true;
 
         static const std::string REPLAY_FILENAME = "Replay.dat";
         size_t pos = modifiedPath.find(REPLAY_FILENAME);

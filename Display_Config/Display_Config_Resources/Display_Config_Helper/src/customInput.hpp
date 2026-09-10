@@ -10,14 +10,7 @@
 #pragma once
 bool CheckKeyState(void** keyboardPtr, int keyValue);
 void HandleF7(safetyhook::Context& ctx);
-namespace hideresults {
-    static void TrackMode(void* supreme);
-    static bool InReplay();
-    static void Pump();
-    static void OnSpaceSeen();
-    static void Cancel();
-}
-static void TrackLevelRoot();
+namespace playerhandler { static void Install(); }
 void HandleG();
 void HandleM(bool isShiftDown);
 void SetupFunctionPointers();
@@ -27,7 +20,6 @@ constexpr int getKeyCode(char key) {
 }
 
 const int KEY_F7 = 90;
-const int KEY_SPACE = 49;
 const int KEY_M = getKeyCode('m');
 const int KEY_G = getKeyCode('g');
 const int KEY_SHIFT = 36;
@@ -117,9 +109,6 @@ void DoCustomInput() {
         typedef void** (*FUN_100d0b80_t)(void);
         FUN_100d0b80_t FUN_100d0b80 = (FUN_100d0b80_t)((std::uint8_t*)supremeGameModule + 0xd0b80);
         void** keyboardPtr = FUN_100d0b80();
-        TrackLevelRoot();
-        hideresults::TrackMode((void*)ctx.ecx);
-        hideresults::Pump();
 
         for (int i = 0; i <= 92; ++i) {
             auto isKeyDown = CheckKeyState(keyboardPtr, i);
@@ -127,9 +116,6 @@ void DoCustomInput() {
                 Log(std::format("DoCustomInput: Key {} pressed!", i));
                 if (i == KEY_F7) {
                     HandleF7(ctx);
-                }
-                if (i == KEY_SPACE) {
-                    hideresults::OnSpaceSeen();
                 }
                 if (i == KEY_M) {
                     HandleM(CheckKeyState(keyboardPtr, KEY_SHIFT));
@@ -142,6 +128,8 @@ void DoCustomInput() {
         }
     });
 
+
+    playerhandler::Install();
 
     static safetyhook::MidHook aiHeuristicHook;
     aiHeuristicHook = safetyhook::create_mid((void*)((std::uint8_t*)supremeGameModule + 0x12536b), [](safetyhook::Context& ctx) {
@@ -174,223 +162,161 @@ void HandleM(bool isShiftDown) {
     }
 }
 
-// Whether F7 has a replay to play.
+// F7 = replay.
 //
-// Set_Replay_Mode feeds the game's replay parser from the run written at
-// the finish line; before a finish in the current level there is nothing to
-// parse and the parser throws the game's "String literal must begin (and
-// end) with a '\"'" kernel error - the modal that ends the session. The
-// finish is observed where the game writes that run (saveReplayTimestamp.hpp
-// sets GlobalState::replayReady); a new level (TrackLevelRoot) or leaving the
-// replay for a new run (hideresults::TrackMode) clears it.
+// Set_Replay_Mode hands the player handler to the replay controller, which
+// plays the Ghost_Players in the handler's ghost list: the guide rider / TOP5
+// ghosts loaded with the level, or the human run once the finish turned it
+// into a ghost for the auto replay. With that list empty - a fresh spawn, a
+// new run after F5 - there is nothing to play and the replay start throws
+// the game's fatal "String literal" kernel error from a later cycle (a
+// try/catch around the calls does not see it; measured 2026-09-10/11). So
+// F7 is refused unless the ghost list has an entry.
 //
-// On top of the flag the game must currently be in replay mode: after a
-// finish the auto replay starts within a frame of the results dialog (and no
-// key reaches this loop in between), so a finished run is only ever replayed
-// from inside a replay. Every other game-mode situation - a new run after F5,
-// a level re-entered from the menu with a stale flag - has no run to parse.
-static bool F7ReplayAvailable() {
-    if (!GlobalState::replayReady) {
-        Log("F7: no finished run in this level to replay - ignored");
-        return false;
-    }
-    if (!hideresults::InReplay()) {
-        Log("F7: not in a replay - the finished run belongs to an earlier run - ignored");
-        return false;
-    }
-    return true;
-}
+// The player handler is captured from Player_Handler::Set_Controller
+// (SG+0x942F0), which Set_Game_Mode calls at every level start and F5
+// restart (the exe's own path). Its lists are FLIT trees (HMG_HTL_2): every
+// object embeds its node at +4, a node is {succ, pred, parent, child_head,
+// child_tail, child_tailpred}, and an empty list points its child_head at
+// its own child_tail slot (layout confirmed live 2026-09-11).
+namespace playerhandler {
+    const size_t NODE_OFFSET = 0x4;        // object -> its FLIT node
+    const size_t NODE_CHILD_HEAD = 0xC;
+    const size_t NODE_CHILD_TAIL = 0x10;   // the sentinel an empty head points at
+    const size_t GHOST_LIST_OFFSET = 0x20; // handler -> list object
 
-// The level root at Supreme_Game+0x1D5450 is reallocated when a level is
-// loaded (it survives F5 restarts). A new root means the finished run that
-// was replayable belongs to a level that is gone.
-static uint32_t g_lastLevelRoot = 0;
+    static void* g_handler = nullptr;
+    static safetyhook::MidHook g_setControllerHook{};
 
-static uint32_t ReadLevelRoot() {
-    __try {
-        return *(uint32_t*)((char*)supremeGameModule + 0x1D5450);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
-static void TrackLevelRoot() {
-    uint32_t root = ReadLevelRoot();
-    if (root == g_lastLevelRoot) return;
-    g_lastLevelRoot = root;
-    GlobalState::replayReady = false;
-    GlobalState::resultsVisible = false;
-    hideresults::Cancel();
-}
-
-// Set_Replay_Mode on a run the game cannot parse throws a C++ exception the
-// game's own top level turns into the fatal dialog. Catching it here covers
-// a throw from inside these two calls when the ready flag is wrong (a replay
-// invalidated by something this DLL does not see): the game's frames unwind
-// normally, the press is ignored, and the reason is logged. It does not
-// cover the game throwing later, from its own cycle, once a bad replay has
-// been switched on, and if Set_Replay_Mode throws after Set_AI_Learning_Mode
-// took effect nothing here rolls the first call back - the game is left as
-// the throw left it, which is still better than the fatal dialog. Keeping
-// the gate right (F7ReplayAvailable, TrackLevelRoot, hideresults::TrackMode)
-// is what actually prevents the dialog.
-static bool EnterReplayMode(void* supreme) {
-    try {
-        Housemarque::Supreme_Snowboarding::Supreme::Set_AI_Learning_Mode(supreme);
-        Housemarque::Supreme_Snowboarding::Supreme::Set_Replay_Mode(supreme);
-        return true;
-    } catch (...) {
-        Log("F7: the game refused to start the replay (no parsable run) - ignored");
-        GlobalState::replayReady = false;
-        return false;
-    }
-}
-
-// Results-overlay dismissal.
-//
-// After a finish the game shows the results overlay ("Your time was ...",
-// the hiscore table, "press space to hide the results") and it stays up over
-// an F7 replay. The game itself takes it down on SPACE - but SPACE is a
-// TOGGLE of the table while a replay runs (measured 2026-09-10), so the
-// helper must know whether the table is up before pressing anything:
-//   - up from the moment the game writes the finished run (saveReplayTimestamp
-//     hook sets GlobalState::resultsVisible);
-//   - flipped by every SPACE the game honours - the key loop sees exactly
-//     those presses (for ~10 s after the auto replay starts the game ignores
-//     every key, and the key loop sees nothing either);
-//   - gone when the replay drops back to game mode (F5 rebuilds the HUD) or
-//     the level changes.
-// When F7 starts a replay with the table up, the helper presses SPACE the way
-// the player would: WM_KEYDOWN/WM_KEYUP posted to the game window (the game's
-// Win32 keyboard driver reads them; with DirectInput enabled they are ignored
-// and the overlay simply stays). PostMessage is asynchronous, so the hook
-// never re-enters the game's input path. The key is released as soon as the
-// key loop sees the game's own keyboard report it down - the press has been
-// honoured and the visibility flag flips with it - or after a short timeout,
-// in which case nothing was toggled and the flag stays as it was.
-namespace hideresults {
-    constexpr DWORD HOLD_MS = 2000;     // release an unseen press after this
-    const int MODE_REPLAY = 1;          // Supreme+0: Set_Replay_Mode writes 1, Set_Game_Mode 0
-
-    static bool g_active = false;
-    static DWORD g_startMs = 0;
-    static HWND g_window = nullptr;
-    static int g_lastMode = -1;
-
-    struct WindowSearch { HWND anyVisible; HWND gameClass; };
-
-    static BOOL CALLBACK FindGameWindowProc(HWND hwnd, LPARAM lParam) {
-        DWORD pid = 0;
-        GetWindowThreadProcessId(hwnd, &pid);
-        if (pid != GetCurrentProcessId() || !IsWindowVisible(hwnd)) return TRUE;
-        WindowSearch* search = (WindowSearch*)lParam;
-        if (!search->anyVisible) search->anyVisible = hwnd;
-        char className[64] = {};
-        GetClassNameA(hwnd, className, sizeof(className));
-        if (strcmp(className, "Supreme") == 0) {
-            search->gameClass = hwnd;
-            return FALSE;
-        }
-        return TRUE;
+    static void Install() {
+        g_setControllerHook = safetyhook::create_mid((void*)((uint8_t*)supremeGameModule + 0x942f0),
+            [](safetyhook::Context& ctx) { g_handler = (void*)ctx.ecx; });
+        Log("DoCustomInput: Player_Handler::Set_Controller hook installed");
     }
 
-    // The game's own top-level window (class "Supreme"), else any visible one.
-    static HWND FindGameWindow() {
-        WindowSearch search{};
-        EnumWindows(FindGameWindowProc, (LPARAM)&search);
-        return search.gameClass ? search.gameClass : search.anyVisible;
-    }
-
-    static void PostSpace(bool down) {
-        const LPARAM scan = (LPARAM)(MapVirtualKeyA(VK_SPACE, MAPVK_VK_TO_VSC) << 16) | 1;
-        if (down) PostMessageA(g_window, WM_KEYDOWN, VK_SPACE, scan);
-        else PostMessageA(g_window, WM_KEYUP, VK_SPACE, scan | (1u << 30) | (1u << 31));
-    }
-
-    // SEH leaf: the Supreme object's mode word, -1 if unreadable.
-    static int ReadMode(void* supreme) {
+    // SEH leaf: 1 when the handler's ghost list has an entry, 0 when it is
+    // empty, -1 when no handler was seen yet or the chain cannot be read.
+    static int GhostsLoaded() {
         __try {
-            return *(int*)supreme;
+            uint8_t* handler = (uint8_t*)g_handler;
+            if (!handler) return -1;
+            uint8_t* list = *(uint8_t**)(handler + GHOST_LIST_OFFSET);
+            if (!list) return -1;
+            uint8_t* node = list + NODE_OFFSET;
+            uint8_t* head = *(uint8_t**)(node + NODE_CHILD_HEAD);
+            if (!head) return -1;
+            return head != node + NODE_CHILD_TAIL ? 1 : 0;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return -1;
+        }
+    }
+}
+
+static bool F7ReplayAvailable() {
+    const int ghosts = playerhandler::GhostsLoaded();
+    if (ghosts == 1) return true;
+    Log(ghosts == 0 ? "F7: nothing to replay (no ghost loaded, no finished run) - ignored"
+                    : "F7: player handler not seen yet - ignored");
+    return false;
+}
+
+// The finish results.
+//
+// The results overlay is not part of Supreme_Game. The hiscore table is the
+// Main_Menu page ID_IN_GAME_RESULTS, driven by Supreme.exe: the exe keeps a
+// Game object at [[exe+0x889C4]+0x30] whose byte +0x10 is "results active";
+// the finish handler (exe+0x26DA0) sets it to 1 and Game::Reset (exe+0x24F40,
+// every restart) sets it back to 0, and the main loop paints the page only
+// while the game is in replay mode and that byte is set. The "press space to
+// hide the results" line is a HUD text line Supreme_Game refreshes every
+// frame from the std::string at [game+0x34]+0xD4 (game = the Supreme_Game
+// singleton FUN_1013e410 returns), which the exe assigns "" the moment the
+// byte drops. The overlay staying up over an F7 replay is just that byte
+// still being 1 from the finish, and the line showing over a ghost replay
+// started before any finish is the string never having been blanked - so F7
+// does both the way the exe does: clear the byte, blank the string. (Static
+// RE of the decompiled exe + Supreme_Game, live checks 2026-09-10/11.)
+namespace results {
+    const uintptr_t APP_POINTER_RVA = 0x889C4;
+    const uintptr_t GAME_VTABLE_RVA = 0x6D6EC;
+    const size_t GAME_OFFSET_IN_APP = 0x30;
+    const size_t RESULTS_ACTIVE_OFFSET = 0x10;
+    const size_t START_INFO_OFFSET = 0x34;
+    const size_t PROMPT_STRING_OFFSET = 0xD4;
+
+    // SEH leaf: the exe's Game object, validated by its vtable; null if the
+    // chain is unreadable or points somewhere else (level teardown nulls it).
+    static uint8_t* GameObject() {
+        __try {
+            uint8_t* exe = (uint8_t*)GetModuleHandleA(nullptr);
+            uint8_t* app = *(uint8_t**)(exe + APP_POINTER_RVA);
+            if (!app) return nullptr;
+            uint8_t* game = *(uint8_t**)(app + GAME_OFFSET_IN_APP);
+            if (!game) return nullptr;
+            if (*(uint8_t**)game != exe + GAME_VTABLE_RVA) return nullptr;
+            return game;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return nullptr;
+        }
+    }
+
+    // SEH leaf: 1 when the page was up and is now down, 0 when it was not
+    // up, -1 when the exe's Game object is not there.
+    static int ClearPageFlag() {
+        __try {
+            uint8_t* game = GameObject();
+            if (!game) return -1;
+            if (!game[RESULTS_ACTIVE_OFFSET]) return 0;
+            game[RESULTS_ACTIVE_OFFSET] = 0;
+            return 1;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             return -1;
         }
     }
 
-    // Called from the key loop every frame, before the keys are scanned.
-    //
-    // Leaving replay mode (F5 during a replay drops straight into a new run)
-    // rebuilds the HUD, so the overlay is gone - and the finished run with it:
-    // the new run takes over the recorder, and F7 on it throws the same
-    // "String literal" kernel error as F7 before any finish (measured
-    // 2026-09-10; the throw escapes the F7 handler's try/catch, so it has to
-    // be refused up front). The next finish raises both flags again.
-    static void TrackMode(void* supreme) {
-        const int mode = ReadMode(supreme);
-        if (mode == g_lastMode) return;
-        Log(std::format("F7: game mode {} -> {}", g_lastMode, mode));
-        if (g_lastMode == MODE_REPLAY) {
-            if (GlobalState::replayReady) Log("F7: replay left - the finished run is gone until the next finish");
-            GlobalState::replayReady = false;
-            GlobalState::resultsVisible = false;
-            Cancel();
-        }
-        g_lastMode = mode;
-    }
-
-    static bool InReplay() { return g_lastMode == MODE_REPLAY; }
-
-    // Drops a pending press (releasing the key) when the replay or the level
-    // it belonged to is gone, so it cannot land in the next run.
-    static void Cancel() {
-        if (!g_active) return;
-        Log("F7: pending SPACE press cancelled - the replay is gone");
-        PostSpace(false);
-        g_active = false;
-    }
-
-    // Called from the key loop when it sees a SPACE press (edge).
-    static void OnSpaceSeen() {
-        if (g_lastMode != MODE_REPLAY) return;
-        GlobalState::resultsVisible = !GlobalState::resultsVisible;
-        Log(std::format("F7: SPACE seen in the replay - results overlay now {}",
-                        GlobalState::resultsVisible ? "up" : "hidden"));
-        if (g_active) {
-            Log(std::format("F7: results overlay dismissed after {} ms", GetTickCount() - g_startMs));
-            PostSpace(false);
-            g_active = false;
+    // SEH leaf: blanks the prompt string like the exe's assign("") does - an
+    // MSVC6 std::string {alloc, ptr, len, res}: the length goes to 0 and the
+    // buffer gets its terminator. 1 when it held text, 0 when already empty,
+    // -1 when unreadable or not a string this code recognises.
+    static int BlankPrompt() {
+        __try {
+            uint8_t* startInfo = *(uint8_t**)((uint8_t*)FUN_1013e410() + START_INFO_OFFSET);
+            if (!startInfo) return -1;
+            uint32_t* str = (uint32_t*)(startInfo + PROMPT_STRING_OFFSET);
+            char* text = (char*)str[1];
+            uint32_t len = str[2];
+            if (!text || len > 256) return -1;
+            if (len == 0) return 0;
+            size_t actual = 0;
+            while (actual < len && text[actual]) actual++;
+            if (actual != len) return -1;   // not the length field this expects
+            str[2] = 0;
+            text[0] = 0;
+            return 1;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return -1;
         }
     }
 
-    // Called right after F7 has started a replay.
-    static void Begin() {
-        if (!GlobalState::resultsVisible) return;
-        if (g_active) { PostSpace(false); g_active = false; }
-        g_window = FindGameWindow();
-        if (!g_window) {
-            Log("F7: game window not found - results overlay left as is");
-            return;
-        }
-        g_active = true;
-        g_startMs = GetTickCount();
-        PostSpace(true);
-    }
-
-    // Called from the key loop every frame.
-    static void Pump() {
-        if (!g_active) return;
-        if (GetTickCount() - g_startMs < HOLD_MS) return;
-        Log("F7: the game never saw the SPACE press - results overlay left as is");
-        PostSpace(false);
-        g_active = false;
+    // Takes the results down like a restart does. Safe when nothing is up.
+    static void Hide() {
+        const int page = ClearPageFlag();
+        const int prompt = BlankPrompt();
+        if (page == 1) Log("F7: results page hidden");
+        if (page == -1) Log("F7: exe Game object not found - results page left as is");
+        if (prompt == 1) Log("F7: replay instructions line blanked");
+        if (prompt == -1) Log("F7: replay instructions string not recognised - left as is");
     }
 }
 
 void HandleF7(safetyhook::Context& ctx) {
     Log("Handle F7");
-    void* supreme = (void*)ctx.ecx;
     if (!F7ReplayAvailable()) return;
-    if (!EnterReplayMode(supreme)) return;
-    hideresults::Begin();
+    void* supreme = (void*)ctx.ecx;
+
+    Housemarque::Supreme_Snowboarding::Supreme::Set_AI_Learning_Mode(supreme);
+    Housemarque::Supreme_Snowboarding::Supreme::Set_Replay_Mode(supreme);
+    results::Hide();
 
     // Press "C"
     void *cameraPtr = FUN_1013e410(); // expected: 0x02AFD9D8
