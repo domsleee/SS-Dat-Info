@@ -185,21 +185,36 @@ namespace playerhandler {
     const size_t NODE_CHILD_TAIL = 0x10;   // the sentinel an empty head points at
     const size_t GHOST_LIST_OFFSET = 0x20; // handler -> list object
 
+    const uintptr_t LEVEL_ROOT_RVA = 0x1D5450; // reallocated on level teardown, kept across F5
+
     static void* g_handler = nullptr;
+    static uint32_t g_handlerRoot = 0;      // the level the handler belongs to
     static safetyhook::MidHook g_setControllerHook{};
+
+    static uint32_t LevelRoot() {
+        __try {
+            return *(uint32_t*)((uint8_t*)supremeGameModule + LEVEL_ROOT_RVA);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return 0;
+        }
+    }
 
     static void Install() {
         g_setControllerHook = safetyhook::create_mid((void*)((uint8_t*)supremeGameModule + 0x942f0),
-            [](safetyhook::Context& ctx) { g_handler = (void*)ctx.ecx; });
+            [](safetyhook::Context& ctx) { g_handler = (void*)ctx.ecx; g_handlerRoot = LevelRoot(); });
         Log("DoCustomInput: Player_Handler::Set_Controller hook installed");
     }
 
     // SEH leaf: 1 when the handler's ghost list has an entry, 0 when it is
-    // empty, -1 when no handler was seen yet or the chain cannot be read.
+    // empty, -1 when no handler was seen for the current level (the capture
+    // is stamped with the level root, so a handler freed with its level is
+    // never read) or the chain cannot be read.
     static int GhostsLoaded() {
         __try {
             uint8_t* handler = (uint8_t*)g_handler;
             if (!handler) return -1;
+            const uint32_t root = LevelRoot();
+            if (!root || root != g_handlerRoot) return -1;
             uint8_t* list = *(uint8_t**)(handler + GHOST_LIST_OFFSET);
             if (!list) return -1;
             uint8_t* node = list + NODE_OFFSET;
@@ -274,28 +289,54 @@ namespace results {
         }
     }
 
-    // SEH leaf: blanks the prompt string like the exe's assign("") does - an
-    // MSVC6 std::string {alloc, ptr, len, res}: the length goes to 0 and the
-    // buffer gets its terminator. 1 when it held text, 0 when already empty,
-    // -1 when unreadable or not a string this code recognises.
-    static int BlankPrompt() {
+    // The exe's own std::string::assign(const char*, size) from MSVCP60 - the
+    // routine the exe itself blanks the string with (MSVC6 strings share
+    // reference-counted buffers, so the string is never written directly).
+    typedef void* (__fastcall* StringAssign_t)(void* self, void* unusedEdx, const char* text, unsigned length);
+    static StringAssign_t g_stringAssign = nullptr;
+
+    static StringAssign_t StringAssign() {
+        if (g_stringAssign) return g_stringAssign;
+        HMODULE msvcp = GetModuleHandleA("MSVCP60.dll");
+        if (!msvcp) {
+            Log("F7: MSVCP60.dll not loaded - replay instructions line left as is");
+            return nullptr;
+        }
+        g_stringAssign = (StringAssign_t)GetProcAddress(msvcp,
+            "?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QAEAAV12@PBDI@Z");
+        if (!g_stringAssign) Log("F7: MSVCP60 basic_string::assign(const char*, size) export not found");
+        return g_stringAssign;
+    }
+
+    // SEH leaf: the prompt string object, checked to look like an MSVC6
+    // std::string {alloc, ptr, len, res} holding text; null when unreadable,
+    // empty or not recognised.
+    static void* PromptStringHoldingText() {
         __try {
             uint8_t* startInfo = *(uint8_t**)((uint8_t*)FUN_1013e410() + START_INFO_OFFSET);
-            if (!startInfo) return -1;
+            if (!startInfo) return nullptr;
             uint32_t* str = (uint32_t*)(startInfo + PROMPT_STRING_OFFSET);
-            char* text = (char*)str[1];
-            uint32_t len = str[2];
-            if (!text || len > 256) return -1;
-            if (len == 0) return 0;
+            const char* text = (const char*)str[1];
+            const uint32_t len = str[2];
+            if (!text || len == 0 || len > 256) return nullptr;
             size_t actual = 0;
             while (actual < len && text[actual]) actual++;
-            if (actual != len) return -1;   // not the length field this expects
-            str[2] = 0;
-            text[0] = 0;
-            return 1;
+            return actual == len ? str : nullptr;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return -1;
+            return nullptr;
         }
+    }
+
+    // Blanks the prompt string the way the exe does. 1 when it held text and
+    // was blanked, 0 when there was nothing to blank, -1 when the runtime
+    // routine is not available.
+    static int BlankPrompt() {
+        void* str = PromptStringHoldingText();
+        if (!str) return 0;
+        StringAssign_t assign = StringAssign();
+        if (!assign) return -1;
+        assign(str, nullptr, "", 0);
+        return 1;
     }
 
     // Takes the results down like a restart does. Safe when nothing is up.
@@ -305,7 +346,7 @@ namespace results {
         if (page == 1) Log("F7: results page hidden");
         if (page == -1) Log("F7: exe Game object not found - results page left as is");
         if (prompt == 1) Log("F7: replay instructions line blanked");
-        if (prompt == -1) Log("F7: replay instructions string not recognised - left as is");
+        if (prompt == -1) Log("F7: MSVCP60 string assign not found - replay instructions line left as is");
     }
 }
 
