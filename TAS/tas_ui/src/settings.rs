@@ -9,9 +9,11 @@ use std::path::PathBuf;
 pub struct Settings {
     // View panel toggles
     pub show_pico_panel: bool,
+    pub show_debug_drift: bool,
     pub show_history: bool,
     pub show_config: bool,
     pub show_log: bool,
+    pub show_trajectory: bool,
 
     // Playback
     pub playback_speed: f32,
@@ -26,9 +28,11 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             show_pico_panel: false,
+            show_debug_drift: false,
             show_history: false,
             show_config: false,
             show_log: false,
+            show_trajectory: false,
             playback_speed: 1.0,
             // The catch-up replay is physics-compute-bound at ~80x effective;
             // 256x saturates that ceiling without costing reliability.

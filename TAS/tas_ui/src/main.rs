@@ -39,7 +39,9 @@ fn compute_global_key_edges(now: [bool; 4], prev: &mut [bool; 4]) -> [bool; 4] {
     edges
 }
 
-use panels::{config, history, input_script, log_panel, status, timeline, transport};
+use panels::{
+    config, drift, history, input_script, log_panel, status, timeline, trajectory, transport,
+};
 use pico::PicoState;
 use recording::{RecordingHistory, RecordingSessionKind};
 
@@ -146,8 +148,10 @@ struct TasApp {
     continue_from_frame: u32,
     continue_from_text: String,
     playback_speed: f32,
+    show_debug_drift: bool,
     show_history: bool,
     show_log: bool,
+    show_trajectory: bool,
     segment_tracker: recording::SegmentTracker,
     active_recording_session: Option<ActiveRecordingSession>,
     pending_session_kind: Option<RecordingSessionKind>,
@@ -174,6 +178,10 @@ struct TasApp {
 
     drift_tracker: drift_scan::DriftTracker,
     last_logged_drift_level: u8, // 0=none, 1=any, 2=>=1.0, 3=>=5.0
+
+    // Cached plot data (avoid per-frame Vec allocation)
+    drift_cache: drift::DriftCache,
+    trajectory_cache: trajectory::TrajectoryCache,
 
     /// In-flight restart→arm(→judge→reroll) cycle, driven by the shared
     /// `tas_shared::transport` controller — the SAME state machine the tas_test
@@ -392,8 +400,10 @@ impl TasApp {
             continue_from_frame: 0,
             continue_from_text: "0".to_string(),
             playback_speed: normalize_playback_speed(settings.playback_speed),
+            show_debug_drift: settings.show_debug_drift,
             show_history: settings.show_history,
             show_log: settings.show_log,
+            show_trajectory: settings.show_trajectory,
             segment_tracker: recording::SegmentTracker::new(),
             active_recording_session: None,
             pending_session_kind: None,
@@ -408,6 +418,8 @@ impl TasApp {
             finished_hud_cs: None,
             drift_tracker: drift_scan::DriftTracker::default(),
             last_logged_drift_level: 0,
+            drift_cache: drift::DriftCache::default(),
+            trajectory_cache: trajectory::TrajectoryCache::default(),
             cont_controller: None,
             cont_cycle_deadline: None,
             cont_last_outcome: None,
@@ -1836,6 +1848,7 @@ impl TasApp {
         self.pending_input_edit = None;
         self.pending_edit_autostop = false;
         self.timeline_edit = timeline::TimelineEdit::default();
+        self.drift_cache = drift::DriftCache::default();
     }
 
     /// Apply a pending input edit to the stopped recording before rendering,
@@ -2567,7 +2580,9 @@ impl eframe::App for TasApp {
     fn on_exit(&mut self) {
         let s = settings::Settings {
             show_pico_panel: self.show_pico_panel,
+            show_debug_drift: self.show_debug_drift,
             show_history: self.show_history,
+            show_trajectory: self.show_trajectory,
             show_config: self.show_config,
             show_log: self.show_log,
             playback_speed: self.playback_speed_for_settings(),
@@ -2855,6 +2870,7 @@ impl eframe::App for TasApp {
                         ui.checkbox(&mut self.show_log, "Log");
                         ui.weak("Ctrl+L");
                     });
+                    ui.checkbox(&mut self.show_trajectory, "Trajectory");
                     ui.separator();
                     // Debug section — rarely touched diagnostic toggles.
                     ui.label(
@@ -2862,6 +2878,7 @@ impl eframe::App for TasApp {
                             .small()
                             .color(egui::Color32::from_gray(140)),
                     );
+                    ui.checkbox(&mut self.show_debug_drift, "Drift overlay");
                     ui.checkbox(&mut self.show_pico_panel, "Pico HID");
                     ui.checkbox(&mut self.show_config, "Debug Config");
                 });
@@ -3311,6 +3328,29 @@ impl eframe::App for TasApp {
                     }
                 }
 
+                if self.show_debug_drift {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Debug drift").strong());
+                    drift::show(ui, state, &mut self.drift_cache);
+                }
+
+                // Trajectory + Rotation — toggleable via the View menu,
+                // hidden by default. Fixed 220 px container when shown.
+                if self.show_trajectory {
+                    ui.add_space(4.0);
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.label(egui::RichText::new("Trajectory").strong());
+                        ui.separator();
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), 220.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                trajectory::show(ui, state, &mut self.trajectory_cache);
+                            },
+                        );
+                    });
+                }
+
                 // Diagnostics footer — DLL counters. Only useful when
                 // debugging the DLL itself; gated on Debug Config so it's
                 // hidden during normal use.
@@ -3683,8 +3723,10 @@ mod tests {
             continue_from_frame: 0,
             continue_from_text: "0".to_string(),
             playback_speed: 1.0,
+            show_debug_drift: false,
             show_history: false,
             show_log: false,
+            show_trajectory: false,
             segment_tracker: recording::SegmentTracker::new(),
             active_recording_session: None,
             pending_session_kind: None,
@@ -3696,6 +3738,8 @@ mod tests {
             log_read_cursor: 0,
             drift_tracker: drift_scan::DriftTracker::default(),
             last_logged_drift_level: 0,
+            drift_cache: drift::DriftCache::default(),
+            trajectory_cache: trajectory::TrajectoryCache::default(),
             cont_controller: None,
             cont_cycle_deadline: None,
             cont_last_outcome: None,
