@@ -294,6 +294,25 @@ fn checkpoint_clear_decision(flush: Option<Result<(), String>>) -> (bool, Option
 /// arms within a few seconds; the DLL's own menu-side retirement is 5 s.
 const STALE_PROTECTION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The checkpoint a session left behind: same kind and start tick, and no
+/// longer than the session ever was.
+#[derive(Clone, Copy)]
+struct CheckpointOwner {
+    kind: RecordingSessionKind,
+    start_tick: u32,
+    max_recorded_count: u32,
+}
+
+impl From<&ActiveRecordingSession> for CheckpointOwner {
+    fn from(session: &ActiveRecordingSession) -> Self {
+        Self {
+            kind: session.kind,
+            start_tick: session.start_tick,
+            max_recorded_count: session.max_recorded_count,
+        }
+    }
+}
+
 impl TasApp {
     fn new() -> Self {
         let (shared, connect_error) = match TasSharedMemoryClient::open() {
@@ -527,6 +546,15 @@ impl TasApp {
     /// the shared memory). Returns `true` when an entry was pushed; the caller
     /// clears the checkpoint only after the history flush is confirmed durable.
     fn recover_pending_checkpoint(&mut self) -> bool {
+        self.recover_pending_checkpoint_matching(None)
+    }
+
+    /// Like `recover_pending_checkpoint`, but when `owner` is given the file
+    /// is recovered only if it belongs to THAT session. A finalize whose push
+    /// was rejected (empty buffer) must not resurrect an older take's
+    /// checkpoint whose clear was refused - that would land as a pinned
+    /// duplicate of an entry already in history.
+    fn recover_pending_checkpoint_matching(&mut self, owner: Option<CheckpointOwner>) -> bool {
         if self.recovery_store.is_none() {
             return false;
         }
@@ -547,6 +575,18 @@ impl TasApp {
                 return false;
             }
         };
+        if let Some(owner) = owner {
+            let mine = cp.session.kind == owner.kind
+                && cp.session.start_tick == owner.start_tick
+                && cp.session.end_tick <= owner.max_recorded_count;
+            if !mine {
+                self.push_log(&format!(
+                    "Recovery checkpoint ({}) belongs to another session - kept on disk for the next launch",
+                    cp.session.label
+                ));
+                return false;
+            }
+        }
         let session_label = cp.session.label.clone();
         let (start, end) = (cp.session.start_tick, cp.session.end_tick);
         let cp_level = cp.session.level.clone();
@@ -707,8 +747,10 @@ impl TasApp {
             .map_or(0, |shared| shared.frame_count_volatile());
         // The dead DLL's section is frozen at the counter we last saw; a
         // counter below it means the new DLL has already zeroed the section.
-        let mapping_is_old = fc >= self.cycle_fc;
+        // A counter that never moved proves nothing either way (the old
+        // game sat at a menu): treat the section as unknown, never as ours.
         let old_never_ticked = self.cycle_fc == 0;
+        let mapping_is_old = !old_never_ticked && fc >= self.cycle_fc;
         let stale_mode = self
             .shared
             .as_ref()
@@ -797,12 +839,15 @@ impl TasApp {
                 // Whatever the buffer holds now belongs to the new game (a
                 // harness may already have loaded or recorded into it): the
                 // old take's checkpoint is its only copy.
-                self.active_recording_session = None;
+                let owner = self
+                    .active_recording_session
+                    .take()
+                    .map(|session| CheckpointOwner::from(&session));
                 self.push_log(
                     "The recording in progress was lost with the old game process; \
                      recovering its last checkpoint",
                 );
-                if self.recover_pending_checkpoint() {
+                if self.recover_pending_checkpoint_matching(owner) {
                     self.clear_recovery_after_durable_persist();
                 }
             }
@@ -837,22 +882,59 @@ impl TasApp {
     /// from it into history NOW — waiting for a REC→OFF transition that can
     /// only come from a fresh, empty mapping used to push an empty snapshot and
     /// then delete the checkpoint, losing the take.
-    fn disconnect_from_dead_game(&mut self) {
-        self.push_log("Game process not found — disconnecting shared memory");
-        if self.active_recording_session.is_some() {
-            let capture = self.shared.as_ref().map(|shared| {
-                let snapshot = recording::RecordingSnapshot::from_state(shared.state());
-                let recorded = snapshot.recorded_count;
-                (snapshot, recorded)
-            });
-            if let Some((snapshot, recorded)) = capture {
-                self.push_log(&format!(
-                    "Game exited during a recording — captured its {} ticks from shared memory",
-                    recorded
-                ));
-                self.finalize_recording_session(&snapshot, recorded);
+    /// The recording in progress, captured from the section as it stands.
+    /// Used when the process that owned it is gone but nothing has zeroed the
+    /// section yet: what is in it is the complete take.
+    fn capture_take_from_mapping(&mut self, why: &str) {
+        if self.active_recording_session.is_none() {
+            return;
+        }
+        let capture = self.shared.as_ref().map(|shared| {
+            let snapshot = recording::RecordingSnapshot::from_state(shared.state());
+            let recorded = snapshot.recorded_count;
+            (snapshot, recorded)
+        });
+        if let Some((snapshot, recorded)) = capture {
+            self.push_log(&format!(
+                "{why} — captured its {recorded} ticks from shared memory"
+            ));
+            self.finalize_recording_session(&snapshot, recorded);
+        }
+    }
+
+    /// The 1 Hz identity sample. A new PID is a relaunch. NO PID while a
+    /// recording is in progress is the moment to capture it: the process
+    /// that owned the section is gone, nothing can zero it until a new game
+    /// injects, and waiting for the stale-frame disconnect (up to 5 s) or a
+    /// relaunch's memset would trade the complete take for a checkpoint that
+    /// lags by a debounce interval.
+    fn on_game_pid_observed(&mut self, pid: Option<u32>) {
+        match pid {
+            Some(pid) => {
+                if let Some(seen) = self.game_pid_seen {
+                    if seen != pid {
+                        self.on_game_process_changed(seen, pid);
+                    }
+                }
+                self.game_pid_seen = Some(pid);
+            }
+            None => {
+                if self.game_pid_seen.is_some() && self.active_recording_session.is_some() {
+                    self.capture_take_from_mapping("Game exited during a recording");
+                    // The frozen section still reads REC; the memset or the
+                    // disconnect must not turn that into a phantom session.
+                    self.last_mode = self
+                        .shared
+                        .as_ref()
+                        .map_or(TasMode::Off as u32, |shared| shared.mode_volatile());
+                }
             }
         }
+    }
+
+    fn disconnect_from_dead_game(&mut self) {
+        self.push_log("Game process not found — disconnecting shared memory");
+        self.capture_take_from_mapping("Game exited during a recording");
         self.shared = None;
         self.detach_input_editor();
         self.connect_error =
@@ -2049,13 +2131,16 @@ impl TasApp {
             // for one) cannot stand in for the take: the checkpoint on disk
             // is the only copy left. Bring it into history NOW — left on disk
             // it would only survive until the next take's checkpoint replaced
-            // it or a later STOP cleared it.
+            // it or a later STOP cleared it. Only THIS session's checkpoint:
+            // a stop before the first tick (F9 then F11) has nothing to
+            // recover, and an older take whose clear was refused must not
+            // come back as a pinned duplicate.
             self.push_log(&format!(
                 "Recording session ({}) was not added to history: the buffer is empty — \
                  recovering its checkpoint instead",
                 session_context.label
             ));
-            if self.recover_pending_checkpoint() {
+            if self.recover_pending_checkpoint_matching(Some(CheckpointOwner::from(&session))) {
                 self.clear_recovery_after_durable_persist();
             }
             return;
@@ -2105,14 +2190,8 @@ impl TasApp {
         // on_game_process_changed). Sampled once a second, so a process
         // snapshot is affordable.
         if self.shared.is_some() {
-            if let Some(pid) = win32::find_supreme_pid() {
-                if let Some(seen) = self.game_pid_seen {
-                    if seen != pid {
-                        self.on_game_process_changed(seen, pid);
-                    }
-                }
-                self.game_pid_seen = Some(pid);
-            }
+            let pid = win32::find_supreme_pid();
+            self.on_game_pid_observed(pid);
         }
         self.poll_stale_input_protection();
 
@@ -4457,6 +4536,90 @@ mod tests {
             .lines()
             .iter()
             .any(|l| l.contains("second line")));
+    }
+
+    #[test]
+    fn a_vanished_game_pid_captures_the_take_at_once() {
+        let mut app = app_recording_in_dead_mapping(450);
+        app.check_game_health(); // seed the heartbeat
+        app.game_pid_seen = Some(11);
+        app.on_game_pid_observed(None);
+        assert_eq!(app.history.len(), 1, "captured from the frozen section");
+        assert_eq!(app.history.entries()[0].label, "Recorded 0:04.50");
+        assert!(app.active_recording_session.is_none());
+        assert_eq!(
+            app.last_mode,
+            TasMode::Rec as u32,
+            "no phantom session from the frozen REC"
+        );
+        assert_eq!(
+            app.game_pid_seen,
+            Some(11),
+            "a relaunch is still noticed later"
+        );
+        // The disconnect that follows finds nothing left to capture.
+        app.disconnect_from_dead_game();
+        assert_eq!(app.history.len(), 1);
+    }
+
+    #[test]
+    fn a_vanished_pid_with_no_recording_does_nothing() {
+        let mut app = test_app();
+        app.shared = Some(TasSharedMemoryClient::new_test_mapping());
+        app.game_pid_seen = Some(11);
+        app.on_game_pid_observed(None);
+        assert_eq!(app.history.len(), 0);
+        assert_eq!(app.game_pid_seen, Some(11));
+    }
+
+    #[test]
+    fn rejected_finalize_recovers_only_its_own_checkpoint() {
+        let root = scratch_recovery_root("finalize_owner");
+        let mut store =
+            recording::RecoveryStore::new_in_root(root.clone(), std::time::Duration::ZERO).unwrap();
+        // An older take's checkpoint (300 ticks) whose clear was refused.
+        write_checkpoint(&mut store, 300);
+        let checkpoint = root.join("recovery_checkpoint.tasrec");
+        let mut app = test_app();
+        app.recovery_store = Some(store);
+        let empty = recording::RecordingSnapshot::from_state(&state_with_recorded_count(0));
+
+        // F9 then F11 before the first tick: a 0-tick session. Not its file.
+        app.active_recording_session = Some(ActiveRecordingSession {
+            kind: RecordingSessionKind::Rec,
+            start_tick: 0,
+            max_recorded_count: 0,
+        });
+        app.finalize_recording_session(&empty, 0);
+        assert_eq!(
+            app.history.len(),
+            0,
+            "another take's checkpoint is not resurrected"
+        );
+        assert!(
+            checkpoint.exists(),
+            "...and stays on disk for the next launch"
+        );
+
+        // A CONT session from 100: different start, not its file either.
+        app.active_recording_session = Some(ActiveRecordingSession {
+            kind: RecordingSessionKind::Continue,
+            start_tick: 100,
+            max_recorded_count: 400,
+        });
+        app.finalize_recording_session(&empty, 0);
+        assert_eq!(app.history.len(), 0);
+
+        // The session the checkpoint came from: recovered.
+        app.active_recording_session = Some(ActiveRecordingSession {
+            kind: RecordingSessionKind::Rec,
+            start_tick: 0,
+            max_recorded_count: 350,
+        });
+        app.finalize_recording_session(&empty, 0);
+        assert_eq!(app.history.len(), 1);
+        assert_eq!(app.history.entries()[0].end_tick, 300);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
