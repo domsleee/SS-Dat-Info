@@ -297,8 +297,8 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
 // measured in wall time - long enough for one poll, and released on the
 // first cycle after the reload freeze in any case.
 // The byte itself is released by restart_release.hpp the moment the level
-// restart is observed (replay-capture hook) or after its wall-clock cap
-// (worker thread); this cap only bounds the observer "up" if both fail.
+// restart is observed (replay-capture hook) or after its 25 ms cap (timed
+// thread); this cycle cap only bounds the observer "up" if both fail.
 static constexpr uint32_t RESTART_F5_MAX_HOLD_FRAMES = 30;
 static uint32_t g_restartFramesHeld = 0;                    // Cycles since the press
 

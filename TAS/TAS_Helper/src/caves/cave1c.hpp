@@ -4,6 +4,7 @@
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
 #include "../input_gate.hpp"
+#include "../restart_release.hpp"
 #include <safetyhook.hpp>
 
 // Cave 1C: Handler gate hooks at HMG+3940 (keyDown) and HMG+3980 (keyUp).
@@ -35,6 +36,10 @@ inline void UninstallCave1C() {
 //   ecx = this, edx = unused, stack: arg1, arg2, arg3
 void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
     auto* s = g_cave1cState;
+    // A physical F5 inside F5_MIN_SPACING_MS of the last one the game saw is
+    // the keyboard's autorepeat (or a bounce): each would restart the level
+    // again. Swallow it before anything else (restart_release.hpp).
+    if (a1 == VK_F5 && !IsTasInjectionThread() && !restartrelease::AcceptPhysicalF5Down()) return;
     // Block external handler during REC and PLAY (symmetric).
     // Cave 2 writes the buffer and calls BB3B10 directly in both modes.
     // Only pass through on Cave 2's injection thread or when mode is IDLE.
@@ -71,6 +76,8 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
 
 void __fastcall Cave1C_UpDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
     auto* s = g_cave1cState;
+    // The up that pairs with a swallowed F5 down is swallowed too (no unbalanced up).
+    if (a1 == VK_F5 && !IsTasInjectionThread() && restartrelease::SwallowPhysicalF5Up()) return;
     // Keep the fallback arg4 fresh from real keyUp calls too (see DownDetour).
     if (s && !IsTasInjectionThread() && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
         g_bb3b10Arg4 = a3;

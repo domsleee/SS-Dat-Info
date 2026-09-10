@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "game_addresses.hpp"
 #include "log.hpp"
+#include "restart_release_policy.hpp"
 
 // Release of F5 the moment the game has acted on it.
 //
@@ -19,11 +20,15 @@
 // rebuild creates a new player recorder, and the replay-capture hook that
 // adopts it runs inside that rebuild, before the level's next input poll.
 // That hook clears the DI byte here - for Cave 2's own press AND for a
-// physical tap (the byte stays clear until the key's own "up", so a human
-// tap of any length restarts exactly once). For Cave 2's press a timed
-// thread also clears the byte after a short cap, in case a second poll lands
-// before the rebuild reaches the recorder; Cave 2 finishes the sequence
-// (observer "up", restart_state) on its next cycle either way.
+// physical tap. For Cave 2's press a timed thread also clears the byte after
+// a short cap, in case a second poll lands before the rebuild reaches the
+// recorder; Cave 2 finishes the sequence (observer "up", restart_state) on
+// its next cycle either way.
+//
+// A physical key held past the keyboard's repeat delay would set the byte
+// again on every autorepeat, so cave1c's handler gate also swallows F5 downs
+// arriving within F5_MIN_SPACING_MS of the last accepted one (and their
+// matching ups).
 namespace restartrelease {
 
 inline uint32_t g_diBuffer = 0;        // DI buffer Cave 2's press was written to
@@ -32,7 +37,13 @@ inline DWORD g_pressMs = 0;            // GetTickCount at Cave 2's press
 inline volatile LONG g_pending = 0;    // 1 while Cave 2's F5 byte is still down
 inline volatile LONG g_releasedBy = 0; // diagnostic: 1 = restart hook, 2 = timed cap, 3 = cycle cap
 inline volatile LONG g_physicalClears = 0;  // restarts that took a physical F5 back up
+inline volatile LONG g_repeatsSwallowed = 0;  // physical F5 downs refused as autorepeat/bounce
 inline HANDLE g_thread = nullptr;
+inline volatile LONG g_stop = 0;
+
+// Handler-gate state (game thread only).
+inline DWORD g_lastAcceptedF5Ms = 0;
+inline uint32_t g_f5DownsSwallowed = 0;
 
 // Timed cap for Cave 2's press: longer than one poll period so the game is
 // sure to have seen the key, shorter than a second poll.
@@ -83,24 +94,38 @@ inline void FlushLog() {
     if (releases == g_releasesLogged) return;
     g_releasesLogged = releases;
     const char* by = g_lastBy == 1 ? "restart hook" : g_lastBy == 2 ? "25 ms cap" : "cycle cap";
-    Log(std::format("Restart F5: byte up after {} ms ({}), physical taps cut short so far: {}",
-                    (long)g_lastHoldMs, by, (long)g_physicalClears));
+    Log(std::format("Restart F5: byte up after {} ms ({}); physical taps cut short {}, repeats swallowed {}",
+                    (long)g_lastHoldMs, by, (long)g_physicalClears, (long)g_repeatsSwallowed));
 }
 
 inline DWORD WINAPI ReleaseThread(LPVOID) {
-    for (;;) {
+    while (!g_stop) {
         Sleep(5);
         if (g_pending && GetTickCount() - g_pressMs >= MAX_HOLD_MS) ReleaseByteNow(2);
     }
     return 0;
 }
 
+// Cave 2 pressed F5 (game thread).
 inline void Pressed(uint32_t buffer) {
+    DWORD now = GetTickCount();
     g_diBuffer = buffer;
-    g_pressMs = GetTickCount();
+    g_pressMs = now;
+    g_lastAcceptedF5Ms = now ? now : 1;   // a physical tap right behind an arm is a repeat too
     InterlockedExchange(&g_releasedBy, 0);
     InterlockedExchange(&g_pending, 1);
     if (!g_thread) g_thread = CreateThread(nullptr, 0, ReleaseThread, nullptr, 0, nullptr);
+}
+
+// Stops the timed-release thread. The DLL has no unload path today; this
+// exists so one can be added without leaving a thread running in freed code.
+inline void Shutdown() {
+    InterlockedExchange(&g_stop, 1);
+    if (g_thread) {
+        WaitForSingleObject(g_thread, 200);
+        CloseHandle(g_thread);
+        g_thread = nullptr;
+    }
 }
 
 // The level restarted (a new human recorder was adopted): the game has seen
@@ -114,6 +139,23 @@ inline void OnLevelRestartObserved() {
         InterlockedIncrement(&g_physicalClears);
     }
 }
+
+// cave1c handler gate: a physical F5 down may reach the game only
+// F5_MIN_SPACING_MS after the last one it saw. Game thread only.
+inline bool AcceptPhysicalF5Down() {
+    DWORD now = GetTickCount();
+    if (!now) now = 1;
+    if (!F5DownAccepted(now, g_lastAcceptedF5Ms, F5_MIN_SPACING_MS)) {
+        g_f5DownsSwallowed++;
+        InterlockedIncrement(&g_repeatsSwallowed);
+        return false;
+    }
+    g_lastAcceptedF5Ms = now;
+    return true;
+}
+
+// The up that pairs with a swallowed down is swallowed too.
+inline bool SwallowPhysicalF5Up() { return F5UpSwallowed(g_f5DownsSwallowed); }
 
 inline bool Pending() { return g_pending != 0; }
 
