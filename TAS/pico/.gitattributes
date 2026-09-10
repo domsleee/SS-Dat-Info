@@ -1,0 +1,4 @@
+# deploy.ps1 compares these byte-for-byte with the board, so each file is pinned to the ending the board has.
+code.py          text eol=lf
+test.py          text eol=lf
+boot.py          text eol=crlf

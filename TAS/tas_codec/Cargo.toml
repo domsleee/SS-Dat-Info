@@ -1,0 +1,8 @@
+[package]
+name = "tas_codec"
+version = "0.1.0"
+edition = "2021"
+description = "Shared .tasrec recording-file framing for the TAS UI and harness"
+
+[dependencies]
+tas_shared = { path = "../tas_shared" }

@@ -50,6 +50,13 @@
           />
         </div>
       </div>
+      <v-divider class="my-1" />
+      <v-checkbox
+        v-model="trainerSettings.enableTas"
+        label="Enable TAS"
+        hint="Inject TAS_Helper.dll for tool-assisted speedrun recording/playback"
+        persistent-hint
+      />
     </v-card-text>
   </v-card>
 </template>

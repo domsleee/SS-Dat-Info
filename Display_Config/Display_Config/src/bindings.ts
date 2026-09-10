@@ -12,6 +12,14 @@ export const commands = {
   async runInject(trainerSettings: TrainerSettings) : Promise<string> {
     return await TAURI_INVOKE("run_inject", { trainerSettings });
   },
+  /**
+ * Inject TAS_Helper.dll into the running Supreme.exe process.
+ * Uses the shared Injector.exe in Display_Config_Resources, with TAS payload
+ * files located under Display_Config_Resources/TAS/.
+ */
+  async runTasInject() : Promise<string> {
+    return await TAURI_INVOKE("run_tas_inject");
+  },
   async readRdConfig() : Promise<string> {
     return await TAURI_INVOKE("read_rd_config");
   },

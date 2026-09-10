@@ -21,7 +21,8 @@ export function getDefaultTrainerUISettings(): { trainerSettings: Ref<TrainerUIS
     disableDirectInput: false,
     enableCustomControls: false,
     hideBlinkingR: false,
-    showReplaySpeed: false
+    showReplaySpeed: false,
+    enableTas: false
   });
   return { trainerSettings: settings };
 }

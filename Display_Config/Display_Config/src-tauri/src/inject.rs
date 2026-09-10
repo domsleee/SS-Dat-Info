@@ -1,4 +1,4 @@
-use std::{os::windows::process::CommandExt, path::PathBuf, process::Command};
+use std::{os::windows::process::CommandExt, path::PathBuf, process::Command, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +38,9 @@ pub async fn run_inject(trainer_settings: TrainerSettings) -> Result<String, Str
     serde_json::to_writer_pretty(writer, &trainer_settings).unwrap();
 
     let injector_path = display_config_resources.join("Injector.exe");
+    let dll_path = display_config_resources.join("Display_Config_Helper.dll");
     let status = Command::new(injector_path)
+        .arg(&dll_path)
         .creation_flags(0x08000000) // CREATE_NO_WINDOW (https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags)
         .current_dir(&display_config_resources)
         .status()
@@ -58,6 +60,134 @@ pub fn get_display_config_helper_log_path() -> PathBuf {
 pub fn get_display_config_resources_path() -> PathBuf {
     let supreme_folder = get_supreme_folder();
     supreme_folder.join("Display_Config_Resources")
+}
+
+/// Inject TAS_Helper.dll into the running Supreme.exe process.
+/// Uses the shared Injector.exe in Display_Config_Resources, with TAS payload
+/// files located under Display_Config_Resources/TAS/.
+#[tauri::command]
+#[specta::specta]
+pub async fn run_tas_inject() -> Result<String, String> {
+    let supreme_folder = get_supreme_folder();
+    let display_config_resources = supreme_folder.join("Display_Config_Resources");
+    let tas_folder = display_config_resources.join("TAS");
+    let injector_path = display_config_resources.join("Injector.exe");
+    let dll_path = tas_folder.join("TAS_Helper.dll");
+    let tas_ui_path = tas_folder.join("tas_ui.exe");
+    require_tas_ui(&tas_ui_path)?;
+
+    if !injector_path.exists() {
+        return Err(format!("Injector not found at {}", injector_path.display()));
+    }
+    if !dll_path.exists() {
+        return Err(format!(
+            "TAS_Helper.dll not found at {}",
+            dll_path.display()
+        ));
+    }
+
+    let status = Command::new(&injector_path)
+        .arg(&dll_path)
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .current_dir(&tas_folder)
+        .status()
+        .map_err(|err| format!("Failed to spawn Injector: {err}"))?;
+
+    if !status.success() {
+        // Non-zero also means a loaded DLL whose TAS_Initialize refused the
+        // process: Injector.log names the step, TAS_Helper.log the reason.
+        return Err("Injector.exe failed.\nIs Supreme.exe running? If so, see \
+             Display_Config_Resources\\Injector.log and TAS_Helper.log."
+            .to_string());
+    }
+
+    // Injector.exe propagates LoadLibrary/TAS_Initialize failures. Keep this
+    // independent readiness check as defense in depth: success means the DLL
+    // also created the expected protocol mapping, not merely that its entry
+    // point returned.
+    if !wait_for_shared_memory("Local\\SupremeTAS", Duration::from_secs(5)) {
+        return Err(
+            "Injector.exe exited successfully, but TAS shared memory was not created. \
+             TAS_Helper.dll may have failed to attach (e.g., Supreme.exe is elevated, \
+             or a dependency is missing)."
+                .to_string(),
+        );
+    }
+
+    // Launch tas_ui.exe (SSB Inspect) as a detached process
+    launch_tas_ui(&tas_ui_path)?;
+
+    Ok("TAS_Helper.dll injected".to_string())
+}
+
+fn require_tas_ui(path: &std::path::Path) -> Result<(), String> {
+    if !path.is_file() {
+        return Err(format!(
+            "TAS UI not found at {}. Reinstall the TAS files and try again.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn launch_tas_ui(path: &std::path::Path) -> Result<(), String> {
+    require_tas_ui(path)?;
+    Command::new(path)
+        .current_dir(path.parent().unwrap_or(std::path::Path::new(".")))
+        .creation_flags(0x00000008) // DETACHED_PROCESS
+        .spawn()
+        .map_err(|error| format!("Could not launch TAS UI at {}: {}. Check the installation and antivirus quarantine, then try again.", path.display(), error))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    #[test]
+    fn missing_ui_is_an_actionable_error() {
+        let path = std::env::temp_dir().join(format!("missing-tas-{}.exe", uuid::Uuid::new_v4()));
+        let error = launch_tas_ui(&path).unwrap_err();
+        assert!(error.contains("TAS UI not found"));
+        assert!(error.contains(&path.display().to_string()));
+    }
+}
+
+/// Poll for a Windows named shared-memory section by attempting to open it
+/// with `OpenFileMappingW`. Returns true as soon as the mapping exists,
+/// false on timeout. Used to verify TAS_Helper.dll actually attached and
+/// initialised, rather than just trusting Injector.exe's exit code.
+fn wait_for_shared_memory(name: &str, timeout: Duration) -> bool {
+    use std::ffi::c_void;
+    use std::iter;
+
+    // Win32's own type names, so the FFI signatures read like the SDK headers.
+    #[allow(clippy::upper_case_acronyms)]
+    type HANDLE = *mut c_void;
+    #[allow(clippy::upper_case_acronyms)]
+    type DWORD = u32;
+    #[allow(clippy::upper_case_acronyms)]
+    type BOOL = i32;
+    const FILE_MAP_READ: DWORD = 0x0004;
+
+    unsafe extern "system" {
+        fn OpenFileMappingW(access: DWORD, inherit: BOOL, name: *const u16) -> HANDLE;
+        fn CloseHandle(h: HANDLE) -> BOOL;
+    }
+
+    let wide: Vec<u16> = name.encode_utf16().chain(iter::once(0)).collect();
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        unsafe {
+            let h = OpenFileMappingW(FILE_MAP_READ, 0, wide.as_ptr());
+            if !h.is_null() {
+                CloseHandle(h);
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
 }
 
 fn wait_for_finished_log(log_path: &PathBuf) -> Result<String, String> {

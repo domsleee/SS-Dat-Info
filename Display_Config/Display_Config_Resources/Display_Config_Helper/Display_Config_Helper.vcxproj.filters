@@ -24,16 +24,16 @@
     <ClInclude Include="src\stdafx.h">
       <Filter>Source Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\external\Zydis.h">
+    <ClInclude Include="..\..\..\third_party\safetyhook\Zydis.h">
       <Filter>Source Files\external</Filter>
     </ClInclude>
-    <ClInclude Include="src\external\safetyhook.hpp">
+    <ClInclude Include="..\..\..\third_party\safetyhook\safetyhook.hpp">
       <Filter>Source Files\external</Filter>
     </ClInclude>
     <ClInclude Include="src\log.hpp">
       <Filter>Source Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\external\json.hpp">
+    <ClInclude Include="..\..\..\third_party\json\json.hpp">
       <Filter>Source Files\external</Filter>
     </ClInclude>
     <ClInclude Include="src\fixes.hpp">
@@ -65,10 +65,10 @@
     <ClCompile Include="src\main.cc">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\external\safetyhook.cpp">
+    <ClCompile Include="..\..\..\third_party\safetyhook\safetyhook.cpp">
       <Filter>Source Files\external</Filter>
     </ClCompile>
-    <ClCompile Include="src\external\Zydis.c">
+    <ClCompile Include="..\..\..\third_party\safetyhook\Zydis.c">
       <Filter>Source Files\external</Filter>
     </ClCompile>
   </ItemGroup>
