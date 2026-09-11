@@ -253,7 +253,14 @@ static bool F7ReplayAvailable() {
 // RE of the decompiled exe + Supreme_Game, live checks 2026-09-10/11.)
 namespace results {
     const uintptr_t APP_POINTER_RVA = 0x889C4;
-    const uintptr_t GAME_VTABLE_RVA = 0x6D6EC;
+    // Arcade modes share Game's results flag but have distinct vtables.
+    // Supreme.exe+0x30E0 constructs each through the same Arcade_Game base.
+    const uintptr_t GAME_VTABLE_RVAS[] = {
+        0x6D6EC, // Time Attack
+        0x6D730, // Race
+        0x6D6A8, // Pipe
+        0x6D664, // Air
+    };
     const size_t GAME_OFFSET_IN_APP = 0x30;
     const size_t RESULTS_ACTIVE_OFFSET = 0x10;
     const size_t START_INFO_OFFSET = 0x34;
@@ -268,8 +275,11 @@ namespace results {
             if (!app) return nullptr;
             uint8_t* game = *(uint8_t**)(app + GAME_OFFSET_IN_APP);
             if (!game) return nullptr;
-            if (*(uint8_t**)game != exe + GAME_VTABLE_RVA) return nullptr;
-            return game;
+            const uint8_t* vtable = *(uint8_t**)game;
+            for (const auto rva : GAME_VTABLE_RVAS) {
+                if (vtable == exe + rva) return game;
+            }
+            return nullptr;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             return nullptr;
         }
