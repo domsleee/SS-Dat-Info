@@ -13,6 +13,7 @@
   <ItemGroup>
     <ClInclude Include="src\disableDirectInput.hpp" />
     <ClInclude Include="src\customInput.hpp" />
+    <ClInclude Include="src\f7Replay.hpp" />
     <ClInclude Include="src\external\json.hpp" />
     <ClInclude Include="src\external\safetyhook.hpp" />
     <ClInclude Include="src\external\Zydis.h" />

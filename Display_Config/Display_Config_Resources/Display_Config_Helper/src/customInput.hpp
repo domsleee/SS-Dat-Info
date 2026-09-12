@@ -3,13 +3,13 @@
 #include "helper.hpp"
 #include "Log.hpp"
 #include "globalState.hpp"
+#include "f7Replay.hpp"
 #include <string>
 #include <regex>
 #include <ctime>
 
 #pragma once
 bool CheckKeyState(void** keyboardPtr, int keyValue);
-void HandleF7(safetyhook::Context& ctx);
 void HandleG();
 void HandleM(bool isShiftDown);
 void SetupFunctionPointers();
@@ -49,14 +49,6 @@ namespace Housemarque::Game_Construction_Kit::Sound_System {
     Get_Master_Volume_Samples_t Get_Master_Volume_Samples;
 }
 
-namespace Housemarque::Supreme_Snowboarding::Supreme {
-    typedef bool(__fastcall* Set_Replay_Mode_t)(void*);
-    Set_Replay_Mode_t Set_Replay_Mode;
-
-    typedef bool(__fastcall* Set_AI_Learning_Mode_t)(void*);
-    Set_AI_Learning_Mode_t Set_AI_Learning_Mode;
-}
-
 namespace Housemarque::SR_UIT::Sr_Plane_Text_Line {
     typedef void (__fastcall* Hide_t)(void*);
     Hide_t Hide;
@@ -65,9 +57,6 @@ namespace Housemarque::SR_UIT::Sr_Plane_Text_Line {
 namespace Housemarque::Supreme_Snowboarding::Supreme_Keyboard {
     typedef bool(__fastcall* State_t)(void* thisPtr, int keyValue);
 }
-
-typedef void* (*FUN_1013e410_t)(void);
-FUN_1013e410_t FUN_1013e410;
 
 void DoCustomInput() {
     supremeGameModule = GetModuleHandleA("Supreme_Game.dll");
@@ -92,6 +81,7 @@ void DoCustomInput() {
     }
 
     SetupFunctionPointers();
+    f7::Install(supremeGameModule);
 
     std::uint8_t* FUN_10140650Address = Memory::PatternScan(supremeGameModule, "83 C4 0C C3 90 51 A0 93 53");
     if (!FUN_10140650Address) {
@@ -114,7 +104,7 @@ void DoCustomInput() {
             if (isKeyDown && isKeyDown != keyStates[i]) {
                 Log(std::format("DoCustomInput: Key {} pressed!", i));
                 if (i == KEY_F7) {
-                    HandleF7(ctx);
+                    f7::Handle((void*)ctx.ecx);
                 }
                 if (i == KEY_M) {
                     HandleM(CheckKeyState(keyboardPtr, KEY_SHIFT));
@@ -126,7 +116,6 @@ void DoCustomInput() {
             keyStates[i] = isKeyDown;
         }
     });
-
 
     static safetyhook::MidHook aiHeuristicHook;
     aiHeuristicHook = safetyhook::create_mid((void*)((std::uint8_t*)supremeGameModule + 0x12536b), [](safetyhook::Context& ctx) {
@@ -159,20 +148,6 @@ void HandleM(bool isShiftDown) {
     }
 }
 
-void HandleF7(safetyhook::Context& ctx) {
-    Log("Handle F7");
-
-    Housemarque::Supreme_Snowboarding::Supreme::Set_AI_Learning_Mode((void*)ctx.ecx);
-    Housemarque::Supreme_Snowboarding::Supreme::Set_Replay_Mode((void*)ctx.ecx);
-
-    // Press "C"
-    void *cameraPtr = FUN_1013e410(); // expected: 0x02AFD9D8
-    int iVar5 = *(int*)((char*)(cameraPtr) + 0x144); // expected: 0CA7AE98
-    if (iVar5 != 0) {
-        *(int*)(iVar5 + 0x68) = (int)(*(int*)((char*)iVar5 + 0x68) == 0);
-    }
-}
-
 void HandleG() {
     GlobalState::ghostsOpaque = !GlobalState::ghostsOpaque;
 }
@@ -193,10 +168,6 @@ void SetupFunctionPointers() {
     Housemarque::Supreme_Snowboarding::Music_Handler::Play_Slope_Music = (Housemarque::Supreme_Snowboarding::Music_Handler::voidFunction)((char*)supremeGameModule + 0x108000);
     Housemarque::Supreme_Snowboarding::Music_Handler::Play_Prev_Slope_Music = (Housemarque::Supreme_Snowboarding::Music_Handler::voidFunction)((char*)supremeGameModule + 0x108040);
 
-    Housemarque::Supreme_Snowboarding::Supreme::Set_Replay_Mode = (Housemarque::Supreme_Snowboarding::Supreme::Set_Replay_Mode_t)((char*)supremeGameModule + 0x1417e0);
-    Housemarque::Supreme_Snowboarding::Supreme::Set_AI_Learning_Mode = (Housemarque::Supreme_Snowboarding::Supreme::Set_AI_Learning_Mode_t)((char*)supremeGameModule + 0x142130);
-
     Housemarque::SR_UIT::Sr_Plane_Text_Line::Hide = (Housemarque::SR_UIT::Sr_Plane_Text_Line::Hide_t)((char*)srUitModule + 0xf4f0);
 
-    FUN_1013e410 = (FUN_1013e410_t)((char*)supremeGameModule + 0x13e410);
 }
