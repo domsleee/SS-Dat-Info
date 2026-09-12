@@ -177,6 +177,58 @@ fn only_offers_newer_versions() {
     }
 }
 
+// Concurrent replacement can briefly deny access on Windows. Retry I/O, but never invalid JSON.
+const REPLACEMENT_ERRORS: [i32; 2] = [5, 32];
+const REPLACEMENT_RETRIES: usize = 100;
+
+fn retry_through_replacement<T>(mut operation: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    for _ in 0..REPLACEMENT_RETRIES {
+        match operation() {
+            Err(error)
+                if error
+                    .raw_os_error()
+                    .is_some_and(|code| REPLACEMENT_ERRORS.contains(&code)) =>
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            result => return result,
+        }
+    }
+    operation()
+}
+
+#[test]
+fn replacement_errors_are_retried_but_other_errors_surface() {
+    let mut calls = 0;
+    let published = retry_through_replacement(|| {
+        calls += 1;
+        match calls {
+            1 => Err(io::Error::from_raw_os_error(REPLACEMENT_ERRORS[0])),
+            2 => Err(io::Error::from_raw_os_error(REPLACEMENT_ERRORS[1])),
+            _ => Ok(calls),
+        }
+    })
+    .unwrap();
+    assert_eq!((published, calls), (3, 3));
+
+    let mut calls = 0;
+    let error = retry_through_replacement(|| {
+        calls += 1;
+        Err::<(), _>(io::Error::from(io::ErrorKind::NotFound))
+    })
+    .unwrap_err();
+    assert_eq!((error.kind(), calls), (io::ErrorKind::NotFound, 1));
+
+    let mut calls = 0;
+    let error = retry_through_replacement(|| {
+        calls += 1;
+        Err::<(), _>(io::Error::from_raw_os_error(REPLACEMENT_ERRORS[0]))
+    })
+    .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(REPLACEMENT_ERRORS[0]));
+    assert_eq!(calls, REPLACEMENT_RETRIES + 1);
+}
+
 #[test]
 fn concurrent_writes_publish_complete_caches() {
     let dir = std::env::temp_dir().join(format!("ss-update-{}", uuid::Uuid::new_v4()));
@@ -190,17 +242,19 @@ fn concurrent_writes_publish_complete_caches() {
                 barrier.wait();
                 for attempt in 0..32 {
                     let stamp = writer * 32 + attempt;
-                    write_cache_at(
-                        path,
-                        &UpdateCache {
-                            checked_at_secs: stamp,
-                            last_attempt_secs: stamp,
-                            latest_version: format!("0.4.{stamp}"),
-                        },
-                    )
+                    retry_through_replacement(|| {
+                        write_cache_at(
+                            path,
+                            &UpdateCache {
+                                checked_at_secs: stamp,
+                                last_attempt_secs: stamp,
+                                latest_version: format!("0.4.{stamp}"),
+                            },
+                        )
+                    })
                     .unwrap();
-                    let cache: UpdateCache =
-                        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                    let published = retry_through_replacement(|| std::fs::read(path)).unwrap();
+                    let cache: UpdateCache = serde_json::from_slice(&published).unwrap();
                     assert_eq!(cache.checked_at_secs, cache.last_attempt_secs);
                     assert_eq!(
                         cache.latest_version,
