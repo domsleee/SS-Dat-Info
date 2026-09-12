@@ -9,6 +9,18 @@ use futures_util::TryStreamExt;
 use log::{error, info};
 use serde::Serialize;
 use tauri::ipc::Channel;
+
+mod install;
+
+pub fn cleanup_completed_updates() {
+    install::cleanup(&get_supreme_folder());
+}
+
+pub fn exit_if_not_installing() {
+    if let Ok(_guard) = install::INSTALLATION_LOCK.try_lock() {
+        std::process::exit(1);
+    }
+}
 #[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase", tag = "event", content = "data")]
 pub enum DownloadEvent {
@@ -21,10 +33,13 @@ pub enum DownloadEvent {
     },
 
     #[serde(rename_all = "camelCase")]
-    Token { token: String },
+    Token {
+        token: String,
+    },
 
     #[serde(rename_all = "camelCase")]
     DownloadCancelled,
+    Installing,
 }
 #[tauri::command]
 #[specta::specta]
@@ -34,22 +49,18 @@ pub async fn download_and_extract(
 ) -> Result<DownloadResult, String> {
     let cancellation_registry = CancellationRegistry::instance();
     let (id, token) = cancellation_registry.create_and_register_task();
-    on_event
-        .send(DownloadEvent::Token {
+    let result = async {
+        on_event.send(DownloadEvent::Token {
             token: id.to_string(),
-        })
-        .expect("Can send token");
-    match do_download_and_extract(url, on_event, token).await {
-        Ok(result) => {
-            cancellation_registry.remove_task(&id);
-            Ok(result)
-        }
-        Err(e) => {
-            error!("Error: {e:?}");
-            cancellation_registry.remove_task(&id);
-            Err(format!("download_and_extract error: {e:?}"))
-        }
+        })?;
+        do_download_and_extract(url, on_event, token, id).await
     }
+    .await;
+    cancellation_registry.remove_task(&id);
+    result.map_err(|e: anyhow::Error| {
+        error!("Update failed: {e:#}");
+        format!("Update failed: {e:#}")
+    })
 }
 
 #[derive(Serialize, specta::Type)]
@@ -61,8 +72,12 @@ async fn do_download_and_extract(
     url: String,
     on_event: Channel<DownloadEvent>,
     token: Arc<AtomicBool>,
-) -> Result<DownloadResult, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
+    id: uuid::Uuid,
+) -> Result<DownloadResult> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(15))
+        .build()?;
     let response = client
         .get(url)
         .header("User-Agent", "SS-Dat-Info-App")
@@ -70,7 +85,7 @@ async fn do_download_and_extract(
         .await?;
 
     if !response.status().is_success() {
-        return Err(format!("Download error: {}", response.status()).into());
+        anyhow::bail!("Download error: {}", response.status());
     }
     let total = response.content_length().unwrap_or(0);
 
@@ -92,56 +107,25 @@ async fn do_download_and_extract(
         })?;
     }
 
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(buffer))?;
-
-    let temp_dir = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
-    info!(
-        "Extracting files to {}, temp_folder {temp_dir:?}...",
-        get_supreme_folder().display()
-    );
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        let relative_path = enclosed_path(&file)?;
-        let outpath = get_supreme_folder().join(&relative_path);
-        if is_task_cancelled(&token) {
-            on_event.send(DownloadEvent::DownloadCancelled)?;
-            return Ok(DownloadResult { installed: false });
-        }
-
-        if file.is_dir() {
-            if !outpath.exists() {
-                std::fs::create_dir_all(&outpath).context("Failed to create_dir_all")?;
+    let installed = install::install_zip(
+        buffer,
+        &get_supreme_folder(),
+        || is_task_cancelled(&token),
+        || {
+            // Close cancellation before replacing files. Any accepted cancellation wins.
+            CancellationRegistry::instance().remove_task(&id);
+            if is_task_cancelled(&token) {
+                return Ok(false);
             }
-        } else {
-            if let Some(parent) = outpath.parent()
-                && !parent.exists()
-            {
-                std::fs::create_dir_all(parent).context("Failed to create_dir_all")?;
-            }
-
-            if outpath.exists() {
-                let temp_path = temp_dir.join(&relative_path);
-                if let Some(parent) = temp_path.parent()
-                    && !parent.exists()
-                {
-                    std::fs::create_dir_all(parent).context("Failed to create_dir_all")?;
-                }
-                std::fs::rename(&outpath, &temp_path).context("Failed to rename")?;
-            }
-            let mut outfile = std::fs::File::create(&outpath)?;
-            std::io::copy(&mut file, &mut outfile).context("failed to copy")?;
-        }
+            on_event.send(DownloadEvent::Installing)?;
+            Ok(true)
+        },
+    )?;
+    if !installed {
+        on_event.send(DownloadEvent::DownloadCancelled)?;
     }
-    info!("Extraction complete.");
-    Ok(DownloadResult { installed: true })
-}
-
-/// The entry's path relative to the extraction folder, or an error if `..` would climb out of it.
-fn enclosed_path<R: std::io::Read>(
-    file: &zip::read::ZipFile<'_, R>,
-) -> Result<std::path::PathBuf, String> {
-    file.enclosed_name()
-        .ok_or_else(|| format!("Update archive contains an unsafe path: {}", file.name()))
+    info!("Update installation completed: {installed}");
+    Ok(DownloadResult { installed })
 }
 
 #[tauri::command]
@@ -153,55 +137,4 @@ pub fn cancel_download(id: String) -> bool {
     };
     let cancellation_registry = CancellationRegistry::instance();
     cancellation_registry.cancel_task(&uuid)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::enclosed_path;
-    use std::io::{Cursor, Write};
-    use std::path::{Component, PathBuf};
-
-    fn archive_with(names: &[&str]) -> zip::ZipArchive<Cursor<Vec<u8>>> {
-        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        for name in names {
-            writer
-                .start_file(*name, zip::write::SimpleFileOptions::default())
-                .unwrap();
-            writer.write_all(b"x").unwrap();
-        }
-        zip::ZipArchive::new(writer.finish().unwrap()).unwrap()
-    }
-
-    #[test]
-    fn accepts_paths_inside_the_game_folder() {
-        let mut archive =
-            archive_with(&["Display_Config.exe", "Display_Config_Resources/helper.dll"]);
-        for i in 0..archive.len() {
-            let file = archive.by_index(i).unwrap();
-            assert_eq!(enclosed_path(&file).unwrap(), PathBuf::from(file.name()));
-        }
-    }
-
-    #[test]
-    fn never_returns_a_path_outside_the_game_folder() {
-        let mut archive = archive_with(&[
-            "../evil.exe",
-            "Display_Config_Resources/../../evil.exe",
-            "C:/evil.exe",
-            "/evil.exe",
-        ]);
-        for i in 0..archive.len() {
-            let file = archive.by_index(i).unwrap();
-            match enclosed_path(&file) {
-                Err(_) => {}
-                Ok(path) => assert!(
-                    !file.name().contains("..")
-                        && path.components().all(|c| matches!(c, Component::Normal(_))),
-                    "{} became {}",
-                    file.name(),
-                    path.display()
-                ),
-            }
-        }
-    }
 }

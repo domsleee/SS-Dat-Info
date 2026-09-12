@@ -27,6 +27,11 @@ type State =
     latestVersion: string;
     progress: number;
     token?: string;
+    cancelling?: boolean;
+  }
+  | {
+    key: 'installing';
+    latestVersion: string;
   }
   | {
     key: 'finished';

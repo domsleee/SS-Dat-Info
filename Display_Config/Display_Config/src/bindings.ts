@@ -41,7 +41,7 @@ export type DownloadEvent = { event: "downloadProgress"; data: {
   transferSpeed: number,
 } } | { event: "token"; data: {
   token: string,
-} } | { event: "downloadCancelled" };
+} } | { event: "downloadCancelled" } | { event: "installing" };
 
 export type DownloadResult = {
   installed: boolean,

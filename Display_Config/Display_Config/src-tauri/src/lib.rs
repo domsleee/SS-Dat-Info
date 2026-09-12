@@ -25,7 +25,8 @@ mod version_info;
 #[tauri::command]
 #[specta::specta]
 fn kill_exit_1() -> String {
-    std::process::exit(1);
+    download_and_extract::exit_if_not_installing();
+    String::new()
 }
 
 // crazy hack: https://github.com/tauri-apps/tauri/issues/1564
@@ -52,6 +53,7 @@ pub fn run() {
         )
         .invoke_handler(builder.invoke_handler())
         .setup(|app| {
+            download_and_extract::cleanup_completed_updates();
             app.manage(CancellationRegistry::default());
             let window = app.get_webview_window("main").unwrap();
             let package_info = app.package_info();
@@ -62,7 +64,7 @@ pub fn run() {
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
-                    std::process::exit(1);
+                    download_and_extract::exit_if_not_installing();
                 }
             });
             Ok(())

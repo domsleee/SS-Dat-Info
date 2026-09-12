@@ -80,7 +80,7 @@
       </v-card>
 
       <v-card
-        v-if="state.state.key === 'downloading'"
+        v-if="state.state.key === 'downloading' || state.state.key === 'installing'"
         :prepend-icon="mdiUpdate"
         title="Updater"
       >
@@ -94,15 +94,16 @@
             />
             <div class="flex-grow-1">
               <div class="text-h6 font-weight-medium">
-                Installing
+                {{ state.state.key === 'installing' ? 'Installing' : state.state.cancelling ? 'Cancelling...' : 'Downloading' }}
               </div>
               <div class="text-body-2 text-medium-emphasis">
-                Downloading {{ state.state.latestVersion }} from <a
+                {{ state.state.latestVersion }} from <a
                   href="https://github.com/domsleee/SS-Dat-Info/releases/latest"
                   target="_blank"
                 >github</a>
               </div>
               <v-progress-linear
+                v-if="state.state.key === 'downloading'"
                 v-model="state.state.progress"
                 height="25"
                 class="mt-2"
@@ -110,12 +111,19 @@
               >
                 <strong>{{ Math.floor(state.state.progress) }}%</strong>
               </v-progress-linear>
+              <v-progress-linear
+                v-else
+                indeterminate
+                class="mt-2"
+              />
             </div>
           </div>
         </v-card-text>
 
         <template #actions>
           <v-btn
+            v-if="state.state.key === 'downloading'"
+            :disabled="state.state.cancelling"
             text="Cancel"
             @click="closeDialog()"
           />
@@ -229,8 +237,11 @@ function getReleaseLink(version: string) {
 
 
 async function closeDialog() {
-  if (state.state.key === 'downloading' && state.state.token) {
-    await commands.cancelDownload(state.state.token);
+  if (state.state.key === 'installing') return;
+  if (state.state.key === 'downloading') {
+    state.state.cancelling = true;
+    if (state.state.token) await commands.cancelDownload(state.state.token);
+    return;
   }
   state.state.key = 'closed';
 }

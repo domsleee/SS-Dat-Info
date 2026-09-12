@@ -21,13 +21,22 @@ export async function update(latestVersion: string): Promise<void> {
     const onEvent = new Channel<DownloadEvent>((message) => {
       if (state.state.key === 'downloading' && message.event === 'token') {
         state.state.token = message.data.token;
+        if (state.state.cancelling) void commands.cancelDownload(message.data.token);
+      }
+      if (message.event === 'installing') {
+        state.state = { key: 'installing', latestVersion };
       }
       if (message.event === 'downloadProgress' && state.state.key === 'downloading') {
         const { progressTotal, total } = message.data;
-        state.state.progress = parseFloat(((progressTotal / total) * 100).toFixed(0));
+        state.state.progress = total > 0 ? Math.round(progressTotal / total * 100) : 0;
       }
     });
-    const { installed } = await commands.downloadAndExtract(url, onEvent);
+    let installed: boolean;
+    try {
+      ({ installed } = await commands.downloadAndExtract(url, onEvent));
+    } finally {
+      state.state = { key: 'closed' };
+    }
     if (!installed) return;
 
     state.state = {
