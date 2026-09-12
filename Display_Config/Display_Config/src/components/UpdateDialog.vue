@@ -202,7 +202,10 @@ const isOpen = computed(() => state.state.key !== 'closed')
 async function openDialog() {
   await runWithErrorHandler(async () => {
     state.state = { key: 'checking' };
-    const checkForUpdatesResult = await checkForUpdates();
+    const checkForUpdatesResult = await checkForUpdates(true).catch(error => {
+      state.state = { key: 'closed' };
+      throw error;
+    });
     if (checkForUpdatesResult.currentVersion === checkForUpdatesResult.latestVersion) {
       state.state = {
         key: 'noUpdateAvailable',

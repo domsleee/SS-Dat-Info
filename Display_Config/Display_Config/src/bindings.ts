@@ -45,8 +45,8 @@ export const commands = {
   async getFirstPlayerType() : Promise<string> {
     return await TAURI_INVOKE("get_first_player_type");
   },
-  async checkForUpdates() : Promise<UpdateInfo> {
-    return await TAURI_INVOKE("check_for_updates");
+  async checkForUpdates(force: boolean) : Promise<UpdateInfo> {
+    return await TAURI_INVOKE("check_for_updates", { force });
   },
   async downloadAndExtract(url: string, onEvent: TAURI_CHANNEL<DownloadEvent>) : Promise<DownloadResult> {
     return await TAURI_INVOKE("download_and_extract", { url, onEvent });

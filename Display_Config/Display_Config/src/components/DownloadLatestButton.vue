@@ -30,18 +30,20 @@ let updateStatus = {
   currentVersion: '0.0.0',
 };
 
-async function run() {
-  const x = await checkForUpdates();
-  updateStatus = x;
-  hasUpdate.value = updateStatus.latestVersion !== updateStatus.currentVersion;
+async function refreshUpdateStatus() {
+  try {
+    updateStatus = await checkForUpdates();
+    hasUpdate.value = updateStatus.latestVersion !== updateStatus.currentVersion;
+  } catch {
+    // Background checks should not open an error dialog.
+    hasUpdate.value = false;
+  }
 }
 
 async function downloadLatest() {
   await update(updateStatus.latestVersion);
 }
 
-onMounted(async () => {
-  await run();
-});
+onMounted(refreshUpdateStatus);
 
 </script>
