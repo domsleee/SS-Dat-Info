@@ -35,23 +35,17 @@ impl UpdateInfo {
 // Persist checks across launcher restarts to avoid GitHub's rate limit.
 #[derive(Serialize, Deserialize)]
 struct UpdateCache {
-    checked_at_secs: u64, // last SUCCESSFUL check
-    // Last attempt, success OR failure. Failures don't refresh checked_at (a
-    // transient blip must not hide a pending update for a whole TTL), but they
-    // do back off retries — without this, a cold start while rate-limited
-    // would fire one request per relaunch until the first success.
+    checked_at_secs: u64, // Last successful check.
     #[serde(default)]
-    last_attempt_secs: u64,
+    last_attempt_secs: u64, // Includes failed checks.
     latest_version: String,
 }
 
-const CACHE_TTL_SECS: u64 = 3600; // re-check GitHub at most once per hour
-const FAILURE_RETRY_SECS: u64 = 300; // after a failed check, back off 5 min
+const CACHE_TTL_SECS: u64 = 3600;
+const FAILURE_RETRY_SECS: u64 = 300;
 const REQUEST_TIMEOUT_SECS: u64 = 10;
 
-// Per-user app-data dir, NOT the game's Display_Config_Resources folder: the
-// game may live somewhere the user can't write (e.g. Program Files), and a
-// failed cache write would silently bring the request storm back.
+// The game directory may not be writable.
 fn cache_path() -> std::path::PathBuf {
     let base = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
@@ -100,74 +94,58 @@ fn write_cache_at(path: &Path, cache: &UpdateCache) -> io::Result<()> {
 #[tauri::command]
 #[specta::specta]
 pub async fn check_for_updates() -> Result<UpdateInfo, String> {
-    let current_version = get_version().to_string();
+    let current_version = get_version();
 
-    // Serve the cache without touching the network while the last success is
-    // fresh, or while backing off after a recent failed attempt. Collapses
-    // relaunch storms to ~1 request/hr (worst case 12/hr while failing).
-    if let Some(c) = read_cache() {
+    if let Some(cache) = read_cache() {
         let now = now_secs();
-        let success_fresh = now.saturating_sub(c.checked_at_secs) < CACHE_TTL_SECS;
-        let backing_off = now.saturating_sub(c.last_attempt_secs) < FAILURE_RETRY_SECS;
+        let success_fresh = now.saturating_sub(cache.checked_at_secs) < CACHE_TTL_SECS;
+        let backing_off = now.saturating_sub(cache.last_attempt_secs) < FAILURE_RETRY_SECS;
         if success_fresh || backing_off {
-            return Ok(UpdateInfo::new(current_version, c.latest_version));
+            return Ok(UpdateInfo::new(current_version, cache.latest_version));
         }
     }
 
-    match fetch_latest_version().await {
-        Ok(latest) => {
-            write_cache(&UpdateCache {
-                checked_at_secs: now_secs(),
-                last_attempt_secs: now_secs(),
-                latest_version: latest.clone(),
-            });
-            Ok(UpdateInfo::new(current_version, latest))
+    let cache = match fetch_latest_version().await {
+        Ok(latest_version) => {
+            let now = now_secs();
+            UpdateCache {
+                checked_at_secs: now,
+                last_attempt_secs: now,
+                latest_version,
+            }
         }
-        // NEVER surface an Err: the frontend turns a rejected command into an
-        // error dialog that reads like a crash. A failed/rate-limited update
-        // check is not user-facing — degrade gracefully. Prefer a stale cached
-        // version (so a real pending update still shows); otherwise report
-        // "no update" (latest == current).
         Err(e) => {
-            eprintln!("update check failed, degrading gracefully: {e}");
-            let prev = read_cache();
-            let latest_version = prev
-                .as_ref()
-                .map(|c| c.latest_version.clone())
-                .unwrap_or_else(|| current_version.clone());
-            // Stamp the attempt (keeping the old success time) so the next
-            // few relaunches back off instead of re-firing the request.
-            write_cache(&UpdateCache {
-                checked_at_secs: prev.map(|c| c.checked_at_secs).unwrap_or(0),
-                last_attempt_secs: now_secs(),
-                latest_version: latest_version.clone(),
+            eprintln!("update check failed: {e}");
+            // Keep the last known version without marking the failed check as fresh.
+            let mut cache = read_cache().unwrap_or_else(|| UpdateCache {
+                checked_at_secs: 0,
+                last_attempt_secs: 0,
+                latest_version: current_version.clone(),
             });
-            Ok(UpdateInfo::new(current_version, latest_version))
+            cache.last_attempt_secs = now_secs();
+            cache
         }
-    }
+    };
+    write_cache(&cache);
+    Ok(UpdateInfo::new(current_version, cache.latest_version))
 }
 
 async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error>> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .build()?;
-    let response = serde_json::from_str::<serde_json::Value>(
-        &client
-            .get("https://api.github.com/repos/domsleee/SS-Dat-Info/releases/latest")
-            .header("User-Agent", "SS-Dat-Info-App")
-            .send()
-            .await?
-            .text()
-            .await?,
-    )?;
+    let body = client
+        .get("https://api.github.com/repos/domsleee/SS-Dat-Info/releases/latest")
+        .header("User-Agent", "SS-Dat-Info-App")
+        .send()
+        .await?
+        .text()
+        .await?;
+    let response: serde_json::Value = serde_json::from_str(&body)?;
 
-    // Extract the tag_name which contains version (usually in format "v1.2.3")
     let version = response["tag_name"]
         .as_str()
-        .ok_or(format!(
-            "\"tag_name\" not found in response: {:?}",
-            response
-        ))?
+        .ok_or_else(|| format!("\"tag_name\" not found in response: {response:?}"))?
         .trim_start_matches('v')
         .to_string();
 

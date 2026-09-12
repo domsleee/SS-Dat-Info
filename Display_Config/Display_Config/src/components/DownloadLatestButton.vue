@@ -30,14 +30,12 @@ let updateStatus = {
   currentVersion: '0.0.0',
 };
 
-async function run() {
-  // Best-effort: a failed/rate-limited update check must never surface as an
-  // error (the backend already degrades gracefully; this is a second guard).
+async function refreshUpdateStatus() {
   try {
-    const x = await checkForUpdates();
-    updateStatus = x;
+    updateStatus = await checkForUpdates();
     hasUpdate.value = updateStatus.latestVersion !== updateStatus.currentVersion;
   } catch {
+    // Background checks should not open an error dialog.
     hasUpdate.value = false;
   }
 }
@@ -46,8 +44,6 @@ async function downloadLatest() {
   await update(updateStatus.latestVersion);
 }
 
-onMounted(async () => {
-  await run();
-});
+onMounted(refreshUpdateStatus);
 
 </script>
