@@ -3,8 +3,8 @@ import { runWithErrorHandler } from "@/stores/errorStore";
 import { useUpdateDialogStore } from "@/stores/updateDialogStore";
 import { Channel } from "@tauri-apps/api/core";
 
-export async function checkForUpdates(): Promise<{ currentVersion: string; latestVersion: string; }> {
-  return (await commands.checkForUpdates());
+export async function checkForUpdates(force = false): Promise<{ currentVersion: string; latestVersion: string; }> {
+  return await commands.checkForUpdates(force);
 }
 
 export async function update(latestVersion: string): Promise<void> {

@@ -1,5 +1,6 @@
 use crate::version_info::get_version;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -41,6 +42,14 @@ struct UpdateCache {
     latest_version: String,
 }
 
+impl UpdateCache {
+    fn can_reuse(&self, now: u64) -> bool {
+        let recent = |stamp, ttl| stamp != 0 && now.checked_sub(stamp).is_some_and(|age| age < ttl);
+        recent(self.checked_at_secs, CACHE_TTL_SECS)
+            || recent(self.last_attempt_secs, FAILURE_RETRY_SECS)
+    }
+}
+
 const CACHE_TTL_SECS: u64 = 3600;
 const FAILURE_RETRY_SECS: u64 = 300;
 const REQUEST_TIMEOUT_SECS: u64 = 10;
@@ -60,13 +69,12 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn read_cache() -> Option<UpdateCache> {
-    serde_json::from_str(&std::fs::read_to_string(cache_path()).ok()?).ok()
+fn read_cache(path: &Path) -> Option<UpdateCache> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
-fn write_cache(cache: &UpdateCache) {
-    let path = cache_path();
-    if let Err(e) = write_cache_at(&path, cache) {
+fn write_cache(path: &Path, cache: &UpdateCache) {
+    if let Err(e) = write_cache_at(path, cache) {
         eprintln!("update cache: write {} failed: {e}", path.display());
     }
 }
@@ -93,40 +101,47 @@ fn write_cache_at(path: &Path, cache: &UpdateCache) -> io::Result<()> {
 
 #[tauri::command]
 #[specta::specta]
-pub async fn check_for_updates() -> Result<UpdateInfo, String> {
-    let current_version = get_version();
+pub async fn check_for_updates(force: bool) -> Result<UpdateInfo, String> {
+    check_updates(force, &cache_path(), async {
+        fetch_latest_version().await.map_err(|e| e.to_string())
+    })
+    .await
+}
 
-    if let Some(cache) = read_cache() {
-        let now = now_secs();
-        let success_fresh = now.saturating_sub(cache.checked_at_secs) < CACHE_TTL_SECS;
-        let backing_off = now.saturating_sub(cache.last_attempt_secs) < FAILURE_RETRY_SECS;
-        if success_fresh || backing_off {
-            return Ok(UpdateInfo::new(current_version, cache.latest_version));
-        }
+async fn check_updates(
+    force: bool,
+    path: &Path,
+    fetch: impl Future<Output = Result<String, String>>,
+) -> Result<UpdateInfo, String> {
+    let current_version = get_version();
+    let mut cache = read_cache(path).unwrap_or_else(|| UpdateCache {
+        checked_at_secs: 0,
+        last_attempt_secs: 0,
+        latest_version: current_version.clone(),
+    });
+
+    if !force && cache.can_reuse(now_secs()) {
+        return Ok(UpdateInfo::new(current_version, cache.latest_version));
     }
 
-    let cache = match fetch_latest_version().await {
-        Ok(latest_version) => {
-            let now = now_secs();
-            UpdateCache {
-                checked_at_secs: now,
-                last_attempt_secs: now,
-                latest_version,
-            }
+    let result = fetch.await;
+    let now = now_secs();
+    match &result {
+        Ok(latest) => {
+            cache.checked_at_secs = now;
+            cache.latest_version = latest.clone();
         }
         Err(e) => {
             eprintln!("update check failed: {e}");
-            // Keep the last known version without marking the failed check as fresh.
-            let mut cache = read_cache().unwrap_or_else(|| UpdateCache {
-                checked_at_secs: 0,
-                last_attempt_secs: 0,
-                latest_version: current_version.clone(),
-            });
-            cache.last_attempt_secs = now_secs();
-            cache
+            // Another launcher may have published a successful check while we waited.
+            cache = read_cache(path).unwrap_or(cache);
         }
-    };
-    write_cache(&cache);
+    }
+    cache.last_attempt_secs = now;
+    write_cache(path, &cache);
+    if force {
+        result.map_err(|e| format!("Could not check for updates: {e}"))?;
+    }
     Ok(UpdateInfo::new(current_version, cache.latest_version))
 }
 
@@ -139,6 +154,7 @@ async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error>> {
         .header("User-Agent", "SS-Dat-Info-App")
         .send()
         .await?
+        .error_for_status()?
         .text()
         .await?;
     let response: serde_json::Value = serde_json::from_str(&body)?;
@@ -153,85 +169,4 @@ async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_offers_newer_versions() {
-        for (current, latest, offered) in [
-            ("0.4.5", "0.4.4", false),
-            ("0.4.5", "0.4.5", false),
-            ("0.4.5", "0.4.6", true),
-            ("0.4.9", "0.4.10", true),
-            ("0.4.5", "0.4.6-rc.1", true),
-            ("0.4.5", "0.4.5-rc.1", false),
-            ("0.4.5-rc.1", "0.4.5", true),
-            ("0.4.5+build.1", "0.4.5+build.2", false),
-            ("0.4.5", "invalid", false),
-            ("0.4.5", "", false),
-        ] {
-            let info = UpdateInfo::new(current.into(), latest.into());
-            assert_eq!(info.current_version, current);
-            assert_eq!(info.latest_version, if offered { latest } else { current });
-        }
-    }
-
-    #[test]
-    fn concurrent_writes_publish_complete_caches() {
-        let dir = std::env::temp_dir().join(format!("ss-update-{}", uuid::Uuid::new_v4()));
-        let path = dir.join("cache.json");
-        let barrier = std::sync::Barrier::new(8);
-        std::thread::scope(|scope| {
-            for writer in 0..8 {
-                let path = &path;
-                let barrier = &barrier;
-                scope.spawn(move || {
-                    barrier.wait();
-                    for attempt in 0..32 {
-                        let stamp = writer * 32 + attempt;
-                        write_cache_at(
-                            path,
-                            &UpdateCache {
-                                checked_at_secs: stamp,
-                                last_attempt_secs: stamp,
-                                latest_version: format!("0.4.{stamp}"),
-                            },
-                        )
-                        .unwrap();
-                        let cache: UpdateCache =
-                            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-                        assert_eq!(cache.checked_at_secs, cache.last_attempt_secs);
-                        assert_eq!(
-                            cache.latest_version,
-                            format!("0.4.{}", cache.checked_at_secs)
-                        );
-                    }
-                });
-            }
-        });
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
-        std::fs::remove_file(path).unwrap();
-        std::fs::remove_dir(dir).unwrap();
-    }
-
-    #[test]
-    fn failed_publish_removes_temporary_file() {
-        let dir = std::env::temp_dir().join(format!("ss-update-{}", uuid::Uuid::new_v4()));
-        let path = dir.join("cache.json");
-        std::fs::create_dir_all(&path).unwrap();
-        assert!(
-            write_cache_at(
-                &path,
-                &UpdateCache {
-                    checked_at_secs: 1,
-                    last_attempt_secs: 1,
-                    latest_version: "0.4.5".into(),
-                },
-            )
-            .is_err()
-        );
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
-        std::fs::remove_dir(path).unwrap();
-        std::fs::remove_dir(dir).unwrap();
-    }
-}
+mod tests;
