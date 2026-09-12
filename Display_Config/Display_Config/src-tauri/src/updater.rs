@@ -19,7 +19,12 @@ impl UpdateInfo {
             semver::Version::parse(&latest_version),
         ) {
             (Ok(current), Ok(latest)) => latest.cmp_precedence(&current).is_gt(),
-            _ => false,
+            _ => {
+                log::warn!(
+                    "update check: invalid version, current={current_version:?}, latest={latest_version:?}"
+                );
+                false
+            }
         };
         // Both update controls interpret unequal versions as an available update.
         Self {
@@ -75,7 +80,7 @@ fn read_cache(path: &Path) -> Option<UpdateCache> {
 
 fn write_cache(path: &Path, cache: &UpdateCache) {
     if let Err(e) = write_cache_at(path, cache) {
-        eprintln!("update cache: write {} failed: {e}", path.display());
+        log::warn!("update cache: write {} failed: {e}", path.display());
     }
 }
 
@@ -132,7 +137,7 @@ async fn check_updates(
             cache.latest_version = latest.clone();
         }
         Err(e) => {
-            eprintln!("update check failed: {e}");
+            log::warn!("update check failed: {e}");
             // Another launcher may have published a successful check while we waited.
             cache = read_cache(path).unwrap_or(cache);
         }
