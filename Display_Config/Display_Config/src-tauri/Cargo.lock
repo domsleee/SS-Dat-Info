@@ -761,6 +761,7 @@ dependencies = [
  "once_cell",
  "opener",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "specta",
