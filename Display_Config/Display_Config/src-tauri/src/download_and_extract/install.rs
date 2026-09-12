@@ -4,9 +4,18 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Cursor;
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, TryLockError};
 
 pub(super) static INSTALLATION_LOCK: Mutex<()> = Mutex::new(());
+
+pub(super) fn when_not_installing(action: impl FnOnce()) {
+    let _guard = match INSTALLATION_LOCK.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(TryLockError::WouldBlock) => return,
+    };
+    action();
+}
 
 fn lock_folder(root: &Path) -> Result<File> {
     // The OS releases this lock on exit; the empty file can be reused.
@@ -24,7 +33,7 @@ fn lock_folder(root: &Path) -> Result<File> {
 
 pub(super) fn cleanup(root: &Path) {
     if let Ok(_lock) = lock_folder(root) {
-        cleanup_completed(root);
+        cleanup_staging(root);
     }
 }
 
@@ -60,7 +69,7 @@ fn remove_staging(path: &Path) -> std::io::Result<()> {
     fs::remove_dir_all(path)
 }
 
-fn cleanup_completed(root: &Path) {
+fn cleanup_staging(root: &Path) {
     if let Ok(entries) = fs::read_dir(root) {
         for entry in entries.flatten() {
             if entry
@@ -70,7 +79,9 @@ fn cleanup_completed(root: &Path) {
                 && entry
                     .file_type()
                     .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
-                && entry.path().join("complete").is_file()
+                && (entry.path().join("complete").is_file()
+                    || matches!(fs::symlink_metadata(entry.path().join("backup")),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound))
             {
                 let _ = remove_staging(&entry.path());
             }
@@ -85,7 +96,7 @@ pub(super) fn install_zip(
     before_install: impl FnOnce() -> Result<bool>,
 ) -> Result<bool> {
     let _lock = lock_folder(root)?;
-    cleanup_completed(root);
+    cleanup_staging(root);
     let staging_path = root.join(format!(".display-config-update-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&staging_path)?;
     let mut staging = Staging {

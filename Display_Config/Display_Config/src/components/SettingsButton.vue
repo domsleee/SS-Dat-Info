@@ -2,6 +2,7 @@
   <div>
     <v-menu
       v-model="menu"
+      :disabled="disabled"
       :close-on-content-click="false"
       min-width="320"
       rounded="lg"
@@ -11,6 +12,7 @@
       <template #activator="{ props }">
         <v-btn
           v-bind="props"
+          :disabled="disabled"
           :icon="mdiCog"
           size="large"
           class="settings-button"
@@ -50,6 +52,7 @@
 <script setup>
 import { mdiCog, mdiInformationOutline, mdiUpdate } from '@mdi/js';
 import { ref } from 'vue';
+const componentProps = defineProps({ disabled: Boolean });
 const aboutDialog = ref(null);
 const updateDialog = ref(null);
 
@@ -60,6 +63,7 @@ const items = ref([
 ]);
 
 const handleAction = (action) => {
+  if (componentProps.disabled) return;
   if (action === 'checkUpdates') {
     updateDialog.value.openDialog();
   } else if (action === 'about') {

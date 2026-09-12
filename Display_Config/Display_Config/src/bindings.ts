@@ -26,6 +26,7 @@ export const commands = {
   relaunch: () => __TAURI_INVOKE<void>("relaunch"),
   logStartupTime: (startupTimeInfo: StartupTimeInfo) => __TAURI_INVOKE<string>("log_startup_time", { startupTimeInfo }),
   killExit1: () => __TAURI_INVOKE<string>("kill_exit_1"),
+  exitAfterPlay: () => __TAURI_INVOKE<void>("exit_after_play"),
 };
 
 /* Types */

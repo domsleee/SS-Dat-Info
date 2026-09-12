@@ -25,8 +25,14 @@ mod version_info;
 #[tauri::command]
 #[specta::specta]
 fn kill_exit_1() -> String {
-    download_and_extract::exit_if_not_installing();
+    download_and_extract::exit_if_not_installing(1);
     String::new()
+}
+
+#[tauri::command]
+#[specta::specta]
+fn exit_after_play() {
+    download_and_extract::exit_if_not_installing(0);
 }
 
 // crazy hack: https://github.com/tauri-apps/tauri/issues/1564
@@ -53,7 +59,7 @@ pub fn run() {
         )
         .invoke_handler(builder.invoke_handler())
         .setup(|app| {
-            download_and_extract::cleanup_completed_updates();
+            download_and_extract::cleanup_updates();
             app.manage(CancellationRegistry::default());
             let window = app.get_webview_window("main").unwrap();
             let package_info = app.package_info();
@@ -64,7 +70,7 @@ pub fn run() {
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
-                    download_and_extract::exit_if_not_installing();
+                    download_and_extract::exit_if_not_installing(1);
                 }
             });
             Ok(())
@@ -95,7 +101,8 @@ pub fn get_tauri_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             version_info::get_version,
             relaunch::relaunch,
             performance::log_startup_time,
-            kill_exit_1
+            kill_exit_1,
+            exit_after_play
         ])
         .error_handling(ErrorHandlingMode::Throw)
         .dangerously_cast_bigints_to_number();

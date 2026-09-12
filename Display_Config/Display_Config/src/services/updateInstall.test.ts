@@ -1,10 +1,12 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
-import { clearMocks, mockIPC } from '@tauri-apps/api/mocks';
+import { clearMocks, mockIPC, mockWindows } from '@tauri-apps/api/mocks';
 import { createPinia, setActivePinia } from 'pinia';
 import { commands } from '@/bindings';
 import { useUpdateDialogStore } from '@/stores/updateDialogStore';
 import { useErrorStore } from '@/stores/errorStore';
 import { update } from './updaterService';
+import { handlePlayAsync } from './handlePlay';
+import { ref } from 'vue';
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
 const download = spyOn(commands, 'downloadAndExtract');
@@ -68,4 +70,28 @@ test('cancellation requested before the token arrives is forwarded and does not 
   await update('0.4.6');
   expect(useUpdateDialogStore().state.key).toBe('closed');
   expect(relaunch).not.toHaveBeenCalled();
+});
+
+test('Play already in flight uses the guarded exit when installation starts', async () => {
+  let finishInjection!: () => void;
+  const injection = new Promise<void>(resolve => { finishInjection = resolve; });
+  let injectionStarted!: () => void;
+  const started = new Promise<void>(resolve => { injectionStarted = resolve; });
+  const calls: string[] = [];
+  mockWindows('main');
+  mockIPC(async command => {
+    calls.push(command);
+    if (command === 'run_inject') {
+      injectionStarted();
+      await injection;
+    }
+  });
+  const playing = handlePlayAsync(ref(false));
+  await started;
+  useUpdateDialogStore().state = { key: 'installing', latestVersion: '0.4.6' };
+  finishInjection();
+  await playing;
+  expect(useErrorStore().show).toBe(false);
+  expect(calls).toContain('exit_after_play');
+  expect(calls).not.toContain('plugin:process|exit');
 });

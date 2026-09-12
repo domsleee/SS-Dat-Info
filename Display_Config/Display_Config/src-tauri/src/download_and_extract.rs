@@ -12,14 +12,12 @@ use tauri::ipc::Channel;
 
 mod install;
 
-pub fn cleanup_completed_updates() {
+pub fn cleanup_updates() {
     install::cleanup(&get_supreme_folder());
 }
 
-pub fn exit_if_not_installing() {
-    if let Ok(_guard) = install::INSTALLATION_LOCK.try_lock() {
-        std::process::exit(1);
-    }
+pub fn exit_if_not_installing(code: i32) {
+    install::when_not_installing(|| std::process::exit(code));
 }
 #[derive(Clone, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase", tag = "event", content = "data")]

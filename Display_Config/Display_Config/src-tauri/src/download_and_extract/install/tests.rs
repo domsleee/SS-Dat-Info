@@ -244,15 +244,53 @@ fn cleans_completed_backups_but_preserves_recovery_files() {
         .share_mode(1)
         .open(completed.join("backup/Display_Config.exe"))
         .unwrap();
-    cleanup_completed(&game.0);
+    cleanup_staging(&game.0);
     assert!(completed.join("complete").exists());
     drop(locked);
-    cleanup_completed(&game.0);
+    cleanup_staging(&game.0);
     assert!(!completed.exists());
     assert_eq!(
         fs::read(failed.join("backup/Display_Config.exe")).unwrap(),
         b"backup"
     );
+}
+
+#[test]
+fn retries_cleanup_of_abandoned_staging_after_a_file_lock_is_released() {
+    let game = Game::new();
+    let abandoned = game.0.join(".display-config-update-abandoned");
+    fs::create_dir_all(abandoned.join("new")).unwrap();
+    let payload = abandoned.join("new/Display_Config.exe");
+    fs::write(&payload, b"staged update").unwrap();
+    let locked = OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&payload)
+        .unwrap();
+    cleanup(&game.0);
+    assert!(payload.exists());
+    drop(locked);
+    cleanup(&game.0);
+    assert!(!abandoned.exists());
+    game.assert_original();
+}
+
+#[test]
+fn cleanup_does_not_remove_an_active_installers_staging() {
+    let game = Game::new();
+    let active = game.0.join(".display-config-update-active");
+    fs::create_dir_all(active.join("new")).unwrap();
+    let _lock = lock_folder(&game.0).unwrap();
+    cleanup(&game.0);
+    assert!(active.exists());
+}
+
+#[test]
+fn exit_action_is_blocked_during_installation() {
+    let _installing = INSTALLATION_LOCK.lock().unwrap();
+    let exited = Cell::new(false);
+    when_not_installing(|| exited.set(true));
+    assert!(!exited.get());
 }
 
 #[test]

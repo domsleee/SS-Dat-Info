@@ -8,6 +8,7 @@
       <template #activator="{ props }">
         <v-btn 
           v-bind="props"
+          :disabled="disabled"
           :icon="mdiDownload" 
           variant="text" 
           color="green-darken-1" 
@@ -23,6 +24,8 @@
 import { checkForUpdates, update } from '@/services/updaterService';
 import { onMounted, ref } from 'vue';
 import { mdiDownload } from '@mdi/js';
+
+defineProps<{ disabled?: boolean }>();
 
 const hasUpdate = ref(false);
 let updateStatus = {

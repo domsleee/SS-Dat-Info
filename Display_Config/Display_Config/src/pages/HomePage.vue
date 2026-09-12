@@ -11,8 +11,8 @@
       />
       <AutoStart @auto-play="handleAutoplay()" />
       <div class="mt-2 ga-2 d-flex justify-end">
-        <DownloadLatestButton />
-        <SettingsButton />
+        <DownloadLatestButton :disabled="playLoading" />
+        <SettingsButton :disabled="playLoading" />
         <v-btn
           size="x-large"
           color="indigo-darken-3"
