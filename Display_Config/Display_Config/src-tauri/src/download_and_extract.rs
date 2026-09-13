@@ -101,13 +101,14 @@ async fn do_download_and_extract(
     );
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
-        let outpath = get_supreme_folder().join(file.name());
+        let relative_path = enclosed_path(&file)?;
+        let outpath = get_supreme_folder().join(&relative_path);
         if is_task_cancelled(&token) {
             on_event.send(DownloadEvent::DownloadCancelled)?;
             return Ok(DownloadResult { installed: false });
         }
 
-        if file.name().ends_with('/') {
+        if file.is_dir() {
             if !outpath.exists() {
                 std::fs::create_dir_all(&outpath).context("Failed to create_dir_all")?;
             }
@@ -119,7 +120,7 @@ async fn do_download_and_extract(
             }
 
             if outpath.exists() {
-                let temp_path = temp_dir.join(file.name());
+                let temp_path = temp_dir.join(&relative_path);
                 if let Some(parent) = temp_path.parent()
                     && !parent.exists()
                 {
@@ -135,6 +136,14 @@ async fn do_download_and_extract(
     Ok(DownloadResult { installed: true })
 }
 
+/// The entry's path relative to the extraction folder, or an error if `..` would climb out of it.
+fn enclosed_path<R: std::io::Read>(
+    file: &zip::read::ZipFile<'_, R>,
+) -> Result<std::path::PathBuf, String> {
+    file.enclosed_name()
+        .ok_or_else(|| format!("Update archive contains an unsafe path: {}", file.name()))
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn cancel_download(id: String) -> bool {
@@ -144,4 +153,55 @@ pub fn cancel_download(id: String) -> bool {
     };
     let cancellation_registry = CancellationRegistry::instance();
     cancellation_registry.cancel_task(&uuid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::enclosed_path;
+    use std::io::{Cursor, Write};
+    use std::path::{Component, PathBuf};
+
+    fn archive_with(names: &[&str]) -> zip::ZipArchive<Cursor<Vec<u8>>> {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for name in names {
+            writer
+                .start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"x").unwrap();
+        }
+        zip::ZipArchive::new(writer.finish().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn accepts_paths_inside_the_game_folder() {
+        let mut archive =
+            archive_with(&["Display_Config.exe", "Display_Config_Resources/helper.dll"]);
+        for i in 0..archive.len() {
+            let file = archive.by_index(i).unwrap();
+            assert_eq!(enclosed_path(&file).unwrap(), PathBuf::from(file.name()));
+        }
+    }
+
+    #[test]
+    fn never_returns_a_path_outside_the_game_folder() {
+        let mut archive = archive_with(&[
+            "../evil.exe",
+            "Display_Config_Resources/../../evil.exe",
+            "C:/evil.exe",
+            "/evil.exe",
+        ]);
+        for i in 0..archive.len() {
+            let file = archive.by_index(i).unwrap();
+            match enclosed_path(&file) {
+                Err(_) => {}
+                Ok(path) => assert!(
+                    !file.name().contains("..")
+                        && path.components().all(|c| matches!(c, Component::Normal(_))),
+                    "{} became {}",
+                    file.name(),
+                    path.display()
+                ),
+            }
+        }
+    }
 }
