@@ -57,12 +57,12 @@ export type RdConfig = {
 };
 
 export type StartupTimeInfo = {
-  onMounted1: number | null,
-  onMounted2: number | null,
-  createAppTime: number | null,
-  mountAppTime: number | null,
-  registerPluginsTime: number | null,
-  totalStartupTime: number | null,
+  onMounted1: number,
+  onMounted2: number,
+  createAppTime: number,
+  mountAppTime: number,
+  registerPluginsTime: number,
+  totalStartupTime: number,
 };
 
 export type TrainerSettings = {
