@@ -45,7 +45,7 @@ export function quaternionToEuler(q: Quaternion): Rotation {
   const rotX = (Math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)) * 180) / Math.PI;
 
   // Handle gimbal lock
-  let rotY = 0;
+  let rotY: number;
   const sinp = 2 * (w * y - z * x);
   if (Math.abs(sinp) >= 1) {
     rotY = Math.sign(sinp) * 90; // Use 90 degrees if in gimbal lock

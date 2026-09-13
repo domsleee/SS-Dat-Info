@@ -71,7 +71,7 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-pub fn get_tauri_specta_builder() -> tauri_specta::Builder {
+pub fn get_tauri_specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     let builder = tauri_specta::Builder::new()
         .commands(tauri_specta::collect_commands![
             show_window,
@@ -95,15 +95,14 @@ pub fn get_tauri_specta_builder() -> tauri_specta::Builder {
             performance::log_startup_time,
             kill_exit_1
         ])
-        .error_handling(ErrorHandlingMode::Throw);
+        .error_handling(ErrorHandlingMode::Throw)
+        .dangerously_cast_bigints_to_number();
 
     #[cfg(debug_assertions)]
     builder
         .export(
             specta_typescript::Typescript::default()
-                .header("/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */\n// @ts-nocheck")
-                .bigint(specta_typescript::BigIntExportBehavior::Number)
-                .formatter(specta_typescript::formatter::eslint),
+                .header("/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */\n// @ts-nocheck"),
             "../src/bindings.ts",
         )
         .expect("Failed to export typescript bindings");
