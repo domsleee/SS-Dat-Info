@@ -37,6 +37,7 @@
     "bun-types": "^1.4.2",
     "eslint": "^10.10.0",
     "eslint-plugin-vue": "^10.11.0",
+    "globals": "^17.12.0",
     "pinia": "^4.0.3",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.70.0",
