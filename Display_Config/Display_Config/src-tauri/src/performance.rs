@@ -37,11 +37,19 @@ pub fn log_startup_time(startup_time_info: StartupTimeInfo) -> Result<String, St
 
 #[derive(Debug, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
+// specta exports f64 as `number | null` (serde_json writes NaN as null), but these are
+// only ever deserialized from finite JS numbers, so export them as plain `number`.
 pub struct StartupTimeInfo {
+    #[specta(type = specta_typescript::Number)]
     pub on_mounted_1: f64,
+    #[specta(type = specta_typescript::Number)]
     pub on_mounted_2: f64,
+    #[specta(type = specta_typescript::Number)]
     pub create_app_time: f64,
+    #[specta(type = specta_typescript::Number)]
     pub mount_app_time: f64,
+    #[specta(type = specta_typescript::Number)]
     pub register_plugins_time: f64,
+    #[specta(type = specta_typescript::Number)]
     pub total_startup_time: f64,
 }

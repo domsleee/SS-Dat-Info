@@ -7,7 +7,7 @@ use crate::path_util::get_supreme_folder;
 #[derive(Debug, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TrainerSettings {
-    #[specta(rename = "use4xFonts")]
+    #[serde(rename = "use4xFonts")]
     pub use4x_fonts: bool,
     pub change_fov: bool,
     pub fov_width: Option<i32>,

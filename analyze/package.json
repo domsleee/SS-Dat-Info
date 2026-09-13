@@ -3,18 +3,18 @@
   "module": "src/analyzeReplay.ts",
   "type": "module",
   "devDependencies": {
-    "@eslint/js": "^9.36.0",
-    "@stylistic/eslint-plugin": "^5.4.0",
-    "@typescript/native-preview": "^7.0.0-dev.20250922.1",
-    "bun-types": "latest",
-    "eslint": "^9.36.0",
-    "typescript-eslint": "^8.44.0"
+    "@eslint/js": "^10.0.1",
+    "@stylistic/eslint-plugin": "^5.10.0",
+    "@typescript/native-preview": "^7.0.0-dev.20260707.2",
+    "bun-types": "^1.4.2",
+    "eslint": "^10.10.0",
+    "typescript-eslint": "^8.70.0"
   },
   "peerDependencies": {
-    "typescript": "^5.8.2"
+    "typescript": "~6.0.3"
   },
   "dependencies": {
-    "commander": "^14.0.1"
+    "commander": "^15.0.0"
   },
   "scripts": {
     "start": "bun src/index.ts",
