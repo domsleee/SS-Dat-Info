@@ -11,8 +11,8 @@
       />
       <AutoStart @auto-play="handleAutoplay()" />
       <div class="mt-2 ga-2 d-flex justify-end">
-        <DownloadLatestButton />
-        <SettingsButton />
+        <DownloadLatestButton :disabled="playLoading" />
+        <SettingsButton :disabled="playLoading" />
         <v-btn
           size="x-large"
           color="indigo-darken-3"
@@ -40,6 +40,7 @@ import { handlePlayAsync } from '../services/handlePlay';
 import { VForm } from 'vuetify/components';
 import { loadFromFiles, setupFileSync } from '../services/fileSyncService';
 import { commands } from '@/bindings';
+import { useUpdateDialogStore } from '@/stores/updateDialogStore';
 
 const playLoading = ref(false);
 const form = ref<VForm | undefined>();
@@ -56,7 +57,7 @@ onMounted(async () => {
 
 async function handlePlay() {
   const { valid } = await form.value!.validate();
-  if (!valid) return;
+  if (!valid || useUpdateDialogStore().state.key !== 'closed') return;
   await handlePlayAsync(playLoading);
 }
 

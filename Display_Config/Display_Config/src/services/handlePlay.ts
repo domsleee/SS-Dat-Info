@@ -1,6 +1,5 @@
 
 import { useTrainerUISettingsStore } from '../stores/trainerSettings';
-import { exit } from '@tauri-apps/plugin-process';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getAsRdConfig, getAsDetailConfig, useRenderSettingsStore } from '../stores/renderSettings';
 import type { Ref } from 'vue';
@@ -25,7 +24,7 @@ export async function handlePlayAsync(playLoading: Ref<boolean>) {
     }
     await getCurrentWindow().setFocus();
     playLoading.value = false;
-    await exit(0);
+    await commands.exitAfterPlay();
   } catch (e) {
     if (e instanceof Error || typeof e === 'string') {
       const errorString = e instanceof Error ? e.message : e;
