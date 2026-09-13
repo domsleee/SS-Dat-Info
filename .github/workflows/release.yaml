@@ -1,0 +1,103 @@
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yaml
+name: release
+permissions:
+  contents: write
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  release:
+    name: release
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: ilammy/msvc-dev-cmd@v1.4.1
+        with:
+          arch: amd64_x86
+      - uses: extractions/setup-just@v3
+      - uses: arduino/setup-task@v2
+
+      - name: Read version
+        id: version
+        run: |
+          $dir = "Display_Config/Display_Config"
+          $package = (Get-Content "$dir/package.json" -Raw | ConvertFrom-Json).version
+          $tauri = (Get-Content "$dir/src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json).version
+          $cargo = (Select-String -Path "$dir/src-tauri/Cargo.toml" -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if ($package -ne $tauri -or $package -ne $cargo) {
+            throw "Version mismatch: package.json $package, tauri.conf.json $tauri, Cargo.toml $cargo"
+          }
+          "version=$package" >> $env:GITHUB_OUTPUT
+
+      - name: Refuse to replace a published release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $isDraft = gh release view $version --json isDraft --jq .isDraft 2>$null
+          if ($LASTEXITCODE -eq 0 -and $isDraft -eq "false") {
+            throw "Release $version is already published. Bump the version first."
+          }
+          exit 0
+
+      - name: Build
+        run: |
+          cd Display_Config/Display_Config
+          bun install --frozen-lockfile
+          just
+
+      - name: Package
+        id: package
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $output = Resolve-Path "Display_Config/output"
+          $expected = @(
+            "Display_Config.exe",
+            "Display_Config_Resources/Display_Config_Helper.dll",
+            "Display_Config_Resources/Injector.exe"
+          )
+          foreach ($file in $expected) {
+            if (-not (Test-Path (Join-Path $output $file))) { throw "Build did not produce $file" }
+          }
+          $zip = Join-Path $PWD "Display_Config_$version.zip"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($output, $zip)
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          $entries = @($archive.Entries | Where-Object { -not $_.FullName.EndsWith("/") } | ForEach-Object { $_.FullName } | Sort-Object)
+          $archive.Dispose()
+          if (Compare-Object $entries @($expected | Sort-Object)) {
+            throw "Unexpected zip entries: $($entries -join ', ')"
+          }
+          "zip=Display_Config_$version.zip" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Display_Config_${{ steps.version.outputs.version }}
+          path: ${{ steps.package.outputs.zip }}
+          if-no-files-found: error
+
+      - name: Create or update draft release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $zip = "${{ steps.package.outputs.zip }}"
+          gh release view $version --json isDraft *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $version --target $env:GITHUB_SHA
+            if ($LASTEXITCODE -ne 0) { throw "Could not retarget draft release $version" }
+            gh release upload $version $zip --clobber
+          } else {
+            gh release create $version $zip --draft --title "Display_Config $version" --target $env:GITHUB_SHA
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Could not publish $zip to draft release $version" }
