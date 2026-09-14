@@ -9,7 +9,7 @@ jobs:
     name: analyze:lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: cd analyze && bun install
       - run: cd analyze && bun run lint
@@ -18,7 +18,7 @@ jobs:
     name: analyze:test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: cd analyze && bun install
       - run: cd analyze && bun run test
@@ -26,7 +26,7 @@ jobs:
     name: threejs:lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: cd threejs && bun install
       - run: cd threejs && bun run lint
@@ -35,7 +35,7 @@ jobs:
     name: displayConfig:build
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: cd Display_Config/Display_Config && bun install
       - run: cd Display_Config/Display_Config && bun tauri build --debug
@@ -45,7 +45,7 @@ jobs:
     env:
       BINDINGS_PATH: "Display_Config/Display_Config/src/bindings.ts"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: cd Display_Config/Display_Config && bun install
       - run: cd Display_Config/Display_Config/src-tauri && cargo run --bin codegen
@@ -68,7 +68,7 @@ jobs:
     name: displayConfig:lintRust
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: cd Display_Config/Display_Config/src-tauri && cargo fmt --all --check
       - run: cd Display_Config/Display_Config/src-tauri && cargo clippy -- -Dwarnings
@@ -76,14 +76,14 @@ jobs:
     name: displayConfig:testRust
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: cd Display_Config/Display_Config/src-tauri && cargo test
   displayConfigLintVue:
     name: displayConfig:lintVue
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: cd Display_Config/Display_Config && bun install
       - run: cd Display_Config/Display_Config && bun run lint
@@ -92,7 +92,7 @@ jobs:
     name: displayConfig:test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: cd Display_Config/Display_Config && bun install
       - run: cd Display_Config/Display_Config && bun run test
@@ -100,12 +100,9 @@ jobs:
     name: displayConfig:cppBuild
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-      - uses: ilammy/msvc-dev-cmd@v1.4.1
-        with:
-          arch: amd64_x86
-      - uses: extractions/setup-just@v3
-      - uses: arduino/setup-task@v2
+      - uses: extractions/setup-just@v4
+      - uses: arduino/setup-task@v3
       - run: cd Display_Config/Display_Config && bun install
       - run: cd Display_Config/Display_Config && just

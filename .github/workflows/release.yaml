@@ -17,13 +17,10 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-      - uses: ilammy/msvc-dev-cmd@v1.4.1
-        with:
-          arch: amd64_x86
-      - uses: extractions/setup-just@v3
-      - uses: arduino/setup-task@v2
+      - uses: extractions/setup-just@v4
+      - uses: arduino/setup-task@v3
 
       - name: Read version
         id: version
@@ -79,7 +76,7 @@ jobs:
           }
           "zip=Display_Config_$version.zip" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Display_Config_${{ steps.version.outputs.version }}
           path: ${{ steps.package.outputs.zip }}
