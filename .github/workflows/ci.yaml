@@ -4,6 +4,9 @@ on:
     branches:
       - main
 name: ci
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   analyzeLint:
     name: analyze:lint
@@ -11,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-      - run: cd analyze && bun install
+      - run: cd analyze && bun install --frozen-lockfile
       - run: cd analyze && bun run lint
       - run: cd analyze && bun run typecheck
   analyzeTest:
@@ -20,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-      - run: cd analyze && bun install
+      - run: cd analyze && bun install --frozen-lockfile
       - run: cd analyze && bun run test
   threejsLint:
     name: threejs:lint
@@ -28,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-      - run: cd threejs && bun install
+      - run: cd threejs && bun install --frozen-lockfile
       - run: cd threejs && bun run lint
       - run: cd threejs && bun run typecheck
   displayConfigBuild:
@@ -37,8 +40,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-      - run: cd Display_Config/Display_Config && bun install
-      - run: cd Display_Config/Display_Config && bun tauri build --debug
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Display_Config/Display_Config/src-tauri -> target
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - run: cd Display_Config/Display_Config && bun install --frozen-lockfile
+      - run: cd Display_Config/Display_Config && bun tauri build --debug -- --locked
   displayConfigBindings:
     name: displayConfig:bindings
     runs-on: windows-latest
@@ -47,8 +54,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-      - run: cd Display_Config/Display_Config && bun install
-      - run: cd Display_Config/Display_Config/src-tauri && cargo run --bin codegen
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Display_Config/Display_Config/src-tauri -> target
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - run: cd Display_Config/Display_Config && bun install --frozen-lockfile
+      - run: cd Display_Config/Display_Config/src-tauri && cargo run --locked --bin codegen
       - name: Check if bindings.ts exists
         run: |
           if [ ! -f "${{ env.BINDINGS_PATH }}" ]; then
@@ -64,28 +75,28 @@ jobs:
             exit 1
           fi
         shell: bash
+      - name: Run Rust tests
+        if: ${{ !cancelled() }}
+        run: cd Display_Config/Display_Config/src-tauri && cargo test --locked
   displayConfigLintRust:
     name: displayConfig:lintRust
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Display_Config/Display_Config/src-tauri -> target
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - run: cd Display_Config/Display_Config/src-tauri && cargo fmt --all --check
-      - run: cd Display_Config/Display_Config/src-tauri && cargo clippy -- -Dwarnings
-  displayConfigTestRust:
-    name: displayConfig:testRust
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-      - run: cd Display_Config/Display_Config/src-tauri && cargo test
+      - run: cd Display_Config/Display_Config/src-tauri && cargo clippy --locked -- -Dwarnings
   displayConfigLintVue:
     name: displayConfig:lintVue
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-      - run: cd Display_Config/Display_Config && bun install
+      - run: cd Display_Config/Display_Config && bun install --frozen-lockfile
       - run: cd Display_Config/Display_Config && bun run lint
       - run: cd Display_Config/Display_Config && bun run typecheck
   displayConfigTest:
@@ -94,7 +105,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-      - run: cd Display_Config/Display_Config && bun install
+      - run: cd Display_Config/Display_Config && bun install --frozen-lockfile
       - run: cd Display_Config/Display_Config && bun run test
   displayConfigCppBuild:
     name: displayConfig:cppBuild
@@ -102,7 +113,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Display_Config/Display_Config/src-tauri -> target
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - uses: extractions/setup-just@v4
       - uses: arduino/setup-task@v3
-      - run: cd Display_Config/Display_Config && bun install
+      - run: cd Display_Config/Display_Config && bun install --frozen-lockfile
       - run: cd Display_Config/Display_Config && just
