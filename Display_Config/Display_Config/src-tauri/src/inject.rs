@@ -102,50 +102,48 @@ fn wait_for_finished_log(log_path: &PathBuf) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    fn temp_folder() -> PathBuf {
-        std::env::temp_dir().join(format!("ss-inject-test-{}", uuid::Uuid::new_v4()))
+    fn resources_with(files: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for file in files {
+            std::fs::write(dir.path().join(file), []).unwrap();
+        }
+        dir
     }
 
     #[test]
     fn missing_resources_folder_is_an_error_not_a_panic() {
-        let resources = temp_folder().join("Display_Config_Resources");
-        let error = prepare_injection(&resources, &TrainerSettings::default()).unwrap_err();
+        let dir = resources_with(&[]);
+        let resources = dir.path().join("Display_Config_Resources");
+        let error = prepare_injection(&resources, &Default::default()).unwrap_err();
         assert!(error.contains("Injector.exe is missing"), "{error}");
         assert!(!resources.exists());
     }
 
     #[test]
     fn missing_helper_dll_is_named() {
-        let resources = temp_folder();
-        std::fs::create_dir_all(&resources).unwrap();
-        std::fs::write(resources.join("Injector.exe"), b"x").unwrap();
-        let error = prepare_injection(&resources, &TrainerSettings::default()).unwrap_err();
+        let dir = resources_with(&["Injector.exe"]);
+        let error = prepare_injection(dir.path(), &Default::default()).unwrap_err();
         assert!(
             error.contains("Display_Config_Helper.dll is missing"),
             "{error}"
         );
-        std::fs::remove_dir_all(&resources).unwrap();
     }
 
     #[test]
     fn writes_settings_and_removes_old_log() {
-        let resources = temp_folder();
-        std::fs::create_dir_all(&resources).unwrap();
-        for file in [
+        let dir = resources_with(&[
             "Injector.exe",
             "Display_Config_Helper.dll",
             "Display_Config_Helper.log",
-        ] {
-            std::fs::write(resources.join(file), b"x").unwrap();
-        }
+        ]);
+        let resources = dir.path();
         let settings = TrainerSettings {
             hide_blinking_r: true,
             ..Default::default()
         };
-        prepare_injection(&resources, &settings).unwrap();
+        prepare_injection(resources, &settings).unwrap();
         let json = std::fs::read_to_string(resources.join("Display_Config_Helper.json")).unwrap();
         assert!(json.contains("\"hideBlinkingR\": true"), "{json}");
         assert!(!resources.join("Display_Config_Helper.log").exists());
-        std::fs::remove_dir_all(&resources).unwrap();
     }
 }
