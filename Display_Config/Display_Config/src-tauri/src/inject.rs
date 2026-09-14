@@ -1,10 +1,14 @@
-use std::{os::windows::process::CommandExt, path::PathBuf, process::Command};
+use std::{
+    os::windows::process::CommandExt,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::path_util::get_supreme_folder;
 
-#[derive(Debug, Deserialize, Serialize, specta::Type)]
+#[derive(Debug, Default, Deserialize, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TrainerSettings {
     #[serde(rename = "use4xFonts")]
@@ -24,18 +28,8 @@ pub struct TrainerSettings {
 #[tauri::command]
 #[specta::specta]
 pub async fn run_inject(trainer_settings: TrainerSettings) -> Result<String, String> {
-    let supreme_folder = get_supreme_folder();
-    let display_config_resources = supreme_folder.join("Display_Config_Resources");
-    let settings_path = display_config_resources.join("Display_Config_Helper.json");
-    let settings_file = std::fs::File::create(settings_path).unwrap();
-
-    let log_path = get_display_config_helper_log_path();
-    if log_path.exists() {
-        std::fs::remove_file(&log_path).expect("Failed to remove log file");
-    }
-
-    let writer = std::io::BufWriter::new(&settings_file);
-    serde_json::to_writer_pretty(writer, &trainer_settings).unwrap();
+    let display_config_resources = get_display_config_resources_path();
+    prepare_injection(&display_config_resources, &trainer_settings)?;
 
     let injector_path = display_config_resources.join("Injector.exe");
     let status = Command::new(injector_path)
@@ -48,7 +42,31 @@ pub async fn run_inject(trainer_settings: TrainerSettings) -> Result<String, Str
         return Err("Injector.exe failed.\nDid you run using Supreme.exe?".to_string());
     }
 
-    wait_for_finished_log(&log_path)
+    wait_for_finished_log(&get_display_config_helper_log_path())
+}
+
+fn prepare_injection(resources: &Path, trainer_settings: &TrainerSettings) -> Result<(), String> {
+    for file in ["Injector.exe", "Display_Config_Helper.dll"] {
+        let path = resources.join(file);
+        if !path.is_file() {
+            return Err(format!(
+                "{} is missing.\nReinstall Display_Config from the latest release.",
+                path.display()
+            ));
+        }
+    }
+
+    let log_path = resources.join("Display_Config_Helper.log");
+    if log_path.exists() {
+        std::fs::remove_file(&log_path)
+            .map_err(|err| format!("Failed to remove {}: {err}", log_path.display()))?;
+    }
+
+    let settings_path = resources.join("Display_Config_Helper.json");
+    let json = serde_json::to_vec_pretty(trainer_settings)
+        .map_err(|err| format!("Failed to serialize trainer settings: {err}"))?;
+    std::fs::write(&settings_path, json)
+        .map_err(|err| format!("Failed to write {}: {err}", settings_path.display()))
 }
 
 pub fn get_display_config_helper_log_path() -> PathBuf {
@@ -78,4 +96,56 @@ fn wait_for_finished_log(log_path: &PathBuf) -> Result<String, String> {
     Err(format!(
         "Timeout waiting for 'Finished.' in log {formatted_log_path}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_folder() -> PathBuf {
+        std::env::temp_dir().join(format!("ss-inject-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn missing_resources_folder_is_an_error_not_a_panic() {
+        let resources = temp_folder().join("Display_Config_Resources");
+        let error = prepare_injection(&resources, &TrainerSettings::default()).unwrap_err();
+        assert!(error.contains("Injector.exe is missing"), "{error}");
+        assert!(!resources.exists());
+    }
+
+    #[test]
+    fn missing_helper_dll_is_named() {
+        let resources = temp_folder();
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::write(resources.join("Injector.exe"), b"x").unwrap();
+        let error = prepare_injection(&resources, &TrainerSettings::default()).unwrap_err();
+        assert!(
+            error.contains("Display_Config_Helper.dll is missing"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(&resources).unwrap();
+    }
+
+    #[test]
+    fn writes_settings_and_removes_old_log() {
+        let resources = temp_folder();
+        std::fs::create_dir_all(&resources).unwrap();
+        for file in [
+            "Injector.exe",
+            "Display_Config_Helper.dll",
+            "Display_Config_Helper.log",
+        ] {
+            std::fs::write(resources.join(file), b"x").unwrap();
+        }
+        let settings = TrainerSettings {
+            hide_blinking_r: true,
+            ..Default::default()
+        };
+        prepare_injection(&resources, &settings).unwrap();
+        let json = std::fs::read_to_string(resources.join("Display_Config_Helper.json")).unwrap();
+        assert!(json.contains("\"hideBlinkingR\": true"), "{json}");
+        assert!(!resources.join("Display_Config_Helper.log").exists());
+        std::fs::remove_dir_all(&resources).unwrap();
+    }
 }
