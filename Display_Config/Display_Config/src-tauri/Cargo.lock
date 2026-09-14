@@ -691,6 +691,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-shell",
  "tauri-specta",
+ "tempfile",
  "uuid",
  "zip",
 ]
