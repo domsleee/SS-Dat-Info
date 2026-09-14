@@ -34,7 +34,7 @@ jobs:
           }
           "version=$package" >> $env:GITHUB_OUTPUT
 
-      - name: Refuse to replace a published release
+      - name: Check the release can be updated
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -43,6 +43,17 @@ jobs:
           $isDraft = gh release view $version --json isDraft --jq .isDraft 2>$null
           if ($LASTEXITCODE -eq 0 -and $isDraft -eq "false") {
             throw "Release $version is already published. Bump the version first."
+          }
+          $ref = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$version" 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $object = ($ref | ConvertFrom-Json).object
+            $commit = $object.sha
+            if ($object.type -eq "tag") {
+              $commit = gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$commit" --jq .object.sha
+            }
+            if ($commit -ne $env:GITHUB_SHA) {
+              throw "Tag $version already points at $commit, not $env:GITHUB_SHA. Delete the tag or run the release from that commit."
+            }
           }
           exit 0
 
@@ -89,6 +100,17 @@ jobs:
         run: |
           $version = "${{ steps.version.outputs.version }}"
           $zip = "${{ steps.package.outputs.zip }}"
+          $ref = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$version" 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $object = ($ref | ConvertFrom-Json).object
+            $commit = $object.sha
+            if ($object.type -eq "tag") {
+              $commit = gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$commit" --jq .object.sha
+            }
+            if ($commit -ne $env:GITHUB_SHA) {
+              throw "Tag $version already points at $commit, not $env:GITHUB_SHA. Delete the tag or run the release from that commit."
+            }
+          }
           $isDraft = gh release view $version --json isDraft --jq .isDraft 2>$null
           if ($LASTEXITCODE -eq 0) {
             if ($isDraft -ne "true") {
