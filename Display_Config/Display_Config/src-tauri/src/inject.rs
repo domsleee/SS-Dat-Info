@@ -32,14 +32,19 @@ pub async fn run_inject(trainer_settings: TrainerSettings) -> Result<String, Str
     prepare_injection(&display_config_resources, &trainer_settings)?;
 
     let injector_path = display_config_resources.join("Injector.exe");
+    let dll_path = display_config_resources.join("Display_Config_Helper.dll");
     let status = Command::new(injector_path)
+        .arg(&dll_path)
         .creation_flags(0x08000000) // CREATE_NO_WINDOW (https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags)
         .current_dir(&display_config_resources)
         .status()
         .map_err(|err| format!("Failed to spawn process: {err}"))?;
 
     if !status.success() {
-        return Err("Injector.exe failed.\nDid you run using Supreme.exe?".to_string());
+        return Err(format!(
+            "Injector.exe failed.\nCheck that Supreme.exe is running, then see {} for details.",
+            display_config_resources.join("Injector.log").display()
+        ));
     }
 
     wait_for_finished_log(&get_display_config_helper_log_path())
