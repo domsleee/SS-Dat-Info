@@ -402,10 +402,11 @@ VmtHook create_vmt(void* object) {
 
 #include <iterator>
 
-#if __has_include("Zydis/Zydis.h")
-#include "Zydis/Zydis.h"
-#elif __has_include("Zydis.h")
+// Local patch (see third_party/README.md): prefer the Zydis.h vendored next to this file.
+#if __has_include("Zydis.h")
 #include "Zydis.h"
+#elif __has_include("Zydis/Zydis.h")
+#include "Zydis/Zydis.h"
 #else
 #error "Zydis not found"
 #endif

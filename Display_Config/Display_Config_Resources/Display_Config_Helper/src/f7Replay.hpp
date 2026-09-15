@@ -2,7 +2,7 @@
 
 #include <windows.h>
 #include <cstdint>
-#include <safetyhook.hpp>
+#include <safetyhook/safetyhook.hpp>
 #include "Log.hpp"
 
 namespace f7 {

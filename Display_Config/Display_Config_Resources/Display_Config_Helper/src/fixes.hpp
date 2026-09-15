@@ -1,5 +1,5 @@
 #include <windows.h>
-#include <safetyhook.hpp>
+#include <safetyhook/safetyhook.hpp>
 #include "helper.hpp"
 #include "Log.hpp"
 #include "globalState.hpp"

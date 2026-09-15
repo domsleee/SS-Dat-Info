@@ -1,14 +1,31 @@
 # Vendored third-party code
 
-Libraries used by `Display_Config/Display_Config_Resources/Display_Config_Helper`.
-Its vcxproj adds these directories to `AdditionalIncludeDirectories` and compiles
-the `.c`/`.cpp` files from here, so sources include `<safetyhook.hpp>` / `<json.hpp>`.
+Libraries compiled into `Display_Config/Display_Config_Resources/Display_Config_Helper`.
 
-| Directory | Upstream | Version | License |
+To use them from a project, import `third_party.props` once (not per configuration).
+It adds this directory to the include path:
+
+```xml
+<ImportGroup Label="PropertySheets">
+  <Import Project="..\..\..\third_party\third_party.props" />
+</ImportGroup>
+```
+
+Include headers with their directory, e.g. `#include <safetyhook/safetyhook.hpp>` and
+`#include <nlohmann/json.hpp>`. The project still has to compile `safetyhook/safetyhook.cpp`
+and `safetyhook/Zydis.c` itself.
+
+| Files | Upstream | Version | License |
 |---|---|---|---|
-| `safetyhook/` (`safetyhook.hpp`, `safetyhook.cpp`) | https://github.com/cursey/safetyhook | amalgamated build, vendored 2025-03-08 (commit db6d286 of this repo); the amalgamation carries no version macro | Boost Software License 1.0 (`safetyhook/LICENSE`) |
-| `safetyhook/` (`Zydis.h`, `Zydis.c`) | https://github.com/zyantific/zydis | 4.0.0 (`ZYDIS_VERSION` in `Zydis.h`), amalgamated; safetyhook needs it for instruction-length decoding | MIT (`safetyhook/LICENSE.zydis`) |
-| `json/json.hpp` | https://github.com/nlohmann/json | 3.11.3 (`NLOHMANN_JSON_VERSION_*`), single header; Display_Config_Helper only | MIT (SPDX header in the file) |
+| `safetyhook/safetyhook.hpp`, `safetyhook/safetyhook.cpp` | https://github.com/cursey/safetyhook | v0.5.3 (`safetyhook-amalgamated.zip` release asset), plus the local patch below | Boost Software License 1.0 (`safetyhook/LICENSE`) |
+| `safetyhook/Zydis.h`, `safetyhook/Zydis.c` | https://github.com/zyantific/zydis | v4.0.0 amalgamation, which bundles Zycore-C v1.4.1. `Zydis.c` has been reformatted (brace style only) and includes `"Zydis.h"` rather than `<Zydis.h>` | MIT (`safetyhook/LICENSE.zydis`, `safetyhook/LICENSE.zycore`) |
+| `nlohmann/json.hpp` | https://github.com/nlohmann/json | v3.12.0 (`json.hpp` release asset, unmodified) | MIT (`nlohmann/LICENSE.MIT`) |
 
-Update by replacing the files with a fresh amalgamation and recording the new
-version here.
+## Local patches
+
+- `safetyhook/safetyhook.cpp`: checks for `"Zydis.h"` before `"Zydis/Zydis.h"`, so it always
+  uses the Zydis next to it, even when another Zydis (e.g. from vcpkg) is on the include path.
+
+## Updating
+
+Replace the files with the new release, update the version column, and reapply the local patches.
