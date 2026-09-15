@@ -93,6 +93,23 @@ jobs:
           path: ${{ steps.package.outputs.zip }}
           if-no-files-found: error
 
+      - name: Generate release notes
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $notes = gh api --method POST "repos/$env:GITHUB_REPOSITORY/releases/generate-notes" `
+            -f "tag_name=$env:RELEASE_VERSION" -f "target_commitish=$env:GITHUB_SHA" --jq .body
+          if ($LASTEXITCODE -ne 0) { throw "Could not generate release notes" }
+          $notes = $notes -join "`n"
+          $notes = $notes -replace '(?m) by @domsleee(?= in https://github\.com/[^/\s]+/[^/\s]+/pull/\d+\r?$)', ''
+          $notes = $notes -replace '(?m) in (https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+))\r?$', ' ([#$2]($1))'
+          $notes = $notes -replace '(?m)^\*\*Full Changelog\*\*: (https://github\.com/\S+)\r?$', '[Full changelog]($1)'
+          $notes = $notes.Trim() -replace '(\r?\n){3,}', "`n`n"
+          Set-Content -LiteralPath release-notes.md -Value $notes -Encoding utf8
+          $notes >> $env:GITHUB_STEP_SUMMARY
+
       - name: Create or update draft release
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -111,15 +128,20 @@ jobs:
               throw "Tag $version already points at $commit, not $env:GITHUB_SHA. Delete the tag or run the release from that commit."
             }
           }
-          $isDraft = gh release view $version --json isDraft --jq .isDraft 2>$null
+          $release = gh release view $version --json isDraft,body 2>$null
           if ($LASTEXITCODE -eq 0) {
-            if ($isDraft -ne "true") {
+            $release = $release | ConvertFrom-Json
+            if (-not $release.isDraft) {
               throw "Release $version was published during the build. Not replacing its zip."
             }
-            gh release edit $version --target $env:GITHUB_SHA
+            $notesArgs = @()
+            if ([string]::IsNullOrWhiteSpace($release.body)) {
+              $notesArgs = @('--notes-file', 'release-notes.md')
+            }
+            gh release edit $version --target $env:GITHUB_SHA @notesArgs
             if ($LASTEXITCODE -ne 0) { throw "Could not retarget draft release $version" }
             gh release upload $version $zip --clobber
           } else {
-            gh release create $version $zip --draft --title "Display_Config $version" --target $env:GITHUB_SHA
+            gh release create $version $zip --draft --title "Display_Config $version" --target $env:GITHUB_SHA --notes-file release-notes.md
           }
           if ($LASTEXITCODE -ne 0) { throw "Could not publish $zip to draft release $version" }
