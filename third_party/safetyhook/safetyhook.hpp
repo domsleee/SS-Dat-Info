@@ -9,6 +9,198 @@
 
 
 //
+// Header: safetyhook/os.hpp
+//
+// Include stack:
+//   - safetyhook.hpp
+//
+
+// This is the OS abstraction layer.
+#pragma once
+
+#ifndef SAFETYHOOK_USE_CXXMODULES
+#include <cstdint>
+#include <expected>
+#include <functional>
+#else
+import std.compat;
+#endif
+
+
+//
+// Header: safetyhook/common.hpp
+//
+// Include stack:
+//   - safetyhook.hpp
+//   - safetyhook/os.hpp
+//
+
+#pragma once
+
+#if defined(_MSC_VER)
+#define SAFETYHOOK_COMPILER_MSVC 1
+#define SAFETYHOOK_COMPILER_GCC 0
+#define SAFETYHOOK_COMPILER_CLANG 0
+#elif defined(__clang__)
+#define SAFETYHOOK_COMPILER_MSVC 0
+#define SAFETYHOOK_COMPILER_GCC 0
+#define SAFETYHOOK_COMPILER_CLANG 1
+#elif defined(__GNUC__)
+#define SAFETYHOOK_COMPILER_MSVC 0
+#define SAFETYHOOK_COMPILER_GCC 1
+#define SAFETYHOOK_COMPILER_CLANG 0
+#else
+#error "Unsupported compiler"
+#endif
+
+#if defined(_MSC_VER)
+#define SAFETYHOOK_ABI_MSVC 1
+#define SAFETYHOOK_ABI_ITANIUM 0
+#else
+#define SAFETYHOOK_ABI_MSVC 0
+#define SAFETYHOOK_ABI_ITANIUM 1
+#endif
+
+#if SAFETYHOOK_COMPILER_MSVC
+#if defined(_M_IX86)
+#define SAFETYHOOK_ARCH_X86_32 1
+#define SAFETYHOOK_ARCH_X86_64 0
+#elif defined(_M_X64)
+#define SAFETYHOOK_ARCH_X86_32 0
+#define SAFETYHOOK_ARCH_X86_64 1
+#else
+#error "Unsupported architecture"
+#endif
+#elif SAFETYHOOK_COMPILER_GCC || SAFETYHOOK_COMPILER_CLANG
+#if defined(__i386__)
+#define SAFETYHOOK_ARCH_X86_32 1
+#define SAFETYHOOK_ARCH_X86_64 0
+#elif defined(__x86_64__)
+#define SAFETYHOOK_ARCH_X86_32 0
+#define SAFETYHOOK_ARCH_X86_64 1
+#else
+#error "Unsupported architecture"
+#endif
+#endif
+
+#if defined(_WIN32)
+#define SAFETYHOOK_OS_WINDOWS 1
+#define SAFETYHOOK_OS_LINUX 0
+#elif defined(__linux__)
+#define SAFETYHOOK_OS_WINDOWS 0
+#define SAFETYHOOK_OS_LINUX 1
+#else
+#error "Unsupported OS"
+#endif
+
+#if SAFETYHOOK_OS_WINDOWS
+#if SAFETYHOOK_COMPILER_MSVC
+#define SAFETYHOOK_CCALL __cdecl
+#define SAFETYHOOK_STDCALL __stdcall
+#define SAFETYHOOK_FASTCALL __fastcall
+#define SAFETYHOOK_THISCALL __thiscall
+#elif SAFETYHOOK_COMPILER_GCC || SAFETYHOOK_COMPILER_CLANG
+#define SAFETYHOOK_CCALL __attribute__((cdecl))
+#define SAFETYHOOK_STDCALL __attribute__((stdcall))
+#define SAFETYHOOK_FASTCALL __attribute__((fastcall))
+#define SAFETYHOOK_THISCALL __attribute__((thiscall))
+#endif
+#else
+#define SAFETYHOOK_CCALL
+#define SAFETYHOOK_STDCALL
+#define SAFETYHOOK_FASTCALL
+#define SAFETYHOOK_THISCALL
+#endif
+
+#if SAFETYHOOK_COMPILER_MSVC
+#define SAFETYHOOK_NOINLINE __declspec(noinline)
+#elif SAFETYHOOK_COMPILER_GCC || SAFETYHOOK_COMPILER_CLANG
+#define SAFETYHOOK_NOINLINE __attribute__((noinline))
+#endif
+
+#if SAFETYHOOK_COMPILER_MSVC
+#define SAFETYHOOK_DLLEXPORT __declspec(dllexport)
+#define SAFETYHOOK_DLLIMPORT __declspec(dllimport)
+#elif SAFETYHOOK_COMPILER_GCC || SAFETYHOOK_COMPILER_CLANG
+#define SAFETYHOOK_DLLEXPORT __attribute__((visibility("default")))
+#define SAFETYHOOK_DLLIMPORT
+#endif
+
+#if SAFETYHOOK_SHARED_LIB && SAFETYHOOK_BUILDING
+#define SAFETYHOOK_API SAFETYHOOK_DLLEXPORT
+#elif SAFETYHOOK_SHARED_LIB
+#define SAFETYHOOK_API SAFETYHOOK_DLLIMPORT
+#else
+#define SAFETYHOOK_API
+#endif
+
+namespace safetyhook {
+
+enum class OsError {
+    FAILED_TO_ALLOCATE,
+    FAILED_TO_PROTECT,
+    FAILED_TO_QUERY,
+    FAILED_TO_GET_NEXT_THREAD,
+    FAILED_TO_GET_THREAD_CONTEXT,
+    FAILED_TO_SET_THREAD_CONTEXT,
+    FAILED_TO_FREEZE_THREAD,
+    FAILED_TO_UNFREEZE_THREAD,
+    FAILED_TO_GET_THREAD_ID,
+};
+
+struct VmAccess {
+    bool read : 1;
+    bool write : 1;
+    bool execute : 1;
+
+    constexpr bool operator==(const VmAccess& other) const {
+        return read == other.read && write == other.write && execute == other.execute;
+    }
+};
+
+inline constexpr VmAccess VM_ACCESS_R{true, false, false};
+inline constexpr VmAccess VM_ACCESS_RW{true, true, false};
+inline constexpr VmAccess VM_ACCESS_RX{true, false, true};
+inline constexpr VmAccess VM_ACCESS_RWX{true, true, true};
+
+struct VmBasicInfo {
+    uint8_t* address;
+    size_t size;
+    VmAccess access;
+    bool is_free;
+};
+
+std::expected<uint8_t*, OsError> SAFETYHOOK_API vm_allocate(uint8_t* address, size_t size, VmAccess access);
+void SAFETYHOOK_API vm_free(uint8_t* address);
+std::expected<uint32_t, OsError> SAFETYHOOK_API vm_protect(uint8_t* address, size_t size, VmAccess access);
+std::expected<uint32_t, OsError> SAFETYHOOK_API vm_protect(uint8_t* address, size_t size, uint32_t access);
+std::expected<VmBasicInfo, OsError> SAFETYHOOK_API vm_query(uint8_t* address);
+bool SAFETYHOOK_API vm_is_readable(uint8_t* address, size_t size);
+bool SAFETYHOOK_API vm_is_writable(uint8_t* address, size_t size);
+bool SAFETYHOOK_API vm_is_executable(uint8_t* address);
+
+struct SystemInfo {
+    uint32_t page_size;
+    uint32_t allocation_granularity;
+    uint8_t* min_address;
+    uint8_t* max_address;
+};
+
+SystemInfo SAFETYHOOK_API system_info();
+
+using ThreadContext = void*;
+
+void SAFETYHOOK_API trap_threads(uint8_t* from, uint8_t* to, size_t len, const std::function<void()>& run_fn);
+
+/// @brief Will modify the context of a thread's IP to point to a new address if its IP is at the old address.
+/// @param ctx The thread context to modify.
+/// @param old_ip The old IP address.
+/// @param new_ip The new IP address.
+void SAFETYHOOK_API fix_ip(ThreadContext ctx, uint8_t* old_ip, uint8_t* new_ip);
+
+} // namespace safetyhook
+
+//
 // Header: safetyhook/easy.hpp
 //
 // Include stack:
@@ -70,11 +262,12 @@ import std.compat;
 import std.compat;
 #endif
 
+
 namespace safetyhook {
 class Allocator;
 
 /// @brief A memory allocation.
-class Allocation final {
+class SAFETYHOOK_API Allocation final {
 public:
     Allocation() = default;
     Allocation(const Allocation&) = delete;
@@ -115,7 +308,7 @@ private:
 };
 
 /// @brief Allocates memory near target addresses.
-class Allocator final : public std::enable_shared_from_this<Allocator> {
+class SAFETYHOOK_API Allocator final : public std::enable_shared_from_this<Allocator> {
 public:
     /// @brief Returns the global Allocator.
     /// @return The global Allocator.
@@ -188,90 +381,6 @@ private:
 } // namespace safetyhook
 
 //
-// Header: safetyhook/common.hpp
-//
-// Include stack:
-//   - safetyhook.hpp
-//   - safetyhook/easy.hpp
-//   - safetyhook/inline_hook.hpp
-//
-
-#pragma once
-
-#if defined(_MSC_VER)
-#define SAFETYHOOK_COMPILER_MSVC 1
-#define SAFETYHOOK_COMPILER_GCC 0
-#define SAFETYHOOK_COMPILER_CLANG 0
-#elif defined(__GNUC__)
-#define SAFETYHOOK_COMPILER_MSVC 0
-#define SAFETYHOOK_COMPILER_GCC 1
-#define SAFETYHOOK_COMPILER_CLANG 0
-#elif defined(__clang__)
-#define SAFETYHOOK_COMPILER_MSVC 0
-#define SAFETYHOOK_COMPILER_GCC 0
-#define SAFETYHOOK_COMPILER_CLANG 1
-#else
-#error "Unsupported compiler"
-#endif
-
-#if SAFETYHOOK_COMPILER_MSVC
-#if defined(_M_IX86)
-#define SAFETYHOOK_ARCH_X86_32 1
-#define SAFETYHOOK_ARCH_X86_64 0
-#elif defined(_M_X64)
-#define SAFETYHOOK_ARCH_X86_32 0
-#define SAFETYHOOK_ARCH_X86_64 1
-#else
-#error "Unsupported architecture"
-#endif
-#elif SAFETYHOOK_COMPILER_GCC || SAFETYHOOK_COMPILER_CLANG
-#if defined(__i386__)
-#define SAFETYHOOK_ARCH_X86_32 1
-#define SAFETYHOOK_ARCH_X86_64 0
-#elif defined(__x86_64__)
-#define SAFETYHOOK_ARCH_X86_32 0
-#define SAFETYHOOK_ARCH_X86_64 1
-#else
-#error "Unsupported architecture"
-#endif
-#endif
-
-#if defined(_WIN32)
-#define SAFETYHOOK_OS_WINDOWS 1
-#define SAFETYHOOK_OS_LINUX 0
-#elif defined(__linux__)
-#define SAFETYHOOK_OS_WINDOWS 0
-#define SAFETYHOOK_OS_LINUX 1
-#else
-#error "Unsupported OS"
-#endif
-
-#if SAFETYHOOK_OS_WINDOWS
-#if SAFETYHOOK_COMPILER_MSVC
-#define SAFETYHOOK_CCALL __cdecl
-#define SAFETYHOOK_STDCALL __stdcall
-#define SAFETYHOOK_FASTCALL __fastcall
-#define SAFETYHOOK_THISCALL __thiscall
-#elif SAFETYHOOK_COMPILER_GCC || SAFETYHOOK_COMPILER_CLANG
-#define SAFETYHOOK_CCALL __attribute__((cdecl))
-#define SAFETYHOOK_STDCALL __attribute__((stdcall))
-#define SAFETYHOOK_FASTCALL __attribute__((fastcall))
-#define SAFETYHOOK_THISCALL __attribute__((thiscall))
-#endif
-#else
-#define SAFETYHOOK_CCALL
-#define SAFETYHOOK_STDCALL
-#define SAFETYHOOK_FASTCALL
-#define SAFETYHOOK_THISCALL
-#endif
-
-#if SAFETYHOOK_COMPILER_MSVC
-#define SAFETYHOOK_NOINLINE __declspec(noinline)
-#elif SAFETYHOOK_COMPILER_GCC || SAFETYHOOK_COMPILER_CLANG
-#define SAFETYHOOK_NOINLINE __attribute__((noinline))
-#endif
-
-//
 // Header: safetyhook/utility.hpp
 //
 // Include stack:
@@ -291,6 +400,7 @@ private:
 import std.compat;
 #endif
 
+
 namespace safetyhook {
 template <typename T> constexpr void store(uint8_t* address, const T& value) {
     std::copy_n(reinterpret_cast<const uint8_t*>(&value), sizeof(T), address);
@@ -304,9 +414,9 @@ template <typename T, typename U> constexpr T address_cast(U address) {
     }
 }
 
-bool is_executable(uint8_t* address);
+bool SAFETYHOOK_API is_executable(uint8_t* address);
 
-class UnprotectMemory {
+class SAFETYHOOK_API UnprotectMemory {
 public:
     UnprotectMemory() = delete;
     ~UnprotectMemory();
@@ -316,7 +426,7 @@ public:
     UnprotectMemory& operator=(UnprotectMemory&& other) noexcept;
 
 private:
-    friend std::optional<UnprotectMemory> unprotect(uint8_t*, size_t);
+    friend std::optional<UnprotectMemory> SAFETYHOOK_API unprotect(uint8_t*, size_t);
 
     UnprotectMemory(uint8_t* address, size_t size, uint32_t original_protection)
         : m_address{address}, m_size{size}, m_original_protection{original_protection} {}
@@ -326,7 +436,7 @@ private:
     uint32_t m_original_protection{};
 };
 
-[[nodiscard]] std::optional<UnprotectMemory> unprotect(uint8_t* address, size_t size);
+[[nodiscard]] std::optional<UnprotectMemory> SAFETYHOOK_API unprotect(uint8_t* address, size_t size);
 
 template <typename T> constexpr T align_up(T address, size_t align) {
     const auto unaligned_address = address_cast<uintptr_t>(address);
@@ -343,7 +453,7 @@ template <typename T> constexpr T align_down(T address, size_t align) {
 
 namespace safetyhook {
 /// @brief An inline hook.
-class InlineHook final {
+class SAFETYHOOK_API InlineHook final {
 public:
     /// @brief Error type for InlineHook.
     struct Error {
@@ -368,46 +478,71 @@ public:
         /// @param err The Allocator::Error that failed.
         /// @return The new BAD_ALLOCATION error.
         [[nodiscard]] static Error bad_allocation(Allocator::Error err) {
-            return {.type = BAD_ALLOCATION, .allocator_error = err};
+            Error error{};
+            error.type = BAD_ALLOCATION;
+            error.allocator_error = err;
+            return error;
         }
 
         /// @brief Create a FAILED_TO_DECODE_INSTRUCTION error.
         /// @param ip The IP of the problematic instruction.
         /// @return The new FAILED_TO_DECODE_INSTRUCTION error.
         [[nodiscard]] static Error failed_to_decode_instruction(uint8_t* ip) {
-            return {.type = FAILED_TO_DECODE_INSTRUCTION, .ip = ip};
+            Error error{};
+            error.type = FAILED_TO_DECODE_INSTRUCTION;
+            error.ip = ip;
+            return error;
         }
 
         /// @brief Create a SHORT_JUMP_IN_TRAMPOLINE error.
         /// @param ip The IP of the problematic instruction.
         /// @return The new SHORT_JUMP_IN_TRAMPOLINE error.
         [[nodiscard]] static Error short_jump_in_trampoline(uint8_t* ip) {
-            return {.type = SHORT_JUMP_IN_TRAMPOLINE, .ip = ip};
+            Error error{};
+            error.type = SHORT_JUMP_IN_TRAMPOLINE;
+            error.ip = ip;
+            return error;
         }
 
         /// @brief Create a IP_RELATIVE_INSTRUCTION_OUT_OF_RANGE error.
         /// @param ip The IP of the problematic instruction.
         /// @return The new IP_RELATIVE_INSTRUCTION_OUT_OF_RANGE error.
         [[nodiscard]] static Error ip_relative_instruction_out_of_range(uint8_t* ip) {
-            return {.type = IP_RELATIVE_INSTRUCTION_OUT_OF_RANGE, .ip = ip};
+            Error error{};
+            error.type = IP_RELATIVE_INSTRUCTION_OUT_OF_RANGE;
+            error.ip = ip;
+            return error;
         }
 
         /// @brief Create a UNSUPPORTED_INSTRUCTION_IN_TRAMPOLINE error.
         /// @param ip The IP of the problematic instruction.
         /// @return The new UNSUPPORTED_INSTRUCTION_IN_TRAMPOLINE error.
         [[nodiscard]] static Error unsupported_instruction_in_trampoline(uint8_t* ip) {
-            return {.type = UNSUPPORTED_INSTRUCTION_IN_TRAMPOLINE, .ip = ip};
+            Error error{};
+            error.type = UNSUPPORTED_INSTRUCTION_IN_TRAMPOLINE;
+            error.ip = ip;
+            return error;
         }
 
         /// @brief Create a FAILED_TO_UNPROTECT error.
         /// @param ip The IP of the problematic instruction.
         /// @return The new FAILED_TO_UNPROTECT error.
-        [[nodiscard]] static Error failed_to_unprotect(uint8_t* ip) { return {.type = FAILED_TO_UNPROTECT, .ip = ip}; }
+        [[nodiscard]] static Error failed_to_unprotect(uint8_t* ip) {
+            Error error{};
+            error.type = FAILED_TO_UNPROTECT;
+            error.ip = ip;
+            return error;
+        }
 
         /// @brief Create a NOT_ENOUGH_SPACE error.
         /// @param ip The IP of the problematic instruction.
         /// @return The new NOT_ENOUGH_SPACE error.
-        [[nodiscard]] static Error not_enough_space(uint8_t* ip) { return {.type = NOT_ENOUGH_SPACE, .ip = ip}; }
+        [[nodiscard]] static Error not_enough_space(uint8_t* ip) {
+            Error error{};
+            error.type = NOT_ENOUGH_SPACE;
+            error.ip = ip;
+            return error;
+        }
     };
 
     /// @brief Flags for InlineHook.
@@ -753,7 +888,7 @@ namespace safetyhook {
 using MidHookFn = void (*)(Context& ctx);
 
 /// @brief A mid function hook.
-class MidHook final {
+class SAFETYHOOK_API MidHook final {
 public:
     /// @brief Error type for MidHook.
     struct Error {
@@ -773,14 +908,20 @@ public:
         /// @param err The Allocator::Error that failed.
         /// @return The new BAD_ALLOCATION error.
         [[nodiscard]] static Error bad_allocation(Allocator::Error err) {
-            return {.type = BAD_ALLOCATION, .allocator_error = err};
+            Error error{};
+            error.type = BAD_ALLOCATION;
+            error.allocator_error = err;
+            return error;
         }
 
         /// @brief Create a BAD_INLINE_HOOK error.
         /// @param err The InlineHook::Error that failed.
         /// @return The new BAD_INLINE_HOOK error.
         [[nodiscard]] static Error bad_inline_hook(InlineHook::Error err) {
-            return {.type = BAD_INLINE_HOOK, .inline_hook_error = err};
+            Error error{};
+            error.type = BAD_INLINE_HOOK;
+            error.inline_hook_error = err;
+            return error;
         }
     };
 
@@ -912,8 +1053,18 @@ import std.compat;
 
 
 namespace safetyhook {
+/// @brief Number of ABI-specific non-function entries preceding the first virtual function pointer
+/// in the vtable layout for the current compiler/ABI.
+#if SAFETYHOOK_ABI_MSVC
+constexpr size_t VMT_HEADER = 1; // RTTICompleteObjectLocator*
+#elif SAFETYHOOK_ABI_ITANIUM
+constexpr size_t VMT_HEADER = 2; // offset-to-top + RTTI ptr
+#else
+constexpr size_t VMT_HEADER = 0;
+#endif
+
 /// @brief A hook class that allows for hooking a single method in a VMT.
-class VmHook final {
+class SAFETYHOOK_API VmHook final {
 public:
     VmHook() = default;
     VmHook(const VmHook&) = delete;
@@ -988,7 +1139,7 @@ private:
 };
 
 /// @brief A hook class that copies an entire VMT for a given object and replaces it.
-class VmtHook final {
+class SAFETYHOOK_API VmtHook final {
 public:
     /// @brief Error type for VmtHook.
     struct Error {
@@ -1006,7 +1157,10 @@ public:
         /// @param err The Allocator::Error that failed.
         /// @return The new BAD_ALLOCATION error.
         [[nodiscard]] static Error bad_allocation(Allocator::Error err) {
-            return {.type = BAD_ALLOCATION, .allocator_error = err};
+            Error error{};
+            error.type = BAD_ALLOCATION;
+            error.allocator_error = err;
+            return error;
         }
     };
 
@@ -1040,7 +1194,7 @@ public:
     template <typename T> [[nodiscard]] std::expected<VmHook, Error> hook_method(size_t index, T new_function) {
         VmHook hook{};
 
-        ++index; // Skip RTTI pointer.
+        index += VMT_HEADER; // Skip RTTI header.
         hook.m_original_vm = m_new_vmt[index];
         store(reinterpret_cast<uint8_t*>(&hook.m_new_vm), new_function);
         hook.m_vmt_entry = &m_new_vmt[index];
@@ -1068,7 +1222,8 @@ namespace safetyhook {
 /// @param destination The address of the destination function.
 /// @param flags The flags to use.
 /// @return The InlineHook object.
-[[nodiscard]] InlineHook create_inline(void* target, void* destination, InlineHook::Flags flags = InlineHook::Default);
+[[nodiscard]] InlineHook SAFETYHOOK_API create_inline(
+    void* target, void* destination, InlineHook::Flags flags = InlineHook::Default);
 
 /// @brief Easy to use API for creating an InlineHook.
 /// @param target The address of the function to hook.
@@ -1085,7 +1240,8 @@ template <typename T, typename U>
 /// @param destination The destination function.
 /// @param flags The flags to use.
 /// @return The MidHook object.
-[[nodiscard]] MidHook create_mid(void* target, MidHookFn destination, MidHook::Flags flags = MidHook::Default);
+[[nodiscard]] MidHook SAFETYHOOK_API create_mid(
+    void* target, MidHookFn destination, MidHook::Flags flags = MidHook::Default);
 
 /// @brief Easy to use API for creating a MidHook.
 /// @param target the address of the function to hook.
@@ -1100,7 +1256,7 @@ template <typename T>
 /// @brief Easy to use API for creating a VmtHook.
 /// @param object The object to hook.
 /// @return The VmtHook object.
-[[nodiscard]] VmtHook create_vmt(void* object);
+[[nodiscard]] VmtHook SAFETYHOOK_API create_vmt(void* object);
 
 /// @brief Easy to use API for creating a VmHook.
 /// @param vmt The VmtHook to use to create the VmHook.

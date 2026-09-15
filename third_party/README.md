@@ -17,8 +17,8 @@ and `safetyhook/Zydis.c` itself.
 
 | Files | Upstream | Version | License |
 |---|---|---|---|
-| `safetyhook/safetyhook.hpp`, `safetyhook/safetyhook.cpp` | https://github.com/cursey/safetyhook | v0.5.3 (`safetyhook-amalgamated.zip` release asset), plus the local patch below | Boost Software License 1.0 (`safetyhook/LICENSE`) |
-| `safetyhook/Zydis.h`, `safetyhook/Zydis.c` | https://github.com/zyantific/zydis | v4.0.0 amalgamation, which bundles Zycore-C v1.4.1. `Zydis.c` has been reformatted (brace style only) and includes `"Zydis.h"` rather than `<Zydis.h>` | MIT (`safetyhook/LICENSE.zydis`, `safetyhook/LICENSE.zycore`) |
+| `safetyhook/safetyhook.hpp`, `safetyhook/safetyhook.cpp` | https://github.com/cursey/safetyhook | v0.7.0 (`safetyhook-amalgamated.zip` release asset), plus the local patch below | Boost Software License 1.0 (`safetyhook/LICENSE`) |
+| `safetyhook/Zydis.h`, `safetyhook/Zydis.c` | https://github.com/zyantific/zydis | v4.0.0 amalgamation, which bundles Zycore-C v1.4.1 (the same version safetyhook v0.7.0 ships in `safetyhook-amalgamated-zydis.zip`). `Zydis.c` has been reformatted (brace style only) and includes `"Zydis.h"` rather than `<Zydis.h>` | MIT (`safetyhook/LICENSE.zydis`, `safetyhook/LICENSE.zycore`) |
 | `nlohmann/json.hpp` | https://github.com/nlohmann/json | v3.12.0 (`json.hpp` release asset, unmodified) | MIT (`nlohmann/LICENSE.MIT`) |
 
 ## Local patches
