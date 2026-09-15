@@ -108,7 +108,6 @@ jobs:
           $notes = $notes -replace '(?m)^\*\*Full Changelog\*\*: (https://github\.com/\S+)\r?$', '[Full changelog]($1)'
           $notes = $notes.Trim() -replace '(\r?\n){3,}', "`n`n"
           Set-Content -LiteralPath release-notes.md -Value $notes -Encoding utf8
-          $notes >> $env:GITHUB_STEP_SUMMARY
 
       - name: Create or update draft release
         if: github.event_name == 'workflow_dispatch'
@@ -128,20 +127,63 @@ jobs:
               throw "Tag $version already points at $commit, not $env:GITHUB_SHA. Delete the tag or run the release from that commit."
             }
           }
-          $release = gh release view $version --json isDraft,body 2>$null
+          $release = gh release view $version --json isDraft,body,targetCommitish 2>$null
           if ($LASTEXITCODE -eq 0) {
             $release = $release | ConvertFrom-Json
             if (-not $release.isDraft) {
               throw "Release $version was published during the build. Not replacing its zip."
             }
-            $notesArgs = @()
-            if ([string]::IsNullOrWhiteSpace($release.body)) {
-              $notesArgs = @('--notes-file', 'release-notes.md')
+            if (-not [string]::IsNullOrWhiteSpace($release.body)) {
+              $body = $release.body
+              $generated = Get-Content -LiteralPath release-notes.md -Raw
+
+              # Keep previously covered changes omitted or rewritten by the maintainer.
+              $newPrs = $null
+              if ($release.targetCommitish -match '^[0-9a-f]{40}$') {
+                $newPrs = @{}
+                $commits = @(gh api --method GET --paginate "repos/$env:GITHUB_REPOSITORY/compare/$($release.targetCommitish)...$env:GITHUB_SHA" -f per_page=100 --jq '.commits[].sha')
+                if ($LASTEXITCODE -ne 0) { throw "Could not compare changes since the previous draft" }
+                foreach ($commitSha in $commits) {
+                  $numbers = @(gh api --paginate "repos/$env:GITHUB_REPOSITORY/commits/$commitSha/pulls" --jq '.[] | select(.merged_at != null) | .number')
+                  if ($LASTEXITCODE -ne 0) { throw "Could not find pull requests for $commitSha" }
+                  foreach ($number in $numbers) { $newPrs[$number] = $true }
+                }
+              }
+
+              $prPattern = [regex]::Escape("https://github.com/$env:GITHUB_REPOSITORY/pull/") + '(\d+)\b'
+              $seen = @{}
+              foreach ($reference in [regex]::Matches($body, "$prPattern|(?<!\w)#(\d+)\b")) {
+                $seen[$reference.Groups[1].Value + $reference.Groups[2].Value] = $true
+              }
+              $additions = @(foreach ($line in $generated -split '\r?\n') {
+                if ($line -notmatch "^\* .*$prPattern") { continue }
+                $number = $Matches[1]
+                if ($seen.ContainsKey($number) -or ($null -ne $newPrs -and -not $newPrs.ContainsKey($number))) { continue }
+                $seen[$number] = $true
+                $line
+              })
+
+              $footerPattern = '(?i)\[Full changelog\]\([^)]+\)|\*\*Full Changelog\*\*: \S+'
+              if ($additions.Count) {
+                $footerLine = [regex]::Match($body, "(?m)^[^\r\n]*(?:$footerPattern)[^\r\n]*")
+                $index = if ($footerLine.Success) { $footerLine.Index } else { $body.Length }
+                $body = ($body.Substring(0, $index).TrimEnd(), ($additions -join "`n"), $body.Substring($index) | Where-Object { $_ }) -join "`n`n"
+              }
+              $footer = [regex]::Match($generated, $footerPattern).Value
+              if ($footer) {
+                if ([regex]::IsMatch($body, $footerPattern)) {
+                  $body = [regex]::Replace($body, $footerPattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $footer })
+                } else {
+                  $body = $body.TrimEnd() + "`n`n$footer"
+                }
+              }
+              Set-Content -LiteralPath release-notes.md -Value $body.TrimEnd() -Encoding utf8
             }
-            gh release edit $version --target $env:GITHUB_SHA @notesArgs
+            gh release edit $version --target $env:GITHUB_SHA --notes-file release-notes.md
             if ($LASTEXITCODE -ne 0) { throw "Could not retarget draft release $version" }
             gh release upload $version $zip --clobber
           } else {
             gh release create $version $zip --draft --title "Display_Config $version" --target $env:GITHUB_SHA --notes-file release-notes.md
           }
           if ($LASTEXITCODE -ne 0) { throw "Could not publish $zip to draft release $version" }
+          Get-Content -LiteralPath release-notes.md -Raw >> $env:GITHUB_STEP_SUMMARY
