@@ -4,7 +4,7 @@
 #include "saveReplayTimestamp.hpp"
 #include "matchGhostSoundsToCharacter.hpp"
 #include "customInput.hpp"
-#include "external/json.hpp"
+#include <nlohmann/json.hpp>
 #include "PathUtil.hpp"
 #include "globalState.hpp"
 #include "disableDirectInput.hpp"

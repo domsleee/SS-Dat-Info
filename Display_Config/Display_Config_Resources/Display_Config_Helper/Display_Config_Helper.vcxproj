@@ -14,9 +14,9 @@
     <ClInclude Include="src\disableDirectInput.hpp" />
     <ClInclude Include="src\customInput.hpp" />
     <ClInclude Include="src\f7Replay.hpp" />
-    <ClInclude Include="src\external\json.hpp" />
-    <ClInclude Include="src\external\safetyhook.hpp" />
-    <ClInclude Include="src\external\Zydis.h" />
+    <ClInclude Include="..\..\..\third_party\nlohmann\json.hpp" />
+    <ClInclude Include="..\..\..\third_party\safetyhook\safetyhook.hpp" />
+    <ClInclude Include="..\..\..\third_party\safetyhook\Zydis.h" />
     <ClInclude Include="src\fixes.hpp" />
     <ClInclude Include="src\globalState.hpp" />
     <ClInclude Include="src\helper.hpp" />
@@ -28,8 +28,8 @@
     <ClInclude Include="src\stdafx.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\external\safetyhook.cpp" />
-    <ClCompile Include="src\external\Zydis.c" />
+    <ClCompile Include="..\..\..\third_party\safetyhook\safetyhook.cpp" />
+    <ClCompile Include="..\..\..\third_party\safetyhook\Zydis.c" />
     <ClCompile Include="src\main.cc" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
@@ -63,6 +63,9 @@
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="..\..\..\third_party\third_party.props" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
