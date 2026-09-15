@@ -42,7 +42,6 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust-portable
           workspaces: Display_Config/Display_Config/src-tauri -> target
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - run: cd Display_Config/Display_Config && bun install --frozen-lockfile
@@ -57,7 +56,6 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust-portable
           workspaces: Display_Config/Display_Config/src-tauri -> target
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - run: cd Display_Config/Display_Config && bun install --frozen-lockfile
@@ -88,7 +86,6 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust-portable
           workspaces: Display_Config/Display_Config/src-tauri -> target
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - run: cd Display_Config/Display_Config/src-tauri && cargo fmt --all --check
@@ -118,7 +115,6 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust-portable
           workspaces: Display_Config/Display_Config/src-tauri -> target
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - uses: extractions/setup-just@v4
