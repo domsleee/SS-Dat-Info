@@ -64,8 +64,11 @@ jobs:
             if (-not (Test-Path (Join-Path $output $file))) { throw "Build did not produce $file" }
           }
           $zip = Join-Path $PWD "Display_Config_$version.zip"
+          Push-Location $output
+          7z a -tzip $zip *
+          if ($LASTEXITCODE -ne 0) { throw "7z failed with exit code $LASTEXITCODE" }
+          Pop-Location
           Add-Type -AssemblyName System.IO.Compression.FileSystem
-          [System.IO.Compression.ZipFile]::CreateFromDirectory($output, $zip)
           $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
           $entries = @($archive.Entries | Where-Object { -not $_.FullName.EndsWith("/") } | ForEach-Object { $_.FullName } | Sort-Object)
           $archive.Dispose()
