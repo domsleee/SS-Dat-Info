@@ -55,9 +55,10 @@ arm-relative offset metrics are diagnostic, not the verdict.
 `just deploy_run` is the one deploy flow. It stops the game and every TAS
 process, copies `TAS_Helper.dll`, `tas_ui.exe`, `tas_test.exe` and
 `Injector.exe` into the game folder and relaunches the game with a fresh UI.
-The game folder is the `supreme_folder` variable at the top of the root
-`justfile` (`just --set supreme_folder D:\Games\Supreme deploy_run` overrides
-it), exported to the harness as `SUPREME_FOLDER`. Live tests control the game
+The game folder comes from the `SUPREME_FOLDER` environment variable
+(`just --set supreme_folder D:\Games\Supreme deploy_run` overrides it for one
+run). There is no default: deploy recipes fail until it is set. The root
+`justfile` exports it to the harness. Live tests control the game
 and replace its recording, so save your run first. The full test contract,
 every `tas_test` mode, the environment variables, artifacts and
 troubleshooting are in [TAS quality gates](../docs/tas-quality-gates.md).

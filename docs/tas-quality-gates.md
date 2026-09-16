@@ -160,7 +160,7 @@ not classify.
 
 | Variable | Read by | Meaning |
 |---|---|---|
-| `SUPREME_FOLDER` | `tas_test` | Game folder; the harness injects `Display_Config_Resources\TAS\TAS_Helper.dll` from it after launching. Required whenever the harness has to launch the game, with no default. The root `justfile` exports it from `supreme_folder`. |
+| `SUPREME_FOLDER` | `tas_test` | Game folder; the harness injects `Display_Config_Resources\TAS\TAS_Helper.dll` from it after launching. Required whenever the harness has to launch the game, with no default. The root `justfile` reads it from the environment (`--set supreme_folder` overrides it), refuses deploy recipes until it is set, and exports it to the harness. |
 | `REVIVE_SUPREME_SCRIPT` | `tas_test` | Path to `revive-supreme.nu`, the launcher the harness runs when no game is live. The script comes from the separate `cheatengine-mcp-bridge` repository and needs Nushell (`nu`) on PATH. Required, with no default. |
 | `NO_REVIVE` | `tas_test` | `1` or `true`: never launch the game; fail when none is live. |
 | `TAS_TEST_LEVEL` | `tas_test` | Expected track code (default `FE`); `any` disables the track guard. |
@@ -244,8 +244,8 @@ in a running game. Deploy and restart before testing a native change.
 Use a dedicated game copy with fresh Forest Easy scores for the full lane.
 Finishing races can update scores, and an established score table can prevent
 the finish fixture from showing the "Save attack player?" prompt. Do not erase
-personal scores to make the test pass. Point `supreme_folder` at the test copy
-and make the revival script honor its exported `SUPREME_FOLDER`, for example
+personal scores to make the test pass. Point `SUPREME_FOLDER` at the test copy
+and make the revival script honor it, for example
 `just --set supreme_folder 'C:\Games\Supreme-Test' final test_live_full`.
 The prompt is declined using physical Pico RIGHT + Enter (`0xFC`, current
 firmware required), not Escape. Navigation then verifies Arcade followed by

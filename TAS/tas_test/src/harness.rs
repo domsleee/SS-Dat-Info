@@ -422,7 +422,7 @@ pub fn restart_play_aligned_inprocess(client: &mut TasSharedMemoryClient) -> Opt
 }
 
 /// An environment variable the live launch path needs; no built-in default.
-fn required_env(name: &str) -> Result<String, String> {
+pub(crate) fn required_env(name: &str) -> Result<String, String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())

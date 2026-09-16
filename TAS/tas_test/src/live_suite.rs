@@ -204,7 +204,9 @@ fn preflight(stages: &mut [Stage], full: bool, executable: &Path) -> Result<(), 
         {
             return Err("Nushell (nu) is required for save-reload revival".into());
         }
-        let folder = std::env::var("SUPREME_FOLDER").map_err(|_| "Set SUPREME_FOLDER")?;
+        // The root justfile exports SUPREME_FOLDER even when unset (as ""), so
+        // treat blank as missing rather than reporting a missing Supreme.exe.
+        let folder = crate::harness::required_env("SUPREME_FOLDER")?;
         for relative in [
             "Supreme.exe",
             "Display_Config_Resources/Injector.exe",

@@ -1,9 +1,11 @@
 set shell := ["pwsh.exe", "-NoProfile", "-c"]
 set unstable
 
-# The one place the game folder is configured. `just --set supreme_folder D:\Games\Supreme deploy`
-# overrides it; the live harness reads the exported SUPREME_FOLDER.
-supreme_folder := 'T:\Games\SupremeORIG'
+# The game folder comes from the SUPREME_FOLDER environment variable
+# (`just --set supreme_folder D:\Games\Supreme deploy` overrides it for one run).
+# There is no default: recipes that touch the game folder fail until it is set.
+# The live harness reads the exported SUPREME_FOLDER.
+supreme_folder := env('SUPREME_FOLDER', '')
 export SUPREME_FOLDER := supreme_folder
 dc_profile := 'release'
 
@@ -58,8 +60,14 @@ stop_game:
     }; \
     exit 0
 
+# Fails fast, before any build, when the game folder is unset or wrong.
+[private]
+require_supreme_folder:
+    @if ('{{supreme_folder}}' -eq '') { Write-Error 'SUPREME_FOLDER is not set. Point it at the game folder, e.g. $env:SUPREME_FOLDER = "D:\Games\Supreme", or run just --set supreme_folder D:\Games\Supreme <recipe>.'; exit 1 }; \
+    if (!(Test-Path '{{supreme_folder}}\Supreme.exe')) { Write-Error 'SUPREME_FOLDER is "{{supreme_folder}}" but it does not contain Supreme.exe.'; exit 1 }
+
 # Stops the game and every TAS process before copying.
-deploy: tas display_config_helper stop_game
+deploy: require_supreme_folder tas display_config_helper stop_game
     $dest = '{{supreme_folder}}\Display_Config_Resources\TAS'; \
     if (!(Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }; \
     Copy-Item .\TAS\TAS_Helper\Release\TAS_Helper.dll $dest\ -Force; \
@@ -69,7 +77,7 @@ deploy: tas display_config_helper stop_game
     Write-Host "Deployed TAS and Injector.exe to $dest"
 
 # Launch the game directly, then a fresh tas_ui that connects to the new instance.
-relaunch:
+relaunch: require_supreme_folder
     Start-Process -FilePath '{{supreme_folder}}\Supreme.exe' -WorkingDirectory '{{supreme_folder}}'; \
     Start-Sleep -Seconds 4; \
     $dest = '{{supreme_folder}}\Display_Config_Resources\TAS'; \
@@ -80,14 +88,14 @@ relaunch:
 deploy_run: deploy relaunch
 
 [private]
-stage_display_config profile:
+stage_display_config profile: require_supreme_folder
     Copy-Item .\Display_Config\output\Display_Config.exe '{{supreme_folder}}\' -Force; \
     $dest = '{{supreme_folder}}\Display_Config_Resources'; \
     if (!(Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }; \
     Copy-Item .\Display_Config\output\Display_Config_Resources\* $dest\ -Force; \
     Write-Host "Deployed Display_Config ({{profile}}) to {{supreme_folder}}"
 
-deploy_display_config: display_config stop_game (stage_display_config dc_profile)
+deploy_display_config: require_supreme_folder display_config stop_game (stage_display_config dc_profile)
 
 [private]
 display_config_debug:
