@@ -1,4 +1,4 @@
-set shell := ["pwsh.exe", "-NoProfile", "-c"]
+set shell := ["pwsh.exe", "-NoProfile", "-c", "$ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true;"]
 set unstable
 
 dc_profile := 'release'
@@ -10,14 +10,14 @@ all: clean _build
 _build: display_config display_config_helper tas_helper
 
 display_config:
-    cd Display_Config && bun tauri build {{ if dc_profile == "debug" { "--debug" } else { "" } }};
+    cd Display_Config && bun tauri build {{ if dc_profile == "debug" { "--debug" } else { "" } }} -- --locked;
     if (!(Test-Path ./output)) { mkdir output > $null }; \
     cp Display_Config\src-tauri\target\{{dc_profile}}\display-config.exe ./output/Display_Config.exe
 
 display_config_helper:
     $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath; \
     $msbuild = "$vsPath\MSBuild\Current\Bin\MSBuild.exe"; \
-    rm -Force -Recurse .\Display_Config_Resources\Display_Config_Helper\Release; \
+    if (Test-Path .\Display_Config_Resources\Display_Config_Helper\Release) { Remove-Item .\Display_Config_Resources\Display_Config_Helper\Release -Recurse -Force }; \
     & $msbuild .\Display_Config_Resources\Display_Config_Helper\Display_Config_Helper.vcxproj /v:minimal /p:Configuration=Release; \
     & $msbuild .\Display_Config_Resources\Injector\Injector.vcxproj /v:minimal /p:Configuration=Release; \
 
