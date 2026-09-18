@@ -11,11 +11,6 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <!-- Headers are listed for the IDE only: MSBuild tracks the real #include
-         dependencies through the compiler's .tlog files, so nothing here
-         affects the build or its up-to-date check. A hand-written copy of the
-         src tree only ever drifts (four headers were missing before this),
-         so glob it and let the project follow the directory. -->
     <ClInclude Include="src\**\*.hpp" />
     <ClInclude Include="src\**\*.h" />
     <ClInclude Include="..\..\third_party\safetyhook\safetyhook.hpp" />
