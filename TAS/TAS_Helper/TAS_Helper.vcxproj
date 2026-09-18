@@ -11,34 +11,15 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\caves\cave1_replay.hpp" />
-    <ClInclude Include="src\caves\cave1c.hpp" />
-    <ClInclude Include="src\caves\cave1d.hpp" />
-    <ClInclude Include="src\caves\cave2.hpp" />
-    <ClInclude Include="src\caves\cave5.hpp" />
-    <ClInclude Include="src\caves\menu_state.hpp" />
-    <ClInclude Include="src\caves\menu_page.hpp" />
-    <ClInclude Include="src\caves\race_timer.hpp" />
+    <!-- Headers are listed for the IDE only: MSBuild tracks the real #include
+         dependencies through the compiler's .tlog files, so nothing here
+         affects the build or its up-to-date check. A hand-written copy of the
+         src tree only ever drifts (four headers were missing before this),
+         so glob it and let the project follow the directory. -->
+    <ClInclude Include="src\**\*.hpp" />
+    <ClInclude Include="src\**\*.h" />
     <ClInclude Include="..\..\third_party\safetyhook\safetyhook.hpp" />
     <ClInclude Include="..\..\third_party\safetyhook\Zydis.h" />
-    <ClInclude Include="src\game_addresses.hpp" />
-    <ClInclude Include="src\gate_alignment.hpp" />
-    <ClInclude Include="src\input_gate.hpp" />
-    <ClInclude Include="src\level_path_parse.hpp" />
-    <ClInclude Include="src\level_scan.hpp" />
-    <ClInclude Include="src\log.hpp" />
-    <ClInclude Include="src\mapping_owner.hpp" />
-    <ClInclude Include="src\menu_model.hpp" />
-    <ClInclude Include="src\race_timer_table.hpp" />
-    <ClInclude Include="src\renderer_info.hpp" />
-    <ClInclude Include="src\replay_capture_policy.hpp" />
-    <ClInclude Include="src\replay_identity.hpp" />
-    <ClInclude Include="src\rider_identity_parse.hpp" />
-    <ClInclude Include="src\rider_identity.hpp" />
-    <ClInclude Include="src\setup_config_parse.hpp" />
-    <ClInclude Include="src\setup_object.hpp" />
-    <ClInclude Include="src\shared_state.hpp" />
-    <ClInclude Include="src\stdafx.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\third_party\safetyhook\safetyhook.cpp" />
