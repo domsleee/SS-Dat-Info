@@ -172,7 +172,6 @@ static constexpr int32_t CAVE5_PER_FRAME_TICK_CAP = 64;
 // scripted fast-forward (playback_speed > 1) or the catchup-drain path.
 static constexpr int32_t NATIVE_GAME_CLAMP_AT_1X = 20;
 
-// Cave 5 callback with FPU preservation
 static void Cave5_MidCallback(SafetyHookContext& ctx) {
     uint8_t fpu_buf[108];
     __asm { fsave [fpu_buf] }
@@ -399,7 +398,6 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     static const uint8_t kFmulTickAdvance[6] = { 0xD8, 0x0D, 0x08, 0xDB, 0x46, 0x00 };
     bool redirected = true;
 
-    // Pass 1: unprotect and verify.
     const size_t kSiteCount = sizeof(CAVE5_TICK_ADVANCE_OPERANDS) / sizeof(uint32_t);
     for (size_t i = 0; i < kSiteCount && redirected; ++i) {
         uint32_t rva = CAVE5_TICK_ADVANCE_OPERANDS[i];
@@ -418,8 +416,6 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
         }
     }
 
-    // Pass 2: commit.
-    //
     // The game loop runs on another thread and may be executing these very
     // instructions right now. The operands are unaligned (2/3/0/1 mod 4), so a
     // plain store is not guaranteed to be observed as one write — and a torn

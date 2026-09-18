@@ -10,11 +10,10 @@ pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
 
 /// Bumped whenever `TasSharedState` changes layout (mirrors shared_state.hpp).
 pub const TAS_SHARED_VERSION: u32 = 51;
-/// v46: size of the menu document buffer (JSON, NUL-terminated).
+/// Size of the menu document buffer (JSON, NUL-terminated).
 pub const TAS_MENU_DOC_MAX: usize = 4096;
-/// v47: size of the menu command target (id or label, NUL-terminated).
+/// Size of the menu command target (id or label, NUL-terminated).
 pub const TAS_MENU_CMD_TARGET_MAX: usize = 64;
-/// v47 menu command kinds (`menu_cmd_kind`).
 pub const TAS_MENU_CMD_ACTIVATE: u32 = 1;
 pub const TAS_MENU_CMD_FOCUS: u32 = 2;
 pub const TAS_MENU_CMD_UP: u32 = 3;
@@ -22,7 +21,6 @@ pub const TAS_MENU_CMD_DOWN: u32 = 4;
 pub const TAS_MENU_CMD_LEFT: u32 = 5;
 pub const TAS_MENU_CMD_RIGHT: u32 = 6;
 pub const TAS_MENU_CMD_TRIGGER: u32 = 7;
-/// v47 menu command results (`menu_cmd_result`).
 pub const TAS_MENU_RESULT_OK: u32 = 0;
 pub const TAS_MENU_RESULT_NO_MENU: u32 = 1;
 pub const TAS_MENU_RESULT_NOT_FOUND: u32 = 2;
@@ -74,7 +72,6 @@ pub enum TasLogSeverity {
     Error = 3,
 }
 
-/// A single log ring entry (matches C++ TasLogEntry)
 #[repr(C)]
 pub struct TasLogEntry {
     pub sequence: u32,
@@ -103,7 +100,6 @@ impl TasLogEntry {
     }
 }
 
-/// A segment boundary record (matches C++ TasSegmentBoundary, 8 bytes)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TasSegmentBoundary {
@@ -111,7 +107,6 @@ pub struct TasSegmentBoundary {
     pub input_log_offset: u32, // Offset into input_log for this segment
 }
 
-/// Input mask bit definitions (matches C++ TasInputBit)
 pub mod input_bits {
     pub const LEFT: u8 = 0x01;
     pub const RIGHT: u8 = 0x02;
@@ -352,15 +347,10 @@ pub struct TasSharedState {
     pub menu_cmd_result: u32,
 }
 
-/// How many times to retry a torn seqlock read before giving up.
-///
-/// A writer's critical section is at most a few hundred bytes of stores, and
-/// it only opens when the published value actually CHANGES — the DLL skips
-/// publications that would write identical values. So the window is both short
-/// and rare, and a reader that loses 64 races in a row is not racing: the
-/// producer is wedged or dead. Giving up returns UNKNOWN, which every caller
-/// treats as "match nothing", so exhausting the bound fails closed rather than
-/// spinning a UI frame forever.
+/// Give up after this many torn seqlock reads. The write window is a few
+/// hundred bytes and only opens on a real change, so losing this many in a row
+/// means a wedged producer. Giving up returns UNKNOWN, which every caller
+/// treats as "match nothing", rather than spinning a UI frame forever.
 const SEQLOCK_RETRIES: usize = 64;
 
 /// One clean read of a seqlocked group (`level_ctx_seq`, `rider_seq`,
@@ -926,8 +916,7 @@ mod level_epoch_tests {
         s.level_scan_epoch = 3;
         s.level_id = u32::MAX; // scan found nothing this cycle
 
-        // Resolved-but-unknown is a real state (the menu). It is NOT "the level
-        // changed" — that is exactly the conflation the old code made.
+        // Resolved-but-unknown is a real state (the menu), not a level change.
         assert!(level_is_resolved(&s));
         assert_eq!(crate::level::code_from_id(s.level_id), None);
     }

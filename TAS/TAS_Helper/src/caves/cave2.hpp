@@ -26,7 +26,6 @@
 //      game the same way, capture coordinates, splice to REC at the CONT
 //      point or hand the speed over at a judged PLAY's marker.
 
-// Globals accessed by hook callback
 inline TasSharedState* g_cave2State = nullptr;
 inline std::atomic_flag g_cycleStopGate = ATOMIC_FLAG_INIT;
 inline GameAddresses* g_cave2Addr = nullptr;
@@ -39,7 +38,6 @@ inline void UninstallCave2() {
     g_cave2Addr = nullptr;
 }
 
-// BB3B10 function type: __thiscall with 4 stack args
 typedef void(__thiscall* BB3B10Fn)(void* thisPtr, uint32_t keyIndex, uint32_t pressed,
                                     uint32_t unk, uint32_t arg4);
 
@@ -82,7 +80,6 @@ static uint8_t SampleGAKS() {
     return mask;
 }
 
-// Helper: write DI buffer from mask (SEH-protected)
 static void WriteDIBuffer(uint32_t buffer, uint8_t mask) {
     if (!buffer) return;
     __try {
@@ -99,7 +96,6 @@ static void WriteDIBuffer(uint32_t buffer, uint8_t mask) {
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-// Helper: write action_state bytes from mask (SEH-protected)
 static void WriteActionState(uint32_t kbobj, uint8_t mask) {
     if (!kbobj) return;
     __try {
@@ -235,7 +231,6 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
         memcpy(&raw[0], player + GameAddresses::PLAYER_X, 4);
         memcpy(&raw[1], player + GameAddresses::PLAYER_Y, 4);
         memcpy(&raw[2], player + GameAddresses::PLAYER_Z, 4);
-        // Read rotation from physics sub-object
         uint32_t physics = 0;
         memcpy(&physics, player + GameAddresses::PLAYER_PHYSICS, 4);
         if (physics) {
@@ -317,7 +312,6 @@ static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, boo
         SafeWriteF5Buffer(buffer, pressed);
     }
 
-    // Notify BB3B10 of the F5 state change
     if (kbobj) {
         auto bb3b10 = (BB3B10Fn)(addr->bb3b10);
         void* thisPtr = (void*)(kbobj + GameAddresses::BB3B10_THIS_OFFSET);
@@ -510,8 +504,7 @@ static bool ProcessCommand(TasSharedState* s) {
             s->bb3b10_call_count = 0;
             s->handler_block_count = 0;
             s->bb3b10_block_count = 0;
-            // Reset segment tracking for fresh recording
-            s->segment_count = 1;
+                    s->segment_count = 1;
             s->segment_start_frame = 0;
             memset(s->segment_boundaries, 0, sizeof(s->segment_boundaries));
             s->segment_boundaries[0].frame = 0;
@@ -711,7 +704,6 @@ static void CompleteContinueSplice(TasSharedState* s) {
         // end-of-replay deceleration needed.
         g_contResetPending = 1;
 
-        // Record new segment boundary
         uint32_t segIdx = s->segment_count;
         if (segIdx < TAS_MAX_SEGMENTS) {
             s->segment_boundaries[segIdx].frame = rec_splice;
@@ -763,17 +755,14 @@ static void __declspec(noinline) Cave2_Logic() {
             memcpy(&new_y, player + GameAddresses::PLAYER_Y, 4);
             memcpy(&new_z, player + GameAddresses::PLAYER_Z, 4);
 
-            // Compute velocity (current - previous)
             s->velocity_x = new_x - s->player_x;
             s->velocity_y = new_y - s->player_y;
             s->velocity_z = new_z - s->player_z;
 
-            // Update current position
             s->player_x = new_x;
             s->player_y = new_y;
             s->player_z = new_z;
 
-            // Update rotation matrix from physics sub-object
             uint32_t physics = 0;
             memcpy(&physics, player + GameAddresses::PLAYER_PHYSICS, 4);
             if (physics) {

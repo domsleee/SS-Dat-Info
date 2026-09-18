@@ -414,7 +414,6 @@ public:
             return false;
         }
 
-        // Zero-init, then the non-zero defaults.
         memset(state, 0, sizeof(TasSharedState));
         state->version = TAS_SHARED_VERSION;
         state->playback_speed = 1.0f;

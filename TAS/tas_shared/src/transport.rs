@@ -219,7 +219,6 @@ enum Phase {
     Aborted,
 }
 
-/// Result of one `step()`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StepOutcome {
     /// Mid-cycle; call `step()` again (after a short poll delay).
@@ -720,34 +719,19 @@ impl TransportController {
                         ),
                     };
                 }
-                // THE PREDICTIVE REJECT. first_moving is decided by the arm
-                // offset, not by anything that happens during the replay, so
-                // once K is known this attempt's bucket is already determined
-                // and a wrong one can be thrown away here — at zero replayed
-                // ticks instead of after the whole countdown.
+                // The predictive reject: first_moving follows from the arm
+                // offset, not from the replay, so once K is known a wrong
+                // bucket can go at zero replayed ticks instead of after the
+                // whole countdown. It only ever rejects; survivors still face
+                // the full judge.
                 //
-                // It only ever REJECTS. A wrong prediction costs a reroll that
-                // might have matched; it can never let a wrong bucket through,
-                // because everything that survives still faces the full judge.
+                // Must stay BELOW the splice-success check and gated on a live
+                // replay, or it can reroll a CONT whose splice already fired
+                // and add a duplicate segment boundary.
                 //
-                // It sits HERE, below the splice-success check and gated on
-                // the replay still being live, rather than at the top of the
-                // phase. Above them it could
-                // reroll a CONT whose splice had already fired — sending STOP
-                // and adding a duplicate segment boundary to a recording that
-                // was already correctly spliced. A prediction must never be
-                // able to overrule something that already happened.
-                //
-                // PLAY only, and never on the last retry:
-                //
-                // * CONT catches up at 256x, where the countdown it would skip
-                //   is ~57ms of a ~1800ms reroll — a few percent, against a
-                //   proven path that ends in a destructive splice. Not a trade
-                //   worth making. The escape hatch is a flag; this is a floor.
-                // * Reserving a retry guarantees at least one more attempt can
-                //   actually replay and re-learn K. Without it a bad K can burn
-                //   the remaining retries on predictions and abort the cycle
-                //   having never observed anything to correct itself with.
+                // PLAY only (CONT would save ~57 ms of a ~1800 ms reroll before
+                // a destructive splice), and never on the last retry, which has
+                // to be free to replay and re-learn K.
                 if self.cfg.predict_bucket
                     && self.cfg.arm == Arm::Play
                     && !replay_ended
@@ -1420,9 +1404,8 @@ mod tests {
         assert_eq!(p.speed_handoff_pos, 0);
         assert_eq!(p.playback_speed, 1.0);
 
-        // REGRESSION: the controller re-asserts the catch-up speed on every
-        // step. Left ungated it would undo the handover on the very next one
-        // and the run would be watched at 64x after all.
+        // Later steps must preserve the handed-off speed: the controller
+        // re-asserts the catch-up speed on every step.
         assert_eq!(c.step(&mut p), StepOutcome::InProgress);
         assert_eq!(
             p.playback_speed, 1.0,
@@ -1465,11 +1448,9 @@ mod tests {
         assert!(!TransportController::new(cfg(Arm::Rec, None, 0)).owns_playback_speed());
     }
 
-    /// The check and the write are two operations, so cave2 can fire between
-    /// them and the catch-up store lands last with nothing to correct it.
-    /// Waiting for the next step to repair that is not enough: the window has
-    /// no timing bound and cave5 programs its next tick batch from
-    /// playback_speed, so the run can be issued fast for those ticks.
+    /// Forces the handover to fire between the pre-write check and the
+    /// catch-up write, which must be repaired in the same step: cave5 programs
+    /// its next tick batch from playback_speed, so the window has no bound.
     #[test]
     fn a_handover_that_fires_mid_step_is_repaired_within_the_same_step() {
         let target = BucketTarget {
@@ -1661,13 +1642,9 @@ mod tests {
         p.playback_pos = 600;
         assert!(matches!(c.step(&mut p), StepOutcome::Reroll { .. }));
     }
-    /// The controller and cave2 both write playback_speed, and the read that
-    /// decides which speed to write is not part of the write. A step can read
-    /// "handover still pending", have cave2 fire underneath it, and land its
-    /// catch-up store AFTER the resume speed was installed - with the marker
-    /// by then cleared, so nothing would ever look at it again. Going quiet
-    /// once the handover fires is therefore not enough; the controller has to
-    /// keep asserting the resume speed so a lost race is repaired.
+    /// Repairs a catch-up write that lands after the handover: the marker is
+    /// cleared by then, so the controller must keep asserting the resume speed
+    /// rather than going quiet once the handover fires.
     #[test]
     fn a_lost_speed_race_is_repaired_on_the_next_step() {
         let target = BucketTarget {

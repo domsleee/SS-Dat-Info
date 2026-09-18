@@ -15,12 +15,7 @@
 
 // In-process level detection, plus the DLL's background housekeeping.
 //
-// The level identity is read from the GAME-SETUP OBJECT (setup_object.hpp): the
-// menu's selection, reached through the executable's own config pointer chain.
-// It names the area AND the difficulty as plain strings (and so settles
-// Village Easy vs Village Hard, which share a path asset). The level-path
-// string below is the level-CHANGE event and an area cross-check. Runs on a
-// background thread, publishing into s->level_id only while a level is running
+// A background thread publishes s->level_id only while a level is running
 // (game_in_game + cycle heartbeat):
 //   0..9 = area*3 + difficulty  (area 0=Forest,1=Alpine,2=Village,3=Practice;
 //                                 diff 0=Easy,1=Medium,2=Hard; Practice has
@@ -229,15 +224,12 @@ static const uint32_t STEADY_PERIOD_MS = 60000;
 // reinjection.
 static const uint32_t STALE_SUPPRESS_MS = 5000;
 
-// Identify the level from the game-setup object (setup_object.hpp) - the
-// authoritative menu selection, read through the executable config pointer
-// chain. The AREA comes from the path (areaHint, reliable); the game-setup
-// object supplies the DIFFICULTY, which the path cannot (it points at the
-// shared easy/ shadow asset). If the object's area disagrees with the path we
-// are mid-switch, so nothing is reported. Practice resolves from the path
-// alone - it skips the menu screen that writes the setup object, so the object
-// holds a stale Arcade selection there (the case levelpath::LevelIdFrom
-// guards; see its unit tests). Returns area*3+diff (Practice = 9) or -1.
+// Area from the path, difficulty from the setup object (see the header).
+// Disagreeing areas mean a mid-switch, so nothing is reported. Practice
+// resolves from the path alone: it skips the menu screen that writes the setup
+// object, so the object holds a stale Arcade selection there (guarded by
+// levelpath::LevelIdFrom; see its unit tests).
+// Returns area*3+diff (Practice = 9) or -1.
 static int32_t scanLevelId(int areaHint) {
     if (areaHint < 0) return -1;   // no area from the path => nothing to identify
     gamesetup::Setup setup;
@@ -255,35 +247,20 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // reflected in the epoch this scan will be stamped with.
         pollLevelContext(s);
         uint32_t epochAtScan = s->level_epoch;
-        // Refuse to identify anything while there is NO ROOT. game_in_game is
-        // not enough: it is only written by the Cycle hook, so it stays stale at
-        // 1 through a menu/teardown. With no root there is no level, and the
-        // track strings still in the heap are residue from the one we LEFT — a
-        // scan here would publish the OLD track stamped with the NEW epoch, i.e.
-        // confidently wrong, which is worse than unresolved.
-        // Wait for the cycle to tick AFTER a context change before scanning at
-        // all: the cycle is frozen for the whole load, so a tick proves the load
-        // finished and the new track's resources are resident. Without this the
-        // scan runs mid-load, when the OLD track's strings are still dominant.
+        // Wait for a cycle tick after a context change before scanning: the
+        // cycle is frozen for the whole load, so a tick proves the load
+        // finished and the new track's resources are resident. Scanning
+        // mid-load reads the old track's strings, which are still dominant.
         if (g_awaitingCycleTick && s->frame_count != g_frameAtEpochBump) {
             g_awaitingCycleTick = false;
         }
 
-        // THE ENGINE IS NOT RUNNING A LEVEL. Static menu, pause menu, or a load
-        // in progress — see cycleFrozen(). Give up the identification for as
-        // long as it lasts.
-        //
-        // This is the only mechanism that catches a return to the menu, because
-        // NOTHING ELSE CHANGES there: probed live, the level-path pointer, the
-        // engine root and the game's own in-a-level flag all still describe the
-        // track the player just left. It is also the only thing that catches a
-        // switch between two tracks that SHARE a path (Village Easy and Village
-        // Hard both load ".../village/Tracks/easy/..."), since for those the
-        // path never changes at all and there is no other event to hang off.
-        //
-        // Scanning is suppressed too, not just publication. At a menu the old
-        // level's strings are still resident and dominant, so a scan here would
-        // "confirm" the track we just left and immediately undo this.
+        // A frozen cycle means static menu, pause or load: invalidate the
+        // identity and suppress scanning too, because the departed level's
+        // strings are still resident and a scan would "confirm" them. It is the
+        // only signal for a return to the menu (probed live, the path pointer,
+        // the engine root and game_in_game all still describe the track just
+        // left) and for a switch between two tracks that share a path.
         bool frozen = cycleFrozen();
         if (frozen) {
             // STOP must have an out-of-cycle consumer: leaving a level freezes
@@ -330,19 +307,10 @@ static DWORD WINAPI threadProc(LPVOID param) {
 
         bool settled = (id >= 0);
 
-        // Every one of these mutates the identity half of the group, so every
-        // one goes through the seqlock. The pair (level_id, level_scan_epoch) is
-        // the whole point: a reader that sees the validating epoch without the
-        // id it validates gets "resolved" plus the PREVIOUS track, which is
-        // worse than unresolved because it looks trustworthy.
-        //
-        // Each also publishes only when it would actually CHANGE something. The
-        // steady state re-derives the same id every 1.5s, and republishing it
-        // opened a write window — and made a reader retry — for no new
-        // information. Skipping an identical write is exactly equivalent, and it
-        // buys a real invariant: the sequence advances if and only if the level
-        // context changed. (We are the sole writer, so reading these fields back
-        // to compare is not itself racy.)
+        // Publish id and validating epoch together through the seqlock, or a
+        // reader can take the new epoch with the previous id and believe it.
+        // Skip identical publications so the sequence advances only on a real
+        // context change (sole writer, so reading back to compare is safe).
         if (s->level_epoch != epochAtScan) {
             // The context moved under the scan: whatever we found describes the
             // level we just left. Discard it and stay unresolved — level_scan_epoch
@@ -354,23 +322,12 @@ static DWORD WINAPI threadProc(LPVOID param) {
         } else if (settled && id >= 0) {
             bool alreadyResolved = (s->level_scan_epoch == epochAtScan);
             if (alreadyResolved && s->level_id != (uint32_t)id) {
-                // SAME CONTEXT, DIFFERENT TRACK. The path did not change, so
-                // this is either two tracks sharing one path (Village Easy and
-                // Village Hard both load ".../village/Tracks/easy/...") or a
-                // scan that was wrong — and from here the two are
-                // indistinguishable. What is certain is that the id we are about
-                // to publish CONTRADICTS the one we already published, so at
-                // least one of them is false.
-                //
-                // Go unresolved and let the next scan, taken entirely inside
-                // this context, decide. Overwriting one confident answer with
-                // another would hand the UI a fresh wrong track just as readily
-                // as a fresh right one; unknown is the only honest state when
-                // the evidence disagrees with itself. Costs ~200ms (the
-                // unresolved cadence) in the rare case, and nothing otherwise.
-                // epochAtScan == s->level_epoch here (that is what the outer
-                // branch established, and this thread is the only writer), so
-                // this makes the pair unequal = unresolved.
+                // Same context, contradicting ids: either two tracks sharing
+                // one path (Village Easy/Hard) or a bad scan, indistinguishable
+                // from here, and one of the two must be false. Go unresolved
+                // and let the next scan decide, at the cost of ~200 ms of the
+                // unresolved cadence. epochAtScan == s->level_epoch here, so
+                // stepping it back leaves the pair unequal = unresolved.
                 publishContext(s, [&] {
                     s->level_id = 0xFFFFFFFFu;
                     s->level_scan_epoch = epochAtScan - 1u;

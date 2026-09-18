@@ -297,3 +297,11 @@ three successful finite measurements, not a median of surviving trials.
   per restart: one restart must add exactly one. Crash dumps land in
   `%LOCALAPPDATA%\CrashDumps`; WinDbg reads them with
   `WinDbgX -z <dump> -logo <file> -c ".ecxr; !analyze -v; kb; q"`.
+
+## Comments
+
+Explain each fact once, beside the code that owns it; at other use sites state
+only the local consequence. Keep reverse-engineered addresses, measurements,
+ordering constraints, wire contracts and approaches that failed. Delete comments
+that paraphrase a name, signature or assignment, and write history as the
+current rule plus the failure it prevents.
