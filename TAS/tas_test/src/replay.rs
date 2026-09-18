@@ -134,16 +134,25 @@ impl ReplayReport {
         }
 
         println!();
-        if drift_count == 0 {
+        // Report the same thing the caller's verdict is built from: an
+        // iteration that never played reports 0.0 drift over zero frames, so
+        // a drift-only headline would read as a pass on a run that failed.
+        let incomplete = self
+            .results
+            .iter()
+            .filter(|r| !r.playback_complete || !r.position_matched)
+            .count();
+        if drift_count == 0 && incomplete == 0 {
             println!(
                 "Result: ZERO DRIFT in all {} iterations",
                 self.results.len()
             );
         } else {
             println!(
-                "Result: DRIFT in {}/{} iterations",
+                "Result: DRIFT in {}/{} iterations, {} did not play to the end or failed the start match",
                 drift_count,
-                self.results.len()
+                self.results.len(),
+                incomplete
             );
         }
     }
