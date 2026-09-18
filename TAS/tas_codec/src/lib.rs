@@ -20,7 +20,9 @@ pub const BLOB_BYTES_PER_TICK: usize = 1 + 3 * 4;
 /// rather than read into memory.
 pub const MAX_TASREC_METADATA_BYTES: usize = 1024 * 1024;
 
-/// Hard upper bound on a whole file: a full-length recording. Any file
+/// Hard upper bound on a whole file: the largest metadata header plus a
+/// full-length recording. Any file past this is rejected on `metadata()`,
+/// before a byte of it is read into memory.
 pub const MAX_TASREC_BYTES: u64 =
     (4 + MAX_TASREC_METADATA_BYTES + TAS_MAX_TICKS * BLOB_BYTES_PER_TICK) as u64;
 

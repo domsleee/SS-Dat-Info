@@ -358,8 +358,8 @@ static constexpr uint8_t kMenuActionSig[] = { 0x8B, 0x81, 0x0C, 0x01, 0x00, 0x00
 static constexpr uint8_t kRequestFocusSig[] = { 0x53, 0x56, 0x8B, 0xF1, 0x8B, 0x4E, 0x0C, 0x85, 0xC9, 0x8B, 0xDA, 0x74, 0x24,
                                                 0x84, 0xDB, 0x74, 0x18, 0x8B, 0x06, 0x8B, 0xCE, 0xFF, 0x50, 0x2C };
 static uint32_t RunCommand(uint32_t uiMenu, uint32_t kind, const char* target, const char* screen) {
-    const uint32_t page = ValidateScreen(screen);
-    if (page != TAS_MENU_RESULT_OK) return page;
+    const uint32_t screenCheck = ValidateScreen(screen);
+    if (screenCheck != TAS_MENU_RESULT_OK) return screenCheck;
     MenuSnapshot snap;
     if (!ReadMenu(uiMenu, snap)) return TAS_MENU_RESULT_NO_MENU;
     switch (kind) {

@@ -44,6 +44,8 @@ bool run() {
     bool cave2_ok = InstallCave2(g_addr, state);
     bool cave5_ok = InstallCave5(g_addr, state);
     // Defence in depth for the sr.dll srConfig unlink crash (srconfig_guard.hpp).
+    // Not required for TAS to work, so it never fails the rollback below; if
+    // sr.dll is not mapped yet the level-scan worker keeps trying.
     srconfigguard::Install();
 
     // These hooks are one functional unit. Reporting ready after any of them
@@ -67,6 +69,7 @@ bool run() {
     Log(std::format("  Cave 1C (handler gate):      {}", cave1c_ok ? "OK" : "FAILED"));
     Log(std::format("  Cave 2  (Supreme::Cycle):    {}", cave2_ok ? "OK" : "FAILED"));
     Log(std::format("  Cave 5  (fixed tick):        {}", cave5_ok ? "OK" : "FAILED"));
+    Log(std::format("  srConfig crash guard:        {}", srconfigguard::StatusText()));
 
     // Background worker: level identity, rider identity, renderer, menu
     // housekeeping, and the out-of-cycle STOP consumer (a STOP sent at a menu

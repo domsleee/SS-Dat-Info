@@ -379,11 +379,16 @@ impl Default for RecoveryWriter {
 impl RecoveryStore {
     pub fn load_pending(&self) -> Result<Option<RecoveryCheckpoint>, String> {
         if !self.recording_path.exists() {
-            return if self.metadata_path.exists() {
-                Err("Recovery metadata exists without its recording; files retained".into())
-            } else {
-                Ok(None)
-            };
+            if !self.metadata_path.exists() {
+                return Ok(None);
+            }
+            // A sidecar from an older build with no recording beside it:
+            // nothing is recoverable from it, and leaving it would fail this
+            // check on every launch forever. Report once, then clear it.
+            remove_if_exists(&self.metadata_path)?;
+            return Err(
+                "Recovery metadata from an older build had no recording beside it; removed".into(),
+            );
         }
         let data = tas_codec::read_bounded(&self.recording_path)?;
         let mut state = tas_shared::zeroed_boxed();

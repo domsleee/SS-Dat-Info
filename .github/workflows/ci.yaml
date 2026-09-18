@@ -125,10 +125,9 @@ jobs:
     name: tas:test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install task runner
-        run: cargo install just --locked --version 1.55.1
+      - uses: extractions/setup-just@v4
       - name: Run the local TAS quality gate
         run: just check_all
       - name: Build TAS native DLL

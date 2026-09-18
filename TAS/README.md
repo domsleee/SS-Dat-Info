@@ -114,9 +114,17 @@ focus from the game. The Pico firmware and its deployment have their own
 Recovery publishes the recording bytes and session metadata in one atomic
 `recovery_checkpoint.tasrec`. Older recordings without embedded session data
 are recovered with an explicit unknown-session label: an old JSON sidecar cannot
-prove it belongs to those bytes. History blobs and manifests use the same
+prove it belongs to those bytes (a sidecar found with no recording beside it is
+reported once and removed). History blobs and manifests use the same
 flushed atomic writer. Quarantine preserves prior copies and keeps their IDs
 out of the allocator; a failed preservation never deletes the source file.
+
+`tas_ui/src/relaunch.rs` owns what happens when the game process dies, is
+killed or is replaced while the UI stays open: capturing the take still in the
+dead DLL's mapping, recovering the checkpoint once a new DLL has zeroed it, and
+releasing input protection abandoned by a controller that died mid-cycle. One
+relaunch produces two signals (the PID changing, and `frame_count` going
+backwards) in either order, and they reset the session view exactly once.
 
 `tas_ui` keeps run history in `tas_ui/src/history_store_v2.rs`:
 `manifest.json` stores ordered metadata and the current entry ID, with immutable

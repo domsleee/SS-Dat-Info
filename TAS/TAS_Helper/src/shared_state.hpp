@@ -4,7 +4,7 @@
 
 // Shared memory layout between TAS_Helper.dll and the egui UI process.
 // Lock-free single-writer: UI writes the command region, DLL writes the status
-// region. The Rust mirror is tas_shared/src/lib.rs; both pin the size and the
+// region. The Rust mirror is tas_shared/src/state.rs; both pin the size and the
 // group-boundary offsets below, and TAS_SHARED_VERSION is bumped on any change.
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
@@ -342,10 +342,10 @@ struct TasSharedState {
 // TAS_SHARED_VERSION whenever any of these numbers changes.
 #define TAS_PIN_OFFSET(field, expected) \
     static_assert(offsetof(TasSharedState, field) == (expected), \
-                  "TasSharedState." #field " moved: bump TAS_SHARED_VERSION and update tas_shared/src/lib.rs")
+                  "TasSharedState." #field " moved: bump TAS_SHARED_VERSION and update tas_shared/src/state.rs")
 static_assert(sizeof(TasSharedState) == 1651504,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
-              "the Rust size pin in tas_shared/src/lib.rs");
+              "the Rust size pin in tas_shared/src/state.rs");
 TAS_PIN_OFFSET(input_log, 416);
 TAS_PIN_OFFSET(rec_coords, 65952);
 TAS_PIN_OFFSET(play_coords, 852384);

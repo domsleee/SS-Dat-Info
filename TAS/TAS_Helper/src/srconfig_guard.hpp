@@ -19,6 +19,9 @@ inline SafetyHookInline g_unlinkHook{};
 inline volatile LONG g_skipped = 0;
 inline LONG g_skippedLogged = 0;
 inline uintptr_t g_lastSkippedNode = 0;
+inline bool g_installed = false;
+inline bool g_abandoned = false;  // a failure retrying cannot fix
+inline uint32_t g_attempts = 0;
 
 // sr.dll+0x13550: sub esp,8; push ebx; push esi; mov esi,[esp+14h];
 // test esi,esi; push edi; mov edi,ecx; mov [esp+0Ch],edi. No absolute
@@ -47,24 +50,40 @@ inline void __fastcall UnlinkDetour(void* self, void* /*edx*/, void* node) {
     g_unlinkHook.thiscall<void>(self, node);
 }
 
+// Install the guard if sr.dll is mapped. Idempotent, and called from the
+// level-scan worker because sr.dll need not be loaded when the injector fires.
+// Retries stop at a failure retrying cannot fix (wrong bytes, hook refused),
+// so a broken build logs once rather than once per second.
 inline bool Install() {
+    if (g_installed || g_abandoned) return g_installed;
+    g_attempts++;
     auto module = (std::uint8_t*)GetModuleHandleA("sr.dll");
     if (!module) {
-        Log("srConfig guard: sr.dll not loaded - not installed");
+        if (g_attempts == 1) Log("srConfig guard: sr.dll not loaded yet - retrying from the level-scan worker");
         return false;
     }
     std::uint8_t* fn = module + UNLINK_RVA;
     if (std::memcmp(fn, UNLINK_PROLOGUE, sizeof UNLINK_PROLOGUE) != 0) {
+        g_abandoned = true;
         Log("srConfig guard: sr.dll+0x13550 bytes do not match the known unlink prologue - not installed");
         return false;
     }
     g_unlinkHook = safetyhook::create_inline((void*)fn, (void*)UnlinkDetour);
     if (!g_unlinkHook) {
+        g_abandoned = true;
         Log("srConfig guard: hook failed");
         return false;
     }
-    Log(std::format("srConfig guard: installed at sr.dll+{:#x} ({:p})", UNLINK_RVA, (void*)fn));
+    g_installed = true;
+    Log(std::format("srConfig guard: installed at sr.dll+{:#x} ({:p}) after {} attempt(s)",
+                    UNLINK_RVA, (void*)fn, g_attempts));
     return true;
+}
+
+// For the hook installation summary: a deferred guard is not a failed one.
+inline const char* StatusText() {
+    if (g_installed) return "OK";
+    return g_abandoned ? "FAILED" : "deferred (waiting for sr.dll)";
 }
 
 // Worker-thread side: report skips the detour counted.

@@ -358,6 +358,7 @@ static DWORD WINAPI threadProc(LPVOID param) {
         for (int i = 0; i < slices && !g_stop.load(std::memory_order_relaxed); i++) {
             Sleep(100);
             FlushPendingLog();           // cave2's mode-transition lines (queued inside the hook)
+            srconfigguard::Install();    // no-op once in place; sr.dll may load after injection
             srconfigguard::FlushLog();   // corrupt unlinks the guard skipped (srconfig_guard.hpp)
             restartrelease::FlushLog();  // F5 hold timing per restart (restart_release.hpp)
             pollLevelContext(s);

@@ -3,6 +3,11 @@
 
 // The heartbeat only suggests that a cycle is frozen. It is not exclusion:
 // a new game cycle can begin while the worker is applying STOP.
+//
+// A racing cycle is DROPPED, not delayed: cave2 skips its callback for that
+// tick, losing one REC sample. Only reachable while the worker applies a STOP
+// to a cycle it judged frozen, so the take is ending anyway. Do not widen this
+// gate to anything the game does every frame.
 class CycleStopGuard {
     std::atomic_flag& flag;
     bool owns;
