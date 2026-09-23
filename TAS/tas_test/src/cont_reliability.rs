@@ -159,7 +159,7 @@ impl ContReliabilityReport {
                 .collect();
             println!();
             println!(
-                "Bucket lottery (rerolls): first-try {}/{} | mean {:.1} | worst {} | per-cycle [{}]",
+                "Rerolls: first-try {}/{} | mean {:.1} | worst {} | per-cycle [{}]",
                 first_try,
                 spliced.len(),
                 total as f64 / spliced.len() as f64,
@@ -385,7 +385,7 @@ fn assess_splice(
     let recorded_moves = analyze_prefix_coords(&state.rec_coords, splice_frame).forward_only_ok;
     // The whole source recording, not the live buffer: a splice inside the
     // countdown truncates that to a prefix that has not moved yet.
-    let recording_has_gate = tas_shared::cont::detect_first_moving(
+    let recording_has_gate = tas_shared::align::detect_first_moving(
         baseline_rec_coords,
         baseline_rec_coords.len() as u32,
     )

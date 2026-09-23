@@ -115,7 +115,7 @@ pub fn run(iterations: u32, rec: Option<&str>) -> bool {
     replay::write_to_shared(&mut client, &loaded);
     let rec_gate = {
         let s = client.state();
-        match tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count) {
+        match tas_shared::align::detect_first_moving(&s.rec_coords[..], s.recorded_count) {
             Some(f) => f,
             None => {
                 eprintln!("ERROR: the recording never moves");

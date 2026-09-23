@@ -38,7 +38,7 @@ pub fn level_for_save<'a>(live: Option<&'a str>, last_known: Option<&'a str>) ->
 /// when the character leaves spawn) to the end of the recording. Returns
 /// `None` if the recording never leaves spawn.
 pub fn race_centiseconds(rec_coords: &[[f32; 3]], recorded_count: u32) -> Option<u32> {
-    let gate = tas_shared::cont::detect_first_moving(rec_coords, recorded_count)?;
+    let gate = tas_shared::align::detect_first_moving(rec_coords, recorded_count)?;
     Some(recorded_count.saturating_sub(gate))
 }
 

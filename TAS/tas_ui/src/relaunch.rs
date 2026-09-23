@@ -147,7 +147,7 @@ impl TasApp {
     ) {
         let observed = self.shared.as_ref().and_then(|shared| {
             let state = shared.state();
-            (self.cont_controller.is_none()
+            (self.cycle.is_none()
                 && state.mode == TasMode::Off as u32
                 && state.cont_suppress_input != 0)
                 .then_some(state.arm_generation)
@@ -332,11 +332,11 @@ impl TasApp {
         // Only a cycle of ours may release the interlock, and only while the
         // section is still the one it armed: a controller in another process
         // may already own the new game's restart.
-        let owned_cycle = self.cont_controller.is_some();
+        let owned_cycle = self.cycle.is_some();
         self.pending_session_kind = None;
         self.pending_continue_start_tick = None;
-        self.cont_cycle_deadline = None;
-        self.cont_controller = None;
+        self.cycle_deadline = None;
+        self.cycle = None;
         if owned_cycle && mapping_is_old {
             self.set_cont_suppress_input(false);
         }

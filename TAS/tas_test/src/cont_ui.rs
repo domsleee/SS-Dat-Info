@@ -68,7 +68,7 @@ fn original_recording_file() -> Vec<u8> {
 
 fn verdict(log: &str, splice: u32) -> Result<bool, String> {
     if [
-        "CONT bucket reroll",
+        "CONT watcher reroll",
         "CONT aborted",
         "CONT gave up",
         "Game process not found",
@@ -80,9 +80,7 @@ fn verdict(log: &str, splice: u32) -> Result<bool, String> {
         return Err("Retry, drift or runtime failure in UI log".into());
     }
     let resumes = log
-        .matches(&format!(
-            "CONT resumed at frame {splice} after 1 bucket attempt "
-        ))
+        .matches(&format!("CONT resumed at frame {splice} after 1 attempt "))
         .count();
     if resumes > 1 {
         return Err("More than one CONT was triggered".into());
@@ -343,13 +341,13 @@ mod tests {
     }
     #[test]
     fn resume_alone_cannot_pass_and_transients_are_diagnostic() {
-        let resume = "Global F12 (in-game): CONT\nCONT resumed at frame 4500 after 1 bucket attempt — bucket matched\n";
+        let resume = "Global F12 (in-game): CONT\nCONT resumed at frame 4500 after 1 attempt — trajectory matched\n";
         assert!(!verdict(resume, 4500).unwrap());
         assert!(verdict(&format!("{resume}CONT prefix difference first at tick 1831\nCONT splice 4500: X=0.000000000 Z=0.000000000\n"), 4500).unwrap());
         for bad in [
             "CONT splice 4500: X=0.5 Z=0",
             "CONT splice 4500: X=NaN Z=0",
-            "CONT bucket reroll",
+            "CONT watcher reroll",
             "DRIFT",
         ] {
             assert!(verdict(&format!("{resume}{bad}"), 4500).is_err());

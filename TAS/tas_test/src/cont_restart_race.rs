@@ -43,7 +43,7 @@ fn serialised_stop_then_restart(client: &mut TasSharedMemoryClient) -> bool {
     use tas_shared::transport::{Arm, ArmConfig, StepOutcome, TransportController};
     let mut controller = TransportController::new(ArmConfig {
         arm: Arm::Continue,
-        catchup_speed: 1.0,
+        speed: 1.0,
         continue_from_frame: SPLICE_FRAME,
         gate_align_rec: 0,
         max_retries: 0,
@@ -83,7 +83,7 @@ pub fn run_input_protection() -> bool {
     let original_speed = client.state().playback_speed;
     let config = ArmConfig {
         arm: Arm::Continue,
-        catchup_speed: original_speed,
+        speed: original_speed,
         continue_from_frame: 4705,
         gate_align_rec: 299,
         max_retries: 30,

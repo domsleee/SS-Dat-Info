@@ -140,7 +140,7 @@ fn restart_play_aligned_unwatched(
     client: &mut tas_shared::TasSharedMemoryClient,
     loaded: &replay::LoadedRecording,
 ) -> Result<(u32, u32), String> {
-    let rec_gate = tas_shared::cont::detect_first_moving(&loaded.rec_coords, loaded.count)
+    let rec_gate = tas_shared::align::detect_first_moving(&loaded.rec_coords, loaded.count)
         .ok_or("source recording never leaves the spawn")?;
     if !harness::restart_and_stabilize_inprocess(client) {
         return Err("in-process restart failed".into());

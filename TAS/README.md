@@ -125,7 +125,7 @@ releasing input protection abandoned by a controller that died mid-cycle. One
 relaunch produces two signals (the PID changing, and `frame_count` going
 backwards) in either order, and they reset the session view exactly once.
 
-`tas_ui` keeps run history in `tas_ui/src/history_store_v2.rs`:
+`tas_ui` keeps run history in `tas_ui/src/history_store.rs`:
 `manifest.json` stores ordered metadata and the current entry ID, with immutable
 ID-named `.tasrec` blobs and per-entry CRC32 checksums. Metadata edits leave the
 recording blobs untouched. Its tests and the recording/UI tests cover migration,

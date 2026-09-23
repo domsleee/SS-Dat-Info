@@ -9,7 +9,7 @@
 //! implemented for the real shared-memory client and for a `FakePort` in tests
 //! (so the serialization invariants are checked without a running game).
 
-use crate::cont::BucketVerdict;
+use crate::align::{check_aligned_trajectory, AlignVerdict};
 use crate::{TasCommand, TasMode};
 
 /// Which session to arm after the restart completes.
@@ -35,7 +35,7 @@ impl Arm {
 pub struct ArmConfig {
     pub arm: Arm,
     /// Replay/catch-up speed to assert before arming.
-    pub catchup_speed: f32,
+    pub speed: f32,
     /// Splice frame for CONT (0 for REC/PLAY).
     pub continue_from_frame: u32,
     /// The recording's first-moving frame (its gate). PLAY and CONT input is
@@ -111,7 +111,7 @@ enum Phase {
     /// Arm command.
     ArmSettle,
     /// Replaying: watch the gate-aligned trajectory.
-    JudgeBucket,
+    Watch,
     Done,
     Aborted,
 }
@@ -139,87 +139,10 @@ pub enum StepOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletedVia {
     /// The aligned trajectory positively matched.
-    BucketMatched,
+    Matched,
     /// Nothing to judge: REC, a recording that never moves, or a CONT
     /// spliced before the boarder starts moving.
     Unjudged,
-}
-
-/// Judge the first gate-relative window of an aligned PLAY.
-///
-/// CONT deliberately allows sub-tick trajectory skew after matching its
-/// bucket because it only needs a safe state to splice from. Aligned PLAY
-/// has a stronger contract: cave2 is feeding the same recorded input from
-/// the same semantic gate, so the resulting coordinates must be bit-exact.
-/// A differing hidden spawn state shows up immediately in this window and
-/// must be rerolled rather than allowed to become the watched run.
-#[allow(clippy::too_many_arguments)] // a judge reads many independent shared-state fields
-pub fn judge_gate_aligned_play(
-    play_coords: &[[f32; 3]],
-    rec_coords: &[[f32; 3]],
-    recorded_count: u32,
-    playback_pos: u32,
-    live_gate: u32,
-    rec_gate: u32,
-    capture_ok: bool,
-    max_depth_rel: u32,
-) -> BucketVerdict {
-    if !capture_ok {
-        return BucketVerdict::WrongStart;
-    }
-    if live_gate == 0 || playback_pos <= live_gate {
-        return BucketVerdict::KeepWaiting;
-    }
-
-    let rec_end = (recorded_count as usize).min(rec_coords.len());
-    let rec_gate = rec_gate as usize;
-    let live_gate = live_gate as usize;
-    if rec_gate >= rec_end || live_gate >= play_coords.len() {
-        return BucketVerdict::NoSignal;
-    }
-
-    // Validate DEEP, not just through the settle: a replay exact for the
-    // first 64 frames can still veer off later, which is why
-    // BUCKET_VALIDATE_WINDOW exists. `max_depth_rel` caps the depth at the
-    // splice for CONT (0 = uncapped): the verdict must be decidable from
-    // the prefix that exists while the DLL parks the splice waiting for
-    // approval.
-    let depth_cap = if max_depth_rel == 0 {
-        usize::MAX
-    } else {
-        max_depth_rel as usize
-    };
-    let depth = (rec_end - rec_gate)
-        .min(crate::cont::BUCKET_VALIDATE_WINDOW as usize)
-        .min(depth_cap);
-    if depth == 0 {
-        return BucketVerdict::NoSignal;
-    }
-    let available = (playback_pos as usize)
-        .saturating_sub(live_gate)
-        .min(play_coords.len().saturating_sub(live_gate))
-        .min(depth);
-
-    for k in 0..available {
-        let p = play_coords[live_gate + k];
-        let r = rec_coords[rec_gate + k];
-        if !p.iter().all(|v| v.is_finite())
-            || !r.iter().all(|v| v.is_finite())
-            || p[0].to_bits() != r[0].to_bits()
-            || p[1].to_bits() != r[1].to_bits()
-            || p[2].to_bits() != r[2].to_bits()
-        {
-            return BucketVerdict::WrongBucket {
-                observed: Some(k as u32),
-            };
-        }
-    }
-
-    if available == depth {
-        BucketVerdict::Match
-    } else {
-        BucketVerdict::KeepWaiting
-    }
 }
 
 /// Drives one restart→arm(→judge→reroll) cycle to a terminal outcome.
@@ -267,7 +190,7 @@ impl TransportController {
             Phase::StopSettle => "StopSettle (waiting out the fixed Stop->Restart delay)",
             Phase::RestartWaitDone => "RestartWaitDone (waiting for the F5 restart)",
             Phase::ArmSettle => "ArmSettle",
-            Phase::JudgeBucket => "JudgeBucket (waiting on the replay)",
+            Phase::Watch => "Watch (waiting on the replay)",
             Phase::Done => "Done",
             Phase::Aborted => "Aborted",
         }
@@ -280,7 +203,7 @@ impl TransportController {
     /// True while the NEXT transition's timing feeds the F5 spawn phase
     /// (Stop acknowledgement, restart-done detection, arm settle): a driver
     /// should poll these without vsync quantization. The multi-second
-    /// `JudgeBucket` replay gains nothing from sub-frame latency, so a UI
+    /// `Watch` replay gains nothing from sub-frame latency, so a UI
     /// driver can poll it once per frame instead of spinning.
     pub fn needs_tight_polling(&self) -> bool {
         matches!(
@@ -304,10 +227,10 @@ impl TransportController {
         // Re-assert the catch-up speed on EVERY step: the in-process F5
         // restart momentarily resets the game's speed, and without this the
         // post-restart countdown replays at 1x until the next phase re-sets it.
-        port.set_playback_speed(self.cfg.catchup_speed);
+        port.set_playback_speed(self.cfg.speed);
         match self.phase {
             Phase::Start => {
-                port.set_playback_speed(self.cfg.catchup_speed);
+                port.set_playback_speed(self.cfg.speed);
                 port.set_continue_from_frame(self.cfg.continue_from_frame);
                 // STOP also clears this in the DLL. Clear it here as part of
                 // the controller contract so even a delayed STOP cannot let
@@ -366,13 +289,13 @@ impl TransportController {
                 // The gate fixes input indexing, but it does not fully identify
                 // hidden spawn state, so the resulting trajectory is watched.
                 if self.cfg.gate_align_rec > 0 {
-                    self.phase = Phase::JudgeBucket;
+                    self.phase = Phase::Watch;
                     StepOutcome::InProgress
                 } else {
                     self.finish(CompletedVia::Unjudged)
                 }
             }
-            Phase::JudgeBucket => {
+            Phase::Watch => {
                 // Until the DLL has processed the arm, the mode and position
                 // being read still describe the PREVIOUS replay - so nothing
                 // here can be concluded from them yet. This has to come
@@ -386,7 +309,7 @@ impl TransportController {
                 if mode == rec {
                     // The splice already fired: the prefix replayed clean
                     // past the watcher and reached the splice.
-                    return self.finish(CompletedVia::BucketMatched);
+                    return self.finish(CompletedVia::Matched);
                 }
                 // Past the arm, "not in PLAY" means the replay ENDED (or the
                 // DLL refused the arm outright, which leaves it OFF forever).
@@ -436,7 +359,7 @@ impl TransportController {
                 } else {
                     0
                 };
-                let verdict = judge_gate_aligned_play(
+                let verdict = check_aligned_trajectory(
                     port.play_coords(),
                     port.rec_coords(),
                     port.recorded_count(),
@@ -447,13 +370,13 @@ impl TransportController {
                     max_depth_rel,
                 );
                 match verdict {
-                    BucketVerdict::KeepWaiting if replay_ended => self.reroll(
+                    AlignVerdict::Pending if replay_ended => self.reroll(
                         port,
                         "aligned replay ended before its watcher completed".to_string(),
                         None,
                     ),
-                    BucketVerdict::KeepWaiting => StepOutcome::InProgress,
-                    BucketVerdict::Match => {
+                    AlignVerdict::Pending => StepOutcome::InProgress,
+                    AlignVerdict::Matched => {
                         // CONT: the DLL parks playback AT the splice until
                         // this approval lands. Writing it is the ONLY way the
                         // splice can fire, so a starved controller merely
@@ -461,22 +384,22 @@ impl TransportController {
                         if is_cont {
                             port.approve_cont_splice();
                         }
-                        self.finish(CompletedVia::BucketMatched)
+                        self.finish(CompletedVia::Matched)
                     }
-                    BucketVerdict::WrongBucket { observed } => self.reroll(
+                    AlignVerdict::Diverged { at } => self.reroll(
                         port,
                         format!(
                             "aligned trajectory mismatch at gate-relative frame {:?}",
-                            observed
+                            at
                         ),
-                        observed,
+                        at,
                     ),
-                    BucketVerdict::WrongStart => self.reroll(
+                    AlignVerdict::CaptureFailed => self.reroll(
                         port,
                         "aligned trajectory capture was incomplete".to_string(),
                         None,
                     ),
-                    BucketVerdict::NoSignal => self.reroll(
+                    AlignVerdict::MissingTrajectory => self.reroll(
                         port,
                         "recording has no gate-relative trajectory to watch".to_string(),
                         None,
@@ -528,7 +451,7 @@ impl TransportController {
         let attempt = self.cfg.max_retries - self.retries_remaining;
         port.set_continue_from_frame(self.cfg.continue_from_frame);
         port.set_gate_align_rec(0);
-        port.set_playback_speed(self.cfg.catchup_speed);
+        port.set_playback_speed(self.cfg.speed);
         port.send_command(self.restart_stop_command());
         self.phase = Phase::StopWaitAck;
         StepOutcome::Reroll { attempt, observed }
@@ -538,6 +461,7 @@ impl TransportController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::align::aligned_trajectory;
 
     #[derive(Default)]
     struct FakePort {
@@ -623,87 +547,11 @@ mod tests {
     fn cfg(arm: Arm, max_retries: u32) -> ArmConfig {
         ArmConfig {
             arm,
-            catchup_speed: 12.0,
+            speed: 12.0,
             continue_from_frame: if arm == Arm::Continue { 320 } else { 0 },
             gate_align_rec: 0,
             max_retries,
         }
-    }
-
-    fn aligned_trajectory(
-        rec_gate: usize,
-        live_gate: usize,
-        depth: usize,
-    ) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
-        let len = (rec_gate.max(live_gate) + depth + 16).max(400);
-        let mut rec = vec![[0.0; 3]; len];
-        let mut play = vec![[0.0; 3]; len];
-        for k in 0..depth {
-            let point = [k as f32 + 1.25, k as f32 * 0.5 + 2.0, -(k as f32)];
-            rec[rec_gate + k] = point;
-            play[live_gate + k] = point;
-        }
-        (play, rec)
-    }
-
-    #[test]
-    fn aligned_play_judge_matches_a_shifted_gate_relative_trajectory() {
-        // recorded_count 400, rec_gate 299 -> full depth is 101; the
-        // watcher must see ALL of it before declaring Match.
-        let (play, rec) = aligned_trajectory(299, 297, 101);
-        assert_eq!(
-            judge_gate_aligned_play(&play, &rec, 400, 398, 297, 299, true, 0),
-            BucketVerdict::Match
-        );
-    }
-
-    #[test]
-    fn aligned_play_judge_validates_past_the_settle_window() {
-        // Exact for the first 64 gate-relative frames, divergent at 80:
-        // the documented late-divergence bug. A 64-frame window accepted
-        // this; the deep watcher must reject it.
-        let (mut play, rec) = aligned_trajectory(299, 297, 101);
-        play[297 + 80][2] += 0.5;
-        assert_eq!(
-            judge_gate_aligned_play(&play, &rec, 400, 398, 297, 299, true, 0),
-            BucketVerdict::WrongBucket { observed: Some(80) }
-        );
-    }
-
-    #[test]
-    fn aligned_cont_judge_depth_is_capped_at_the_splice() {
-        // A CONT splicing 70 frames past the gate can only ever show the
-        // watcher 70 frames (the DLL parks there) - Match must be
-        // decidable from exactly that prefix.
-        let (play, rec) = aligned_trajectory(299, 297, 70);
-        assert_eq!(
-            judge_gate_aligned_play(&play, &rec, 400, 367, 297, 299, true, 70),
-            BucketVerdict::Match
-        );
-    }
-
-    #[test]
-    fn aligned_play_judge_rejects_a_one_bit_hidden_state_difference() {
-        let (mut play, rec) = aligned_trajectory(299, 297, 101);
-        play[297][0] = f32::from_bits(play[297][0].to_bits() + 1);
-        assert_eq!(
-            judge_gate_aligned_play(&play, &rec, 400, 298, 297, 299, true, 0),
-            BucketVerdict::WrongBucket { observed: Some(0) }
-        );
-    }
-
-    #[test]
-    fn aligned_play_judge_waits_for_the_full_window_and_capture() {
-        let (play, rec) = aligned_trajectory(299, 297, 101);
-        // One frame short of the full 101-frame depth: keep waiting.
-        assert_eq!(
-            judge_gate_aligned_play(&play, &rec, 400, 397, 297, 299, true, 0),
-            BucketVerdict::KeepWaiting
-        );
-        assert_eq!(
-            judge_gate_aligned_play(&play, &rec, 400, 398, 297, 299, false, 0),
-            BucketVerdict::WrongStart
-        );
     }
 
     #[test]
@@ -802,7 +650,7 @@ mod tests {
             c.step(&mut p),
             StepOutcome::Done {
                 retries_used: 0,
-                completed_via: CompletedVia::BucketMatched
+                completed_via: CompletedVia::Matched
             }
         );
     }
@@ -844,7 +692,7 @@ mod tests {
             c.step(&mut p),
             StepOutcome::Done {
                 retries_used: 1,
-                completed_via: CompletedVia::BucketMatched
+                completed_via: CompletedVia::Matched
             }
         );
     }
@@ -877,7 +725,7 @@ mod tests {
     }
 
     /// Drive the controller through restart until it's armed CONT and in the
-    /// JudgeBucket phase. Returns once ArmContinue has been sent.
+    /// Watch phase. Returns once ArmContinue has been sent.
     fn drive_to_judge(c: &mut TransportController, p: &mut FakePort) {
         // Start publishes Stop. Tests may begin in REC/PLAY, so model Cave2
         // consuming it before the deterministic settle begins.
@@ -890,7 +738,7 @@ mod tests {
         c.step(p);
         p.restart_state = 2;
         c.step(p); // RestartWaitDone -> ArmSettle (Wait)
-        c.step(p); // ArmSettle -> arm command, phase -> JudgeBucket
+        c.step(p); // ArmSettle -> arm command, phase -> Watch
         assert_eq!(p.commands.last(), Some(&c.cfg.arm.command()));
         // game enters PLAY for the replay
         p.mode = TasMode::Play as u32;
@@ -969,7 +817,7 @@ mod tests {
             c.step(&mut p),
             StepOutcome::Done {
                 retries_used: 0,
-                completed_via: CompletedVia::BucketMatched
+                completed_via: CompletedVia::Matched
             }
         );
         assert!(p.splice_approved);
@@ -1058,7 +906,7 @@ mod tests {
             c.step(&mut p),
             StepOutcome::Done {
                 retries_used: 0,
-                completed_via: CompletedVia::BucketMatched
+                completed_via: CompletedVia::Matched
             }
         );
     }

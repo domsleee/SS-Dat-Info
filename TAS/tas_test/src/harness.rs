@@ -340,15 +340,15 @@ pub fn restart_play_aligned_inprocess(client: &mut TasSharedMemoryClient) -> Opt
 
     let rec_gate = {
         let s = client.state();
-        tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count)?
+        tas_shared::align::detect_first_moving(&s.rec_coords[..], s.recorded_count)?
     };
-    let catchup_speed = client.state().playback_speed.max(1.0);
+    let speed = client.state().playback_speed.max(1.0);
     let mut controller = TransportController::new(ArmConfig {
         arm: Arm::Play,
-        catchup_speed,
+        speed,
         continue_from_frame: 0,
         gate_align_rec: rec_gate,
-        max_retries: tas_shared::cont::START_MATCH_MAX_RETRIES,
+        max_retries: tas_shared::align::ALIGN_MAX_RETRIES,
     });
 
     stop_competing_tas_ui_writer();
@@ -376,7 +376,7 @@ pub fn restart_play_aligned_inprocess(client: &mut TasSharedMemoryClient) -> Opt
                 println!(
                     "  Aligned PLAY watcher rejected attempt {}/{} (first mismatch at gate+{})",
                     attempt,
-                    tas_shared::cont::START_MATCH_MAX_RETRIES,
+                    tas_shared::align::ALIGN_MAX_RETRIES,
                     mismatch
                 );
             }
@@ -863,17 +863,17 @@ pub fn restart_continue_and_splice_inprocess(
     // not matter.
     let gate_align_rec = {
         let s = client.state();
-        tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count).unwrap_or(0)
+        tas_shared::align::detect_first_moving(&s.rec_coords[..], s.recorded_count).unwrap_or(0)
     };
     println!(
         "  CONT aligned on recording gate {} (shared controller)",
         gate_align_rec
     );
 
-    let catchup_speed = client.state().playback_speed;
+    let speed = client.state().playback_speed;
     let cfg = ArmConfig {
         arm: Arm::Continue,
-        catchup_speed,
+        speed,
         continue_from_frame: splice_frame,
         gate_align_rec,
         max_retries,
@@ -885,10 +885,10 @@ pub fn restart_continue_and_splice_inprocess(
     stop_competing_tas_ui_writer();
     dismiss_save_dialog();
 
-    let speed = (catchup_speed as f64).max(0.05);
+    let poll_speed = (speed as f64).max(0.05);
     // Per-attempt budget: restart handshake + replay-to-judge at this speed.
     let per_attempt = Duration::from_secs_f64(
-        RESTART_TIMEOUT_SECS as f64 + (JUDGE_TIMEOUT_SECS as f64) * (1.0 / speed).max(1.0),
+        RESTART_TIMEOUT_SECS as f64 + (JUDGE_TIMEOUT_SECS as f64) * (1.0 / poll_speed).max(1.0),
     );
     let mut attempt_deadline = Instant::now() + per_attempt;
 

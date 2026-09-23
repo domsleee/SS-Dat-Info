@@ -1,5 +1,5 @@
 mod drift_scan;
-mod history_store_v2;
+mod history_store;
 mod level;
 mod panels;
 mod pico;
@@ -48,18 +48,18 @@ use recording::{RecordingHistory, RecordingSessionKind};
 
 const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
 const PLAYBACK_SPEED_PRESETS: [f32; 4] = [0.25, 0.5, 1.0, 2.0];
-// Shared with the cont-reliability harness via tas_shared::cont — the bucket
+// Shared with the cont-reliability harness via tas_shared::align — the bucket
 // headroom now lives inside judge_cont_bucket (one source of truth).
-const CONT_START_MATCH_MAX_RETRIES: u32 = tas_shared::cont::START_MATCH_MAX_RETRIES;
+const ALIGN_MAX_RETRIES: u32 = tas_shared::align::ALIGN_MAX_RETRIES;
 
 /// How long one judged cycle may run before the UI gives up on it.
 ///
 /// Generous on purpose — this is a stall guard, not a performance bound. A
 /// deep CONT catch-up plus its rerolls, or a PLAY judged all the way to
-/// first_moving + BUCKET_VALIDATE_WINDOW at 1x, legitimately take tens of
+/// first_moving + ALIGN_VERIFY_FRAMES at 1x, legitimately take tens of
 /// seconds. What it must not do is let a cycle that will never finish hold
 /// the input block forever.
-const CONT_CYCLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(180);
+const CYCLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(180);
 
 fn normalize_playback_speed(speed: f32) -> f32 {
     if !speed.is_finite() {
@@ -105,7 +105,7 @@ struct TasApp {
     show_pico_panel: bool,
     pico: PicoState,
     history: RecordingHistory,
-    history_writer: Option<history_store_v2::HistoryWriter>,
+    history_writer: Option<history_store::HistoryWriter>,
     /// Highest history revision the worker confirmed durably committed.
     last_persisted_revision: u64,
     /// Highest revision currently queued/in flight. Kept separate from durable
@@ -156,13 +156,13 @@ struct TasApp {
     pending_session_kind: Option<RecordingSessionKind>,
     pending_continue_start_tick: Option<u32>,
     last_mode: u32,
-    cont_catchup_speed: Option<f32>, // saved speed to restore after CONT catch-up
-    cont_catchup_multiplier: f32,    // configurable CONT catch-up speed (default 12x)
+    resume_speed: Option<f32>, // speed to return to when a CONT catch-up ends
+    cont_catchup_multiplier: f32, // configurable CONT catch-up speed (default 12x)
     /// Which transport the in-flight controller cycle is for, for log lines.
     /// The reroll/abort messages used to hardcode "CONT" because only CONT was
     /// ever judged; PLAY can be judged now, and a PLAY that exhausts its
     /// rerolls reporting "CONT aborted" would send someone hunting the wrong bug.
-    cont_cycle_arm: tas_shared::transport::Arm,
+    cycle_arm: tas_shared::transport::Arm,
     log_read_cursor: u32,
     /// Finish-line watcher (1.7): scan cursor into rec_coords during REC so
     /// each frame only examines new ticks, and the tick the run crossed the
@@ -181,11 +181,11 @@ struct TasApp {
     /// In-flight restart→arm(→judge→reroll) cycle, driven by the shared
     /// `tas_shared::transport` controller — the SAME state machine the tas_test
     /// harness runs, so the test is a true oracle. Stepped once per egui frame
-    /// via `step_cont_controller`; `None` when idle. Encapsulates the old
+    /// via `step_cycle`; `None` when idle. Encapsulates the old
     /// two-step Stop→wait-OFF→Restart→wait-rs2 serialisation (the shared
     /// `command` slot is a single u32, so Stop and Restart can't be written on
     /// the same frame) plus the CONT bucket judge/reroll loop.
-    cont_controller: Option<tas_shared::transport::TransportController>,
+    cycle: Option<tas_shared::transport::TransportController>,
     /// Wall-clock deadline for the in-flight cycle to make a terminal
     /// transition. `None` when idle.
     ///
@@ -195,7 +195,7 @@ struct TasApp {
     /// had its own budget for this; the UI had none, so the same stall left the
     /// cycle spinning with cont_suppress_input SET and the user's keyboard
     /// swallowed until they found the STOP button.
-    cont_cycle_deadline: Option<std::time::Instant>,
+    cycle_deadline: Option<std::time::Instant>,
     /// Carries the last CONT cycle's result (bucket attempts, how the bucket
     /// was accepted) from controller-`Done` to the REC-start transition, where
     /// the actual resume frame is known — so we can log one "resumed at frame X
@@ -302,9 +302,9 @@ impl TasApp {
         // File-per-entry history store.
         let history_cap = settings.history_cap.max(1);
         let mut history = RecordingHistory::new(history_cap);
-        let history_dir = history_store_v2::default_history_dir();
+        let history_dir = history_store::default_history_dir();
         let mut history_notices: Vec<String> = Vec::new();
-        let history_writer = match history_store_v2::HistoryWriter::open(history_dir.clone()) {
+        let history_writer = match history_store::HistoryWriter::open(history_dir.clone()) {
             Ok((writer, load)) => {
                 // Entries load lazily: a restore reads its blob from here.
                 history.set_blob_dir(history_dir.clone());
@@ -377,17 +377,17 @@ impl TasApp {
             pending_session_kind: None,
             pending_continue_start_tick: None,
             last_mode: 0,
-            cont_catchup_speed: None,
+            resume_speed: None,
             cont_catchup_multiplier: settings.cont_catchup_speed,
-            cont_cycle_arm: tas_shared::transport::Arm::Continue,
+            cycle_arm: tas_shared::transport::Arm::Continue,
             log_read_cursor: 0,
             finish_scan_cursor: 0,
             finished_at_tick: None,
             finished_hud_cs: None,
             drift_tracker: drift_scan::DriftTracker::default(),
             last_logged_drift_level: 0,
-            cont_controller: None,
-            cont_cycle_deadline: None,
+            cycle: None,
+            cycle_deadline: None,
             cont_last_outcome: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
@@ -496,7 +496,7 @@ impl TasApp {
     }
 
     fn playback_speed_for_settings(&self) -> f32 {
-        let base_speed = self.cont_catchup_speed.unwrap_or(self.playback_speed);
+        let base_speed = self.resume_speed.unwrap_or(self.playback_speed);
         normalize_playback_speed(base_speed)
     }
 
@@ -571,7 +571,7 @@ impl TasApp {
     }
 
     fn clear_cont_catchup(&mut self) {
-        if let Some(saved) = self.cont_catchup_speed.take() {
+        if let Some(saved) = self.resume_speed.take() {
             self.playback_speed = saved;
         }
     }
@@ -579,11 +579,11 @@ impl TasApp {
     fn reset_continue_runtime_state(&mut self) {
         self.pending_session_kind = None;
         self.pending_continue_start_tick = None;
-        self.cont_cycle_deadline = None;
+        self.cycle_deadline = None;
         // Cancel any in-flight restart/arm/reroll cycle. STOP must mean STOP —
         // without this the controller would keep stepping and silently start
         // recording/playback after the restart completes.
-        self.cont_controller = None;
+        self.cycle = None;
         // A cancelled CONT must not leave live input blocked.
         self.set_cont_suppress_input(false);
     }
@@ -610,7 +610,7 @@ impl TasApp {
             .as_ref()
             .and_then(|shared| {
                 let state = shared.state();
-                tas_shared::cont::detect_first_moving(&state.rec_coords, state.recorded_count)
+                tas_shared::align::detect_first_moving(&state.rec_coords, state.recorded_count)
             })
             .unwrap_or(0)
     }
@@ -619,7 +619,7 @@ impl TasApp {
         if command == TasCommand::Stop {
             self.clear_cont_catchup();
             // reset_continue_runtime_state also cancels any in-flight
-            // cont_controller cycle, so STOP after a RestartThen click can't
+            // cycle cycle, so STOP after a RestartThen click can't
             // silently complete the restart and start recording/playback.
             self.reset_continue_runtime_state();
         }
@@ -647,7 +647,7 @@ impl TasApp {
             .unwrap_or((TasMode::Off as u32, true));
         // The DLL can be idle while the UI still has a restart/arm queued.
         // Cancel that controller through STOP before replacing its recording.
-        if stop_is_acknowledged(mode, command_idle) && self.cont_controller.is_none() {
+        if stop_is_acknowledged(mode, command_idle) && self.cycle.is_none() {
             self.sync_live_level();
             return true;
         }
@@ -842,7 +842,7 @@ impl TasApp {
                 // cont_resume_speed) drops to the speed the user just picked.
                 // playback_speed stays the catch-up multiplier; clear_cont_catchup
                 // restores playback_speed from cont_catchup_speed at the splice.
-                self.cont_catchup_speed = Some(spd);
+                self.resume_speed = Some(spd);
                 if let Some(shared) = self.shared.as_mut() {
                     shared.state_mut().cont_resume_speed = spd;
                 }
@@ -855,8 +855,8 @@ impl TasApp {
     }
 
     /// Display name of the in-flight controller cycle for log lines.
-    fn cont_cycle_label(&self) -> &'static str {
-        match self.cont_cycle_arm {
+    fn cycle_label(&self) -> &'static str {
+        match self.cycle_arm {
             tas_shared::transport::Arm::Continue => "CONT",
             tas_shared::transport::Arm::Play => "PLAY",
             tas_shared::transport::Arm::Rec => "REC",
@@ -870,7 +870,7 @@ impl TasApp {
         // arm the wrong thing (observed: a stray ArmRec after a rapid double
         // CONT wiped the recording to a fresh spawn run). Ignore until the
         // current cycle finishes.
-        if self.cont_controller.is_some() {
+        if self.cycle.is_some() {
             self.log_lines.push(format!(
                 "{:?} ignored: a restart/arm cycle is already in progress",
                 command
@@ -949,8 +949,8 @@ impl TasApp {
         let mut gate_align_rec = 0;
         let mut continue_from_frame = 0;
         if command == TasCommand::ArmContinue {
-            if self.cont_catchup_speed.is_none() {
-                self.cont_catchup_speed = Some(self.playback_speed);
+            if self.resume_speed.is_none() {
+                self.resume_speed = Some(self.playback_speed);
             }
             self.playback_speed = self.cont_catchup_multiplier;
             self.pending_session_kind = Some(RecordingSessionKind::Continue);
@@ -994,14 +994,14 @@ impl TasApp {
         // diverge with no visible reason.
         if gate_align_rec > 0 {
             if let Some(shared) = self.shared.as_ref() {
-                let n = tas_shared::cont::pre_gate_hold_overwrites(
+                let n = tas_shared::align::pre_gate_hold_overwrites(
                     &shared.state().input_log,
                     gate_align_rec,
                 );
                 if n > 0 {
                     self.log_lines.push(format!(
                         "WARNING: {} recorded input frame(s) in the {} frames before the gate differ from the gate mask; alignment replays them AS the gate mask",
-                        n, tas_shared::cont::GATE_ALIGN_PRE_GATE_LEAD
+                        n, tas_shared::align::GATE_ALIGN_PRE_GATE_LEAD
                     ));
                 }
             }
@@ -1013,7 +1013,7 @@ impl TasApp {
         // atomically at the splice — otherwise the resumed recording
         // fast-forwards at the catch-up rate until the UI polls.
         let cont_resume_speed = if command == TasCommand::ArmContinue {
-            self.cont_catchup_speed.unwrap_or(DEFAULT_PLAYBACK_SPEED)
+            self.resume_speed.unwrap_or(DEFAULT_PLAYBACK_SPEED)
         } else {
             0.0 // unset: DLL leaves the speed alone (PLAY/REC don't splice)
         };
@@ -1030,22 +1030,22 @@ impl TasApp {
         // watcher, and rerolls failures.
         let cfg = tas_shared::transport::ArmConfig {
             arm,
-            catchup_speed: self.playback_speed,
+            speed: self.playback_speed,
             continue_from_frame,
             gate_align_rec,
             max_retries: if gate_align_rec > 0 {
-                CONT_START_MATCH_MAX_RETRIES
+                ALIGN_MAX_RETRIES
             } else {
                 0
             },
         };
-        self.cont_controller = Some(tas_shared::transport::TransportController::new(cfg));
-        self.cont_cycle_deadline = Some(std::time::Instant::now() + CONT_CYCLE_BUDGET);
-        self.cont_cycle_arm = arm;
+        self.cycle = Some(tas_shared::transport::TransportController::new(cfg));
+        self.cycle_deadline = Some(std::time::Instant::now() + CYCLE_BUDGET);
+        self.cycle_arm = arm;
         // Block live input for the restart portion of any replay cycle — set BEFORE the
         // controller's first command so it covers every restart's OFF-mode spawn
         // countdown (the window the mode-based handler block misses). Cleared
-        // when the bucket aligns (step_cont_controller / Done) — from there the
+        // when the bucket aligns (step_cycle / Done) — from there the
         // catch-up PLAY and resumed REC are handler-blocked by mode, and
         // post-splice REC must see live input.
         //
@@ -1075,8 +1075,8 @@ impl TasApp {
     /// shared state machine the tas_test harness also drives — so the app and
     /// the test can't diverge. Logs/jitter/clear live here (egui side); the
     /// transitions live in tas_shared::transport.
-    fn step_cont_controller(&mut self, ctx: &egui::Context) {
-        if self.cont_controller.is_none() {
+    fn step_cycle(&mut self, ctx: &egui::Context) {
+        if self.cycle.is_none() {
             return;
         }
         use tas_shared::transport::StepOutcome;
@@ -1100,11 +1100,11 @@ impl TasApp {
         // replay renders at full rate.
         let spin_until = std::time::Instant::now() + std::time::Duration::from_millis(40);
         loop {
-            let outcome = match (self.cont_controller.as_mut(), self.shared.as_mut()) {
+            let outcome = match (self.cycle.as_mut(), self.shared.as_mut()) {
                 (Some(c), Some(p)) => c.step(p),
                 _ => {
                     // Lost the shared-memory connection — drop the cycle.
-                    self.cont_controller = None;
+                    self.cycle = None;
                     return;
                 }
             };
@@ -1115,19 +1115,15 @@ impl TasApp {
                     // log — an F5 restart that never completed and an arm the
                     // DLL never processed look identical from here otherwise.
                     if self
-                        .cont_cycle_deadline
+                        .cycle_deadline
                         .is_some_and(|d| std::time::Instant::now() > d)
                     {
-                        let phase = self
-                            .cont_controller
-                            .as_ref()
-                            .map(|c| c.phase_name())
-                            .unwrap_or("?");
+                        let phase = self.cycle.as_ref().map(|c| c.phase_name()).unwrap_or("?");
                         self.push_log(&format!(
                             "{} gave up: stalled in {} for {}s",
-                            self.cont_cycle_label(),
+                            self.cycle_label(),
                             phase,
-                            CONT_CYCLE_BUDGET.as_secs()
+                            CYCLE_BUDGET.as_secs()
                         ));
                         self.clear_cont_catchup();
                         if let Some(shared) = self.shared.as_mut() {
@@ -1145,14 +1141,11 @@ impl TasApp {
                     // don't set the F5 arm phase. Spin tightly for a bounded
                     // budget (so restart-done detection stays ~3ms, not
                     // vsync-quantized) ONLY while the phase feeds the arm
-                    // timing. The multi-second JudgeBucket replay gains nothing
+                    // timing. The multi-second Watch replay gains nothing
                     // from sub-frame latency, and spinning through it held every
                     // PLAY/CONT at ~25 fps (measured 2026-09-02: 38-42 ms per
                     // frame, all in this loop) - there, poll once per frame.
-                    let tight = self
-                        .cont_controller
-                        .as_ref()
-                        .is_some_and(|c| c.needs_tight_polling());
+                    let tight = self.cycle.as_ref().is_some_and(|c| c.needs_tight_polling());
                     if !tight || std::time::Instant::now() >= spin_until {
                         ctx.request_repaint();
                         return;
@@ -1171,9 +1164,9 @@ impl TasApp {
                         .unwrap_or_else(|| "?".to_string());
                     self.push_log(&format!(
                         "{} watcher reroll {}/{} (first mismatch at gate+{})",
-                        self.cont_cycle_label(),
+                        self.cycle_label(),
                         attempt,
-                        CONT_START_MATCH_MAX_RETRIES,
+                        ALIGN_MAX_RETRIES,
                         mismatch
                     ));
                 }
@@ -1182,25 +1175,17 @@ impl TasApp {
                     completed_via,
                 } => {
                     if retries_used > 0 {
-                        if self.cont_cycle_arm == tas_shared::transport::Arm::Play {
-                            self.push_log(&format!(
-                                "PLAY watcher accepted after {} restart retr{}",
-                                retries_used,
-                                if retries_used == 1 { "y" } else { "ies" }
-                            ));
-                        } else {
-                            self.push_log(&format!(
-                                "{} bucket aligned after {} restart retr{}",
-                                self.cont_cycle_label(),
-                                retries_used,
-                                if retries_used == 1 { "y" } else { "ies" }
-                            ));
-                        }
+                        self.push_log(&format!(
+                            "{} watcher accepted after {} restart retr{}",
+                            self.cycle_label(),
+                            retries_used,
+                            if retries_used == 1 { "y" } else { "ies" }
+                        ));
                     }
                     // Stash for the resume summary emitted at the REC-start splice,
                     // where the actual resume frame is known. attempts = rerolls + 1.
                     self.cont_last_outcome = Some((retries_used + 1, completed_via));
-                    self.cont_controller = None;
+                    self.cycle = None;
                     // Bucket aligned — release the live-input block. The
                     // remaining catch-up PLAY → splice → REC are all
                     // handler-blocked by mode, and post-splice REC must record
@@ -1209,14 +1194,14 @@ impl TasApp {
                     return;
                 }
                 StepOutcome::Aborted { reason } => {
-                    self.push_log(&format!("{} aborted: {}", self.cont_cycle_label(), reason));
+                    self.push_log(&format!("{} aborted: {}", self.cycle_label(), reason));
                     self.clear_cont_catchup();
                     // Push the restored speed through: an aborted PLAY must not
                     // leave the game fast-forwarding at the judge speed.
                     if let Some(shared) = self.shared.as_mut() {
                         shared.state_mut().playback_speed = self.playback_speed;
                     }
-                    // also clears cont_controller
+                    // also clears cycle
                     self.reset_continue_runtime_state();
                     self.set_cont_suppress_input(false);
                     return;
@@ -1468,11 +1453,11 @@ impl TasApp {
             .take()
             .unwrap_or((1, CompletedVia::Unjudged));
         let verdict = match via {
-            CompletedVia::BucketMatched => "bucket matched",
-            CompletedVia::Unjudged => "bucket unjudged",
+            CompletedVia::Matched => "trajectory matched",
+            CompletedVia::Unjudged => "nothing to watch",
         };
         self.push_log(&format!(
-            "CONT resumed at frame {} after {} bucket attempt{} — {}",
+            "CONT resumed at frame {} after {} attempt{} — {}",
             session.start_tick,
             attempts,
             if attempts == 1 { "" } else { "s" },
@@ -1595,7 +1580,7 @@ impl TasApp {
                     level_code,
                 );
                 let first_moving =
-                    tas_shared::cont::detect_first_moving(snapshot.rec_coords.as_ref(), end_tick);
+                    tas_shared::align::detect_first_moving(snapshot.rec_coords.as_ref(), end_tick);
                 recording::FinishStamp {
                     cs: recording::geometry_race_time_cs(tick, start, first_moving),
                     exact: false,
@@ -2181,12 +2166,12 @@ impl eframe::App for TasApp {
                     // this: it accepts the bucket at first_moving + 64 while the
                     // splice sits thousands of ticks later. But a splice EARLIER
                     // than the judge window (a redo from a low frame) can reach
-                    // REC first, and this handler runs before step_cont_controller
+                    // REC first, and this handler runs before step_cycle
                     // in the same frame. Dropping the controller without its Done
                     // path would strand cont_suppress_input SET - and the whole
                     // point of the resumed REC is to record live input.
-                    if self.cont_controller.take().is_some() {
-                        self.cont_cycle_deadline = None;
+                    if self.cycle.take().is_some() {
+                        self.cycle_deadline = None;
                         self.set_cont_suppress_input(false);
                     }
                     // Fresh finish-line watch for this session. A CONT splice
@@ -2467,7 +2452,7 @@ impl eframe::App for TasApp {
         let history_dir = self
             .history_writer
             .as_ref()
-            .map(|_| history_store_v2::default_history_dir());
+            .map(|_| history_store::default_history_dir());
         let mut open_history_dir = false;
         if self.show_history {
             egui::SidePanel::right("history_panel")
@@ -2606,7 +2591,7 @@ impl eframe::App for TasApp {
         }
 
         // Advance the in-flight restart/arm/reroll cycle (shared controller).
-        self.step_cont_controller(ctx);
+        self.step_cycle(ctx);
 
         // Apply shortcut actions to shared state (same dispatch as the buttons).
         for cmd in shortcut_actions {
@@ -2628,7 +2613,7 @@ impl eframe::App for TasApp {
                 // During catch-up the resume speed lives in cont_catchup_speed
                 // (playback_speed is the catch-up multiplier); otherwise it's
                 // just the live play speed. The buttons highlight/edit this.
-                let resume_speed = self.cont_catchup_speed.unwrap_or(self.playback_speed);
+                let resume_speed = self.resume_speed.unwrap_or(self.playback_speed);
 
                 // Stamp new history entries with the level they're made on
                 // (per-level history filter).
@@ -2657,7 +2642,7 @@ impl eframe::App for TasApp {
                         cont_catchup_speed: self.cont_catchup_multiplier,
                         history: &self.history,
                         state: shared.state(),
-                        catchup_active: self.cont_catchup_speed.is_some(),
+                        catchup_active: self.resume_speed.is_some(),
                         resume_speed,
                         arming_allowed,
                     },
@@ -2691,10 +2676,10 @@ impl eframe::App for TasApp {
                 // multiplier — so we don't stomp it back to e.g. 64x for the
                 // frame(s) before our mode-transition handler runs. This closes
                 // the post-splice overshoot.
-                let catchup_active = self.cont_catchup_speed.is_some();
+                let catchup_active = self.resume_speed.is_some();
                 let mode = shared.state().mode;
                 let speed_to_assert = if catchup_active && mode == TasMode::Rec as u32 {
-                    self.cont_catchup_speed.unwrap_or(self.playback_speed)
+                    self.resume_speed.unwrap_or(self.playback_speed)
                 } else {
                     self.playback_speed
                 };
@@ -2754,7 +2739,7 @@ impl eframe::App for TasApp {
                 if open_text_script {
                     let total = state.recorded_count;
                     let events = input_script::runs_from_log(&state.input_log, total);
-                    let timer = tas_shared::cont::detect_first_moving(&state.rec_coords, total)
+                    let timer = tas_shared::align::detect_first_moving(&state.rec_coords, total)
                         .unwrap_or(0);
                     let script = input_script::events_to_script(&events, timer);
                     let path = script_watch::ScriptWatch::fresh_path();
@@ -3162,14 +3147,14 @@ mod tests {
             pending_session_kind: None,
             pending_continue_start_tick: None,
             last_mode: 0,
-            cont_catchup_speed: None,
+            resume_speed: None,
             cont_catchup_multiplier: 12.0,
-            cont_cycle_arm: tas_shared::transport::Arm::Continue,
+            cycle_arm: tas_shared::transport::Arm::Continue,
             log_read_cursor: 0,
             drift_tracker: drift_scan::DriftTracker::default(),
             last_logged_drift_level: 0,
-            cont_controller: None,
-            cont_cycle_deadline: None,
+            cycle: None,
+            cycle_deadline: None,
             cont_last_outcome: None,
             prev_global_keys: [false; 4],
             game_pid_cached: None,
@@ -3375,22 +3360,22 @@ mod tests {
         use tas_shared::transport::{Arm, ArmConfig, TransportController};
         for arm in [Arm::Rec, Arm::Play, Arm::Continue] {
             let mut app = test_app();
-            app.cont_controller = Some(TransportController::new(ArmConfig {
+            app.cycle = Some(TransportController::new(ArmConfig {
                 arm,
-                catchup_speed: 256.0,
+                speed: 256.0,
                 continue_from_frame: 400,
                 gate_align_rec: 299,
                 max_retries: 1,
             }));
-            app.cont_catchup_speed = Some(1.0);
+            app.resume_speed = Some(1.0);
             app.playback_speed = 256.0;
             app.pending_session_kind = Some(RecordingSessionKind::Continue);
             app.pending_continue_start_tick = Some(400);
             assert!(app.stop_active_session_for_load());
-            assert!(app.cont_controller.is_none());
+            assert!(app.cycle.is_none());
             assert!(app.pending_session_kind.is_none());
             assert!(app.pending_continue_start_tick.is_none());
-            assert!(app.cont_catchup_speed.is_none());
+            assert!(app.resume_speed.is_none());
             assert_eq!(app.playback_speed, 1.0);
         }
     }
@@ -3521,7 +3506,7 @@ mod tests {
         // should bail before touching catchup state.
         app.queue_restart_then(TasCommand::ArmContinue);
         assert!(
-            app.cont_catchup_speed.is_none(),
+            app.resume_speed.is_none(),
             "CONT without recording must not engage catchup speed"
         );
         assert!(
@@ -3530,7 +3515,7 @@ mod tests {
             app.playback_speed
         );
         assert!(
-            app.cont_controller.is_none(),
+            app.cycle.is_none(),
             "CONT without recording must not arm a controller"
         );
     }
@@ -3680,6 +3665,6 @@ mod tests {
     #[test]
     fn cont_controller_initially_none() {
         let app = test_app();
-        assert!(app.cont_controller.is_none());
+        assert!(app.cycle.is_none());
     }
 }

@@ -1,5 +1,5 @@
 use eframe::egui;
-use tas_shared::cont::detect_first_moving;
+use tas_shared::align::detect_first_moving;
 use tas_shared::{TasCommand, TasMode, TasSharedState};
 
 use crate::recording::{format_recording_duration, RecordingHistory};

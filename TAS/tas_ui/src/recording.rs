@@ -1,4 +1,4 @@
-use crate::history_store_v2::BlobRef;
+use crate::history_store::BlobRef;
 use crate::ui_log::UiLog;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -856,7 +856,7 @@ impl HistoryEntry {
         let now = chrono::Local::now();
         let end_tick = snapshot.recorded_count;
         let first_moving =
-            tas_shared::cont::detect_first_moving(snapshot.rec_coords.as_ref(), end_tick);
+            tas_shared::align::detect_first_moving(snapshot.rec_coords.as_ref(), end_tick);
         Self {
             entry_id: 0, // assigned by RecordingHistory on push
             pinned: false,
@@ -1068,7 +1068,7 @@ impl RecordingHistory {
             .blob_dir
             .as_deref()
             .ok_or_else(|| "history store directory unknown".to_string())
-            .and_then(|dir| crate::history_store_v2::load_blob(dir, id, blob))
+            .and_then(|dir| crate::history_store::load_blob(dir, id, blob))
             .and_then(RecordingSnapshot::from_persisted);
         match loaded {
             Ok(snapshot) => {
@@ -1199,7 +1199,7 @@ impl RecordingHistory {
                     (snapshot.recorded_count > 0).then_some(snapshot.rec_coords[0])
                 }
                 SnapshotSlot::OnDisk(blob) => self.blob_dir.as_deref().and_then(|dir| {
-                    crate::history_store_v2::load_blob(dir, self.entries[i].entry_id, *blob)
+                    crate::history_store::load_blob(dir, self.entries[i].entry_id, *blob)
                         .ok()
                         .and_then(|ps| ps.rec_coords.first().copied())
                 }),
@@ -1461,11 +1461,11 @@ impl RecordingHistory {
     // ===== v2 store bridge =====
 
     /// Convert the in-memory history to the store's entry list (row order).
-    pub fn to_stored_entries(&self) -> Vec<crate::history_store_v2::StoredEntry> {
+    pub fn to_stored_entries(&self) -> Vec<crate::history_store::StoredEntry> {
         self.entries
             .iter()
-            .map(|e| crate::history_store_v2::StoredEntry {
-                meta: crate::history_store_v2::EntryMeta {
+            .map(|e| crate::history_store::StoredEntry {
+                meta: crate::history_store::EntryMeta {
                     entry_id: e.entry_id,
                     name: e.label.clone(),
                     user_name: e.custom_name.clone(),
@@ -1622,7 +1622,7 @@ impl RecordingHistory {
     /// (snapshot == None but kind expects one) come in inert (can't restore).
     pub fn apply_loaded(
         &mut self,
-        loaded: Vec<crate::history_store_v2::LoadedEntry>,
+        loaded: Vec<crate::history_store::LoadedEntry>,
         current_entry_id: Option<u64>,
         next_entry_id_floor: u64,
     ) {
@@ -2654,7 +2654,7 @@ mod tests {
 
     #[test]
     fn lazy_history_entries_restore_from_store_and_stay_off_heap() {
-        use crate::history_store_v2::{HistoryStoreV2, StoredEntry};
+        use crate::history_store::{HistoryStore, StoredEntry};
         let dir = std::env::temp_dir().join(format!(
             "tas_ui_lazy_hist_{}_{}",
             std::process::id(),
@@ -2664,7 +2664,7 @@ mod tests {
             let mut input_log = vec![0u8; count as usize];
             input_log[0] = id as u8;
             StoredEntry {
-                meta: crate::history_store_v2::EntryMeta {
+                meta: crate::history_store::EntryMeta {
                     entry_id: id,
                     name: format!("take {}", id),
                     user_name: None,
@@ -2688,11 +2688,11 @@ mod tests {
                 }),
             }
         };
-        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (mut store, _) = HistoryStore::open_eager(dir.clone()).unwrap();
         store.persist(&[mk(1, 3), mk(2, 5)], Some(2), 3).unwrap();
         drop(store);
 
-        let (_lazy, load) = HistoryStoreV2::open_lazy(dir.clone()).unwrap();
+        let (_lazy, load) = HistoryStore::open_lazy(dir.clone()).unwrap();
         let mut history = RecordingHistory::new(8);
         history.set_blob_dir(dir.clone());
         history.apply_loaded(load.entries, load.current_entry_id, load.next_entry_id);
@@ -2755,7 +2755,7 @@ mod tests {
         ));
         let stored = history.to_stored_entries();
         assert!(stored[2].snapshot.is_some(), "new take travels with bytes");
-        let blob = crate::history_store_v2::BlobRef {
+        let blob = crate::history_store::BlobRef {
             size: 0,
             checksum: 0,
         };
@@ -2871,13 +2871,12 @@ mod tests {
             std::process::id(),
             chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
         ));
-        let (mut store, _) =
-            crate::history_store_v2::HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (mut store, _) = crate::history_store::HistoryStore::open_eager(dir.clone()).unwrap();
         store
             .persist(&stored, history.current_entry_id(), history.next_entry_id())
             .unwrap();
         drop(store);
-        let (_s, load) = crate::history_store_v2::HistoryStoreV2::open_lazy(dir.clone()).unwrap();
+        let (_s, load) = crate::history_store::HistoryStore::open_lazy(dir.clone()).unwrap();
         assert_eq!(
             load.entries[0].meta.rider.as_deref(),
             Some("Vincent · regular")
@@ -3011,13 +3010,12 @@ mod tests {
             std::process::id(),
             chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
         ));
-        let (mut store, _) =
-            crate::history_store_v2::HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (mut store, _) = crate::history_store::HistoryStore::open_eager(dir.clone()).unwrap();
         store
             .persist(&stored, history.current_entry_id(), history.next_entry_id())
             .unwrap();
         drop(store);
-        let (_s, load) = crate::history_store_v2::HistoryStoreV2::open_lazy(dir.clone()).unwrap();
+        let (_s, load) = crate::history_store::HistoryStore::open_lazy(dir.clone()).unwrap();
         assert_eq!(load.entries[0].meta.finish_time_cs, Some(5334));
         assert_eq!(load.entries[1].meta.finish_time_cs, None);
         let mut reloaded = RecordingHistory::new(8);
@@ -3057,13 +3055,12 @@ mod tests {
             std::process::id(),
             chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
         ));
-        let (mut store, _) =
-            crate::history_store_v2::HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (mut store, _) = crate::history_store::HistoryStore::open_eager(dir.clone()).unwrap();
         store
             .persist(&stored, history.current_entry_id(), history.next_entry_id())
             .unwrap();
         drop(store);
-        let (_s, load) = crate::history_store_v2::HistoryStoreV2::open_lazy(dir.clone()).unwrap();
+        let (_s, load) = crate::history_store::HistoryStore::open_lazy(dir.clone()).unwrap();
         assert_eq!(
             load.entries[0].meta.physics.as_deref(),
             Some("OpenGL/53-bit")
@@ -3544,7 +3541,7 @@ mod tests {
 
     #[test]
     fn ids_never_reused_after_eviction_and_reload() {
-        use crate::history_store_v2::HistoryStoreV2;
+        use crate::history_store::HistoryStore;
         let dir = std::env::temp_dir().join(format!(
             "ssb_idreuse_{}_{}",
             std::process::id(),
@@ -3558,11 +3555,11 @@ mod tests {
         let evicted = [1u64, 2, 3];
         let next_before = h.next_entry_id();
 
-        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (mut store, _) = HistoryStore::open_eager(dir.clone()).unwrap();
         store
             .persist(&h.to_stored_entries(), h.current_entry_id(), next_before)
             .unwrap();
-        let (_s, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (_s, res) = HistoryStore::open_eager(dir.clone()).unwrap();
         let mut h2 = RecordingHistory::new(3);
         h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
 
@@ -3591,7 +3588,7 @@ mod tests {
 
     #[test]
     fn pinned_and_current_survive_lowered_cap_on_load() {
-        use crate::history_store_v2::HistoryStoreV2;
+        use crate::history_store::HistoryStore;
         let dir = std::env::temp_dir().join(format!(
             "ssb_pinload_{}_{}",
             std::process::id(),
@@ -3606,11 +3603,11 @@ mod tests {
         h.restore_index(1);
         let cur_id = h.current_entry_id();
 
-        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (mut store, _) = HistoryStore::open_eager(dir.clone()).unwrap();
         store
             .persist(&h.to_stored_entries(), cur_id, h.next_entry_id())
             .unwrap();
-        let (_s, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (_s, res) = HistoryStore::open_eager(dir.clone()).unwrap();
         // Load into a history with a cap FAR below the entry count.
         let mut h2 = RecordingHistory::new(2);
         h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
@@ -3664,7 +3661,7 @@ mod tests {
 
     #[test]
     fn bridge_roundtrips_through_v2_store() {
-        use crate::history_store_v2::HistoryStoreV2;
+        use crate::history_store::HistoryStore;
         let dir = std::env::temp_dir().join(format!(
             "ssb_bridge_{}_{}",
             std::process::id(),
@@ -3681,12 +3678,12 @@ mod tests {
         h.restore_index(1);
         let cur = h.current_entry_id();
 
-        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (mut store, _) = HistoryStore::open_eager(dir.clone()).unwrap();
         store
             .persist(&h.to_stored_entries(), cur, h.next_entry_id())
             .unwrap();
 
-        let (_s2, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (_s2, res) = HistoryStore::open_eager(dir.clone()).unwrap();
         let mut h2 = RecordingHistory::new(16);
         h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
 
@@ -3710,7 +3707,7 @@ mod tests {
 
     #[test]
     fn custom_name_roundtrips_and_clears() {
-        use crate::history_store_v2::HistoryStoreV2;
+        use crate::history_store::HistoryStore;
         let dir = std::env::temp_dir().join(format!(
             "ssb_name_{}_{}",
             std::process::id(),
@@ -3721,7 +3718,7 @@ mod tests {
         let id = h.entries()[0].entry_id;
         assert!(h.rename(id, "  my best run  ")); // trims whitespace
 
-        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (mut store, _) = HistoryStore::open_eager(dir.clone()).unwrap();
         store
             .persist(
                 &h.to_stored_entries(),
@@ -3729,7 +3726,7 @@ mod tests {
                 h.next_entry_id(),
             )
             .unwrap();
-        let (_s, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (_s, res) = HistoryStore::open_eager(dir.clone()).unwrap();
         let mut h2 = RecordingHistory::new(16);
         h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
 
@@ -3874,7 +3871,7 @@ mod tests {
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ));
         let (mut hstore, _) =
-            crate::history_store_v2::HistoryStoreV2::open_eager(v2dir.clone()).unwrap();
+            crate::history_store::HistoryStore::open_eager(v2dir.clone()).unwrap();
         hstore
             .persist(
                 &history.to_stored_entries(),
@@ -3882,8 +3879,7 @@ mod tests {
                 history.next_entry_id(),
             )
             .unwrap();
-        let (_hs, hres) =
-            crate::history_store_v2::HistoryStoreV2::open_eager(v2dir.clone()).unwrap();
+        let (_hs, hres) = crate::history_store::HistoryStore::open_eager(v2dir.clone()).unwrap();
         let reloaded = &hres.entries[0];
         assert!(reloaded.meta.pinned, "recovered entry persisted as pinned");
         assert!(reloaded
@@ -3946,7 +3942,7 @@ mod tests {
 
     #[test]
     fn apply_loaded_lowered_cap_trims() {
-        use crate::history_store_v2::HistoryStoreV2;
+        use crate::history_store::HistoryStore;
         let dir = std::env::temp_dir().join(format!(
             "ssb_captrim_{}_{}",
             std::process::id(),
@@ -3957,12 +3953,12 @@ mod tests {
             h.push_snapshot(&state_with_ticks(5), format!("S{}", i));
         }
         let cur = h.current_entry_id();
-        let (mut store, _) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (mut store, _) = HistoryStore::open_eager(dir.clone()).unwrap();
         store
             .persist(&h.to_stored_entries(), cur, h.next_entry_id())
             .unwrap();
 
-        let (_s, res) = HistoryStoreV2::open_eager(dir.clone()).unwrap();
+        let (_s, res) = HistoryStore::open_eager(dir.clone()).unwrap();
         let mut h2 = RecordingHistory::new(3); // smaller cap
         h2.apply_loaded(res.entries, res.current_entry_id, res.next_entry_id);
         assert_eq!(

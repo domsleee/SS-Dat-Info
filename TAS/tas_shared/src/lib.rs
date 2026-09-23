@@ -11,7 +11,7 @@ mod renderer;
 mod rider;
 mod state;
 
-pub mod cont;
+pub mod align;
 pub mod level;
 pub mod transport;
 
