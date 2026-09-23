@@ -1,3 +1,4 @@
+mod cycle;
 mod drift_scan;
 mod history_store;
 mod level;
@@ -6,7 +7,9 @@ mod pico;
 mod recording;
 mod relaunch;
 mod script_watch;
+mod session;
 mod settings;
+mod shortcuts;
 mod start_line;
 mod ui_log;
 mod win32;
@@ -17,47 +20,12 @@ use eframe::egui;
 use std::os::windows::process::CommandExt;
 use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 
-use relaunch::CheckpointOwner;
-
-/// Identifiers for the four TAS shortcut keys, used both for
-/// `poll_global_shortcuts` and for the pure edge-detector unit tests
-/// (which can't link Win32). Order matches `GLOBAL_SHORTCUT_KEYS`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GlobalShortcutSlot {
-    F9 = 0,
-    F10 = 1,
-    F11 = 2,
-    F12 = 3,
-}
-
-/// Compute press-edge transitions for the four shortcut keys. Pure
-/// function so we can unit-test the edge logic without faking Win32.
-/// Mutates `prev` to current so the caller's state stays in sync.
-fn compute_global_key_edges(now: [bool; 4], prev: &mut [bool; 4]) -> [bool; 4] {
-    let mut edges = [false; 4];
-    for i in 0..4 {
-        edges[i] = now[i] && !prev[i];
-        prev[i] = now[i];
-    }
-    edges
-}
-
 use panels::{config, history, input_script, log_panel, status, timeline, transport};
 use pico::PicoState;
 use recording::{RecordingHistory, RecordingSessionKind};
 
 const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
 const PLAYBACK_SPEED_PRESETS: [f32; 4] = [0.25, 0.5, 1.0, 2.0];
-// Shared with the tas_test harness so both give up after the same attempts.
-const ALIGN_MAX_RETRIES: u32 = tas_shared::align::ALIGN_MAX_RETRIES;
-
-/// How long one transport cycle may run before the UI gives up on it.
-///
-/// Generous on purpose: this is a stall guard, not a performance bound. A
-/// deep CONT catch-up, or a PLAY watched for ALIGN_VERIFY_FRAMES past the gate
-/// at 1x, can take tens of seconds. It exists so a cycle that will never
-/// finish cannot hold the input block forever.
-const CYCLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(180);
 
 fn normalize_playback_speed(speed: f32) -> f32 {
     if !speed.is_finite() {
@@ -246,30 +214,6 @@ struct TasApp {
     // One-shot: force dark title bar on first frame
     #[cfg(windows)]
     dark_title_bar_set: bool,
-}
-
-/// Whether the recovery checkpoint may be deleted: only when the recovered
-/// take is durably committed to history. A missing history writer is NOT
-/// durability — the checkpoint files are then the only copy in existence,
-/// and deleting them loses the recovered take permanently.
-fn checkpoint_clear_decision(flush: Option<Result<(), String>>) -> (bool, Option<String>) {
-    match flush {
-        Some(Ok(())) => (true, None),
-        Some(Err(e)) => (
-            false,
-            Some(format!(
-                "[history] persist failed — keeping recovery checkpoint: {}",
-                e
-            )),
-        ),
-        None => (
-            false,
-            Some(
-                "[history] store unavailable — keeping recovery checkpoint (no history was written)"
-                    .to_string(),
-            ),
-        ),
-    }
 }
 
 impl TasApp {
@@ -550,50 +494,6 @@ impl TasApp {
         self.log_lines.flush_to_file();
     }
 
-    fn clear_cont_catchup(&mut self) {
-        if let Some(saved) = self.resume_speed.take() {
-            self.playback_speed = saved;
-        }
-    }
-
-    fn reset_continue_runtime_state(&mut self) {
-        self.pending_session_kind = None;
-        self.pending_continue_start_tick = None;
-        self.cycle_deadline = None;
-        // Cancel any in-flight restart/arm/watch cycle; otherwise the
-        // controller would keep stepping and start REC/PLAY after the restart.
-        self.cycle = None;
-        // A cancelled CONT must not leave live input blocked.
-        self.set_cont_suppress_input(false);
-    }
-
-    /// Write the CONT live-input-suppression flag into shared memory (no-op if
-    /// the value is unchanged or the DLL isn't connected). While set, the DLL
-    /// blocks the real key handler so live input can't disturb the run during
-    /// a cycle's OFF-mode spawn countdown. Cleared when the cycle hands over
-    /// and on every teardown (stop, abort, disconnect).
-    fn set_cont_suppress_input(&mut self, on: bool) {
-        if let Some(shared) = self.shared.as_mut() {
-            let want = on as u32;
-            if shared.state().cont_suppress_input != want {
-                shared.state_mut().cont_suppress_input = want;
-            }
-        }
-    }
-
-    /// The loaded recording's gate (its first-moving frame), or 0 if nothing
-    /// is loaded or it never moves. Uses the shared `detect_first_moving` so
-    /// the app and the harness align identically.
-    fn recording_gate(&self) -> u32 {
-        self.shared
-            .as_ref()
-            .and_then(|shared| {
-                let state = shared.state();
-                tas_shared::align::detect_first_moving(&state.rec_coords, state.recorded_count)
-            })
-            .unwrap_or(0)
-    }
-
     fn send_action_command(&mut self, command: TasCommand) {
         if command == TasCommand::Stop {
             self.clear_cont_catchup();
@@ -797,406 +697,6 @@ impl TasApp {
         }
     }
 
-    /// Display name of the in-flight controller cycle for log lines.
-    fn cycle_label(&self) -> &'static str {
-        match self.cycle_arm {
-            tas_shared::transport::Arm::Continue => "CONT",
-            tas_shared::transport::Arm::Play => "PLAY",
-            tas_shared::transport::Arm::Rec => "REC",
-        }
-    }
-
-    fn queue_restart_then(&mut self, command: TasCommand) {
-        // Ignore a second transport request while a cycle is in flight: it
-        // would clobber the single-u32 command slot mid-sequence and could arm
-        // the wrong thing.
-        if self.cycle.is_some() {
-            self.log_lines.push(format!(
-                "{:?} ignored: a restart/arm cycle is already in progress",
-                command
-            ));
-            return;
-        }
-        // The menu gate at the funnel every button and hotkey passes through,
-        // so a caller that forgot it still cannot arm into a stopped engine.
-        // A native file dialog can block UI updates for seconds while the game
-        // keeps running, so refresh the heartbeat before applying it.
-        self.check_game_health();
-        if !self.arming_allowed() {
-            self.log_lines.push(format!(
-                "{:?} ignored: the game is in a menu / paused - enter a level first",
-                command
-            ));
-            return;
-        }
-        // Refuse CONT requests with nothing to splice (no recording, or frame
-        // 0, which is just PLAY). They would never reach the PLAY→REC
-        // transition that calls clear_cont_catchup, leaving the app stuck at
-        // catch-up speed.
-        if command == TasCommand::ArmContinue {
-            let recorded = self
-                .shared
-                .as_ref()
-                .map(|s| s.state().recorded_count)
-                .unwrap_or(0);
-            if recorded == 0 {
-                self.log_lines
-                    .push("CONT ignored: no recording loaded (recorded_count=0)");
-                return;
-            }
-            if self.continue_from_frame == 0 {
-                self.log_lines
-                    .push("CONT ignored: continue_from_frame=0 — press PLAY instead");
-                return;
-            }
-            // continue_from_frame == recorded_count is valid (play it all,
-            // then REC). It is the normal state after a CONT, since
-            // recorded_count caps at the splice frame, so pressing CONT again
-            // redoes the same prefix.
-            if self.continue_from_frame > recorded {
-                self.log_lines.push(format!(
-                    "CONT ignored: continue_from_frame={} > recorded_count={}",
-                    self.continue_from_frame, recorded
-                ));
-                return;
-            }
-        }
-        // A take recorded as another character or stance cannot replay, and
-        // no restart changes that (both are set when the level is entered
-        // from the menu), so name the screen that fixes it. The arm still
-        // goes ahead. REC keeps whatever the player chose.
-        if command != TasCommand::ArmRec {
-            if let Some(advice) = tas_shared::rider_mismatch_advice(
-                self.loaded_rider.as_deref(),
-                self.history.live_rider(),
-            ) {
-                self.log_lines.push(format!("WARNING: {}", advice));
-            }
-        }
-        let arm = match command {
-            TasCommand::ArmPlay => tas_shared::transport::Arm::Play,
-            TasCommand::ArmContinue => tas_shared::transport::Arm::Continue,
-            _ => tas_shared::transport::Arm::Rec,
-        };
-
-        let mut gate_align_rec = 0;
-        let mut continue_from_frame = 0;
-        if command == TasCommand::ArmContinue {
-            if self.resume_speed.is_none() {
-                self.resume_speed = Some(self.playback_speed);
-            }
-            self.playback_speed = self.cont_catchup_multiplier;
-            self.pending_session_kind = Some(RecordingSessionKind::Continue);
-            self.pending_continue_start_tick = Some(self.continue_from_frame);
-            // The prefix input is indexed from the observed gate, so the
-            // countdown length does not matter. The recording stays in
-            // rec-index space at the splice, so the resumed recording is
-            // byte-consistent with the loaded one.
-            gate_align_rec = self.recording_gate();
-            continue_from_frame = self.continue_from_frame;
-        } else {
-            self.clear_cont_catchup();
-            self.pending_session_kind = if command == TasCommand::ArmRec {
-                Some(RecordingSessionKind::Rec)
-            } else {
-                None
-            };
-            self.pending_continue_start_tick = None;
-            if command == TasCommand::ArmRec {
-                self.detach_input_editor();
-                self.playback_speed = DEFAULT_PLAYBACK_SPEED;
-            }
-            // PLAY starts from tick 0 and indexes its input from the observed
-            // gate, which can land on any countdown tick. The controller then
-            // watches the gate-relative trajectory and restarts if it differs.
-            if command == TasCommand::ArmPlay {
-                self.continue_from_frame = 0;
-                self.continue_from_text = "0".to_string();
-                gate_align_rec = self.recording_gate();
-            }
-        }
-
-        // An aligned replay replaces recorded input in the pre-gate hold
-        // window with the gate mask (see gate_alignment.hpp). Warn when that
-        // changes anything, or such a recording would diverge with no
-        // visible reason.
-        if gate_align_rec > 0 {
-            if let Some(shared) = self.shared.as_ref() {
-                let n = tas_shared::align::pre_gate_hold_overwrites(
-                    &shared.state().input_log,
-                    gate_align_rec,
-                );
-                if n > 0 {
-                    self.log_lines.push(format!(
-                        "WARNING: {} recorded input frame(s) in the {} frames before the gate differ from the gate mask; alignment replays them AS the gate mask",
-                        n, tas_shared::align::GATE_ALIGN_PRE_GATE_LEAD
-                    ));
-                }
-            }
-        }
-
-        // Reflect the speed the controller will assert into the live state now
-        // so the UI updates immediately (the controller re-asserts it too).
-        // For CONT, also stage the resume speed so the DLL drops to it at the
-        // splice itself rather than when the UI next polls.
-        let cont_resume_speed = if command == TasCommand::ArmContinue {
-            self.resume_speed.unwrap_or(DEFAULT_PLAYBACK_SPEED)
-        } else {
-            0.0 // unset: DLL leaves the speed alone (PLAY/REC don't splice)
-        };
-        if let Some(shared) = self.shared.as_mut() {
-            let s = shared.state_mut();
-            s.playback_speed = self.playback_speed;
-            s.cont_resume_speed = cont_resume_speed;
-        }
-
-        // Hand the restart → arm → watch cycle to the shared controller, which
-        // restarts and retries when the watcher finds a mismatch.
-        let cfg = tas_shared::transport::ArmConfig {
-            arm,
-            speed: self.playback_speed,
-            continue_from_frame,
-            gate_align_rec,
-            max_retries: if gate_align_rec > 0 {
-                ALIGN_MAX_RETRIES
-            } else {
-                0
-            },
-        };
-        self.cycle = Some(tas_shared::transport::TransportController::new(cfg));
-        self.cycle_deadline = Some(std::time::Instant::now() + CYCLE_BUDGET);
-        self.cycle_arm = arm;
-        // Block live input for a replay cycle's restarts. Set before the
-        // controller's first command so it covers each OFF-mode spawn
-        // countdown, which the mode-based handler block misses; a live key
-        // there would alter the state being replayed. Cleared at `Done`, after
-        // which PLAY is blocked by mode and post-splice REC needs live input.
-        if gate_align_rec > 0 {
-            if let Some(shared) = self.shared.as_mut() {
-                shared.state_mut().cont_suppress_input = 1;
-            }
-        }
-        let resume_at = if command == TasCommand::ArmContinue {
-            format!(" @frame {}", continue_from_frame)
-        } else {
-            String::new()
-        };
-        self.log_lines.push(format!(
-            "In-process restart → {:?}{} (speed {}x)",
-            command, resume_at, self.playback_speed
-        ));
-    }
-
-    /// Advance the in-flight transport controller and handle its outcome. The
-    /// transitions live in tas_shared::transport, shared with the tas_test
-    /// harness; logging and cleanup live here.
-    fn step_cycle(&mut self, ctx: &egui::Context) {
-        if self.cycle.is_none() {
-            return;
-        }
-        use tas_shared::transport::StepOutcome;
-        // Wait and Reroll are handled inline without yielding to render, so
-        // the command after a settle fires on time rather than one jittered
-        // ~16ms render frame later, matching the tas_test harness. Only
-        // InProgress yields, after a short bounded spin in the phases that
-        // need tight polling.
-        let spin_until = std::time::Instant::now() + std::time::Duration::from_millis(40);
-        loop {
-            let outcome = match (self.cycle.as_mut(), self.shared.as_mut()) {
-                (Some(c), Some(p)) => c.step(p),
-                _ => {
-                    // Lost the shared-memory connection — drop the cycle.
-                    self.cycle = None;
-                    return;
-                }
-            };
-            match outcome {
-                StepOutcome::InProgress => {
-                    // Only InProgress can stall. Name the phase in the log: a
-                    // restart that never completed and an arm the DLL never
-                    // processed look identical from here otherwise.
-                    if self
-                        .cycle_deadline
-                        .is_some_and(|d| std::time::Instant::now() > d)
-                    {
-                        let phase = self.cycle.as_ref().map(|c| c.phase_name()).unwrap_or("?");
-                        self.push_log(&format!(
-                            "{} gave up: stalled in {} for {}s",
-                            self.cycle_label(),
-                            phase,
-                            CYCLE_BUDGET.as_secs()
-                        ));
-                        self.clear_cont_catchup();
-                        if let Some(shared) = self.shared.as_mut() {
-                            // Straight to the DLL, as the controller does for
-                            // its own abort; reset_continue_runtime_state below
-                            // covers the rest of send_action_command's cleanup.
-                            shared.send_command(TasCommand::Stop);
-                            shared.state_mut().playback_speed = self.playback_speed;
-                        }
-                        self.reset_continue_runtime_state();
-                        self.set_cont_suppress_input(false);
-                        return;
-                    }
-                    // Spin with ~3ms polls only while the phase feeds arm
-                    // timing, so restart-done detection is not quantized to
-                    // vsync. The multi-second Watch phase polls once per frame:
-                    // spinning through it held the UI at ~25 fps.
-                    let tight = self.cycle.as_ref().is_some_and(|c| c.needs_tight_polling());
-                    if !tight || std::time::Instant::now() >= spin_until {
-                        ctx.request_repaint();
-                        return;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(3));
-                }
-                StepOutcome::Wait { ms } => {
-                    // Fixed settle; loop straight on to the next command.
-                    std::thread::sleep(std::time::Duration::from_millis(ms));
-                }
-                StepOutcome::Reroll { attempt, observed } => {
-                    let mismatch = observed
-                        .map(|frame| frame.to_string())
-                        .unwrap_or_else(|| "?".to_string());
-                    self.push_log(&format!(
-                        "{} watcher reroll {}/{} (first mismatch at gate+{})",
-                        self.cycle_label(),
-                        attempt,
-                        ALIGN_MAX_RETRIES,
-                        mismatch
-                    ));
-                }
-                StepOutcome::Done {
-                    retries_used,
-                    completed_via,
-                } => {
-                    if retries_used > 0 {
-                        self.push_log(&format!(
-                            "{} watcher accepted after {} restart retr{}",
-                            self.cycle_label(),
-                            retries_used,
-                            if retries_used == 1 { "y" } else { "ies" }
-                        ));
-                    }
-                    // Stash for the resume summary emitted at the REC-start splice,
-                    // where the actual resume frame is known. attempts = retries + 1.
-                    self.cont_last_outcome = Some((retries_used + 1, completed_via));
-                    self.cycle = None;
-                    // Release the live-input block: the rest of the replay is
-                    // blocked by mode, and post-splice REC must record live
-                    // input.
-                    self.set_cont_suppress_input(false);
-                    return;
-                }
-                StepOutcome::Aborted { reason } => {
-                    self.push_log(&format!("{} aborted: {}", self.cycle_label(), reason));
-                    self.clear_cont_catchup();
-                    // Push the restored speed through: an aborted PLAY must not
-                    // leave the game fast-forwarding at the catch-up speed.
-                    if let Some(shared) = self.shared.as_mut() {
-                        shared.state_mut().playback_speed = self.playback_speed;
-                    }
-                    // also clears cycle
-                    self.reset_continue_runtime_state();
-                    self.set_cont_suppress_input(false);
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Clear the crash-recovery checkpoint, but only after the history it
-    /// represents is durably committed (persist → flush → clear). If the flush
-    /// fails the checkpoint is kept, so the next launch recovers it. The
-    /// recovery writer is drained first so no in-flight write can recreate the
-    /// checkpoint files after they are deleted.
-    fn clear_recovery_after_durable_persist(&mut self) {
-        self.persist_history_if_needed();
-        let flush = self.history_writer.as_ref().map(|writer| {
-            let result = writer.flush();
-            if result.is_ok() {
-                self.last_persisted_revision =
-                    self.last_persisted_revision.max(writer.durable_revision());
-            }
-            result
-        });
-        let (durable, notice) = checkpoint_clear_decision(flush);
-        if let Some(notice) = notice {
-            self.log_lines.push(notice);
-        }
-        // Drain in-flight recovery writes BEFORE clearing the files.
-        if let Err(error) = self.recovery_writer.flush() {
-            self.log_lines
-                .push(format!("Recovery flush failed: {error}"));
-        }
-        if durable {
-            if let Some(store) = self.recovery_store.as_mut() {
-                if let Err(error) = store.clear_pending() {
-                    self.log_lines.push(format!(
-                        "Could not clear durable recovery checkpoint: {error}"
-                    ));
-                }
-            }
-        }
-    }
-
-    fn persist_history_if_needed(&mut self) {
-        let revision = self.history.revision();
-        let Some(writer) = self.history_writer.as_ref() else {
-            return;
-        };
-
-        for error in writer.take_errors() {
-            self.log_lines
-                .push(format!("History persistence failed: {error}"));
-        }
-
-        self.last_persisted_revision = self.last_persisted_revision.max(writer.durable_revision());
-        // Takes the writer has committed no longer need a resident copy.
-        for (id, blob) in writer.take_durable_blobs() {
-            self.history.mark_durable(id, blob);
-        }
-        let failed = writer.failed_revision();
-        if failed == 0 {
-            self.last_failed_revision = 0;
-        } else if failed != self.last_failed_revision && failed > self.last_persisted_revision {
-            self.last_failed_revision = failed;
-            self.last_queued_revision = self.last_persisted_revision;
-            self.history_retry_after =
-                Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
-            self.log_lines.push(format!(
-                "[history] background persist of revision {} failed; retrying",
-                failed
-            ));
-        }
-
-        if revision == self.last_persisted_revision || revision == self.last_queued_revision {
-            return;
-        }
-        if self
-            .history_retry_after
-            .is_some_and(|deadline| std::time::Instant::now() < deadline)
-        {
-            return;
-        }
-        // UI-thread cost is only the clone; the worker does serialize + disk.
-        let entries = self.history.to_stored_entries();
-        let current = self.history.current_entry_id();
-        let next = self.history.next_entry_id();
-        // Only mark the revision persisted if the job actually reached the
-        // worker. If the writer thread is gone, leave the revision dirty so a
-        // later frame retries instead of silently dropping the change.
-        if !writer.persist(entries, current, next, revision) {
-            return;
-        }
-        // The re-queue is a new attempt, so forget the handled failure. If the
-        // worker fails again with the same revision before this thread sees
-        // the cleared marker, a stale `last_failed_revision` would suppress
-        // the retry.
-        self.last_failed_revision = 0;
-        self.last_queued_revision = revision;
-        self.history_retry_after = None;
-    }
-
     /// Discard editors and queued gestures when their recording is replaced.
     fn detach_input_editor(&mut self) {
         self.script_watch = None;
@@ -1288,217 +788,6 @@ impl TasApp {
         }
     }
 
-    fn start_recording_session(&mut self, continue_from_frame: u32, recorded_count: u32) {
-        let kind = self.pending_session_kind.take().unwrap_or({
-            if continue_from_frame > 0 {
-                RecordingSessionKind::Continue
-            } else {
-                RecordingSessionKind::Rec
-            }
-        });
-        let start_tick = match kind {
-            RecordingSessionKind::Rec => {
-                self.detach_input_editor();
-                self.pending_continue_start_tick = None;
-                0
-            }
-            RecordingSessionKind::Continue => {
-                self.pending_continue_start_tick
-                    .take()
-                    .unwrap_or(if continue_from_frame > 0 {
-                        continue_from_frame
-                    } else {
-                        recorded_count
-                    })
-            }
-        };
-
-        if kind == RecordingSessionKind::Rec && self.last_mode == 0 {
-            self.segment_tracker.clear();
-        }
-        self.segment_tracker.on_rec_start(start_tick);
-        self.active_recording_session = Some(ActiveRecordingSession {
-            kind,
-            start_tick,
-            max_recorded_count: recorded_count.max(start_tick),
-        });
-    }
-
-    /// Emit one diagnostic line at the CONT splice: where the recording
-    /// actually resumed (the requested splice tick), how many attempts it
-    /// took, and whether the prefix was watched.
-    fn log_cont_resume_summary(&mut self) {
-        use tas_shared::transport::CompletedVia;
-        let Some(session) = self.active_recording_session else {
-            return;
-        };
-        if session.kind != RecordingSessionKind::Continue {
-            return; // plain REC has no resume to report
-        }
-        let (attempts, via) = self
-            .cont_last_outcome
-            .take()
-            .unwrap_or((1, CompletedVia::Unjudged));
-        let verdict = match via {
-            CompletedVia::Matched => "trajectory matched",
-            CompletedVia::Unjudged => "nothing to watch",
-        };
-        self.push_log(&format!(
-            "CONT resumed at frame {} after {} attempt{} — {}",
-            session.start_tick,
-            attempts,
-            if attempts == 1 { "" } else { "s" },
-            verdict,
-        ));
-    }
-
-    fn persist_recovery_snapshot_if_needed(
-        &mut self,
-        snapshot: &recording::RecordingSnapshot,
-        session: &recording::RecoverySessionContext,
-        force: bool,
-    ) {
-        for error in self.recovery_writer.take_errors() {
-            self.log_lines
-                .push(format!("Recovery persistence failed: {error}"));
-            if let Some(store) = self.recovery_store.as_mut() {
-                store.retry_failed_write();
-            }
-        }
-        // Decide on the UI thread (at most one write per ~1.5s of recording
-        // growth, see DEFAULT_RECOVERY_DEBOUNCE_MS) but write off it so REC
-        // never hitches. STOP does not write a checkpoint: finalize moves the
-        // take into durable history and then clears it. Best-effort: a failed
-        // write only leaves a slightly staler recovery file.
-        let job = match self.recovery_store.as_mut() {
-            Some(store) => {
-                store.take_write_job(snapshot, &self.segment_tracker.segments, session, force)
-            }
-            None => None,
-        };
-        if let Some(job) = job {
-            if !self.recovery_writer.submit(job) {
-                self.log_lines
-                    .push("Recovery writer unavailable; checkpoint was not queued");
-                if let Some(store) = self.recovery_store.as_mut() {
-                    store.retry_failed_write();
-                }
-            }
-        }
-    }
-
-    fn update_recording_recovery_progress(&mut self, snapshot: &recording::RecordingSnapshot) {
-        // Stamp the track now, while it is visible. A checkpoint is recovered
-        // at startup, before anything has read the live level.
-        let level = self.level_for_save().map(str::to_string);
-        let live_stamps = self.shared.as_ref().map(|s| {
-            (
-                s.fpu_control_word(),
-                s.renderer_id(),
-                tas_shared::rider_pair(s.state()),
-            )
-        });
-        let maybe_session = {
-            let Some(session) = self.active_recording_session.as_mut() else {
-                return;
-            };
-            session.max_recorded_count = session.max_recorded_count.max(snapshot.recorded_count);
-            recording::RecoverySessionContext::from_ticks(
-                session.kind,
-                session.start_tick,
-                session.max_recorded_count,
-            )
-        };
-
-        if let Some(session_context) = maybe_session {
-            let session_context = session_context
-                .with_level(level.as_deref())
-                .with_stamps(live_stamps);
-            self.persist_recovery_snapshot_if_needed(snapshot, &session_context, false);
-        }
-    }
-
-    fn finalize_recording_session(
-        &mut self,
-        snapshot: &recording::RecordingSnapshot,
-        recorded_count: u32,
-    ) {
-        let Some(session) = self.active_recording_session.take() else {
-            return;
-        };
-
-        let end_tick = recorded_count.max(session.max_recorded_count);
-        let Some(session_context) = recording::RecoverySessionContext::from_ticks(
-            session.kind,
-            session.start_tick,
-            end_tick,
-        ) else {
-            return;
-        };
-
-        // A session the finish-line watch stopped is labelled by its race
-        // time ("Finish 0:53.34"), not its length. Prefer the latched HUD time;
-        // without it, count ticks from the start line to the finish line. The
-        // in-game timer starts at the start trigger, not at first movement,
-        // which would overstate the time by several seconds.
-        let finish = self.finished_at_tick.map(|tick| {
-            let hud = self.finished_hud_cs.unwrap_or(u32::MAX);
-            if hud != u32::MAX {
-                recording::FinishStamp {
-                    cs: hud,
-                    exact: true,
-                }
-            } else {
-                let level_code = self
-                    .shared
-                    .as_ref()
-                    .and_then(|s| tas_shared::resolved_level_id(s.state()))
-                    .and_then(crate::level::level_code_from_id);
-                let start = crate::start_line::start_cross_tick(
-                    snapshot.rec_coords.as_ref(),
-                    end_tick,
-                    level_code,
-                );
-                let first_moving =
-                    tas_shared::align::detect_first_moving(snapshot.rec_coords.as_ref(), end_tick);
-                recording::FinishStamp {
-                    cs: recording::geometry_race_time_cs(tick, start, first_moving),
-                    exact: false,
-                }
-            }
-        });
-        let label = match finish {
-            Some(f) => recording::finished_session_label(f),
-            None => session_context.label.clone(),
-        };
-        let pushed = self.history.push_completed_session(
-            snapshot.clone(),
-            label,
-            session_context.start_tick,
-            session_context.end_tick,
-            finish,
-        );
-        if !pushed {
-            // An empty snapshot (e.g. a fresh mapping after the game
-            // restarted) leaves the checkpoint on disk as the only copy, and
-            // the next take's checkpoint would replace it. Recover it into
-            // history now, but only this session's: an older take whose clear
-            // was refused must not come back as a pinned duplicate.
-            self.push_log(&format!(
-                "Recording session ({}) was not added to history: the buffer is empty — \
-                 recovering its checkpoint instead",
-                session_context.label
-            ));
-            if self.recover_pending_checkpoint_matching(Some(CheckpointOwner::from(&session))) {
-                self.clear_recovery_after_durable_persist();
-            }
-            return;
-        }
-        // The checkpoint is cleared only once the take is durable in history,
-        // so a crash before the background write commits cannot lose it.
-        self.clear_recovery_after_durable_persist();
-    }
-
     /// Check if the game process is still alive by monitoring frame_count advancement.
     /// If frame_count hasn't changed for ~3 seconds, assume the game crashed.
     fn check_game_health(&mut self) {
@@ -1554,278 +843,6 @@ impl TasApp {
                 self.stale_frame_ticks = 0;
             }
         }
-    }
-
-    /// Poll the global keyboard state for F9–F12 and emit the same
-    /// transport actions the in-window shortcut handler would, but only
-    /// when Supreme.exe is the foreground window. Lets the user trigger
-    /// REC/PLAY/STOP/CONT without alt-tabbing to tas_ui. The keys are
-    /// observed, not consumed, so the game still receives them.
-    ///
-    /// Edge state is updated every frame regardless of focus so a key held
-    /// across a focus change is not left "pressed".
-    fn poll_global_shortcuts(&mut self) -> Vec<transport::Action> {
-        let now: [bool; 4] =
-            [win32::VK_F9, win32::VK_F10, win32::VK_F11, win32::VK_F12].map(win32::key_is_down);
-        let edges = compute_global_key_edges(now, &mut self.prev_global_keys);
-        if !edges.iter().any(|&e| e) {
-            return Vec::new();
-        }
-
-        // Only act while Supreme.exe is the foreground window. A stale cached
-        // PID (game restarted without dropping shared memory) just fails to
-        // match, which is harmless.
-        let game_pid = self.game_pid_cached.or_else(|| {
-            let resolved = win32::find_supreme_pid();
-            self.game_pid_cached = resolved;
-            resolved
-        });
-        let Some(game_pid) = game_pid else {
-            return Vec::new();
-        };
-        if win32::foreground_window_pid() != Some(game_pid) {
-            return Vec::new();
-        }
-
-        let mut actions = Vec::new();
-        if edges[GlobalShortcutSlot::F9 as usize] {
-            actions.extend(self.shortcut_arm("Global F9 (in-game): REC", TasCommand::ArmRec));
-        }
-        if edges[GlobalShortcutSlot::F10 as usize] {
-            actions.extend(self.shortcut_arm("Global F10 (in-game): PLAY", TasCommand::ArmPlay));
-        }
-        if edges[GlobalShortcutSlot::F11 as usize] {
-            actions.push(transport::Action::Send(TasCommand::Stop));
-            actions.push(transport::Action::Log("Global F11 (in-game): STOP".into()));
-        }
-        if edges[GlobalShortcutSlot::F12 as usize] {
-            actions
-                .extend(self.shortcut_arm("Global F12 (in-game): CONT", TasCommand::ArmContinue));
-        }
-        actions
-    }
-
-    /// The menu gate: connected, in a level, and that level's cycle ticked
-    /// within the last 400 ms. Arming drives an F5 restart, and at a menu or
-    /// dialog the cycle is frozen (`game_in_game` alone is stale there), so an
-    /// arm would fire into a stopped engine and leave a half-armed cycle.
-    ///
-    /// The button greying, the F9/F10/F12 refusals and `queue_restart_then`
-    /// all read it here so they cannot drift apart.
-    fn arming_allowed(&self) -> bool {
-        self.shared.as_ref().is_some_and(|shared| {
-            shared.state().game_in_game != 0
-                && self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400)
-        })
-    }
-
-    fn shortcut_arm(&mut self, source: &str, command: TasCommand) -> Vec<transport::Action> {
-        let (mode, recorded) = match self.shared.as_ref() {
-            Some(shared) => (shared.state().mode_enum(), shared.recorded_count_volatile()),
-            None => {
-                return vec![transport::Action::Log(format!(
-                    "{source} ignored: not connected to the game"
-                ))]
-            }
-        };
-        if let Some(reason) = transport::arm_refusal(command, mode, recorded, self.arming_allowed())
-        {
-            return vec![transport::Action::Log(format!(
-                "{source} ignored: {reason}"
-            ))];
-        }
-        let mut actions = Vec::new();
-        if command == TasCommand::ArmContinue {
-            match transport::resolve_continue_frame(
-                &mut self.continue_from_text,
-                &mut self.continue_from_frame,
-                recorded,
-            ) {
-                Ok(frame) => actions.push(transport::Action::SetContinueFrame(frame)),
-                Err(reason) => {
-                    return vec![transport::Action::Log(format!(
-                        "{source} ignored: {reason}"
-                    ))]
-                }
-            }
-        }
-        actions.push(transport::Action::RestartThen(command));
-        actions.push(transport::Action::Log(source.to_string()));
-        actions
-    }
-
-    /// Process keyboard shortcuts. Returns actions to execute.
-    fn handle_shortcuts(&mut self, ctx: &egui::Context) -> Vec<transport::Action> {
-        let mut actions = Vec::new();
-
-        // Don't consume shortcuts when a text field has focus
-        let any_text_focus = ctx.memory(|m| m.focused().is_some());
-
-        ctx.input(|input| {
-            let ctrl = input.modifiers.ctrl || input.modifiers.mac_cmd;
-
-            // F5: Restart game (Pico F5)
-            if input.key_pressed(egui::Key::F5) {
-                if self.pico.connected {
-                    win32::focus_game();
-                    match self.pico.send_f5() {
-                        Ok(()) => {
-                            actions.push(transport::Action::Log("Shortcut: F5 restart".into()))
-                        }
-                        Err(e) => actions.push(transport::Action::Log(format!("F5 error: {}", e))),
-                    }
-                } else {
-                    actions.push(transport::Action::Log("F5: Pico not connected".into()));
-                }
-            }
-
-            // F9: Arm REC — same as clicking REC button (restart first)
-            if input.key_pressed(egui::Key::F9) {
-                actions.extend(self.shortcut_arm("Shortcut: F9 REC", TasCommand::ArmRec));
-            }
-
-            // F10: Arm PLAY — same as clicking PLAY button (restart first)
-            if input.key_pressed(egui::Key::F10) {
-                actions.extend(self.shortcut_arm("Shortcut: F10 PLAY", TasCommand::ArmPlay));
-            }
-
-            // F11: STOP
-            if input.key_pressed(egui::Key::F11) {
-                actions.push(transport::Action::Send(TasCommand::Stop));
-                actions.push(transport::Action::Log("Shortcut: F11 STOP".into()));
-            }
-
-            // F12: Continue record — same as clicking CONT button (restart first)
-            if input.key_pressed(egui::Key::F12) {
-                actions.extend(self.shortcut_arm("Shortcut: F12 CONT", TasCommand::ArmContinue));
-            }
-
-            // Skip remaining shortcuts if text input has focus
-            if any_text_focus {
-                return;
-            }
-
-            // Space: STOP (toggle off)
-            if input.key_pressed(egui::Key::Space) {
-                actions.push(transport::Action::Send(TasCommand::Stop));
-                actions.push(transport::Action::Log("Shortcut: Space STOP".into()));
-            }
-
-            // Ctrl+Z: Undo (check raw events — egui may consume key_pressed for built-in undo)
-            let ctrl_z_raw = input.events.iter().any(|e| {
-                matches!(e,
-                    egui::Event::Key { key: egui::Key::Z, pressed: true, modifiers, .. }
-                    if (modifiers.ctrl || modifiers.mac_cmd) && !modifiers.shift
-                )
-            });
-            if ctrl_z_raw {
-                actions.push(transport::Action::Undo);
-                actions.push(transport::Action::Log("Shortcut: Ctrl+Z Undo".into()));
-            }
-
-            // Panel toggles: Ctrl+H (History), Ctrl+A (Analysis),
-            // Ctrl+L (Log). Match on raw Key events for the same reason
-            // as Ctrl+Z — egui may consume these as built-in shortcuts.
-            for ev in input.events.iter() {
-                if let egui::Event::Key {
-                    key,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } = ev
-                {
-                    if !(modifiers.ctrl || modifiers.mac_cmd) {
-                        continue;
-                    }
-                    match key {
-                        egui::Key::H => self.show_history = !self.show_history,
-                        egui::Key::L => self.show_log = !self.show_log,
-                        _ => {}
-                    }
-                }
-            }
-
-            // Ctrl+Y or Ctrl+Shift+Z: Redo
-            let ctrl_redo_raw = input.events.iter().any(|e| {
-                matches!(e,
-                    egui::Event::Key { key: egui::Key::Y, pressed: true, modifiers, .. }
-                    if modifiers.ctrl || modifiers.mac_cmd
-                )
-            }) || input.events.iter().any(|e| {
-                matches!(e,
-                    egui::Event::Key { key: egui::Key::Z, pressed: true, modifiers, .. }
-                    if (modifiers.ctrl || modifiers.mac_cmd) && modifiers.shift
-                )
-            });
-            if ctrl_redo_raw {
-                actions.push(transport::Action::Redo);
-                actions.push(transport::Action::Log("Shortcut: Redo".into()));
-            }
-
-            // Ctrl+S: Save recording
-            if ctrl && input.key_pressed(egui::Key::S) {
-                actions.push(transport::Action::Log("Shortcut: Ctrl+S Save".into()));
-            }
-
-            // Ctrl+O: Open recording
-            if ctrl && input.key_pressed(egui::Key::O) {
-                actions.push(transport::Action::Log("Shortcut: Ctrl+O Open".into()));
-            }
-
-            // Plus/Equals: Zoom in timeline
-            if input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals) {
-                // handled below outside closure
-            }
-
-            // Minus: Zoom out timeline
-            if input.key_pressed(egui::Key::Minus) {
-                // handled below outside closure
-            }
-        });
-
-        // Handle zoom and file operations outside the input closure to avoid borrow issues
-        let (zoom_in, zoom_out, save, open) = ctx.input(|input| {
-            let ctrl = input.modifiers.ctrl || input.modifiers.mac_cmd;
-            (
-                !any_text_focus
-                    && (input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals)),
-                !any_text_focus && input.key_pressed(egui::Key::Minus),
-                ctrl && input.key_pressed(egui::Key::S),
-                ctrl && input.key_pressed(egui::Key::O),
-            )
-        });
-
-        if zoom_in {
-            self.timeline_view.zoom_center(0.8);
-        }
-        if zoom_out {
-            self.timeline_view.zoom_center(1.25);
-        }
-        if save {
-            // Resolve the track BEFORE the dialog: it belongs to the recording,
-            // and the engine may be frozen in its own post-run dialog by now.
-            let level = self.level_for_save().map(str::to_string);
-            if let Some(shared) = self.shared.as_ref() {
-                if let Some(path) = recording::save_dialog_with_segments(
-                    shared.state(),
-                    &self.segment_tracker.segments,
-                    &mut self.log_lines,
-                    level.as_deref(),
-                    self.loaded_identity.as_ref(),
-                ) {
-                    self.history.push_save_marker(
-                        shared.state(),
-                        &path,
-                        self.loaded_identity.clone(),
-                    );
-                }
-            }
-        }
-        if open {
-            self.load_recording_flow();
-        }
-
-        actions
     }
 
     /// Pick a recording, stop any active session, load it, then auto-play.
@@ -1911,6 +928,61 @@ impl eframe::App for TasApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync_frame_state(ctx);
+        self.auto_stop_if_level_left();
+        self.track_mode_transitions();
+
+        // handle_shortcuts takes keys delivered to tas_ui by egui;
+        // poll_global_shortcuts takes keys seen while the game has focus.
+        // They are gated on the foreground window, so one press fires once.
+        let mut shortcut_actions = self.handle_shortcuts(ctx);
+        shortcut_actions.extend(self.poll_global_shortcuts());
+
+        self.show_menu_bar(ctx);
+        self.show_log_panel(ctx);
+        if self.show_connection_error(ctx) {
+            return;
+        }
+
+        // Read current state snapshot for UI
+        let connected = self.shared.is_some();
+        if !connected {
+            return;
+        }
+
+        self.show_left_panel(ctx);
+        let history_actions = self.show_history_panel(ctx);
+        self.apply_history_actions(history_actions);
+
+        // Advance the in-flight restart/arm/watch cycle.
+        self.step_cycle(ctx);
+
+        // Apply shortcut actions to shared state (same dispatch as the buttons).
+        for cmd in shortcut_actions {
+            self.apply_transport_action(cmd);
+        }
+
+        // Apply any input edit the timeline produced last frame.
+        self.poll_script_file();
+        self.apply_pending_input_edit();
+
+        self.show_central_panel(ctx);
+
+        self.drain_dll_log();
+
+        for w in self.history.take_warnings() {
+            self.log_lines.push(format!("History: {}", w));
+        }
+        self.persist_history_if_needed();
+
+        self.schedule_repaint(ctx);
+    }
+}
+
+/// The sections of `update`, in the order it runs them.
+impl TasApp {
+    /// Once-per-frame bookkeeping that must run before anything reads live state.
+    fn sync_frame_state(&mut self, ctx: &egui::Context) {
         // Force dark theme + title bar on Windows (one-shot, first frame)
         #[cfg(windows)]
         if !self.dark_title_bar_set {
@@ -1931,7 +1003,9 @@ impl eframe::App for TasApp {
 
         // Check game health (crash detection) — also samples cycle activity.
         self.check_game_health();
+    }
 
+    fn auto_stop_if_level_left(&mut self) {
         // Auto-stop REC/PLAY when the player leaves the level. Quitting to the
         // menu stops Supreme::Cycle, so the DLL's own auto-stop (in the cycle
         // hook) can't fire. The 5 s threshold rides out an F5 reload stall and
@@ -1963,7 +1037,9 @@ impl eframe::App for TasApp {
                 self.auto_stop_debounce = Some(std::time::Instant::now());
             }
         }
+    }
 
+    fn track_mode_transitions(&mut self) {
         // Track mode transitions for segment history + recovery checkpoints.
         let mode_probe = self.shared.as_ref().map(|shared| {
             (
@@ -2028,65 +1104,62 @@ impl eframe::App for TasApp {
                     self.update_recording_recovery_progress(snap);
                 }
 
-                // Finish-line watch: stop REC when the run crosses the finish
-                // line, since the run-out is never wanted. Only ticks since
-                // the last frame are scanned.
-                if self.finished_at_tick.is_none() {
-                    let resolved_geometry = self
-                        .shared
-                        .as_ref()
-                        .and_then(|sh| tas_shared::resolved_level_id(sh.state()))
-                        .and_then(crate::level::level_code_from_id)
-                        .is_some();
-                    let cross = self.shared.as_ref().and_then(|shared| {
-                        let s = shared.state();
-                        // Resolved level only: a stale id would test the run
-                        // against another track's finish line. Unresolved
-                        // means no crossing is claimed, the safe direction.
-                        crate::start_line::finish_cross_tick(
-                            &s.rec_coords,
-                            recorded,
-                            tas_shared::resolved_level_id(s)
-                                .and_then(crate::level::level_code_from_id),
-                            self.finish_scan_cursor,
-                        )
-                    });
-                    // Advance only past ticks actually scanned; with no
-                    // geometry, advancing would skip a crossing permanently.
-                    if resolved_geometry {
-                        self.finish_scan_cursor = recorded.max(1);
-                    }
-                    if let Some(tick) = cross {
-                        self.finished_at_tick = Some(tick);
-                        // Latch the HUD time in the same poll that saw the
-                        // crossing, as one coherent pair read.
-                        self.finished_hud_cs = self
-                            .shared
-                            .as_ref()
-                            .map(|s| tas_shared::race_pair(s.state()).0)
-                            .filter(|&cs| cs != u32::MAX);
-                        let hud = self
-                            .finished_hud_cs
-                            .map(|cs| {
-                                format!(" (race time {})", recording::format_recording_duration(cs))
-                            })
-                            .unwrap_or_default();
-                        self.log_lines.push(format!(
-                            "\u{1F3C1} Finish line crossed at tick {}{} — recording stopped",
-                            tick, hud
-                        ));
-                        self.apply_transport_action(transport::Action::Send(TasCommand::Stop));
-                    }
-                }
+                self.watch_finish_line(recorded);
             }
         }
+    }
 
-        // handle_shortcuts takes keys delivered to tas_ui by egui;
-        // poll_global_shortcuts takes keys seen while the game has focus.
-        // They are gated on the foreground window, so one press fires once.
-        let mut shortcut_actions = self.handle_shortcuts(ctx);
-        shortcut_actions.extend(self.poll_global_shortcuts());
+    fn watch_finish_line(&mut self, recorded: u32) {
+        // Finish-line watch: stop REC when the run crosses the finish
+        // line, since the run-out is never wanted. Only ticks since
+        // the last frame are scanned.
+        if self.finished_at_tick.is_none() {
+            let resolved_geometry = self
+                .shared
+                .as_ref()
+                .and_then(|sh| tas_shared::resolved_level_id(sh.state()))
+                .and_then(crate::level::level_code_from_id)
+                .is_some();
+            let cross = self.shared.as_ref().and_then(|shared| {
+                let s = shared.state();
+                // Resolved level only: a stale id would test the run
+                // against another track's finish line. Unresolved
+                // means no crossing is claimed, the safe direction.
+                crate::start_line::finish_cross_tick(
+                    &s.rec_coords,
+                    recorded,
+                    tas_shared::resolved_level_id(s).and_then(crate::level::level_code_from_id),
+                    self.finish_scan_cursor,
+                )
+            });
+            // Advance only past ticks actually scanned; with no
+            // geometry, advancing would skip a crossing permanently.
+            if resolved_geometry {
+                self.finish_scan_cursor = recorded.max(1);
+            }
+            if let Some(tick) = cross {
+                self.finished_at_tick = Some(tick);
+                // Latch the HUD time in the same poll that saw the
+                // crossing, as one coherent pair read.
+                self.finished_hud_cs = self
+                    .shared
+                    .as_ref()
+                    .map(|s| tas_shared::race_pair(s.state()).0)
+                    .filter(|&cs| cs != u32::MAX);
+                let hud = self
+                    .finished_hud_cs
+                    .map(|cs| format!(" (race time {})", recording::format_recording_duration(cs)))
+                    .unwrap_or_default();
+                self.log_lines.push(format!(
+                    "\u{1F3C1} Finish line crossed at tick {}{} — recording stopped",
+                    tick, hud
+                ));
+                self.apply_transport_action(transport::Action::Send(TasCommand::Stop));
+            }
+        }
+    }
 
+    fn show_menu_bar(&mut self, ctx: &egui::Context) {
         // Top menu bar
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -2164,7 +1237,9 @@ impl eframe::App for TasApp {
                 });
             });
         });
+    }
 
+    fn show_log_panel(&mut self, ctx: &egui::Context) {
         // Bottom log panel (hidden by default, toggle via View menu).
         // Declared FIRST so it sits at the very bottom of the window;
         // egui stacks subsequent bottom panels above it.
@@ -2176,7 +1251,11 @@ impl eframe::App for TasApp {
                     log_panel::show(ui, &mut self.log_lines);
                 });
         }
+    }
 
+    /// Retry the connection and, while it is down, draw the error screen.
+    /// Returns true when the rest of the frame must be skipped.
+    fn show_connection_error(&mut self, ctx: &egui::Context) -> bool {
         // Connection error state
         if self.connect_error.is_some() {
             // Retry every 2 s (the repaint floor below): the game is often
@@ -2205,15 +1284,12 @@ impl eframe::App for TasApp {
                 });
             });
             ctx.request_repaint_after(std::time::Duration::from_secs(2));
-            return;
+            return true;
         }
+        false
+    }
 
-        // Read current state snapshot for UI
-        let connected = self.shared.is_some();
-        if !connected {
-            return;
-        }
-
+    fn show_left_panel(&mut self, ctx: &egui::Context) {
         // Left side panel: only shown if at least one sub-panel is visible
         let left_panel_visible = self.show_config || self.show_pico_panel;
         if left_panel_visible {
@@ -2267,7 +1343,9 @@ impl eframe::App for TasApp {
                     }
                 });
         } // left_panel_visible
+    }
 
+    fn show_history_panel(&mut self, ctx: &egui::Context) -> Vec<history::HistoryAction> {
         // Right-side history panel (optional)
         let mut history_actions = Vec::new();
         let history_dir = self
@@ -2337,7 +1415,10 @@ impl eframe::App for TasApp {
                 }
             }
         }
+        history_actions
+    }
 
+    fn apply_history_actions(&mut self, history_actions: Vec<history::HistoryAction>) {
         // Process history panel restores
         if !history_actions.is_empty() {
             for action in history_actions {
@@ -2397,19 +1478,9 @@ impl eframe::App for TasApp {
                 }
             }
         }
+    }
 
-        // Advance the in-flight restart/arm/watch cycle.
-        self.step_cycle(ctx);
-
-        // Apply shortcut actions to shared state (same dispatch as the buttons).
-        for cmd in shortcut_actions {
-            self.apply_transport_action(cmd);
-        }
-
-        // Apply any input edit the timeline produced last frame.
-        self.poll_script_file();
-        self.apply_pending_input_edit();
-
+    fn show_central_panel(&mut self, ctx: &egui::Context) {
         // Main central area
         egui::CentralPanel::default().show(ctx, |ui| {
             // Read before the mutable borrow of `shared` below.
@@ -2613,14 +1684,9 @@ impl eframe::App for TasApp {
                 // running CONT's splice.
             }
         });
+    }
 
-        self.drain_dll_log();
-
-        for w in self.history.take_warnings() {
-            self.log_lines.push(format!("History: {}", w));
-        }
-        self.persist_history_if_needed();
-
+    fn schedule_repaint(&self, ctx: &egui::Context) {
         // Refresh only as fast as there is something to show. tas_ui's own
         // rendering at a flat 30 fps costs the game ~10 ms per menu frame
         // (48 ms vs 58 ms) through GPU contention. Full rate while a TAS mode
@@ -2737,7 +1803,10 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     mod cont_splice;
+    mod cycle;
     mod relaunch;
+    mod session;
+    mod shortcuts;
 
     #[test]
     fn load_restore_save_and_edit_keep_take_identity() {
@@ -2795,20 +1864,6 @@ mod tests {
         assert_eq!(app.history.entries().last().unwrap().stamps, keith);
         let _ = std::fs::remove_file(&path);
     }
-    #[test]
-    fn checkpoint_survives_missing_or_failed_history() {
-        // Durable flush authorizes deletion with no notice.
-        assert_eq!(checkpoint_clear_decision(Some(Ok(()))), (true, None));
-        // A failed flush keeps the checkpoint and says so.
-        let (durable, notice) = checkpoint_clear_decision(Some(Err("disk full".into())));
-        assert!(!durable);
-        assert!(notice.unwrap().contains("keeping recovery checkpoint"));
-        // A missing writer is NOT durability: the checkpoint files are the
-        // only copy, so they stay, with an actionable notice.
-        let (durable, notice) = checkpoint_clear_decision(None);
-        assert!(!durable);
-        assert!(notice.unwrap().contains("store unavailable"));
-    }
 
     #[test]
     fn replacing_a_recording_detaches_its_script_and_queued_stop_edit() {
@@ -2828,18 +1883,6 @@ mod tests {
         assert!(app.pending_input_edit.is_none());
         assert!(!app.pending_edit_autostop);
         std::fs::remove_file(old_path).unwrap();
-    }
-
-    #[test]
-    fn fresh_recording_detaches_editor_but_continue_preserves_it() {
-        let mut app = test_app();
-        let path = crate::script_watch::ScriptWatch::fresh_path();
-        assert_ne!(path, crate::script_watch::ScriptWatch::fresh_path());
-        app.script_watch = Some(crate::script_watch::ScriptWatch::new(path, String::new()));
-        app.start_recording_session(10, 20);
-        assert!(app.script_watch.is_some());
-        app.start_recording_session(0, 20);
-        assert!(app.script_watch.is_none());
     }
 
     use super::*;
@@ -2937,45 +1980,6 @@ mod tests {
         }
     }
 
-    /// Run handle_shortcuts with a simulated key press and return actions.
-    fn press_key(app: &mut TasApp, key: Key, modifiers: Modifiers) -> Vec<transport::Action> {
-        let ctx = egui::Context::default();
-        let input = RawInput {
-            events: vec![Event::Key {
-                key,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers,
-            }],
-            ..Default::default()
-        };
-
-        let mut actions = Vec::new();
-        let _ = ctx.run(input, |_ctx| {
-            actions = app.handle_shortcuts(_ctx);
-        });
-        actions
-    }
-
-    fn action_has_command(actions: &[transport::Action], cmd: TasCommand) -> bool {
-        actions
-            .iter()
-            .any(|a| matches!(a, transport::Action::Send(c) if *c == cmd))
-    }
-
-    fn action_has_restart_then(actions: &[transport::Action], cmd: TasCommand) -> bool {
-        actions
-            .iter()
-            .any(|a| matches!(a, transport::Action::RestartThen(c) if *c == cmd))
-    }
-
-    fn action_has_log(actions: &[transport::Action], needle: &str) -> bool {
-        actions
-            .iter()
-            .any(|a| matches!(a, transport::Action::Log(s) if s.contains(needle)))
-    }
-
     // ===== App startup without DLL =====
 
     #[test]
@@ -2986,131 +1990,6 @@ mod tests {
         assert_eq!(app.playback_speed, 1.0);
         assert_eq!(app.timeline_view, timeline::TimelineView::default());
         assert!(!app.pico.connected);
-    }
-
-    // ===== Keyboard shortcuts =====
-
-    /// An app connected to an idle DLL in a ticking level holding `recorded`
-    /// ticks: the state in which the REC / PLAY / CONT buttons are enabled.
-    fn idle_in_level_app(recorded: u32) -> TasApp {
-        let mut app = test_app();
-        let mut shared = TasSharedMemoryClient::new_test_mapping();
-        shared.state_mut().game_in_game = 1;
-        shared.state_mut().recorded_count = recorded;
-        app.shared = Some(shared);
-        app.cycle_advance_at = std::time::Instant::now();
-        app
-    }
-
-    #[test]
-    fn shortcut_f9_arms_rec() {
-        let mut app = idle_in_level_app(0);
-        let actions = press_key(&mut app, Key::F9, Modifiers::NONE);
-        assert!(action_has_restart_then(&actions, TasCommand::ArmRec));
-        assert!(action_has_log(&actions, "F9"));
-    }
-
-    #[test]
-    fn shortcut_f10_arms_play() {
-        let mut app = idle_in_level_app(100);
-        let actions = press_key(&mut app, Key::F10, Modifiers::NONE);
-        assert!(action_has_restart_then(&actions, TasCommand::ArmPlay));
-        assert!(action_has_log(&actions, "F10"));
-    }
-
-    #[test]
-    fn shortcuts_are_inert_without_a_game() {
-        let mut app = test_app();
-        for key in [Key::F9, Key::F10, Key::F12] {
-            let actions = press_key(&mut app, key, Modifiers::NONE);
-            assert!(!action_has_restart_then(&actions, TasCommand::ArmRec));
-            assert!(!action_has_restart_then(&actions, TasCommand::ArmPlay));
-            assert!(!action_has_restart_then(&actions, TasCommand::ArmContinue));
-            assert!(action_has_log(&actions, "not connected"));
-        }
-    }
-
-    #[test]
-    fn shortcut_f11_stops() {
-        let mut app = test_app();
-        let actions = press_key(&mut app, Key::F11, Modifiers::NONE);
-        assert!(action_has_command(&actions, TasCommand::Stop));
-        assert!(action_has_log(&actions, "F11"));
-    }
-
-    #[test]
-    fn shortcut_f12_arms_continue() {
-        let mut app = idle_in_level_app(100);
-        app.continue_from_text = "50".into();
-        let actions = press_key(&mut app, Key::F12, Modifiers::NONE);
-        assert!(matches!(
-            actions.first(),
-            Some(transport::Action::SetContinueFrame(50))
-        ));
-        assert!(action_has_restart_then(&actions, TasCommand::ArmContinue));
-        assert!(action_has_log(&actions, "F12"));
-    }
-
-    #[test]
-    fn shortcut_space_stops() {
-        let mut app = test_app();
-        let actions = press_key(&mut app, Key::Space, Modifiers::NONE);
-        assert!(action_has_command(&actions, TasCommand::Stop));
-        assert!(action_has_log(&actions, "Space"));
-    }
-
-    #[test]
-    fn shortcut_f5_without_pico_logs_not_connected() {
-        let mut app = test_app();
-        let actions = press_key(&mut app, Key::F5, Modifiers::NONE);
-        assert!(action_has_log(&actions, "not connected"));
-    }
-
-    #[test]
-    fn shortcut_ctrl_z_undoes() {
-        let mut app = test_app();
-        let actions = press_key(&mut app, Key::Z, Modifiers::CTRL);
-        // Must produce Undo action — not just "no panic"
-        assert!(
-            actions.iter().any(|a| matches!(a, transport::Action::Undo)),
-            "Ctrl+Z must produce Undo action, got: {:?}",
-            actions.len()
-        );
-        assert!(action_has_log(&actions, "Undo"), "Ctrl+Z must log Undo");
-    }
-
-    #[test]
-    fn shortcut_ctrl_y_redoes() {
-        let mut app = test_app();
-        let actions = press_key(&mut app, Key::Y, Modifiers::CTRL);
-        assert!(
-            actions.iter().any(|a| matches!(a, transport::Action::Redo)),
-            "Ctrl+Y must produce Redo action"
-        );
-        assert!(action_has_log(&actions, "Redo"), "Ctrl+Y must log Redo");
-    }
-
-    #[test]
-    fn shortcut_shift_z_only_redoes() {
-        for modifiers in [Modifiers::CTRL, Modifiers::MAC_CMD] {
-            let mut app = test_app();
-            let actions = press_key(
-                &mut app,
-                Key::Z,
-                Modifiers {
-                    shift: true,
-                    ..modifiers
-                },
-            );
-            assert_eq!(
-                actions
-                    .iter()
-                    .filter(|a| matches!(a, transport::Action::Redo))
-                    .count(),
-                1
-            );
-            assert!(!actions.iter().any(|a| matches!(a, transport::Action::Undo)));
-        }
     }
 
     #[test]
@@ -3136,42 +2015,6 @@ mod tests {
             assert!(app.resume_speed.is_none());
             assert_eq!(app.playback_speed, 1.0);
         }
-    }
-
-    // ===== Timeline zoom (keyboard +/-) =====
-
-    #[test]
-    fn zoom_in_shrinks_window() {
-        let mut app = test_app();
-        app.timeline_view = timeline::TimelineView {
-            start: 100,
-            end: 1100,
-        };
-        press_key(&mut app, Key::Plus, Modifiers::NONE);
-        assert!(app.timeline_view.end - app.timeline_view.start < 1000);
-    }
-
-    #[test]
-    fn zoom_out_grows_window() {
-        let mut app = test_app();
-        app.timeline_view = timeline::TimelineView {
-            start: 100,
-            end: 1100,
-        };
-        press_key(&mut app, Key::Minus, Modifiers::NONE);
-        assert!(app.timeline_view.end - app.timeline_view.start > 1000);
-    }
-
-    #[test]
-    fn zoom_in_clamps_to_min_window() {
-        let mut app = test_app();
-        // 60-tick window is already the minimum; zooming in must not go below.
-        app.timeline_view = timeline::TimelineView {
-            start: 500,
-            end: 560,
-        };
-        press_key(&mut app, Key::Plus, Modifiers::NONE);
-        assert!(app.timeline_view.end - app.timeline_view.start >= 60);
     }
 
     // ===== Speed edge values =====
@@ -3205,64 +2048,6 @@ mod tests {
         assert!((normalize_playback_speed(4.0) - 1.0).abs() < 0.001);
     }
 
-    /// The edge detector fires once per false→true transition, so holding
-    /// F9 in-game arms REC once rather than every frame.
-    #[test]
-    fn global_shortcut_edges_fire_only_on_press() {
-        let mut prev = [false; 4];
-        // First call: F9 pressed → edge for slot 0 only.
-        let edges = compute_global_key_edges([true, false, false, false], &mut prev);
-        assert_eq!(edges, [true, false, false, false]);
-        assert_eq!(prev, [true, false, false, false]);
-        // Hold: F9 still pressed → no edge.
-        let edges = compute_global_key_edges([true, false, false, false], &mut prev);
-        assert_eq!(edges, [false, false, false, false]);
-        // Release: F9 released → no edge (we fire on press, not release).
-        let edges = compute_global_key_edges([false, false, false, false], &mut prev);
-        assert_eq!(edges, [false, false, false, false]);
-        assert_eq!(prev, [false, false, false, false]);
-        // Re-press: F9 pressed again → edge fires.
-        let edges = compute_global_key_edges([true, false, false, false], &mut prev);
-        assert_eq!(edges, [true, false, false, false]);
-    }
-
-    /// A key held across many frames (repeated identical reads) produces no
-    /// further edges.
-    #[test]
-    fn global_shortcut_held_does_not_repeat() {
-        let mut prev = [false; 4];
-        compute_global_key_edges([true, true, true, true], &mut prev);
-        for _ in 0..100 {
-            let edges = compute_global_key_edges([true, true, true, true], &mut prev);
-            assert_eq!(edges, [false, false, false, false]);
-        }
-    }
-
-    /// CONT with no recording loaded must not leave the app half-armed at
-    /// catch-up speed: with nothing to splice, the PLAY→REC transition that
-    /// calls clear_cont_catchup would never fire.
-    #[test]
-    fn cont_with_no_recording_does_not_arm_catchup() {
-        let mut app = test_app();
-        app.playback_speed = 1.0;
-        app.cont_catchup_multiplier = 32.0;
-        // No shared memory, so recorded_count reads as 0.
-        app.queue_restart_then(TasCommand::ArmContinue);
-        assert!(
-            app.resume_speed.is_none(),
-            "CONT without recording must not engage catchup speed"
-        );
-        assert!(
-            (app.playback_speed - 1.0).abs() < 0.001,
-            "playback_speed must remain at pre-CONT value, got {}",
-            app.playback_speed
-        );
-        assert!(
-            app.cycle.is_none(),
-            "CONT without recording must not arm a controller"
-        );
-    }
-
     fn state_with_recorded_count(recorded_count: u32) -> Box<TasSharedState> {
         let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = recorded_count;
@@ -3271,143 +2056,5 @@ mod tests {
             state.rec_coords[i] = [i as f32, 0.0, i as f32];
         }
         state
-    }
-
-    fn only_log(actions: &[transport::Action]) -> String {
-        match actions {
-            [transport::Action::Log(line)] => line.clone(),
-            other => panic!("expected a single log line, got {}", other.len()),
-        }
-    }
-
-    #[test]
-    fn shortcuts_follow_the_button_rule() {
-        let mut app = test_app();
-        let mut shared = TasSharedMemoryClient::new_test_mapping();
-        shared.state_mut().game_in_game = 1;
-        shared.state_mut().mode = TasMode::Rec as u32;
-        shared.state_mut().recorded_count = 100;
-        app.shared = Some(shared);
-        app.cycle_advance_at = std::time::Instant::now(); // the level is ticking
-
-        // F9 during a REC: the button is grey, so the key refuses too.
-        let line = only_log(&app.shortcut_arm("Shortcut: F9 REC", TasCommand::ArmRec));
-        assert!(
-            line.contains("ignored") && line.contains("STOP first"),
-            "{line}"
-        );
-
-        app.shared.as_mut().unwrap().state_mut().mode = TasMode::Off as u32;
-        app.shared.as_mut().unwrap().state_mut().recorded_count = 0;
-        let line = only_log(&app.shortcut_arm("Shortcut: F10 PLAY", TasCommand::ArmPlay));
-        assert!(line.contains("nothing is recorded"), "{line}");
-
-        // F12 with a typo in From: refused, the typo stays for the user to see.
-        app.shared.as_mut().unwrap().state_mut().recorded_count = 100;
-        app.continue_from_text = "abc".into();
-        app.continue_from_frame = 40;
-        let line = only_log(&app.shortcut_arm("Shortcut: F12 CONT", TasCommand::ArmContinue));
-        assert!(line.contains("\"abc\""), "{line}");
-        assert_eq!(
-            (app.continue_from_text.as_str(), app.continue_from_frame),
-            ("abc", 40)
-        );
-
-        // F12 with a frame past the end: clamped, displayed, and armed.
-        app.continue_from_text = "500".into();
-        let actions = app.shortcut_arm("Shortcut: F12 CONT", TasCommand::ArmContinue);
-        assert!(matches!(
-            actions.as_slice(),
-            [
-                transport::Action::SetContinueFrame(100),
-                transport::Action::RestartThen(TasCommand::ArmContinue),
-                transport::Action::Log(_)
-            ]
-        ));
-        assert_eq!(
-            (app.continue_from_text.as_str(), app.continue_from_frame),
-            ("100", 100)
-        );
-
-        // At a menu nothing arms.
-        app.cycle_advance_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
-        let line = only_log(&app.shortcut_arm("Global F9 (in-game): REC", TasCommand::ArmRec));
-        assert!(line.contains("enter a level first"), "{line}");
-    }
-
-    #[test]
-    fn completed_rec_session_pushes_history_entry() {
-        let mut app = test_app();
-        let state = state_with_recorded_count(2303);
-        app.active_recording_session = Some(ActiveRecordingSession {
-            kind: RecordingSessionKind::Rec,
-            start_tick: 0,
-            max_recorded_count: 2303,
-        });
-
-        let snapshot = recording::RecordingSnapshot::from_state(&state);
-        app.finalize_recording_session(&snapshot, 2303);
-
-        assert_eq!(app.history.len(), 1);
-        assert_eq!(app.history.entries()[0].label, "Recorded 0:23.03");
-    }
-
-    #[test]
-    fn completed_cont_session_pushes_history_entry() {
-        let mut app = test_app();
-        let state = state_with_recorded_count(5303);
-        app.active_recording_session = Some(ActiveRecordingSession {
-            kind: RecordingSessionKind::Continue,
-            start_tick: 3000,
-            max_recorded_count: 5303,
-        });
-
-        let snapshot = recording::RecordingSnapshot::from_state(&state);
-        app.finalize_recording_session(&snapshot, 5303);
-
-        assert_eq!(app.history.len(), 1);
-        assert_eq!(
-            app.history.entries()[0].label,
-            "Continued from 0:30.00, total 0:53.03"
-        );
-    }
-
-    #[test]
-    fn continue_session_uses_pending_continue_start_when_shared_resets_to_zero() {
-        let mut app = test_app();
-        app.pending_session_kind = Some(RecordingSessionKind::Continue);
-        app.pending_continue_start_tick = Some(3415);
-        app.start_recording_session(0, 3415);
-
-        let session = app.active_recording_session.expect("session should start");
-        assert_eq!(session.kind, RecordingSessionKind::Continue);
-        assert_eq!(session.start_tick, 3415);
-        assert_eq!(session.max_recorded_count, 3415);
-    }
-
-    #[test]
-    fn play_stop_noop_does_not_push_history_entry() {
-        let mut app = test_app();
-        let state = state_with_recorded_count(100);
-
-        let snapshot = recording::RecordingSnapshot::from_state(&state);
-        app.finalize_recording_session(&snapshot, 100);
-        assert_eq!(app.history.len(), 0);
-
-        app.active_recording_session = Some(ActiveRecordingSession {
-            kind: RecordingSessionKind::Rec,
-            start_tick: 100,
-            max_recorded_count: 100,
-        });
-        app.finalize_recording_session(&snapshot, 100);
-        assert_eq!(app.history.len(), 0);
-    }
-
-    // ===== Transport controller state =====
-
-    #[test]
-    fn cont_controller_initially_none() {
-        let app = test_app();
-        assert!(app.cycle.is_none());
     }
 }

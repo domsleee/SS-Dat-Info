@@ -421,6 +421,98 @@ static bool TryProcessStopCommand(TasSharedState* s, bool notifyObserverNow) {
     return true;
 }
 
+// Reset the playback position, held-key mask and injection counters. Shared
+// by every arm (REC, PLAY, CONT).
+static void ResetArmCounters(TasSharedState* s) {
+    s->playback_pos = 0;
+    g_prevMask = 0;
+    s->bb3b10_call_count = 0;
+    s->handler_block_count = 0;
+    s->bb3b10_block_count = 0;
+}
+
+static void ArmRec(TasSharedState* s) {
+    s->recorded_count = 0;
+    ResetArmCounters(s);
+    s->segment_count = 1;
+    s->segment_start_frame = 0;
+    memset(s->segment_boundaries, 0, sizeof(s->segment_boundaries));
+    s->segment_boundaries[0].frame = 0;
+    s->mode = MODE_REC;
+    g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
+    g_cave2_contArmed = 0;
+    // REC never replays; make sure it cannot inherit alignment.
+    ClearGateAlign(s);
+    g_cave2_pendingLog = 1;
+}
+
+static void ArmPlay(TasSharedState* s) {
+    g_cave2_logParam = s->recorded_count;
+    ResetArmCounters(s);
+
+    // A plain PLAY never splices: clear any splice marker a refused or
+    // stopped CONT left in shared memory.
+    s->continue_from_frame = 0;
+    g_cave2_contArmed = 0;
+
+    // Do not force the spawn position: the rest of the physics state
+    // (rotation, terrain contact) would still be the real spawn's, and
+    // the mismatch drifts once steering starts.
+
+    s->mode = MODE_PLAY;
+    g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
+    g_cave2_pendingLog = 2;
+}
+
+// Refuse an ARM_CONTINUE: log why and leave the mode OFF.
+static void RefuseArmContinue(TasSharedState* s, const char* reason) {
+    LogRing(s, LOG_ERROR, reason);
+    s->mode = MODE_OFF;
+    s->continue_from_frame = 0;  // refused — don't leave a stale marker armed
+    g_cave2_contArmed = 0;
+    ClearGateAlign(s);  // refusal must not leave alignment armed for a later replay
+    g_cave2_pendingLog = 3;  // "stopped"
+}
+
+static void ArmContinue(TasSharedState* s) {
+    // Continue Record: PLAY frames 0..continue_from_frame, then auto-switch to REC
+    // Validate splice point is within recorded range
+    if (s->continue_from_frame == 0 || s->continue_from_frame > s->recorded_count) {
+        RefuseArmContinue(s, "ARM_CONTINUE: invalid splice point");
+        return;
+    }
+    // Refuse ARM_CONTINUE while REC/PLAY is running: the prefix
+    // replay assumes the boarder is at rec_coords[0]'s state, which
+    // holds only right after an F5 restart. tas_ui always sends
+    // CMD_RESTART first (RestartThen(ArmContinue)).
+    if (s->mode != MODE_OFF) {
+        RefuseArmContinue(s,
+            "ARM_CONTINUE: refused — game is REC/PLAY; CONT requires a fresh restart first");
+        return;
+    }
+    g_cave2_logParam = s->continue_from_frame;
+    ResetArmCounters(s);
+    // Segment tracking: keep existing segment_count, we'll add one at splice
+    s->mode = MODE_PLAY;  // Start as PLAY, will auto-switch in PLAY handler
+    g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
+    g_cave2_contArmed = 1;  // the ONLY place the splice gate opens
+    s->cont_splice_approved = 0;  // aligned attempts start unapproved (splice interlock)
+    // Keep gate_align_rec: the controller staged it right before this
+    // arm. The splice fires at the aligned play-index while the
+    // recording stays in rec-index space (CompleteContinueSplice).
+    g_cave2_pendingLog = 5;
+}
+
+// Begin in-process F5 restart sequence
+static void BeginRestart(TasSharedState* s) {
+    s->restart_state = 1;
+    g_restartFramesHeld = 0;
+    // The controller stages alignment AFTER the restart; anything
+    // older is stale.
+    ClearGateAlign(s);
+    g_cave2_pendingLog = 7;  // "restart initiated"
+}
+
 // Handle command transitions
 // WARNING: NO Log/format/float calls — runs inside SafetyHookMid (x87 FPU not saved).
 // Returns false when the out-of-cycle worker currently owns STOP cleanup. The
@@ -437,99 +529,10 @@ static bool ProcessCommand(TasSharedState* s) {
     }
 
     switch (cmd) {
-        case CMD_ARM_REC:
-            s->recorded_count = 0;
-            s->playback_pos = 0;
-            g_prevMask = 0;
-            s->bb3b10_call_count = 0;
-            s->handler_block_count = 0;
-            s->bb3b10_block_count = 0;
-                    s->segment_count = 1;
-            s->segment_start_frame = 0;
-            memset(s->segment_boundaries, 0, sizeof(s->segment_boundaries));
-            s->segment_boundaries[0].frame = 0;
-            s->mode = MODE_REC;
-            g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
-            g_cave2_contArmed = 0;
-            // REC never replays; make sure it cannot inherit alignment.
-            ClearGateAlign(s);
-            g_cave2_pendingLog = 1;
-            break;
-
-        case CMD_ARM_PLAY:
-            g_cave2_logParam = s->recorded_count;
-            s->playback_pos = 0;
-            g_prevMask = 0;
-            s->bb3b10_call_count = 0;
-            s->handler_block_count = 0;
-            s->bb3b10_block_count = 0;
-
-            // A plain PLAY never splices: clear any splice marker a refused or
-            // stopped CONT left in shared memory.
-            s->continue_from_frame = 0;
-            g_cave2_contArmed = 0;
-
-            // Do not force the spawn position: the rest of the physics state
-            // (rotation, terrain contact) would still be the real spawn's, and
-            // the mismatch drifts once steering starts.
-
-            s->mode = MODE_PLAY;
-            g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
-            g_cave2_pendingLog = 2;
-            break;
-
-        case CMD_ARM_CONTINUE:
-            // Continue Record: PLAY frames 0..continue_from_frame, then auto-switch to REC
-            // Validate splice point is within recorded range
-            if (s->continue_from_frame == 0 || s->continue_from_frame > s->recorded_count) {
-                LogRing(s, LOG_ERROR, "ARM_CONTINUE: invalid splice point");
-                s->mode = MODE_OFF;
-                s->continue_from_frame = 0;  // refused — don't leave a stale marker armed
-                g_cave2_contArmed = 0;
-                ClearGateAlign(s);  // refusal must not leave alignment armed for a later replay
-                g_cave2_pendingLog = 3;  // "stopped"
-                break;
-            }
-            // Refuse ARM_CONTINUE while REC/PLAY is running: the prefix
-            // replay assumes the boarder is at rec_coords[0]'s state, which
-            // holds only right after an F5 restart. tas_ui always sends
-            // CMD_RESTART first (RestartThen(ArmContinue)).
-            if (s->mode != MODE_OFF) {
-                LogRing(s, LOG_ERROR,
-                    "ARM_CONTINUE: refused — game is REC/PLAY; CONT requires a fresh restart first");
-                s->mode = MODE_OFF;
-                s->continue_from_frame = 0;  // refused — don't leave a stale marker armed
-                g_cave2_contArmed = 0;
-                ClearGateAlign(s);  // refusal must not leave alignment armed for a later replay
-                g_cave2_pendingLog = 3;  // "stopped"
-                break;
-            }
-            g_cave2_logParam = s->continue_from_frame;
-            s->playback_pos = 0;
-            g_prevMask = 0;
-            s->bb3b10_call_count = 0;
-            s->handler_block_count = 0;
-            s->bb3b10_block_count = 0;
-            // Segment tracking: keep existing segment_count, we'll add one at splice
-            s->mode = MODE_PLAY;  // Start as PLAY, will auto-switch in PLAY handler
-            g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
-            g_cave2_contArmed = 1;  // the ONLY place the splice gate opens
-            s->cont_splice_approved = 0;  // aligned attempts start unapproved (splice interlock)
-            // Keep gate_align_rec: the controller staged it right before this
-            // arm. The splice fires at the aligned play-index while the
-            // recording stays in rec-index space (CompleteContinueSplice).
-            g_cave2_pendingLog = 5;
-            break;
-
-        case CMD_RESTART:
-            // Begin in-process F5 restart sequence
-            s->restart_state = 1;
-            g_restartFramesHeld = 0;
-            // The controller stages alignment AFTER the restart; anything
-            // older is stale.
-            ClearGateAlign(s);
-            g_cave2_pendingLog = 7;  // "restart initiated"
-            break;
+        case CMD_ARM_REC:      ArmRec(s);       break;
+        case CMD_ARM_PLAY:     ArmPlay(s);      break;
+        case CMD_ARM_CONTINUE: ArmContinue(s);  break;
+        case CMD_RESTART:      BeginRestart(s); break;
     }
 
     // arm_generation is the controller's "the arm landed" signal, so it is
@@ -607,6 +610,173 @@ static void CompleteContinueSplice(TasSharedState* s) {
     }
 }
 
+// Publish the live position, velocity and rotation in every mode.
+// Inside FSAVE/FRSTOR, so float ops are safe here. Holds the __try, so it
+// must not own any C++ object needing unwinding (C2712).
+static void PublishLivePosition(TasSharedState* s) {
+    if (s->player_ptr) {
+        __try {
+            auto player = (uint8_t*)s->player_ptr;
+            float new_x, new_y, new_z;
+            memcpy(&new_x, player + GameAddresses::PLAYER_X, 4);
+            memcpy(&new_y, player + GameAddresses::PLAYER_Y, 4);
+            memcpy(&new_z, player + GameAddresses::PLAYER_Z, 4);
+
+            s->velocity_x = new_x - s->player_x;
+            s->velocity_y = new_y - s->player_y;
+            s->velocity_z = new_z - s->player_z;
+
+            s->player_x = new_x;
+            s->player_y = new_y;
+            s->player_z = new_z;
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
+}
+
+// In-process F5 restart state machine (runs regardless of mode)
+static void StepInProcessRestart(TasSharedState* s, GameAddresses* addr) {
+    if (s->restart_state == 1) {
+        uint32_t kbobj = GetKeyboardObject(addr);
+        if (kbobj) {
+            if (g_restartFramesHeld == 0) {
+                // Press: the byte AND the observer. restart_release.hpp
+                // takes the byte back the moment the restart is observed.
+                restartrelease::Pressed(GetDIBuffer(kbobj));
+                InjectF5(addr, kbobj, true);
+            }
+            g_restartFramesHeld++;
+            // Finish once the byte is up (the restart hook or the worker's
+            // wall-clock cap released it): observer "up" + done. The cycle
+            // cap only bounds a run where neither ever fires.
+            if (!restartrelease::Pending() || g_restartFramesHeld >= RESTART_F5_MAX_HOLD_FRAMES) {
+                restartrelease::ReleaseByteNow(3);
+                InjectF5(addr, kbobj, false);
+                s->restart_state = 2;  // Done
+                g_cave2_pendingLog = 8;
+            }
+        }
+    }
+}
+
+// Auto-stop when the level is swapped out under an armed mode (see
+// g_armedRoot). root==0 is not a trigger: restarts pass through it.
+// Returns true when it stopped the session.
+static bool AutoStopIfLevelChanged(TasSharedState* s, GameAddresses* addr) {
+    uint32_t curRoot = SafeReadPtr((uint32_t)addr->player_base);
+    if (curRoot && g_armedRoot && curRoot != g_armedRoot) {
+        s->mode = MODE_OFF;
+        ReleaseTasInput(s, addr);  // clears the NEW level's input state
+        s->continue_from_frame = 0;
+        g_cave2_contArmed = 0;
+        ClearGateAlign(s);
+        // The level is gone, so no restart is in flight: release the
+        // live-input block.
+        s->cont_suppress_input = 0;
+        g_armedRoot = 0;
+        LogRing(s, LOG_WARN,
+            "TAS auto-stopped: level context changed (left the race / menu demo loaded)");
+        g_cave2_pendingLog = 3;  // "stopped"
+        return true;
+    }
+    return false;
+}
+
+static void RecTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
+    uint32_t index = s->recorded_count;
+    if (index >= TAS_MAX_TICKS) {
+        // The buffer holds 10 min 55 s at 100 ticks/s. Say so, rather than
+        // ending the take indistinguishably from a user STOP.
+        LogRing(s, LOG_WARN, "REC stopped: recording buffer full (TAS_MAX_TICKS)");
+        s->mode = MODE_OFF;
+        ReleaseTasInput(s, addr);
+        g_cave2_pendingLog = 3;
+        return;
+    }
+
+    // Sample input via GAKS (Cave 1C blocks +3940, so game buffer is empty).
+    // This makes REC symmetric with PLAY: both write buffer + action_state
+    // + BB3B10 at the same point in Supreme::Cycle.
+    uint8_t mask = SampleGAKS();
+    uint8_t transitions = mask ^ g_prevMask;
+
+    uint32_t buffer = GetDIBuffer(kbobj);
+    WriteDIBuffer(buffer, mask);
+
+    WriteActionState(kbobj, mask);
+
+    if (transitions) {
+        CallBB3B10OnTransitions(s, addr, kbobj, mask, transitions);
+    }
+
+    s->input_log[index] = mask;
+    g_prevMask = mask;
+
+    CapturePlayerCoords(s, index, true);
+
+    s->recorded_count = index + 1;
+}
+
+static void PlayTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
+    uint32_t pos = s->playback_pos;
+
+    // With alignment the end is gate-relative too, so a replay whose gate
+    // landed early still plays every recorded input. recorded_count is
+    // written by the UI process; cap it so it can never index past
+    // input_log.
+    const uint32_t rec_count =
+        s->recorded_count < TAS_MAX_TICKS ? s->recorded_count : TAS_MAX_TICKS;
+    uint32_t play_end = rec_count;
+    if (s->gate_align_rec > 0 && s->gate_index > 0 && rec_count > s->gate_align_rec) {
+        play_end = s->gate_index + (rec_count - s->gate_align_rec);
+    }
+    if (pos >= play_end) {
+        s->mode = MODE_OFF;
+        ClearGateAlign(s);  // aligned PLAY finished — don't leave it armed
+        ReleaseTasInput(s, addr);  // replay done — un-stick its held keys
+        g_cave2_contArmed = 0;  // hygiene — an armed CONT always splices before here
+        g_cave2_logParam = pos;
+        g_cave2_pendingLog = 4;
+        return;
+    }
+
+    // Gate-relative input alignment (gate_alignment.hpp). Input is indexed
+    // from the gate, not the arm, so a countdown a tick longer or shorter
+    // than the recording's does not shift the run's input timing. The
+    // controller's trajectory watcher rejects a differing spawn state.
+    //
+    // Before the live gate, replay the recording's input, then HOLD its
+    // gate mask from the pre-gate lead on. gate_index is stamped at the
+    // END of the cycle whose position first differs, so that cycle's mask
+    // is chosen before the gate is known; injecting nothing there loses a
+    // cycle of input (a constant 0.389 drift). The boarder cannot move
+    // before the gate, so the held mask is inert until it is the right
+    // one. Earlier transitions are kept because the input observer sees
+    // them.
+    uint32_t src = pos;
+    if (s->gate_align_rec > 0) {
+        src = GateAlignedInputSource(pos, s->gate_index, s->gate_align_rec, rec_count);
+    }
+    uint8_t mask = (src == GATE_ALIGN_INVALID_SOURCE) ? (uint8_t)0 : s->input_log[src];
+
+    uint32_t buffer = GetDIBuffer(kbobj);
+    WriteDIBuffer(buffer, mask);
+
+    WriteActionState(kbobj, mask);
+
+    uint8_t transitions = mask ^ g_prevMask;
+    if (transitions) {
+        CallBB3B10OnTransitions(s, addr, kbobj, mask, transitions);
+    }
+
+    g_prevMask = mask;
+
+    CapturePlayerCoords(s, pos, false);
+
+    s->playback_pos = pos + 1;
+
+    CompleteContinueSplice(s);
+}
+
 // Cave 2 callback logic — called with FPU state saved/restored.
 // Separated from the FSAVE wrapper because MSVC forbids __asm in functions with SEH.
 static void __declspec(noinline) Cave2_Logic() {
@@ -632,25 +802,7 @@ static void __declspec(noinline) Cave2_Logic() {
         s->player_ptr = SafeReadPtr(s->replay_ptr + GameAddresses::REPLAY_PLAYER_OFFSET);
     }
 
-    // Publish the live position, velocity and rotation in every mode.
-    // Inside FSAVE/FRSTOR, so float ops are safe here.
-    if (s->player_ptr) {
-        __try {
-            auto player = (uint8_t*)s->player_ptr;
-            float new_x, new_y, new_z;
-            memcpy(&new_x, player + GameAddresses::PLAYER_X, 4);
-            memcpy(&new_y, player + GameAddresses::PLAYER_Y, 4);
-            memcpy(&new_z, player + GameAddresses::PLAYER_Z, 4);
-
-            s->velocity_x = new_x - s->player_x;
-            s->velocity_y = new_y - s->player_y;
-            s->velocity_z = new_z - s->player_z;
-
-            s->player_x = new_x;
-            s->player_y = new_y;
-            s->player_z = new_z;
-        } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    }
+    PublishLivePosition(s);
 
     if (!ProcessCommand(s)) return;
 
@@ -658,54 +810,14 @@ static void __declspec(noinline) Cave2_Logic() {
     // it needs the key buffer, which only this thread can resolve.
     if (uint32_t kb = GetKeyboardObject(addr)) restartrelease::NoteBuffer(GetDIBuffer(kb));
 
-    // In-process F5 restart state machine (runs regardless of mode)
-    if (s->restart_state == 1) {
-        uint32_t kbobj = GetKeyboardObject(addr);
-        if (kbobj) {
-            if (g_restartFramesHeld == 0) {
-                // Press: the byte AND the observer. restart_release.hpp
-                // takes the byte back the moment the restart is observed.
-                restartrelease::Pressed(GetDIBuffer(kbobj));
-                InjectF5(addr, kbobj, true);
-            }
-            g_restartFramesHeld++;
-            // Finish once the byte is up (the restart hook or the worker's
-            // wall-clock cap released it): observer "up" + done. The cycle
-            // cap only bounds a run where neither ever fires.
-            if (!restartrelease::Pending() || g_restartFramesHeld >= RESTART_F5_MAX_HOLD_FRAMES) {
-                restartrelease::ReleaseByteNow(3);
-                InjectF5(addr, kbobj, false);
-                s->restart_state = 2;  // Done
-                g_cave2_pendingLog = 8;
-            }
-        }
-    }
+    StepInProcessRestart(s, addr);
 
     // The level-context epoch is bumped by level_scan.hpp's worker, not here:
     // Supreme::Cycle is frozen during the menus and loads it must detect.
 
     if (s->mode == MODE_OFF) return;
 
-    // Auto-stop when the level is swapped out under an armed mode (see
-    // g_armedRoot). root==0 is not a trigger: restarts pass through it.
-    {
-        uint32_t curRoot = SafeReadPtr((uint32_t)addr->player_base);
-        if (curRoot && g_armedRoot && curRoot != g_armedRoot) {
-            s->mode = MODE_OFF;
-            ReleaseTasInput(s, addr);  // clears the NEW level's input state
-            s->continue_from_frame = 0;
-            g_cave2_contArmed = 0;
-            ClearGateAlign(s);
-            // The level is gone, so no restart is in flight: release the
-            // live-input block.
-            s->cont_suppress_input = 0;
-            g_armedRoot = 0;
-            LogRing(s, LOG_WARN,
-                "TAS auto-stopped: level context changed (left the race / menu demo loaded)");
-            g_cave2_pendingLog = 3;  // "stopped"
-            return;
-        }
-    }
+    if (AutoStopIfLevelChanged(s, addr)) return;
 
     uint32_t kbobj = GetKeyboardObject(addr);
     if (!kbobj) return;
@@ -713,99 +825,9 @@ static void __declspec(noinline) Cave2_Logic() {
     if (s->mode == MODE_PLAY) CompleteContinueSplice(s);
 
     if (s->mode == MODE_REC) {
-        uint32_t index = s->recorded_count;
-        if (index >= TAS_MAX_TICKS) {
-            // The buffer holds 10 min 55 s at 100 ticks/s. Say so, rather than
-            // ending the take indistinguishably from a user STOP.
-            LogRing(s, LOG_WARN, "REC stopped: recording buffer full (TAS_MAX_TICKS)");
-            s->mode = MODE_OFF;
-            ReleaseTasInput(s, addr);
-            g_cave2_pendingLog = 3;
-            return;
-        }
-
-        // Sample input via GAKS (Cave 1C blocks +3940, so game buffer is empty).
-        // This makes REC symmetric with PLAY: both write buffer + action_state
-        // + BB3B10 at the same point in Supreme::Cycle.
-        uint8_t mask = SampleGAKS();
-        uint8_t transitions = mask ^ g_prevMask;
-
-        uint32_t buffer = GetDIBuffer(kbobj);
-        WriteDIBuffer(buffer, mask);
-
-        WriteActionState(kbobj, mask);
-
-        if (transitions) {
-            CallBB3B10OnTransitions(s, addr, kbobj, mask, transitions);
-        }
-
-        s->input_log[index] = mask;
-        g_prevMask = mask;
-
-        CapturePlayerCoords(s, index, true);
-
-        s->recorded_count = index + 1;
-
+        RecTick(s, addr, kbobj);
     } else if (s->mode == MODE_PLAY) {
-        uint32_t pos = s->playback_pos;
-
-
-        // With alignment the end is gate-relative too, so a replay whose gate
-        // landed early still plays every recorded input. recorded_count is
-        // written by the UI process; cap it so it can never index past
-        // input_log.
-        const uint32_t rec_count =
-            s->recorded_count < TAS_MAX_TICKS ? s->recorded_count : TAS_MAX_TICKS;
-        uint32_t play_end = rec_count;
-        if (s->gate_align_rec > 0 && s->gate_index > 0 && rec_count > s->gate_align_rec) {
-            play_end = s->gate_index + (rec_count - s->gate_align_rec);
-        }
-        if (pos >= play_end) {
-            s->mode = MODE_OFF;
-            ClearGateAlign(s);  // aligned PLAY finished — don't leave it armed
-            ReleaseTasInput(s, addr);  // replay done — un-stick its held keys
-            g_cave2_contArmed = 0;  // hygiene — an armed CONT always splices before here
-            g_cave2_logParam = pos;
-            g_cave2_pendingLog = 4;
-            return;
-        }
-
-        // Gate-relative input alignment (gate_alignment.hpp). Input is indexed
-        // from the gate, not the arm, so a countdown a tick longer or shorter
-        // than the recording's does not shift the run's input timing. The
-        // controller's trajectory watcher rejects a differing spawn state.
-        //
-        // Before the live gate, replay the recording's input, then HOLD its
-        // gate mask from the pre-gate lead on. gate_index is stamped at the
-        // END of the cycle whose position first differs, so that cycle's mask
-        // is chosen before the gate is known; injecting nothing there loses a
-        // cycle of input (a constant 0.389 drift). The boarder cannot move
-        // before the gate, so the held mask is inert until it is the right
-        // one. Earlier transitions are kept because the input observer sees
-        // them.
-        uint32_t src = pos;
-        if (s->gate_align_rec > 0) {
-            src = GateAlignedInputSource(pos, s->gate_index, s->gate_align_rec, rec_count);
-        }
-        uint8_t mask = (src == GATE_ALIGN_INVALID_SOURCE) ? (uint8_t)0 : s->input_log[src];
-
-        uint32_t buffer = GetDIBuffer(kbobj);
-        WriteDIBuffer(buffer, mask);
-
-        WriteActionState(kbobj, mask);
-
-        uint8_t transitions = mask ^ g_prevMask;
-        if (transitions) {
-            CallBB3B10OnTransitions(s, addr, kbobj, mask, transitions);
-        }
-
-        g_prevMask = mask;
-
-        CapturePlayerCoords(s, pos, false);
-
-        s->playback_pos = pos + 1;
-
-        CompleteContinueSplice(s);
+        PlayTick(s, addr, kbobj);
     }
 }
 

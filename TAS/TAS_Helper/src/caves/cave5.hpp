@@ -159,6 +159,148 @@ static constexpr int32_t CAVE5_PER_FRAME_TICK_CAP = 64;
 // scripted fast-forward (playback_speed > 1) or the catchup-drain path.
 static constexpr int32_t NATIVE_GAME_CLAMP_AT_1X = 20;
 
+// The helpers below run between Cave5_MidCallback's FSAVE and FRSTOR.
+
+// Was the engine frozen (dialog, menu, load) since the last call? A
+// backlog after a freeze is wall-clock debt and is dropped at ANY
+// speed. CONT catch-up is not a freeze: cave5 runs every frame there,
+// so the gap stays ~7-16 ms.
+static bool ResumedFromFreeze() {
+    static uint32_t s_lastRunMs = 0;
+    uint32_t nowMs = GetTickCount();
+    bool resumed_from_freeze =
+        s_lastRunMs != 0 && (nowMs - s_lastRunMs) > 250;
+    s_lastRunMs = nowMs;
+    return resumed_from_freeze;
+}
+
+// PARK: the aligned-CONT splice interlock (an unaligned CONT,
+// gate_align_rec == 0, never waits for approval). The splice is destructive
+// (truncates recorded_count, flips PLAY to REC) and the watcher that
+// validates the prefix runs in the controller process, which can lag.
+// So from the moment playback reaches its splice, emit ZERO ticks
+// until the controller writes cont_splice_approved. The sim and
+// playback_pos freeze while the renderer keeps presenting. If the
+// controller dies while parked, STOP or RESTART clears the alignment
+// and lifts the park.
+static bool IsSpliceParked(TasSharedState* s) {
+    bool splice_parked = false;
+    if (s->continue_from_frame > 0 && s->mode == MODE_PLAY
+        && s->gate_align_rec != 0 && s->cont_splice_approved == 0) {
+        uint32_t park_at = GateAlignedSplicePos(
+            s->continue_from_frame, s->gate_index, s->gate_align_rec);
+        splice_parked = s->playback_pos >= park_at;
+    }
+    return splice_parked;
+}
+
+// CONT clock-backlog reset. When cave2 flags a splice, advance the
+// game's time accumulator to "now" so the resumed REC runs in real
+// time from the splice frame. At this hook site ctx.ebp is the clock
+// object and [ebp+0x0C] its seconds accumulator. Raw demand is
+// realTick = elapsed * [0x46DB0C] (=100) = (now-prev)/native, a separate
+// constant from the tick advance, so scaling the advance does not scale
+// this conversion; adding realTick * native(0.01) moves prev to now.
+// NATIVE, not the scaled advance, keeps it speed-independent, and the
+// backlog ticks are never run, so REC records no burst.
+// Returns true when the reset was applied this frame.
+static bool ApplyContClockReset(SafetyHookContext& ctx, int32_t realTick, bool splice_parked) {
+    bool did_reset = false;
+    if (g_contResetPending && !splice_parked) {  // parked: keep it pending, no tick may leak
+        if (ctx.ebp) {
+            float* prev_time = (float*)(uintptr_t)(ctx.ebp + 0x0C);
+            *prev_time += (float)realTick * g_nativeTickAdvance;
+        }
+        g_contResetPending = 0;
+        did_reset = true;
+    }
+    return did_reset;
+}
+
+// Land the catch-up batch EXACTLY on the splice, so the PLAY→REC
+// switch happens on the batch's last tick and no catch-up tick spills
+// into REC. While the splice is still pending on the live gate, step
+// one tick per frame near the gate (ContinueSpliceTickLimit).
+static int32_t LimitTicksToSplice(TasSharedState* s, int32_t realTick) {
+    uint32_t aligned_splice = GateAlignedSplicePos(
+        s->continue_from_frame, s->gate_index, s->gate_align_rec);
+    if (s->continue_from_frame > 0 && s->mode == MODE_PLAY) {
+        int32_t remaining = (int32_t)ContinueSpliceTickLimit(
+            s->playback_pos, aligned_splice,
+            s->gate_align_rec == 0 || s->cont_splice_approved != 0,
+            s->gate_align_rec);
+        if (realTick > remaining) realTick = remaining;
+    }
+    return realTick;
+}
+
+// Choose this frame's tick count (esi).
+static void ChooseTickCount(SafetyHookContext& ctx, TasSharedState* s, int32_t realTick,
+                            bool did_reset, bool catchup_drain, bool splice_parked) {
+    if (did_reset) {
+        // Splice frame's backlog was just zeroed (prev → now); process a
+        // single resume tick so the first REC frame doesn't re-burst.
+        ctx.esi = 1;
+    } else if (catchup_drain) {
+        // Set tick_advance large enough that 1 tick drains the whole
+        // wall-time gap (gap ≈ realTick * native because __ftol used
+        // tick_advance = native last frame).
+        if (g_tickAdvancePtr) {
+            *g_tickAdvancePtr = (float)realTick * g_nativeTickAdvance;
+        }
+        ctx.esi = 1;
+    } else {
+        // Clamp raw tick first (fix __ftol garbage). The game's own
+        // clamp (cmp esi, 14h / mov ebx, 14h) is patched at install
+        // time to use 40h instead, so we match that here.
+        if (realTick < 0) realTick = 0;
+        if (realTick > CAVE5_PER_FRAME_TICK_CAP) realTick = CAVE5_PER_FRAME_TICK_CAP;
+
+        // At 1x and below keep the game's native 20-tick clamp, so normal
+        // play behaves like the unpatched game when it stutters; only
+        // fast-forward gets the raised cap.
+        if (s->playback_speed <= 1.0f && realTick > NATIVE_GAME_CLAMP_AT_1X) {
+            realTick = NATIVE_GAME_CLAMP_AT_1X;
+        }
+
+        if (splice_parked) realTick = 0;  // hold AT the splice until approved
+
+        ctx.esi = (uintptr_t)realTick;
+    }
+}
+
+// Variable speed: scale the time advance only during REC/PLAY at a
+// non-1x speed; otherwise write the native value back every frame.
+// Skipped during catchup_drain, whose large value the game must read
+// this frame.
+static void ApplyPlaybackSpeed(TasSharedState* s, bool catchup_drain) {
+    if (g_tickAdvancePtr && !catchup_drain) {
+        if (s->mode != MODE_OFF && s->playback_speed > 0.0f && s->playback_speed != 1.0f) {
+            *g_tickAdvancePtr = g_nativeTickAdvance / s->playback_speed;
+        } else {
+            *g_tickAdvancePtr = g_nativeTickAdvance;
+        }
+    }
+}
+
+// Publish the per-frame tick count: the only external signal of how fast
+// the game is SIMULATING rather than rendering, which is exactly what a
+// fast-forward regression changes and a frame counter cannot see.
+//
+// Count what the game will actually RUN, not what we asked for: the tick
+// loop bounds itself with ebx, which the clamp caps at CAVE5_PER_FRAME_TICK_CAP.
+// esi above that is demand the game discards, and counting it would
+// overstate the rate.
+static void PublishTickCount(SafetyHookContext& ctx) {
+    if (auto* sp = g_cave5State) {
+        uint32_t emitted = (uint32_t)ctx.esi;
+        if (emitted > (uint32_t)CAVE5_PER_FRAME_TICK_CAP) {
+            emitted = (uint32_t)CAVE5_PER_FRAME_TICK_CAP;
+        }
+        sp->tick_count += emitted;
+    }
+}
+
 static void Cave5_MidCallback(SafetyHookContext& ctx) {
     uint8_t fpu_buf[108];
     __asm { fsave [fpu_buf] }
@@ -176,132 +318,25 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // after an engine freeze.
         const int32_t CATCHUP_THRESHOLD = 50;
 
-        // Was the engine frozen (dialog, menu, load) since the last call? A
-        // backlog after a freeze is wall-clock debt and is dropped at ANY
-        // speed. CONT catch-up is not a freeze: cave5 runs every frame there,
-        // so the gap stays ~7-16 ms.
-        static uint32_t s_lastRunMs = 0;
-        uint32_t nowMs = GetTickCount();
-        bool resumed_from_freeze =
-            s_lastRunMs != 0 && (nowMs - s_lastRunMs) > 250;
-        s_lastRunMs = nowMs;
+        bool resumed_from_freeze = ResumedFromFreeze();
 
-        // PARK: the aligned-CONT splice interlock (an unaligned CONT,
-        // gate_align_rec == 0, never waits for approval). The splice is destructive
-        // (truncates recorded_count, flips PLAY to REC) and the watcher that
-        // validates the prefix runs in the controller process, which can lag.
-        // So from the moment playback reaches its splice, emit ZERO ticks
-        // until the controller writes cont_splice_approved. The sim and
-        // playback_pos freeze while the renderer keeps presenting. If the
-        // controller dies while parked, STOP or RESTART clears the alignment
-        // and lifts the park.
-        bool splice_parked = false;
-        if (s->continue_from_frame > 0 && s->mode == MODE_PLAY
-            && s->gate_align_rec != 0 && s->cont_splice_approved == 0) {
-            uint32_t park_at = GateAlignedSplicePos(
-                s->continue_from_frame, s->gate_index, s->gate_align_rec);
-            splice_parked = s->playback_pos >= park_at;
-        }
+        bool splice_parked = IsSpliceParked(s);
 
         bool catchup_drain =
             realTick > CATCHUP_THRESHOLD
             && !splice_parked  // a parked splice must not leak a drain tick
             && (s->playback_speed == 1.0f || resumed_from_freeze);
 
-        // CONT clock-backlog reset. When cave2 flags a splice, advance the
-        // game's time accumulator to "now" so the resumed REC runs in real
-        // time from the splice frame. At this hook site ctx.ebp is the clock
-        // object and [ebp+0x0C] its seconds accumulator. Raw demand is
-        // realTick = elapsed * [0x46DB0C] (=100) = (now-prev)/native, a separate
-        // constant from the tick advance, so scaling the advance does not scale
-        // this conversion; adding realTick * native(0.01) moves prev to now.
-        // NATIVE, not the scaled advance, keeps it speed-independent, and the
-        // backlog ticks are never run, so REC records no burst.
-        bool did_reset = false;
-        if (g_contResetPending && !splice_parked) {  // parked: keep it pending, no tick may leak
-            if (ctx.ebp) {
-                float* prev_time = (float*)(uintptr_t)(ctx.ebp + 0x0C);
-                *prev_time += (float)realTick * g_nativeTickAdvance;
-            }
-            g_contResetPending = 0;
-            did_reset = true;
-        }
+        bool did_reset = ApplyContClockReset(ctx, realTick, splice_parked);
 
-        // Land the catch-up batch EXACTLY on the splice, so the PLAY→REC
-        // switch happens on the batch's last tick and no catch-up tick spills
-        // into REC. While the splice is still pending on the live gate, step
-        // one tick per frame near the gate (ContinueSpliceTickLimit).
-        {
-            uint32_t aligned_splice = GateAlignedSplicePos(
-                s->continue_from_frame, s->gate_index, s->gate_align_rec);
-            if (s->continue_from_frame > 0 && s->mode == MODE_PLAY) {
-                int32_t remaining = (int32_t)ContinueSpliceTickLimit(
-                    s->playback_pos, aligned_splice,
-                    s->gate_align_rec == 0 || s->cont_splice_approved != 0,
-                    s->gate_align_rec);
-                if (realTick > remaining) realTick = remaining;
-            }
-        }
+        realTick = LimitTicksToSplice(s, realTick);
 
-        if (did_reset) {
-            // Splice frame's backlog was just zeroed (prev → now); process a
-            // single resume tick so the first REC frame doesn't re-burst.
-            ctx.esi = 1;
-        } else if (catchup_drain) {
-            // Set tick_advance large enough that 1 tick drains the whole
-            // wall-time gap (gap ≈ realTick * native because __ftol used
-            // tick_advance = native last frame).
-            if (g_tickAdvancePtr) {
-                *g_tickAdvancePtr = (float)realTick * g_nativeTickAdvance;
-            }
-            ctx.esi = 1;
-        } else {
-            // Clamp raw tick first (fix __ftol garbage). The game's own
-            // clamp (cmp esi, 14h / mov ebx, 14h) is patched at install
-            // time to use 40h instead, so we match that here.
-            if (realTick < 0) realTick = 0;
-            if (realTick > CAVE5_PER_FRAME_TICK_CAP) realTick = CAVE5_PER_FRAME_TICK_CAP;
+        ChooseTickCount(ctx, s, realTick, did_reset, catchup_drain, splice_parked);
 
-            // At 1x and below keep the game's native 20-tick clamp, so normal
-            // play behaves like the unpatched game when it stutters; only
-            // fast-forward gets the raised cap.
-            if (s->playback_speed <= 1.0f && realTick > NATIVE_GAME_CLAMP_AT_1X) {
-                realTick = NATIVE_GAME_CLAMP_AT_1X;
-            }
-
-            if (splice_parked) realTick = 0;  // hold AT the splice until approved
-
-            ctx.esi = (uintptr_t)realTick;
-        }
-
-        // Variable speed: scale the time advance only during REC/PLAY at a
-        // non-1x speed; otherwise write the native value back every frame.
-        // Skipped during catchup_drain, whose large value the game must read
-        // this frame.
-        if (g_tickAdvancePtr && !catchup_drain) {
-            if (s->mode != MODE_OFF && s->playback_speed > 0.0f && s->playback_speed != 1.0f) {
-                *g_tickAdvancePtr = g_nativeTickAdvance / s->playback_speed;
-            } else {
-                *g_tickAdvancePtr = g_nativeTickAdvance;
-            }
-        }
+        ApplyPlaybackSpeed(s, catchup_drain);
     }
 
-    // Publish the per-frame tick count: the only external signal of how fast
-    // the game is SIMULATING rather than rendering, which is exactly what a
-    // fast-forward regression changes and a frame counter cannot see.
-    //
-    // Count what the game will actually RUN, not what we asked for: the tick
-    // loop bounds itself with ebx, which the clamp caps at CAVE5_PER_FRAME_TICK_CAP.
-    // esi above that is demand the game discards, and counting it would
-    // overstate the rate.
-    if (auto* sp = g_cave5State) {
-        uint32_t emitted = (uint32_t)ctx.esi;
-        if (emitted > (uint32_t)CAVE5_PER_FRAME_TICK_CAP) {
-            emitted = (uint32_t)CAVE5_PER_FRAME_TICK_CAP;
-        }
-        sp->tick_count += emitted;
-    }
+    PublishTickCount(ctx);
 
     __asm { frstor [fpu_buf] }
 }
