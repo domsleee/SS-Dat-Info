@@ -9,7 +9,7 @@ use crate::rider::TAS_CHARACTER_UNKNOWN;
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
 
 /// Bumped whenever `TasSharedState` changes layout (mirrors shared_state.hpp).
-pub const TAS_SHARED_VERSION: u32 = 52;
+pub const TAS_SHARED_VERSION: u32 = 53;
 /// Size of the menu document buffer (JSON, NUL-terminated).
 pub const TAS_MENU_DOC_MAX: usize = 4096;
 /// Size of the menu command target (id or label, NUL-terminated).
@@ -103,8 +103,7 @@ impl TasLogEntry {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TasSegmentBoundary {
-    pub frame: u32,            // Frame number where this segment starts
-    pub input_log_offset: u32, // Offset into input_log for this segment
+    pub frame: u32, // Frame number where this segment starts
 }
 
 pub mod input_bits {
@@ -135,8 +134,6 @@ pub struct TasSharedState {
 
     // Command region (UI writes, DLL reads)
     pub command: u32,
-    /// 0 = natural ticks, N = force N ticks per frame (cave5).
-    pub force_fixed_tick: u32,
     /// CMD_ARM_CONTINUE: splice point (PLAY 0..N, then REC).
     pub continue_from_frame: u32,
 
@@ -182,9 +179,6 @@ pub struct TasSharedState {
     pub segment_start_frame: u32,
     pub segment_count: u32,
     pub segment_boundaries: [TasSegmentBoundary; TAS_MAX_SEGMENTS],
-
-    /// 3x3 row-major rotation matrix from player+0x104..+0x124.
-    pub rotation_matrix: [f32; 9],
 
     pub input_log: [u8; TAS_MAX_TICKS],
     pub rec_coords: [[f32; 3]; TAS_MAX_TICKS],
@@ -258,10 +252,8 @@ pub struct TasSharedState {
     /// replay's: mode is transient and position holds the previous replay's
     /// final value until the arm resets it.
     pub arm_generation: u32,
-    /// `tick_count` at the first captured frame whose position differs from the
-    /// session's frame 0 (the countdown gate).
-    pub gate_tick: u32,
-    /// The REC/PLAY index at that same moment: the live gate.
+    /// REC/PLAY index of the first captured frame whose position differs from
+    /// the session's frame 0: the live gate. 0 until it fires.
     pub gate_index: u32,
     /// The recording's gate (first-moving index). Non-zero turns on
     /// gate-relative input for PLAY and CONT
@@ -590,40 +582,40 @@ mod tests {
     #[test]
     fn layout_pinned_to_shared_state_hpp() {
         use std::mem::offset_of;
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_651_472);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_651_300);
         let pins = [
-            ("input_log", offset_of!(TasSharedState, input_log), 408),
-            ("rec_coords", offset_of!(TasSharedState, rec_coords), 65_944),
+            ("input_log", offset_of!(TasSharedState, input_log), 240),
+            ("rec_coords", offset_of!(TasSharedState, rec_coords), 65_776),
             (
                 "play_coords",
                 offset_of!(TasSharedState, play_coords),
-                852_376,
+                852_208,
             ),
             (
                 "log_write_seq",
                 offset_of!(TasSharedState, log_write_seq),
-                1_638_808,
+                1_638_640,
             ),
             (
                 "cont_resume_speed",
                 offset_of!(TasSharedState, cont_resume_speed),
-                1_647_004,
+                1_646_836,
             ),
             (
                 "level_ctx_seq",
                 offset_of!(TasSharedState, level_ctx_seq),
-                1_647_176,
+                1_647_008,
             ),
             (
                 "fpu_control_word",
                 offset_of!(TasSharedState, fpu_control_word),
-                1_647_204,
+                1_647_032,
             ),
-            ("menu_doc", offset_of!(TasSharedState, menu_doc), 1_647_264),
+            ("menu_doc", offset_of!(TasSharedState, menu_doc), 1_647_092),
             (
                 "menu_cmd_result",
                 offset_of!(TasSharedState, menu_cmd_result),
-                1_651_468,
+                1_651_296,
             ),
         ];
         for (name, actual, expected) in pins {
@@ -639,7 +631,7 @@ mod tests {
 
     #[test]
     fn size_of_tas_segment_boundary() {
-        assert_eq!(mem::size_of::<TasSegmentBoundary>(), 8);
+        assert_eq!(mem::size_of::<TasSegmentBoundary>(), 4);
     }
 
     /// The command words are the wire protocol cave2 switches on, and they

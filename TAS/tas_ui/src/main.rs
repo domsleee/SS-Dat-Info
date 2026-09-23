@@ -174,9 +174,10 @@ struct TasApp {
 
     /// In-flight restart → arm → watch cycle, driven by the shared
     /// `tas_shared::transport` controller, the same state machine the tas_test
-    /// harness runs. Stepped once per egui frame via `step_cycle`; `None` when
-    /// idle. It serialises Stop → wait OFF → Restart because the shared
-    /// `command` slot holds one u32, so both can't be written in one frame.
+    /// harness runs. Stepped from each egui update via `step_cycle`, which may
+    /// run several transitions per update; `None` when idle. The shared
+    /// `command` slot holds one u32, so each command waits for the DLL to
+    /// acknowledge the previous one (Stop → wait OFF → Restart).
     cycle: Option<tas_shared::transport::TransportController>,
     /// Wall-clock deadline for the in-flight cycle to make a terminal
     /// transition. `None` when idle.
@@ -238,8 +239,8 @@ struct TasApp {
     // The level_epoch we were last resolved in. "Unresolved" has two causes
     // that need opposite handling: a freeze (menu, pause, post-race dialog;
     // the level is still resident and the epoch unchanged) and a real context
-    // change (root reallocated, epoch bumped). Only the second should hide the
-    // history panel.
+    // change (level_scan saw the level path change or disappear and bumped the
+    // epoch). Only the second should hide the history panel.
     last_resolved_epoch: Option<u32>,
 
     // One-shot: force dark title bar on first frame
@@ -771,9 +772,11 @@ impl TasApp {
                 }
             }
             transport::Action::SetContinueFrame(frame) => {
-                // Stage the splice frame UI-side only. The TransportController
-                // is its sole shared-memory writer, at arm time; writing it
-                // here during PLAY could splice the running replay into REC.
+                // Stage the splice frame UI-side only; the TransportController
+                // writes it to shared memory when a cycle starts and on each
+                // reroll, and the DLL clears it. Writing it here mid-replay is
+                // harmless for plain PLAY (cave2 splices only an armed CONT)
+                // but would move a running CONT's splice.
                 self.continue_from_frame = frame;
                 self.continue_from_text = frame.to_string();
             }
@@ -2605,9 +2608,9 @@ impl eframe::App for TasApp {
                 }
 
                 // Do not sync continue_from_frame to shared memory here. It
-                // stages the next CONT; the DLL treats a non-zero shared value
-                // as a splice marker, so syncing it would let an edit during
-                // PLAY splice into REC. The controller writes it at arm time.
+                // stages the next CONT; the controller writes it when a cycle
+                // starts and on each reroll, and syncing it here would move a
+                // running CONT's splice.
             }
         });
 

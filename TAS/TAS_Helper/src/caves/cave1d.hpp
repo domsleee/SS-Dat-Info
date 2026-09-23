@@ -76,8 +76,6 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
 
     // Pass through in all other cases (IDLE, PLAY)
     cave1dInline.thiscall<void>(ecx, keyIndex, pressed, unk, arg4);
-    if (s) {
-    }
 }
 
 bool InstallCave1D(GameAddresses& addr, TasSharedState* state) {

@@ -251,8 +251,6 @@ fn render_day_header(
     yesterday: Option<NaiveDate>,
 ) -> egui::Rect {
     let top = ui.cursor().min;
-    // Built by hand: chrono's `%-d` (no-pad day) is unsupported on Windows
-    // and renders a literal `-d`.
     let short = format!("{} {}", date.day(), month_abbr(date.month()));
     let label = if date == today {
         format!("Today · {}", short)

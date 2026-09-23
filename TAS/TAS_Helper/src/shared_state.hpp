@@ -9,7 +9,7 @@
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
 
-constexpr uint32_t TAS_SHARED_VERSION = 52;
+constexpr uint32_t TAS_SHARED_VERSION = 53;
 constexpr uint32_t TAS_MENU_DOC_MAX = 4096;  // menu document buffer (JSON, NUL-terminated)
 constexpr uint32_t TAS_MENU_CMD_TARGET_MAX = 64;  // menu command target (id or label, NUL-terminated)
 // menu_cmd_kind
@@ -105,10 +105,9 @@ enum TasLogSeverity : uint32_t {
     LOG_ERROR = 3,
 };
 
-// A segment boundary record (8 bytes)
+// A segment boundary record (4 bytes)
 struct TasSegmentBoundary {
     uint32_t frame;              // Frame number where this segment starts
-    uint32_t input_log_offset;   // Offset into input_log for this segment
 };
 
 // A single log ring entry (128 bytes, naturally aligned)
@@ -125,7 +124,6 @@ struct TasSharedState {
 
     // -- Command region (UI writes, DLL reads) --
     volatile uint32_t command;      // TasCommand
-    uint32_t force_fixed_tick;      // 0 = natural ticks, N = force N ticks/frame (cave5)
     uint32_t continue_from_frame;   // CMD_ARM_CONTINUE: splice point (PLAY 0..N, then REC)
 
     // -- Status region (DLL writes, UI reads) --
@@ -164,10 +162,7 @@ struct TasSharedState {
     // -- Segment fields (DLL writes, UI reads) --
     uint32_t segment_start_frame;    // Frame offset where the current segment begins
     uint32_t segment_count;          // Total segments in the current run
-    TasSegmentBoundary segment_boundaries[TAS_MAX_SEGMENTS]; // (frame, offset) pairs
-
-    // -- Rotation telemetry (DLL writes, UI reads) --
-    float rotation_matrix[9]; // 3x3 row-major rotation matrix from player+0x104..+0x124
+    TasSegmentBoundary segment_boundaries[TAS_MAX_SEGMENTS];
 
     // -- Input log (DLL reads/writes) --
     uint8_t  input_log[TAS_MAX_TICKS];
@@ -256,10 +251,9 @@ struct TasSharedState {
     // (ARM_PLAY / ARM_CONTINUE), refusals included. The controller uses it to
     // tell this attempt's mode/position from the previous replay's.
     volatile uint32_t arm_generation;
-    // Countdown gate (DLL writes): tick_count and REC/PLAY index of the first
-    // captured frame whose position differs from frame 0 (the boarder leaving
-    // the spawn).
-    volatile uint32_t gate_tick;
+    // Countdown gate (DLL writes): REC/PLAY index of the first captured frame
+    // whose position differs from frame 0 (the boarder leaving the spawn).
+    // 0 until it fires; the arm resets it.
     volatile uint32_t gate_index;
     // The RECORDING's first-moving index (UI writes before the arm); non-zero
     // enables gate-relative input alignment (recorded_index = playback_index -
@@ -326,18 +320,18 @@ struct TasSharedState {
 #define TAS_PIN_OFFSET(field, expected) \
     static_assert(offsetof(TasSharedState, field) == (expected), \
                   "TasSharedState." #field " moved: bump TAS_SHARED_VERSION and update tas_shared/src/state.rs")
-static_assert(sizeof(TasSharedState) == 1651472,
+static_assert(sizeof(TasSharedState) == 1651300,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/state.rs");
-TAS_PIN_OFFSET(input_log, 408);
-TAS_PIN_OFFSET(rec_coords, 65944);
-TAS_PIN_OFFSET(play_coords, 852376);
-TAS_PIN_OFFSET(log_write_seq, 1638808);
-TAS_PIN_OFFSET(cont_resume_speed, 1647004);
-TAS_PIN_OFFSET(level_ctx_seq, 1647176);
-TAS_PIN_OFFSET(fpu_control_word, 1647204);
-TAS_PIN_OFFSET(menu_doc, 1647264);
-TAS_PIN_OFFSET(menu_cmd_result, 1651468);
+TAS_PIN_OFFSET(input_log, 240);
+TAS_PIN_OFFSET(rec_coords, 65776);
+TAS_PIN_OFFSET(play_coords, 852208);
+TAS_PIN_OFFSET(log_write_seq, 1638640);
+TAS_PIN_OFFSET(cont_resume_speed, 1646836);
+TAS_PIN_OFFSET(level_ctx_seq, 1647008);
+TAS_PIN_OFFSET(fpu_control_word, 1647032);
+TAS_PIN_OFFSET(menu_doc, 1647092);
+TAS_PIN_OFFSET(menu_cmd_result, 1651296);
 #undef TAS_PIN_OFFSET
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks

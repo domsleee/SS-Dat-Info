@@ -213,8 +213,6 @@ struct GameAddresses {
     static constexpr uint32_t PLAYER_X = 0xF8;
     static constexpr uint32_t PLAYER_Y = 0xFC;
     static constexpr uint32_t PLAYER_Z = 0x100;
-    static constexpr uint32_t PLAYER_PHYSICS = 0x110; // Pointer to physics sub-object
-    static constexpr uint32_t PHYSICS_ROT = 0x1B4;   // 3x3 rotation matrix in physics sub-object (9 floats, row-major)
 
     // Fallback Time.hi for injected BB3B10 calls when Kernel::Time::Current is
     // unavailable: what the real key handler passes for a steering key (live

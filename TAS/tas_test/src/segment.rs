@@ -14,9 +14,7 @@ fn segment_structure_passes(state: &tas_shared::TasSharedState, count: u32) -> b
         && end <= state.input_log.len()
         && state.segment_count == 2
         && state.segment_boundaries[0].frame == 0
-        && state.segment_boundaries[0].input_log_offset == 0
         && state.segment_boundaries[1].frame == SPLICE_FRAME
-        && state.segment_boundaries[1].input_log_offset == SPLICE_FRAME
         && state.input_log[splice - 1] & input_bits::LEFT != 0
         && !state.input_log[..splice]
             .iter()
@@ -103,10 +101,7 @@ pub fn run() -> bool {
     }
     for i in 0..state.segment_count as usize {
         let b = &state.segment_boundaries[i];
-        println!(
-            "  Boundary[{}]: frame={} input_log_offset={}",
-            i, b.frame, b.input_log_offset
-        );
+        println!("  Boundary[{}]: frame={}", i, b.frame);
     }
 
     println!(
@@ -180,7 +175,6 @@ mod tests {
         let mut state = tas_shared::zeroed_boxed();
         state.segment_count = 2;
         state.segment_boundaries[1].frame = SPLICE_FRAME;
-        state.segment_boundaries[1].input_log_offset = SPLICE_FRAME;
         state.input_log[499] = input_bits::LEFT;
         state.input_log[500] = input_bits::RIGHT;
         assert!(segment_structure_passes(&state, 600));
@@ -190,9 +184,6 @@ mod tests {
         state.segment_boundaries[1].frame += 1;
         assert!(!segment_structure_passes(&state, 600));
         state.segment_boundaries[1].frame = SPLICE_FRAME;
-        state.segment_boundaries[1].input_log_offset += 1;
-        assert!(!segment_structure_passes(&state, 600));
-        state.segment_boundaries[1].input_log_offset = SPLICE_FRAME;
         state.input_log[500] = 0;
         assert!(!segment_structure_passes(&state, 600));
         state.input_log[500] = input_bits::RIGHT;

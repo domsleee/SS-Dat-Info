@@ -7,8 +7,8 @@ use tas_shared::{TasMode, TasSharedState};
 ///
 /// Gate-aligned replays are correct when `play[live_gate+k] == rec[rec_gate+k]`,
 /// so the bases come from the DLL's gate fields while both are set and stay
-/// latched afterwards. The DLL clears both the moment playback completes;
-/// falling back to raw indices then would report the gate offset itself as
+/// latched afterwards. The DLL clears `gate_align_rec` the moment playback
+/// completes; falling back to raw indices then would report the gate offset as
 /// drift (Time Attack ghosts move the gate ~11 ticks). A new `arm_generation`
 /// drops the latch; nothing else does.
 #[derive(Default)]

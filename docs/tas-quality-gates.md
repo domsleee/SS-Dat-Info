@@ -65,8 +65,8 @@ from `TAS/` with `cargo run --release --bin tas_test -- <mode>`, or from the
 repository root through the `just test_*` recipes named below. Modes marked
 Pico drive steering or a keypress through the board. Scripted steering fails
 on missing hardware or failed writes; it never substitutes a neutral recording.
-Acceptance refreshes its long holds; other steered patterns send no keepalives,
-so the firmware's 500 ms release applies to them.
+Scripted patterns resend held keys every 200 ms, inside the firmware's 500 ms
+safety release, so a hold lasts as long as the pattern says.
 
 ### Suites
 
@@ -86,7 +86,7 @@ so the firmware's 500 ms release applies to them.
 | `smoke` | no | `*** SMOKE TEST PASSED ***` | Pipeline liveness (~40 s): ticks captured, playback ran to completion, player moved in REC and PLAY. REC and PLAY start from different spawns here, so liveness is the whole verdict. `just test_smoke`. |
 | `segment` | yes | `*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***` | Product-aligned CONT at frame 500 while LEFT is held, then RIGHT steering. Requires two exact segment boundaries, released tail and complete gate-relative zero drift; covers approval arriving at the parked splice. |
 | `replay <file.tasrec> [--iterations N] [--verbose]` | no | `Result: ZERO DRIFT in all N iterations` | Loads a `.tasrec` and replays it N times through aligned PLAY; gate-relative drift, incomplete playback or a rejected alignment fails. `just test_replay FILE`. |
-| `reliability [--iterations N] [--speed X]` | yes | `*** RELIABILITY TEST PASSED ***` | N consecutive steered REC+PLAY cycles at one speed (default 10 at 12x). Shares its procedure with drift-speed: a 50-tick neutral tail and mandatory movement gates. |
+| `reliability [--iterations N] [--speed X]` | yes | `*** RELIABILITY TEST PASSED ***` | N consecutive steered REC+PLAY cycles at one speed (default 10 at 12x). Shares its procedure with drift-speed but uses a 50-tick neutral tail (drift-speed: 100) and mandatory movement gates (drift-speed: optional). |
 | `drift-speed` | yes | `*** DRIFT-AT-SPEED TEST PASSED ***` | REC 2x/PLAY 2x and REC 1x/PLAY 2x both replay with zero drift. |
 | `save-reload` | yes | `*** SAVE/RELOAD/REPLAY PASSED: complete gate-relative comparison across game restart ***` | Verify steered REC, save to disk, kill/relaunch, reclaim Pico and command ownership, require exact input/coordinate round-trip and complete product-aligned zero-drift replay. |
 | `pause-resume` | yes | `*** PAUSE/RESUME REPLAY PASSED: ...` | Escape pause and resume during PLAY; the first 1000 frames stay bit-identical. |

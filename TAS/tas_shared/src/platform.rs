@@ -116,16 +116,6 @@ impl TasSharedMemoryClient {
     }
 
     pub fn send_command(&mut self, cmd: TasCommand) {
-        // Every arm runs on natural ticks.
-        if matches!(
-            cmd,
-            TasCommand::ArmRec | TasCommand::ArmPlay | TasCommand::ArmContinue
-        ) {
-            unsafe {
-                let fft_ptr = std::ptr::addr_of_mut!((*self.ptr).force_fixed_tick);
-                std::ptr::write_volatile(fft_ptr, 0);
-            }
-        }
         unsafe {
             let cmd_ptr = std::ptr::addr_of_mut!((*self.ptr).command);
             (&*(cmd_ptr.cast::<AtomicU32>())).store(cmd as u32, Ordering::Release);
@@ -322,39 +312,6 @@ mod tests {
         let b = TasSharedMemoryClient::new_test_mapping();
         a.send_command(TasCommand::ArmRec);
         assert_eq!(b.state().command, TasCommand::Idle as u32);
-    }
-
-    /// Arming REC, PLAY or CONT forces `force_fixed_tick` back to 0 (natural
-    /// ticks).
-    #[test]
-    fn send_command_resets_fft_on_arm() {
-        for cmd in [
-            TasCommand::ArmRec,
-            TasCommand::ArmPlay,
-            TasCommand::ArmContinue,
-        ] {
-            let mut client = TasSharedMemoryClient::new_test_mapping();
-            client.state_mut().force_fixed_tick = 2;
-            client.send_command(cmd);
-            assert_eq!(
-                client.state().force_fixed_tick,
-                0,
-                "{:?} must reset fft to 0",
-                cmd
-            );
-        }
-    }
-
-    #[test]
-    fn send_command_preserves_fft_on_stop() {
-        let mut client = TasSharedMemoryClient::new_test_mapping();
-        client.state_mut().force_fixed_tick = 2;
-        client.send_command(TasCommand::Stop);
-        assert_eq!(
-            client.state().force_fixed_tick,
-            2,
-            "Stop must not reset fft"
-        );
     }
 
     #[test]

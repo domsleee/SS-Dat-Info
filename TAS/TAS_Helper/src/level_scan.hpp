@@ -32,7 +32,9 @@ inline HANDLE g_thread = nullptr;
 //
 // `[SG+0x1D3304]` points at the CURRENT level's resource path. The string
 // changes the instant a level loads, so a change IS the level-change event.
-// (The root pointer [SG+0x1D5450] does not change on a track switch.)
+// The root pointer [SG+0x1D5450] does not change on a track switch, and the
+// level's files are not opened through CreateFile after injection, so neither
+// can serve as the event.
 //
 // The path is reliable for AREA but not for DIFFICULTY: some tracks share the
 // easy/ asset, so Village Hard reads ".../Tracks/easy/...". So the path gives

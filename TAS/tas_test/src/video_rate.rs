@@ -264,13 +264,12 @@ pub fn run(secs: Option<u64>, region: Option<(i32, i32)>) -> bool {
             let dt = c.state().tick_count.wrapping_sub(t0);
             let df = c.state().frame_count.wrapping_sub(f0);
             println!(
-                "  cave5 ticks: {} ({:.1} /s)   cave2 frames: {} ({:.1} /s)   speed={:.2} fixed_tick={}",
+                "  cave5 ticks: {} ({:.1} /s)   cave2 frames: {} ({:.1} /s)   speed={:.2}",
                 dt,
                 dt as f64 / elapsed,
                 df,
                 df as f64 / elapsed,
-                c.state().playback_speed,
-                c.state().force_fixed_tick
+                c.state().playback_speed
             );
         }
     }

@@ -60,10 +60,7 @@ pub fn run(source: &str, out: &str) -> Result<(), String> {
         return Err("source recording is empty".into());
     }
 
-    println!(
-        "Loaded: {} ticks, fft={}",
-        loaded.count, loaded.meta.force_fixed_tick
-    );
+    println!("Loaded: {} ticks", loaded.count);
 
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
@@ -104,7 +101,7 @@ pub fn run(source: &str, out: &str) -> Result<(), String> {
         .as_object_mut()
         .ok_or_else(|| "source metadata is not a JSON object".to_string())?;
     set_u32(meta_obj, "recorded_count", loaded.count);
-    set_u32(meta_obj, "force_fixed_tick", 0);
+    meta_obj.remove("force_fixed_tick");
     // The output coordinates were just captured from the live game, so the
     // output identity must be the live identity — not the source file's.
     // Unknown live halves clear stale source values instead of inheriting

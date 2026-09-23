@@ -116,10 +116,10 @@ pub fn run(iterations: u32, rec: Option<&str>) -> bool {
         }
     };
     println!("  recording first-moving = {}", rec_gate);
-    // Alignment holds input_log[rec_gate] through the countdown, assuming
-    // pre-gate input is inert because the boarder cannot move. Report whether
-    // this recording has pre-gate input that differs, i.e. whether that
-    // assumption is exercised at all.
+    // Before the live gate, alignment replays recorded input unchanged until
+    // rec_gate - 8, then holds input_log[rec_gate] until the gate fires. Report
+    // whether this recording has countdown input that differs from the gate
+    // mask; only differences inside that 8-frame window are replaced.
     {
         let s = client.state();
         let gate_mask = s.input_log[rec_gate as usize];
@@ -221,7 +221,6 @@ fn one_attempt(
 ) -> Option<Attempt> {
     client.state_mut().playback_speed = compare_speed;
     client.state_mut().gate_index = 0;
-    client.state_mut().gate_tick = 0;
 
     if !harness::restart_and_stabilize_inprocess(client) {
         return None;

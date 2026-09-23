@@ -452,7 +452,6 @@ pub struct Segment {
 pub struct RecordingMetadata {
     pub version: u32,
     pub recorded_count: u32,
-    pub force_fixed_tick: u32,
     pub timestamp: String,
     pub notes: String,
     #[serde(default)]
@@ -598,7 +597,6 @@ impl RecordingFile {
         let mut meta = RecordingMetadata {
             version: state.version,
             recorded_count: state.recorded_count,
-            force_fixed_tick: state.force_fixed_tick,
             timestamp: chrono::Local::now().to_rfc3339(),
             notes: String::new(),
             segments: segments.to_vec(),
@@ -669,7 +667,6 @@ impl RecordingFile {
         state.rec_coords[..count].copy_from_slice(&body.rec_coords);
 
         state.recorded_count = meta.recorded_count;
-        state.force_fixed_tick = 0; // always force fft=0 (proven zero-drift config)
 
         Ok(meta)
     }
@@ -1137,12 +1134,12 @@ impl RecordingHistory {
 
     /// We are in a level context whose track has not been identified yet.
     ///
-    /// Driven by the DLL's `level_epoch` / `level_scan_epoch` pair: the engine's
-    /// root object survives an F5 restart but is reallocated on quit-to-menu,
-    /// menu demo or track switch, so a root change is the only trustworthy
-    /// "level swapped" event. Until a scan identifies the new track the old one
-    /// must not be asserted: a wrong tag is worse than no tag, because an
-    /// untagged entry is visibly untagged and a mis-stamped one is not.
+    /// Driven by the DLL's `level_epoch` / `level_scan_epoch` pair: level_scan
+    /// bumps the epoch when the level path changes or becomes unavailable, and
+    /// the scan epoch catches up once the new track is identified. Until then
+    /// the old track must not be asserted: a wrong tag is worse than no tag,
+    /// because an untagged entry is visibly untagged and a mis-stamped one is
+    /// not.
     ///
     /// Idempotent; called every frame while unresolved.
     pub fn enter_resolving(&mut self) {
@@ -2573,7 +2570,6 @@ mod tests {
         let mut state = tas_shared::zeroed_boxed();
         state.version = 4;
         state.recorded_count = 10;
-        state.force_fixed_tick = 0;
 
         for i in 0..10 {
             state.input_log[i] = (i as u8) & 0x3F;
@@ -2589,7 +2585,6 @@ mod tests {
         assert_eq!(count, 10);
         assert!(segments.is_empty());
         assert_eq!(loaded.recorded_count, 10);
-        assert_eq!(loaded.force_fixed_tick, 0); // always forced to 0 on load
 
         for i in 0..10 {
             assert_eq!(loaded.input_log[i], (i as u8) & 0x3F);
@@ -3117,7 +3112,6 @@ mod tests {
         assert_eq!(loaded_segments[1].start_tick, 3);
         assert_eq!(loaded_segments[1].end_tick, 5);
         assert_eq!(loaded.recorded_count, 5);
-        assert_eq!(loaded.force_fixed_tick, 0); // fft always forced to 0 on load
         for i in 0..5 {
             assert_eq!(loaded.input_log[i], 0x04);
             assert_eq!(loaded.rec_coords[i], [i as f32, 0.0, i as f32 * 2.0]);

@@ -21,9 +21,8 @@ use crate::harness;
 use crate::patterns;
 use crate::replay;
 
-/// Long enough that the watcher's 1024-frame bit-exact window covers real
-/// post-input motion: pattern + tail is ~1200 ticks, so the window closes with
-/// the recording still running.
+/// Long enough that the watcher's bit-exact window, min(ticks past the gate,
+/// 1024), covers real post-input motion: pattern + tail is ~1200 ticks.
 const PATTERN: &str = "LR";
 const HOLD_TICKS: u32 = 500;
 const TAIL_NEUTRAL_TICKS: u32 = 200;
@@ -97,7 +96,6 @@ pub fn run() -> bool {
     let meta_value = json!({
         "version": state.version,
         "recorded_count": state.recorded_count,
-        "force_fixed_tick": state.force_fixed_tick,
         "max_drift_x": 0.0_f32,
         "max_drift_z": 0.0_f32,
         "timestamp": "save_reload_test",

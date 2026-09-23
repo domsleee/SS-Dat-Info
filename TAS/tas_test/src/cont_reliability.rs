@@ -336,7 +336,6 @@ fn restore_baseline(
         state.rec_coords[i] = *coord;
     }
     state.recorded_count = baseline_ticks;
-    state.force_fixed_tick = 0;
 }
 
 /// Judge one completed CONT cycle. A splice past the gate is aligned, so
@@ -519,10 +518,7 @@ pub fn run(
                 std::process::exit(1);
             }
             replay::write_to_shared(&mut client, &loaded);
-            println!(
-                "  Loaded: {} ticks, fft={}",
-                loaded.count, loaded.meta.force_fixed_tick
-            );
+            println!("  Loaded: {} ticks", loaded.count);
             if !loaded.meta.notes.is_empty() {
                 println!("  Notes: {}", loaded.meta.notes);
             }

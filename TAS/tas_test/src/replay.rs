@@ -13,8 +13,6 @@ use crate::harness;
 pub struct RecordingMetadata {
     pub recorded_count: u32,
     #[serde(default)]
-    pub force_fixed_tick: u32,
-    #[serde(default)]
     pub notes: String,
 }
 
@@ -78,8 +76,6 @@ pub fn write_to_shared(client: &mut TasSharedMemoryClient, rec: &LoadedRecording
     }
 
     state.recorded_count = rec.count;
-    // Replay at natural ticks, never a forced tick count per frame.
-    state.force_fixed_tick = 0;
 }
 
 pub struct ReplayResult {
@@ -171,10 +167,7 @@ pub fn run(path: &str, iterations: u32, verbose: bool) -> ReplayReport {
         }
     };
 
-    println!(
-        "Loaded: {} ticks, fft={}",
-        rec.count, rec.meta.force_fixed_tick
-    );
+    println!("Loaded: {} ticks", rec.count);
     if !rec.meta.notes.is_empty() {
         println!("Notes: {}", rec.meta.notes);
     }

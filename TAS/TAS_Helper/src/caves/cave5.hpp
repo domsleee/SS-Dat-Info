@@ -23,9 +23,8 @@
 //   accumulated wall time on the next frame.
 //
 // Priority:
-//   1. force_fixed_tick > 0: force that exact value (typically 2, deterministic)
-//   2. playback_speed != 1.0: write 0.01/speed to the per-tick advance
-//   3. Otherwise: clamp to [0, 20] (fix __ftol garbage)
+//   1. playback_speed != 1.0: write 0.01/speed to the per-tick advance
+//   2. Otherwise: clamp to [0, 20] (fix __ftol garbage)
 
 inline TasSharedState* g_cave5State = nullptr;
 static SafetyHookMid cave5Hook{};
@@ -174,7 +173,7 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
         // that burst over many frames, a visible ~2x speedup. Instead, set
         // this frame's tick_advance to realTick * native so ONE physics tick
         // consumes the whole gap. Fires in any mode at 1x, and at any speed
-        // after an engine freeze; never with force_fixed_tick.
+        // after an engine freeze.
         const int32_t CATCHUP_THRESHOLD = 50;
 
         // Was the engine frozen (dialog, menu, load) since the last call? A
@@ -187,7 +186,8 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             s_lastRunMs != 0 && (nowMs - s_lastRunMs) > 250;
         s_lastRunMs = nowMs;
 
-        // PARK: the CONT splice interlock. The splice is destructive
+        // PARK: the aligned-CONT splice interlock (an unaligned CONT,
+        // gate_align_rec == 0, never waits for approval). The splice is destructive
         // (truncates recorded_count, flips PLAY to REC) and the watcher that
         // validates the prefix runs in the controller process, which can lag.
         // So from the moment playback reaches its splice, emit ZERO ticks
@@ -205,15 +205,16 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
 
         bool catchup_drain =
             realTick > CATCHUP_THRESHOLD
-            && s->force_fixed_tick == 0
             && !splice_parked  // a parked splice must not leak a drain tick
             && (s->playback_speed == 1.0f || resumed_from_freeze);
 
         // CONT clock-backlog reset. When cave2 flags a splice, advance the
         // game's time accumulator to "now" so the resumed REC runs in real
         // time from the splice frame. At this hook site ctx.ebp is the clock
-        // object and [ebp+0x0C] its seconds accumulator. realTick =
-        // (now-prev)/native, so adding realTick * native moves prev to now.
+        // object and [ebp+0x0C] its seconds accumulator. Raw demand is
+        // realTick = elapsed * [0x46DB0C] (=100) = (now-prev)/native, a separate
+        // constant from the tick advance, so scaling the advance does not scale
+        // this conversion; adding realTick * native(0.01) moves prev to now.
         // NATIVE, not the scaled advance, keeps it speed-independent, and the
         // backlog ticks are never run, so REC records no burst.
         bool did_reset = false;
@@ -242,10 +243,7 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             }
         }
 
-        if (s->force_fixed_tick > 0) {
-            // Deterministic mode: exact tick count per frame (0 while parked)
-            ctx.esi = splice_parked ? 0 : (uintptr_t)s->force_fixed_tick;
-        } else if (did_reset) {
+        if (did_reset) {
             // Splice frame's backlog was just zeroed (prev → now); process a
             // single resume tick so the first REC frame doesn't re-burst.
             ctx.esi = 1;
@@ -295,8 +293,8 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
     //
     // Count what the game will actually RUN, not what we asked for: the tick
     // loop bounds itself with ebx, which the clamp caps at CAVE5_PER_FRAME_TICK_CAP.
-    // esi above that is demand the game discards (reachable only via
-    // force_fixed_tick > 64), and counting it would overstate the rate.
+    // esi above that is demand the game discards, and counting it would
+    // overstate the rate.
     if (auto* sp = g_cave5State) {
         uint32_t emitted = (uint32_t)ctx.esi;
         if (emitted > (uint32_t)CAVE5_PER_FRAME_TICK_CAP) {
@@ -306,9 +304,6 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
     }
 
     __asm { frstor [fpu_buf] }
-    auto* s2 = g_cave5State;
-    if (s2) {
-    }
 }
 
 inline void UninstallCave5();

@@ -224,19 +224,11 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
     }
 
     uint32_t raw[3];
-    uint32_t rot_raw[9];
-    bool got_rot = false;
     __try {
         auto player = (uint8_t*)s->player_ptr;
         memcpy(&raw[0], player + GameAddresses::PLAYER_X, 4);
         memcpy(&raw[1], player + GameAddresses::PLAYER_Y, 4);
         memcpy(&raw[2], player + GameAddresses::PLAYER_Z, 4);
-        uint32_t physics = 0;
-        memcpy(&physics, player + GameAddresses::PLAYER_PHYSICS, 4);
-        if (physics) {
-            memcpy(rot_raw, (uint8_t*)physics + GameAddresses::PHYSICS_ROT, 36);
-            got_rot = true;
-        }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         s->capture_ok = 0;
         return;
@@ -246,10 +238,6 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
     memcpy(&s->player_x, &raw[0], 4);
     memcpy(&s->player_y, &raw[1], 4);
     memcpy(&s->player_z, &raw[2], 4);
-    // Update rotation matrix (integer-width copy, no float ops)
-    if (got_rot) {
-        memcpy(s->rotation_matrix, rot_raw, 36);
-    }
 
     if (index < TAS_MAX_TICKS) {
         if (isRec) {
@@ -267,11 +255,10 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
         // capture_ok also means frame 0 of THIS session was really written;
         // without it the comparison below is against the previous session's
         // frame 0 and can stamp a gate that never happened.
-        if (s->capture_ok && s->gate_tick == 0 && index > 0) {
+        if (s->capture_ok && s->gate_index == 0 && index > 0) {
             const uint32_t* z = isRec ? (const uint32_t*)&s->rec_coords[0][0]
                                       : (const uint32_t*)&s->play_coords[0][0];
             if (raw[0] != z[0] || raw[1] != z[1] || raw[2] != z[2]) {
-                s->gate_tick = s->tick_count;
                 s->gate_index = index;
             }
         }
@@ -284,19 +271,13 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
 static constexpr uint32_t RESTART_F5_MAX_HOLD_FRAMES = 30;
 static uint32_t g_restartFramesHeld = 0;                    // Cycles since the press
 
-// Helper: press or release F5 in the DI buffer + notify BB3B10
-static void SafeWriteF5Buffer(uint32_t buffer, bool pressed) {
-    restartrelease::SafeWriteF5(buffer, pressed);
-}
-
-static void InjectF5(TasSharedState* s, GameAddresses* addr, uint32_t kbobj, bool pressed) {
-    (void)s;
+// Press or release F5 in the DI buffer and notify BB3B10.
+static void InjectF5(GameAddresses* addr, uint32_t kbobj, bool pressed) {
     uint32_t buffer = GetDIBuffer(kbobj);
     if (buffer) {
-        // Keep SEH in a leaf function. MSVC rejects a function that contains
-        // both __try and the ScopedTasInjection object below because the latter
-        // requires C++ unwinding (C2712).
-        SafeWriteF5Buffer(buffer, pressed);
+        // The SEH write stays in a leaf function: MSVC rejects __try in a
+        // function that also holds the ScopedTasInjection below (C2712).
+        restartrelease::SafeWriteF5(buffer, pressed);
     }
 
     if (kbobj) {
@@ -367,9 +348,10 @@ static void FlushDeferredTasInputRelease(TasSharedState* s, GameAddresses* addr)
 }
 
 // Drop any gate-relative input alignment. gate_align_rec is persistent shared
-// memory that the controller stages right before each arm, so every path that
-// ends or refuses a session clears it: a leftover value would silently
-// re-index a later replay and move its splice point.
+// memory that the controller stages right before each arm, and a leftover
+// value would silently re-index a later replay and move its splice point. It
+// is cleared on STOP, a refused CONT, restart, ARM_REC, a level change and the
+// end of PLAY; the controller also clears it before every restart.
 static inline void ClearGateAlign(TasSharedState* s) {
     s->gate_align_rec = 0;
     s->cont_splice_approved = 0;  // no alignment, nothing to approve
@@ -466,7 +448,6 @@ static bool ProcessCommand(TasSharedState* s) {
             s->segment_start_frame = 0;
             memset(s->segment_boundaries, 0, sizeof(s->segment_boundaries));
             s->segment_boundaries[0].frame = 0;
-            s->segment_boundaries[0].input_log_offset = 0;
             s->mode = MODE_REC;
             g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
             g_cave2_contArmed = 0;
@@ -558,7 +539,6 @@ static bool ProcessCommand(TasSharedState* s) {
     // above), which otherwise leave nothing to wait on but a mode that stays OFF.
     if (cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE || cmd == CMD_ARM_REC) {
         // Fresh session: the gate has not fired yet, and no capture has failed.
-        s->gate_tick = 0;
         s->gate_index = 0;
         s->capture_ok = 1;
     }
@@ -615,7 +595,6 @@ static void CompleteContinueSplice(TasSharedState* s) {
         uint32_t segIdx = s->segment_count;
         if (segIdx < TAS_MAX_SEGMENTS) {
             s->segment_boundaries[segIdx].frame = rec_splice;
-            s->segment_boundaries[segIdx].input_log_offset = rec_splice;
             s->segment_count = segIdx + 1;
         }
         s->segment_start_frame = rec_splice;
@@ -670,12 +649,6 @@ static void __declspec(noinline) Cave2_Logic() {
             s->player_x = new_x;
             s->player_y = new_y;
             s->player_z = new_z;
-
-            uint32_t physics = 0;
-            memcpy(&physics, player + GameAddresses::PLAYER_PHYSICS, 4);
-            if (physics) {
-                memcpy(s->rotation_matrix, (uint8_t*)physics + GameAddresses::PHYSICS_ROT, 36);
-            }
         } __except(EXCEPTION_EXECUTE_HANDLER) {}
     }
 
@@ -693,7 +666,7 @@ static void __declspec(noinline) Cave2_Logic() {
                 // Press: the byte AND the observer. restart_release.hpp
                 // takes the byte back the moment the restart is observed.
                 restartrelease::Pressed(GetDIBuffer(kbobj));
-                InjectF5(s, addr, kbobj, true);
+                InjectF5(addr, kbobj, true);
             }
             g_restartFramesHeld++;
             // Finish once the byte is up (the restart hook or the worker's
@@ -701,7 +674,7 @@ static void __declspec(noinline) Cave2_Logic() {
             // cap only bounds a run where neither ever fires.
             if (!restartrelease::Pending() || g_restartFramesHeld >= RESTART_F5_MAX_HOLD_FRAMES) {
                 restartrelease::ReleaseByteNow(3);
-                InjectF5(s, addr, kbobj, false);
+                InjectF5(addr, kbobj, false);
                 s->restart_state = 2;  // Done
                 g_cave2_pendingLog = 8;
             }

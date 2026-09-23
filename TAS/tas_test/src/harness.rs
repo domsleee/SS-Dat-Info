@@ -727,7 +727,6 @@ pub fn connect() -> TasSharedMemoryClient {
 /// Print current shared state status.
 pub fn print_status(client: &TasSharedMemoryClient) {
     let s = client.state();
-    println!("Config: fft={}", s.force_fixed_tick);
     println!(
         "State: mode={} recorded={} playback_pos={} game_in_game={}",
         s.mode_str(),
@@ -1002,19 +1001,10 @@ fn require_pico_write(sent: bool, port: &str) -> Result<(), String> {
     }
 }
 
-/// Require the proven zero-drift configuration before a gate runs: natural
-/// ticks (`force_fixed_tick == 0`) and a 1x (or unset) playback speed. Exits 1
-/// with the offending value instead of running a gate whose answer is
-/// meaningless.
+/// Require a 1x (or unset) playback speed before a gate runs. Exits 1 with the
+/// offending value instead of running a gate whose answer is meaningless.
 pub fn assert_proven_config(client: &TasSharedMemoryClient) {
     let s = client.state();
-    if s.force_fixed_tick != 0 {
-        eprintln!(
-            "ERROR: force_fixed_tick={} — must be 0 (natural ticks)",
-            s.force_fixed_tick
-        );
-        std::process::exit(1);
-    }
     if s.playback_speed != 1.0 && s.playback_speed != 0.0 {
         eprintln!(
             "ERROR: playback_speed must be 1.0 or 0.0 (got {})",
@@ -1023,7 +1013,7 @@ pub fn assert_proven_config(client: &TasSharedMemoryClient) {
         std::process::exit(1);
     }
     println!(
-        "Config OK: fft=0, speed={} (Cave5={})",
+        "Config OK: speed={} (Cave5={})",
         s.playback_speed,
         if s.cave5_hooked == 1 {
             "hooked"
@@ -1033,19 +1023,11 @@ pub fn assert_proven_config(client: &TasSharedMemoryClient) {
     );
 }
 
-/// Speed modes need Cave 5 (the tick-rate hook) and natural ticks. Prints FAIL
-/// and returns false instead of panicking.
+/// Speed modes need Cave 5 (the tick-rate hook). Prints FAIL and returns false
+/// instead of panicking.
 pub fn require_speed_preconditions(client: &TasSharedMemoryClient) -> bool {
-    let s = client.state();
-    if s.cave5_hooked != 1 {
+    if client.state().cave5_hooked != 1 {
         eprintln!("FAIL: Cave 5 is not hooked — speed scaling cannot be measured");
-        return false;
-    }
-    if s.force_fixed_tick != 0 {
-        eprintln!(
-            "FAIL: force_fixed_tick={} — must be 0 (fixed ticks override speed)",
-            s.force_fixed_tick
-        );
         return false;
     }
     true

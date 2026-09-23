@@ -74,17 +74,18 @@ pub trait TransportPort {
     /// False if any coordinate capture in this session failed, which would
     /// leave a stale hole in the trajectory the watcher compares.
     fn capture_ok(&self) -> bool;
-    /// Approve the CONT splice once the watcher has validated the whole
-    /// prefix it will see. The DLL parks playback at the splice until this
-    /// is written, so a starved or dead controller can never let an
-    /// unchecked prefix be spliced. Default no-op for ports without a DLL.
-    fn approve_cont_splice(&mut self) {}
+    /// Approve an aligned CONT's splice once the watcher has validated the
+    /// whole prefix it will see. The DLL parks an aligned CONT at the splice
+    /// until this is written, so a starved or dead controller can never let an
+    /// unchecked prefix be spliced.
+    fn approve_cont_splice(&mut self);
 }
 
 /// Fixed delay (ms) between an acknowledged Stop and the Restart. Ordering
 /// comes from the idle/OFF acknowledgement, not from this delay; it only
-/// keeps the restart timing consistent. Matches
-/// `restart_and_stabilize_inprocess` in tas_test.
+/// keeps the restart timing consistent. 50 ms matches
+/// `restart_and_stabilize_inprocess` in tas_test, which lands hard recordings
+/// like FE-10065 reliably.
 pub const STOP_SETTLE_MS: u64 = 50;
 
 /// Fixed delay (ms) between restart_state == 2 and the Arm command.
@@ -218,7 +219,6 @@ impl TransportController {
         port.set_playback_speed(self.cfg.speed);
         match self.phase {
             Phase::Start => {
-                port.set_playback_speed(self.cfg.speed);
                 port.set_continue_from_frame(self.cfg.continue_from_frame);
                 // STOP also clears this in the DLL. Clear it here as part of
                 // the controller contract so even a delayed STOP cannot let
@@ -290,9 +290,15 @@ impl TransportController {
                 }
                 let mode = port.mode();
                 if mode == rec {
-                    // The splice already fired: the prefix replayed clean
-                    // past the watcher and reached the splice.
-                    return self.finish(CompletedVia::Matched);
+                    // Only an approved CONT splice enters REC, and approval
+                    // finishes this cycle in the same step, so REC here means
+                    // another writer is driving the game.
+                    port.send_command(TasCommand::Stop);
+                    self.phase = Phase::Aborted;
+                    return StepOutcome::Aborted {
+                        reason: "REC started before this cycle approved a splice (another writer?)"
+                            .to_string(),
+                    };
                 }
                 // Past the arm, "not in PLAY" means the replay ended or the
                 // DLL refused the arm. Nothing more will arrive, so a
@@ -887,6 +893,21 @@ mod tests {
                 completed_via: CompletedVia::Matched
             }
         );
+    }
+
+    /// Only an approved splice enters REC, and approving finishes the cycle, so
+    /// REC seen while watching is someone else driving the game: stop and abort,
+    /// never report it as a match.
+    #[test]
+    fn rec_while_watching_aborts_instead_of_matching() {
+        let mut p = aligned_port(101);
+        let mut c = aligned_cont(320, 30);
+        drive_to_judge(&mut c, &mut p);
+        p.mode = TasMode::Rec as u32;
+        p.playback_pos = 100;
+        assert!(matches!(c.step(&mut p), StepOutcome::Aborted { .. }));
+        assert_eq!(p.commands.last(), Some(&TasCommand::Stop));
+        assert!(!p.splice_approved);
     }
 
     /// A refused arm never enters PLAY and replays nothing. That is a failure,
