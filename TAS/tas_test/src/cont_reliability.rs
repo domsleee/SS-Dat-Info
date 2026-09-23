@@ -43,7 +43,7 @@ impl BaselineInputProfile {
 pub struct ContCycleResult {
     pub iteration: u32,
     pub spliced: bool,
-    /// F5 rerolls needed before the bucket landed (0 = first try).
+    /// F5 rerolls needed before the replay was accepted (0 = first try).
     pub rerolls: u32,
     /// Wall-clock ms from initiating the CONT (restart) to the splice,
     /// including any rerolls: what the user waits through.
@@ -339,10 +339,9 @@ fn restore_baseline(
     state.force_fixed_tick = 0;
 }
 
-/// Judge one completed CONT cycle. Gate-aligned CONT shifts the live play
-/// index relative to the recording, so coverage and drift are gate-relative;
-/// unaligned CONT has `gate_align_rec == 0` and this reduces to the raw-index
-/// comparison.
+/// Judge one completed CONT cycle. A splice past the gate is aligned, so
+/// coverage and drift are measured from each side's gate; a splice inside the
+/// countdown is compared index against index.
 fn assess_splice(
     client: &TasSharedMemoryClient,
     iteration: u32,
@@ -544,10 +543,8 @@ pub fn run(
         } else {
             println!("--- Baseline REC build (single pass) ---");
             client.state_mut().playback_speed = 1.0;
-            // Focus BEFORE the restart: the CONT cycles arm immediately
-            // after their restart, so wall time spent between restart and
-            // ARM_REC here would shift the baseline's first-moving index
-            // under every replay's and the bucket judge would reroll forever.
+            // Focus BEFORE the restart so ARM_REC follows the restart
+            // immediately, as the CONT cycles' arms do.
             harness::focus_game();
             if !harness::restart_and_stabilize_inprocess(&mut client) {
                 eprintln!("ERROR: Game not alive for baseline REC (in-process restart)");

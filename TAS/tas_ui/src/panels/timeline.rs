@@ -34,9 +34,7 @@ fn brush_end(t: i32, start: u32, total: u32) -> u32 {
 }
 
 /// Default window for a fresh view (ticks = 10ms, so 1500 ≈ 15s). Fitting the
-/// WHOLE recording by default renders multi-minute runs as unreadable slivers
-/// ("the default zoom is way too small"); open at a workable zoom instead and
-/// let Fit/scroll widen it.
+/// whole recording would render multi-minute runs as unreadable slivers.
 const DEFAULT_WINDOW: u32 = 1500;
 
 /// Shortest input a drag/box edit will produce (ticks).
@@ -61,8 +59,8 @@ pub fn format_game_time(tick: u32, timer_anchor: u32) -> String {
 }
 
 /// Recording tick where the game's race timer reads zero. Track geometry is
-/// authoritative; first movement is retained as a useful fallback for old or
-/// unidentified recordings.
+/// authoritative; first movement is the fallback for recordings on an
+/// unidentified level.
 pub fn game_timer_anchor(state: &TasSharedState, remembered_level: Option<&str>) -> u32 {
     let level = crate::level::resolved_level_code(state).or(remembered_level);
     crate::start_line::start_cross_tick(&state.rec_coords, state.recorded_count, level)
@@ -327,12 +325,9 @@ pub fn show(
     let rows_bottom = rows_top + row_height * num_rows as f32;
     let axis_y = rows_bottom + 2.0;
 
-    // Wheel zoom, centred on the cursor (mutates the view before we snapshot).
-    // Test the raw pointer position against the timeline rect rather than
-    // `response.hovered()`: when editing, per-block interact widgets sit on
-    // top of the painter and steal its hover, so hovering a key-down block
-    // would otherwise suppress zoom. rect.contains works regardless of which
-    // widget is topmost.
+    // Wheel zoom, centred on the cursor (mutates the view before the snapshot
+    // below). Uses rect.contains rather than `response.hovered()` because the
+    // per-block widgets sit on top of the painter and steal its hover.
     if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
         if rect.contains(p) && edit.drag.is_none() {
             let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
@@ -597,9 +592,8 @@ pub fn show(
         );
     }
 
-    // CONT marker: click empty lane area to set continue_from. (Block
-    // interactions above capture clicks on blocks, so this only fires on
-    // empty space.)
+    // CONT marker: clicking empty lane area sets continue_from. Block widgets
+    // above capture clicks on blocks, so this only fires on empty space.
     if response.clicked() || (response.dragged() && !editable) {
         if let Some(pos) = response.interact_pointer_pos() {
             if pos.x >= bar_left
@@ -785,12 +779,9 @@ fn brush(
             view.pan(dt, total);
         }
     }
-    // Brush handles track the ABSOLUTE cursor position, not the drag delta.
-    // With deltas, a drag that runs past the brush edge keeps clamping — and
-    // the instant the cursor reverses, the window resizes again even though
-    // the cursor is far outside the brush ("drag left past the window, move
-    // right → it zooms in immediately"). Mapping the handle to the cursor's
-    // tick means nothing happens until the cursor re-crosses the handle.
+    // Brush handles track the absolute cursor position, not the drag delta:
+    // with deltas, a drag past the brush edge clamps and then resizes the
+    // window as soon as the cursor reverses, far outside the brush.
     let l_resp = ui
         .interact(lh, id.with("lh"), egui::Sense::drag())
         .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
@@ -887,8 +878,7 @@ fn active_timeline_tick(state: &TasSharedState) -> Option<(usize, ActiveTickMode
 mod tests {
     use super::*;
 
-    /// A recording shorter than MIN_WINDOW used to panic in `clamp` the
-    /// moment either brush handle was dragged.
+    /// A recording shorter than MIN_WINDOW must not invert the handle bounds.
     #[test]
     fn brush_handles_survive_a_recording_shorter_than_the_min_window() {
         let total = 40;

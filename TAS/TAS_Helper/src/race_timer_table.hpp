@@ -14,8 +14,7 @@
 // STALENESS: every trip through the menu rebuilds the HUD, and game_in_game
 // does not drop at the menu (the level is not torn down there), so the
 // previous level's line objects would keep their "advancing" history and make
-// the next race's pick ambiguous (two advancing lines: nothing published,
-// eventually all eight slots dead). A line that has not been sampled for
+// the next race's pick ambiguous. A line that has not been sampled for
 // STALE_TICKS clock ticks is gone from the HUD, so it is evicted (and
 // unlatched) before every classification, and a full table evicts its
 // stalest slot.

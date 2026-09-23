@@ -1,26 +1,22 @@
-//! Does aligning the replay's input to its OWN gate make the bucket irrelevant?
+//! Experiment: does indexing a replay's input from its OWN gate make the
+//! countdown's end tick irrelevant?
 //!
-//! A replay normally applies `input_log[playback_pos]` — indexed from the ARM.
-//! If this replay's countdown ends on a different index than the recording's
-//! did, every input lands at the wrong offset against the race start and the
-//! run diverges. This tool isolates that indexing problem; it does not assume
-//! the gate index fully describes the game's hidden spawn state.
-//!
-//! Predicting that index exactly turned out to be impossible from arm-time
-//! state: the deciding event is tick batching during the restart, which is over
-//! before the arm and leaves nothing behind to read. So instead of predicting
-//! the gate, index the input FROM it:
+//! A raw replay applies `input_log[playback_pos]`, indexed from the ARM. If
+//! the replay's countdown ends on a different index than the recording's did,
+//! every input lands at the wrong offset against the race start. The gate
+//! cannot be predicted from arm-time state (tick batching during the restart
+//! decides it and leaves nothing to read), so aligned PLAY indexes from it:
 //!
 //!     recorded_index = playback_index - play_gate + rec_gate
 //!
-//! This runs replays with bucket matching OFF, so the gate lands wherever it
-//! lands, and compares the trajectory AFTER each side's own gate:
+//! This tool alternates aligned and raw (`gate_align_rec = 0`) replays, lets
+//! the gate land wherever it lands, and compares each side after its own gate:
 //!
 //!     rec_coords[rec_gate + k]  vs  play_coords[play_gate + k]
 //!
-//! If those agree while the raw indices disagree, the countdown's end tick has
-//! stopped mattering for input indexing. Product PLAY still watches the first
-//! gate-relative trajectory window and rerolls a differing hidden spawn state.
+//! It isolates input indexing only and does not assume the gate index fully
+//! describes the hidden spawn state; product PLAY still watches the
+//! gate-relative trajectory and rerolls a differing spawn.
 
 use std::path::PathBuf;
 use std::thread;
@@ -37,44 +33,40 @@ const RECORDING: &str = "FE-10065.tasrec";
 /// instead of burning the full timeout. The matched control establishes how
 /// many meaningful ticks exist before that freeze.
 const FINISH_STALL_SECS: u64 = 3;
-/// Replayed fast: judging during a catch-up is bit-exact on this recording, so
-/// this buys depth without a new variable.
+/// Replay speed. A fast replay is bit-exact on this recording, so it compares
+/// more ticks per run without adding a variable.
 const COMPARE_SPEED: f32 = 16.0;
 const PLAY_TIMEOUT_SECS: u64 = 180;
 /// Arm delays swept across attempts, in milliseconds. The gate is measured
-/// from the ARM, so delaying the arm moves the gate — which is the only way to
-/// exercise offsets bigger than the +1 the first run happened to produce.
+/// from the ARM, so delaying the arm is the only way to exercise gate offsets
+/// larger than the natural jitter.
 const ARM_DELAYS_MS: &[u64] = &[0, 8, 16, 24, 32, 40];
 
 struct Attempt {
     aligned: bool,
-    /// Ticks that were NOT bit-identical. "Drift below a threshold" is not
-    /// bit-exactness, and a printed 0.00000 is five decimals of a float, not
-    /// proof — this compares raw bits.
+    /// Ticks whose coordinates were not bit-identical. Raw bits are compared
+    /// because a small drift, or a printed 0.00000, is not bit-exactness.
     bit_mismatches: u32,
-    /// The first gate-relative tick that differed, if any. A mismatch that
-    /// starts thousands of ticks in is a different animal from one at k=0.
+    /// The first gate-relative tick that differed, if any.
     first_mismatch: Option<u32>,
     /// Ticks the replay was expected to produce past its gate, and did.
     expected: u32,
     /// The on-screen race time at the end of the replay, in centiseconds.
     ///
-    /// Position agreeing is not the same as the RUN agreeing. This is the
-    /// number a TAS is actually judged on, it is read from the HUD rather than
-    /// derived, and it would catch a replay that traced the right path while
-    /// the race clock ran differently.
+    /// Read from the HUD rather than derived, so it catches a replay that
+    /// traced the right path while the race clock ran differently.
     race_time_cs: u32,
     /// True when the HUD clock stayed fixed after playback ended. An unfinished
     /// recording's clock keeps running, so a later poll is not a run result.
     race_time_final: bool,
-    /// How many ticks were actually compared. A pass on three ticks is not a
-    /// pass, so this is reported and asserted rather than assumed.
+    /// How many ticks were compared; reported and asserted so a pass over a
+    /// handful of ticks cannot count.
     compared: u32,
     play_gate: u32,
     rec_gate: u32,
     /// Max per-axis |play - rec| over the available recording past each gate.
     gate_rel_drift: f32,
-    /// The same comparison done the OLD way, index against index.
+    /// The same comparison done index against index.
     index_drift: f32,
 }
 
@@ -124,12 +116,10 @@ pub fn run(iterations: u32, rec: Option<&str>) -> bool {
         }
     };
     println!("  recording first-moving = {}", rec_gate);
-    // Does this recording have input BEFORE its gate? Alignment holds
-    // input_log[rec_gate] through the countdown instead of replaying whatever
-    // the recording had there, on the argument that pre-gate input is inert
-    // because the boarder cannot move. If the recording DOES have pre-gate
-    // input, zero drift is evidence for that argument rather than an untested
-    // assumption — and if it does not, the argument is simply unexercised.
+    // Alignment holds input_log[rec_gate] through the countdown, assuming
+    // pre-gate input is inert because the boarder cannot move. Report whether
+    // this recording has pre-gate input that differs, i.e. whether that
+    // assumption is exercised at all.
     {
         let s = client.state();
         let gate_mask = s.input_log[rec_gate as usize];
@@ -156,8 +146,8 @@ pub fn run(iterations: u32, rec: Option<&str>) -> bool {
     let mut attempts = Vec::new();
     let mut failed_attempts = 0u32;
     for i in 1..=iterations {
-        // Alternate alignment, and sweep the arm delay so both arms see the
-        // same spread of gates rather than whatever the machine felt like.
+        // Alternate alignment and sweep the arm delay, so aligned and raw
+        // attempts see the same spread of gate offsets.
         let aligned = i % 2 == 0;
         let delay = ARM_DELAYS_MS[(i as usize / 2) % ARM_DELAYS_MS.len()];
         if let Some(a) = one_attempt(&mut client, rec_gate, aligned, delay, compare_speed) {
@@ -183,9 +173,9 @@ pub fn run(iterations: u32, rec: Option<&str>) -> bool {
             failed_attempts += 1;
         }
     }
-    // A matched, unaligned baseline is the control. Natural gate jitter can
-    // omit one from a small requested sample, so collect bounded extra controls
-    // rather than turning a sound feature into a coin-flip test result.
+    // The control is a raw replay whose gate matched the recording's. Gate
+    // jitter can leave a small sample without one, so collect up to 12 extra
+    // raw attempts until one matches.
     if !attempts
         .iter()
         .any(|a| !a.aligned && a.play_gate == rec_gate)
@@ -296,9 +286,8 @@ fn one_attempt(
         client.send_command(TasCommand::Stop);
         return None;
     }
-    // What the aligned replay OWES us: every tick of the recording past its
-    // gate. Anything less is a short replay, which is the failure the
-    // arm-relative endpoint used to cause and a fixed window cannot see.
+    // The replay owes every tick of the recording past its gate; comparing
+    // fewer would let a short replay pass.
     let expected = expected
         .min(s.rec_coords.len().saturating_sub(rec_gate as usize) as u32)
         .min(s.play_coords.len().saturating_sub(play_gate as usize) as u32);
@@ -336,7 +325,7 @@ fn one_attempt(
         if !p[0].is_finite() || !p[1].is_finite() || !p[2].is_finite() {
             bit_mismatches += 1;
         }
-        // Same window, compared index-against-index the old way.
+        // Same window, compared index against index.
         let r2 = s.rec_coords[pi.min(s.recorded_count as usize - 1)];
         idx = idx
             .max((p[0] - r2[0]).abs())
@@ -416,12 +405,10 @@ fn report(attempts: &[Attempt], rec_gate: u32, failed_attempts: u32) -> bool {
         .map(|a| a.play_gate as i64 - a.rec_gate as i64)
         .collect();
     println!("  offsets exercised by aligned attempts: {:?}", offsets);
-    // THE CONTROL. Zero is the wrong bar: a replay that matches the gate
-    // exactly is not bit-identical to the recording all the way to the end —
-    // the last ~289 ticks diverge for it too, which is a pre-existing property
-    // of the tail (the race finishes in there) and nothing to do with
-    // alignment. The question is whether an aligned replay with a MISMATCHED
-    // gate does as well as a baseline replay with a MATCHED one.
+    // Compare against the control, not against zero: even a raw replay with a
+    // matched gate diverges over the last ~289 ticks, where the race finishes.
+    // The pass bar is that an aligned replay with a MISMATCHED gate does as
+    // well as a raw replay with a MATCHED one.
     let control: Vec<&Attempt> = attempts
         .iter()
         .filter(|a| !a.aligned && a.play_gate == a.rec_gate)

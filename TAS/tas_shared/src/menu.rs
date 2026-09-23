@@ -15,7 +15,7 @@ use crate::state::{
 /// The current menu page id exactly as the DLL publishes it
 /// ("ID_ARCADE_MENU"), or `None` while a level runs (the buffer is empty
 /// then) or the writer kept it busy. Read under `menu_seq`, together with
-/// which the DLL writes it (v48), so it never names another page's items.
+/// which the DLL writes it, so it never names another page's items.
 pub fn menu_screen_id(state: &TasSharedState) -> Option<String> {
     let bytes = with_seqlock(&state.menu_seq, || {
         let mut v = Vec::new();
@@ -41,7 +41,7 @@ pub fn menu_screen(state: &TasSharedState) -> Option<String> {
     menu_screen_id(state).map(|raw| prettify_menu_id(&raw))
 }
 
-/// The menu document (v46): the current page's items with labels and stable
+/// The menu document: the current page's items with labels and stable
 /// ids as a JSON string (see the field doc), or `None` while a level runs or
 /// while the writer kept it busy. One coherent read under `menu_seq`.
 pub fn menu_doc(state: &TasSharedState) -> Option<String> {
@@ -110,7 +110,7 @@ pub enum MenuSubmitError {
     Busy,
 }
 
-/// Submit a menu command (v47/v48): write the target and the page id it was
+/// Submit a menu command: write the target and the page id it was
 /// read from (both cut to their buffers, always NUL-terminated) and the kind,
 /// then bump the sequence. Returns the sequence to wait for with
 /// [`menu_command_result`]. One command is outstanding at a time.
@@ -205,7 +205,7 @@ mod tests {
         s.menu_seq.store(seq, Ordering::Relaxed);
     }
 
-    /// The menu document (v46) comes back verbatim from a stable buffer.
+    /// The menu document comes back verbatim from a stable buffer.
     #[test]
     fn menu_doc_reads_the_published_json() {
         let mut s = zeroed_boxed();

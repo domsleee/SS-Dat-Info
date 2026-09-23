@@ -42,11 +42,9 @@ Pattern holds refresh the Pico every 200 ms. Input regression and reproducibilit
 compare each key's captured edges with the requested schedule, including releases,
 with 12 ticks of timing tolerance after aligning one shared first-edge origin.
 Multi-key HID changes may span adjacent game ticks; missing keys and extra edges
-still fail. The schedule uses
-10 ms per tick and these capture checks run at 1x. Firmware timeout behavior is
-tested separately, not used to shorten holds inside a game test. Old live reports
-do not validate these corrected input schedules; rerun them after rebuilding.
-The input matrix records the countdown, then drives its short patterns and
+still fail. The schedule uses 10 ms per tick and these capture checks run at 1x.
+Firmware timeout behavior is tested separately, not used to shorten holds inside
+a game test. The input matrix records the countdown, then drives its short patterns and
 replays through the product's gate-aligned transport. Its zero-drift verdict
 compares corresponding gate-relative frames and requires the shifted endpoint;
 arm-relative offset metrics are diagnostic, not the verdict.
@@ -78,9 +76,9 @@ header length, a JSON header, then the per-tick input bytes and XYZ
 coordinates. Headers written by the current `tas_ui` carry `renderer`,
 `fpu_control_word`, `character` and `stance`, the stamps the UI compares with
 the live game because DirectX (24-bit) and OpenGL (53-bit) precision,
-character and stance each change the physics. The three committed files were
-saved before those stamps existed (header versions 5 and 6), so their renderer
-and rider are unknown; the loaders ignore header fields they do not know.
+character and stance each change the physics. The three committed files carry
+none of these stamps (header versions 5 and 6), so their renderer and rider are
+unknown; the loaders ignore header fields they do not know.
 When a physics change moves a trajectory, `tas_test refresh-tasrec
 <source.tasrec> <out.tasrec>` replays the recording in the live game and
 writes it back with the freshly captured coordinates.

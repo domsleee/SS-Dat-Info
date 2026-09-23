@@ -52,8 +52,8 @@ fn serialised_stop_then_restart(client: &mut TasSharedMemoryClient) -> bool {
     while Instant::now() < deadline {
         match controller.step(client) {
             StepOutcome::Done { .. } => {
-                // With no trajectory judge, Done means ARM was submitted, not
-                // that the DLL has consumed it. Observe acknowledgement first.
+                // With `gate_align_rec: 0` nothing watches the replay, so Done
+                // only means ARM was submitted. Wait for the DLL to consume it.
                 if client.command_idle() {
                     return client.mode_volatile() == TasMode::Play as u32;
                 }

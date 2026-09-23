@@ -65,8 +65,8 @@ from `TAS/` with `cargo run --release --bin tas_test -- <mode>`, or from the
 repository root through the `just test_*` recipes named below. Modes marked
 Pico drive steering or a keypress through the board. Scripted steering fails
 on missing hardware or failed writes; it never substitutes a neutral recording.
-The existing watchdog-sensitive hold timing is preserved. Acceptance explicitly
-refreshes its long holds; other steered patterns do not silently acquire keepalives.
+Acceptance refreshes its long holds; other steered patterns send no keepalives,
+so the firmware's 500 ms release applies to them.
 
 ### Suites
 
@@ -86,7 +86,7 @@ refreshes its long holds; other steered patterns do not silently acquire keepali
 | `smoke` | no | `*** SMOKE TEST PASSED ***` | Pipeline liveness (~40 s): ticks captured, playback ran to completion, player moved in REC and PLAY. REC and PLAY start from different spawns here, so liveness is the whole verdict. `just test_smoke`. |
 | `segment` | yes | `*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***` | Product-aligned CONT at frame 500 while LEFT is held, then RIGHT steering. Requires two exact segment boundaries, released tail and complete gate-relative zero drift; covers approval arriving at the parked splice. |
 | `replay <file.tasrec> [--iterations N] [--verbose]` | no | `Result: ZERO DRIFT in all N iterations` | Loads a `.tasrec` and replays it N times through aligned PLAY; gate-relative drift, incomplete playback or a rejected alignment fails. `just test_replay FILE`. |
-| `reliability [--iterations N] [--speed X]` | yes | `*** RELIABILITY TEST PASSED ***` | N consecutive steered REC+PLAY cycles at one speed (default 10 at 12x). Shares the procedure with drift-speed, preserving its 50-tick rather than 100-tick neutral tail and mandatory movement gates. |
+| `reliability [--iterations N] [--speed X]` | yes | `*** RELIABILITY TEST PASSED ***` | N consecutive steered REC+PLAY cycles at one speed (default 10 at 12x). Shares its procedure with drift-speed: a 50-tick neutral tail and mandatory movement gates. |
 | `drift-speed` | yes | `*** DRIFT-AT-SPEED TEST PASSED ***` | REC 2x/PLAY 2x and REC 1x/PLAY 2x both replay with zero drift. |
 | `save-reload` | yes | `*** SAVE/RELOAD/REPLAY PASSED: complete gate-relative comparison across game restart ***` | Verify steered REC, save to disk, kill/relaunch, reclaim Pico and command ownership, require exact input/coordinate round-trip and complete product-aligned zero-drift replay. |
 | `pause-resume` | yes | `*** PAUSE/RESUME REPLAY PASSED: ...` | Escape pause and resume during PLAY; the first 1000 frames stay bit-identical. |
@@ -115,7 +115,7 @@ refreshes its long holds; other steered patterns do not silently acquire keepali
 | `fe-cont-reliability [--iterations N]` | no | `*** FE-CONT-RELIABILITY PASSED ***` | FE-tremendous, splices at 2200 at 12x. Default five cycles, functional suite two. |
 | `fe10065-cont [--iterations N]` | no | `*** FE-10065 CONT PASSED ***` | FE-10065, splices at 6200 at each of 64x and 256x, resume overshoot at most one frame and every resume at most 3000 ms. Default eight cycles per speed, functional suite two. |
 | `cont-hijack` | no | `*** BUG #2 PASSED: replay crossed frame N still in PLAY — no REC hijack ***` | A `continue_from_frame` written during a plain PLAY leaves it in PLAY. |
-| `cont-restart-race` | no | `*** PASS: serialised Stop→Restart is accepted by cave2 ***` | The product controller serializes STOP/restart/arm and the DLL acknowledges CONT. Command-overwrite behavior is tested deterministically offline, not by requiring an uncontrolled live race to lose. |
+| `cont-restart-race` | no | `*** PASS: serialised Stop→Restart is accepted by cave2 ***` | The product controller serializes STOP/restart/arm and the DLL acknowledges CONT. Command-overwrite behavior is tested deterministically offline. |
 | `cont-input-protection` | no | every `PASS:` line, ending `PASS: ordinary STOP releases input protection (cont_suppress_input=0)` | Live input stays blocked through the CONT restart and STOP releases it, driven through the real transport controller. |
 | `gate-align [N] [recording]` | no | `*** Gate-offset input indexing matched the control in this sample. ***` | Gate-relative input indexing reproduces the recording's run over N aligned replays. |
 
@@ -136,9 +136,8 @@ These run on whatever track is loaded; the track guard below is skipped.
 
 Every mode outside the diagnostics table asserts that the game is on Forest
 Easy before it runs and exits `1` with an explanation otherwise. On the wrong
-track the spawn is on a different map, so a replay's start matcher can never
-hit and burns its whole retry budget (the mode appears to hang for about ten
-minutes), while a fresh REC records another course. The check waits up to 12 s
+track the spawn is on a different map, so a replay can never match and burns
+its whole retry budget, while a fresh REC records another course. The check waits up to 12 s
 for the DLL to publish a level. Level detection is edge-driven: the DLL
 re-reads the engine's setup object when the engine cycle freezes or resumes,
 which covers every load and menu trip, with a 60 s re-read as a safety net
@@ -197,8 +196,7 @@ cargo run --release --bin tas_test -- cont-reliability --iterations 1 --splice 2
 Use `--iterations 10` for repeated coverage and `--speed 64` or `--speed 100`
 for other catch-up speeds. Success requires exit code 0, the
 `CONT RELIABILITY PASSED` summary, zero measured drift, and passing coverage
-and forward-progress checks; a bucket match on its own leaves the replayed
-prefix unproven. When a change touches a UI indicator, exercise the UI too and
+and forward-progress checks. When a change touches a UI indicator, exercise the UI too and
 poll it during the catch-up and after the PLAY-to-REC transition, which is
 what `cont-ui-left-spam` does.
 
@@ -214,8 +212,8 @@ launches its own UI with Pico auto-connect disabled so the harness owns
 with From set to the splice, sends F12 through the UI, verifies physical LEFT
 down/up transitions, checks first-attempt resume and an explicit zero splice
 mismatch, then stops via F11. Retries, missing verdicts, focus loss, process
-exit and nonzero splice differences fail the test; historical
-`CONT prefix difference` diagnostics alone do not. The child UI is closed on
+exit and nonzero splice differences fail the test; `CONT prefix difference`
+diagnostics alone do not. The child UI is closed on
 success or failure and its logs and data stay under `TAS_TEST_OUTPUT`.
 
 The short acceptance workflow is `just test_live` (or `just test_live 2200`).
@@ -230,8 +228,8 @@ The short lane uses two UI trials, one acceptance run and seven input cases.
 The functional lane uses two repeated STOP/CONT/reliability cycles per
 configuration; timing medians still require three samples. `smoke`
 remains a standalone diagnostic. Both full lanes include a fresh-game
-save/reload and ends at the main menu after dialog navigation, so save your work
-first and do not run it alongside another controller. It requires a Pico, all
+save/reload and end at the main menu after dialog navigation, so save your work
+first and do not run them alongside another controller. They require a Pico, all
 three committed FE fixtures, Nushell and `REVIVE_SUPREME_SCRIPT`, the deployed
 game/injector/DLL, and a `tas_ui.exe` beside the harness. `NO_REVIVE=1` and
 `TAS_TEST_CASE_FILTER` are refused for this lane. Preflight checks the on-disk
@@ -274,9 +272,9 @@ three successful finite measurements, not a median of surviving trials.
 - **Drift:** keep the failing recording and logs, and compare the rider and
   physics-mode stamps (renderer precision, character, stance) with the live
   game before retrying. A clean retry leaves the failure unexplained.
-- **Reroll rate jumps:** a busy machine (a compile, or a git commit whose hook
-  runs the console tests and pauses the game) turns first-try spawns into
-  retries; reproduce on an idle machine before calling it a regression.
+- **Rerolls appear:** a busy machine (a compile, or a git commit whose hook
+  runs the console tests and pauses the game) can make aligned replays diverge
+  and reroll; reproduce on an idle machine before calling it a regression.
 - **Pico problems:** `TAS\pico\deploy.ps1 -Check` confirms the board runs the
   committed firmware; the harness releases all keys on the port before every
   run. A missing port or failed steering write fails a steered mode; fix the

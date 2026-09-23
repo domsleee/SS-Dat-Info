@@ -108,9 +108,8 @@ pub fn decode_body(
     let coords_end = coords_start
         .checked_add(coords_size)
         .ok_or_else(|| "Recording coordinate length overflow".to_string())?;
-    // Zero the FULL coordinate block first: a legacy/minimal file with no
-    // coord block must not leave a previous recording's coords behind to
-    // corrupt CONT start-matching, drift analysis, or a re-save.
+    // A file with no coordinate block decodes to all-zero coordinates, never
+    // partial ones; a partial block is rejected below.
     let mut rec_coords = vec![[0.0f32; 3]; count];
     let has_coords = bytes.len() >= coords_end;
     if !has_coords && bytes.len() != input_end {
@@ -178,11 +177,9 @@ pub fn encode(
 /// Write bytes atomically (temp + fsync + rename): a crash leaves the old
 /// file or the new one, never a half-written recording.
 ///
-/// The temp name is unique per call (process id + counter): a fixed sibling
-/// name lets a second concurrent save delete the first writer's in-flight
-/// file, and an unconditional cleanup deletes a temp this call never
-/// created. Only a temp this call created is ever removed; a leftover from
-/// a crashed previous save is left alone (and never collides).
+/// The temp name is unique per call (process id + counter), so concurrent
+/// saves never delete each other's in-flight file. Only a temp this call
+/// created is ever removed; a leftover from a crashed save is left alone.
 pub fn save_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -350,7 +347,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("run.tasrec");
-        // A leftover fixed-name temp from before unique naming existed.
+        // A leftover temp with a fixed name.
         std::fs::write(path.with_extension("tasrec.tmp"), b"stale").unwrap();
         let bytes = encode(b"{\"recorded_count\":1}", &[3], &[[0.0; 3]]).unwrap();
         save_atomic(&path, &bytes).unwrap();

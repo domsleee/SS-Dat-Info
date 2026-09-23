@@ -53,7 +53,7 @@ pub fn run() -> bool {
     harness::arm_play(&mut client);
 
     // Wait until the replay is genuinely running but still BEFORE the splice
-    // frame, then inject the stray marker — exactly the bug trigger.
+    // frame, then inject the stray marker.
     let t0 = Instant::now();
     loop {
         let pos = client.playback_pos_volatile();
@@ -83,8 +83,8 @@ pub fn run() -> bool {
     );
     client.state_mut().continue_from_frame = SPLICE_AT;
 
-    // Watch the replay cross the splice frame. The bug = mode flips to REC at
-    // SPLICE_AT. The fix = it stays PLAY past it (then naturally PLAY→OFF at end).
+    // Watch the replay cross the splice frame. A hijack flips the mode to REC
+    // at SPLICE_AT; correct behaviour stays PLAY until the recording ends.
     let mut hijacked = false;
     let mut crossed = false;
     let t1 = Instant::now();

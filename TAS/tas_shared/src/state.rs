@@ -226,11 +226,11 @@ pub struct TasSharedState {
     /// `ARG4_SOURCE_TIME_CURRENT`.
     pub arg4_source: u32,
 
-    /// UI-written: 1 while a Continue cycle is in flight (from before the F5
-    /// restart until the bucket aligns). The DLL blocks the real key handler
-    /// whenever this is set; the level-scan worker retires a flag left set for
-    /// more than 5 s of frozen cycle. Cleared by the UI the instant the bucket
-    /// aligns. ESC stays exempt.
+    /// 1 while a Continue cycle is in flight, from before the F5 restart until
+    /// the cycle ends. The UI sets and clears it (cave2 also sets it on
+    /// StopForRestart). While set, the DLL blocks the real key handler, ESC
+    /// excepted; the level-scan worker retires a flag left set through more
+    /// than 5 s of frozen cycle.
     pub cont_suppress_input: u32,
 
     /// Bumped by the DLL on every level-path change (a level loaded or
@@ -253,30 +253,30 @@ pub struct TasSharedState {
     pub level_ctx_seq: AtomicU32,
 
     /// Bumped by cave2 every time it PROCESSES an arm that starts a replay
-    /// (ARM_PLAY / ARM_CONTINUE), refusals included. The judge uses it to tell
-    /// this attempt's mode/position from the previous replay's: mode is
-    /// transient and position holds the previous replay's final value until
-    /// the arm resets it.
+    /// (ARM_PLAY / ARM_CONTINUE), refusals included. The transport controller
+    /// uses it to tell this attempt's mode/position from the previous
+    /// replay's: mode is transient and position holds the previous replay's
+    /// final value until the arm resets it.
     pub arm_generation: u32,
     /// `tick_count` at the first captured frame whose position differs from the
     /// session's frame 0 (the countdown gate).
     pub gate_tick: u32,
-    /// The REC/PLAY index at that same moment: `first_moving` as stamped by the
-    /// DLL.
+    /// The REC/PLAY index at that same moment: the live gate.
     pub gate_index: u32,
-    /// The RECORDING's first-moving index. Non-zero turns on gate-relative
-    /// input alignment for PLAY (`recorded_index = playback_index - gate_index +
-    /// gate_align_rec`), which makes the gate index irrelevant instead of
-    /// predicted. 0 leaves playback indexed from the arm.
+    /// The recording's gate (first-moving index). Non-zero turns on
+    /// gate-relative input for PLAY and CONT
+    /// (`recorded_index = playback_index - gate_index + gate_align_rec`), so
+    /// the countdown length does not matter. 0 (REC, or a recording that never
+    /// moves) indexes from the arm.
     pub gate_align_rec: u32,
     /// 1 while every coordinate capture in this session has succeeded. A
     /// failed capture still advances the index, leaving a stale coordinate
-    /// inside the prefix that a first-moving scan could read as movement.
+    /// that gate detection or the watcher could misread.
     pub capture_ok: u32,
-    /// Aligned-CONT splice interlock. The controller writes 1 when the
-    /// gate-relative watcher has validated the prefix; until then cave5 parks
-    /// playback at the aligned splice and cave2 refuses to splice. Cleared by
-    /// ARM_CONTINUE and ClearGateAlign in the DLL. Unaligned CONT ignores it.
+    /// CONT splice interlock. The controller writes 1 once the watcher has
+    /// validated the prefix; until then cave5 parks playback at the splice and
+    /// cave2 refuses to splice. Cleared by ARM_CONTINUE and ClearGateAlign in
+    /// the DLL. A CONT with `gate_align_rec == 0` ignores it.
     pub cont_splice_approved: u32,
 
     /// Raw x87 control word sampled ON THE GAME THREAD every cycle: 0x007F =
@@ -376,7 +376,7 @@ pub(crate) fn with_seqlock<T>(seq: &AtomicU32, read: impl Fn() -> T) -> Option<T
     None
 }
 
-/// The live rider as ONE coherent `(character, stance)` pair (v43). Two plain
+/// The live rider as ONE coherent `(character, stance)` pair. Two plain
 /// field reads could pair a new character with the previous stance, and a
 /// recording armed in that window would carry the mixed identity for good.
 /// A read that never settles reports unknown, never a guess.
@@ -390,7 +390,7 @@ pub fn rider_pair(state: &TasSharedState) -> (u32, u32) {
     .unwrap_or((TAS_CHARACTER_UNKNOWN, u32::MAX))
 }
 
-/// The race timer as ONE coherent `(race_time_cs, race_start_ts)` pair (v43);
+/// The race timer as ONE coherent `(race_time_cs, race_start_ts)` pair;
 /// `u32::MAX` in either half = not published / unreadable.
 pub fn race_pair(state: &TasSharedState) -> (u32, u32) {
     with_seqlock(&state.race_seq, || unsafe {
@@ -426,7 +426,7 @@ fn read_identity(state: &TasSharedState) -> Option<u32> {
 ///
 /// Reading `level_scan_epoch == level_epoch` and THEN reading `level_id`
 /// separately is not sound — the level can be swapped between the two, giving
-/// "resolved" plus the previous track's id. Both now happen inside one seqlock
+/// "resolved" plus the previous track's id. Both happen inside one seqlock
 /// window, so either the whole group is from a single publication or the read is
 /// rejected.
 pub fn resolved_level_id(state: &TasSharedState) -> Option<u32> {
@@ -855,8 +855,8 @@ mod level_epoch_tests {
         s.level_id = 0;
         assert!(level_is_resolved(&s));
 
-        // F5 restart: the root SURVIVES, so no epoch bump — the level must stay
-        // trusted. This is the case that made player_ptr the wrong signal.
+        // F5 restart: the root survives, so no epoch bump and the level stays
+        // trusted.
         assert!(level_is_resolved(&s), "an F5 restart must not unresolve");
 
         // Track switch: the root is reallocated, DLL bumps the epoch. The scan

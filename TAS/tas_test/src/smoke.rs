@@ -1,6 +1,6 @@
 //! Pipeline liveness: a short REC, then a PLAY that must run to completion with
-//! the player moving in both phases. Not F5-aligned, so drift is expected and
-//! never asserted.
+//! the player moving in both phases. Neither run starts from a restart, so
+//! drift is expected and never asserted.
 
 use crate::{drift, harness};
 

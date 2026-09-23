@@ -9,8 +9,8 @@
 // machine-uptime units). The input pipeline stamps every key event with the
 // Time at message-pump dispatch: Win32_Driver::Translate(tagMSG&, Kernel::Time)
 // → keyDown/keyUp (+3940/+3980) → BB3B10(keyIndex, pressed, Time.lo, Time.hi).
-// The observer discards events whose Time predates the current race context —
-// the "dynamic arg4" that silently killed stale injected input.
+// The observer silently discards events whose Time predates the current race
+// context, so injected events must carry a current stamp.
 struct KernelTime { uint32_t lo; uint32_t hi; };
 
 // ?Current@Time@Kernel@Housemarque@@SI?AV123@XZ — static __fastcall, returns
@@ -101,7 +101,7 @@ struct GameAddresses {
     // inline-hooks the two HMG key handlers for its F5 debounce, so on a normal
     // launch those sites already start with a JMP. The module identity check
     // still proves which image this is, and SafetyHook chains onto the
-    // existing hook (it did on every launch before byte validation existed).
+    // existing hook.
     template <size_t N>
     static bool ValidateCodeOrHooked(const char* label, const std::uint8_t* address,
                                      const std::uint8_t (&expected)[N]) {
@@ -137,13 +137,11 @@ struct GameAddresses {
     // recorder owners with; 0 until Resolve validated the constructor sites.
     std::uint32_t player_vtable = 0;
     std::uint32_t ghost_vtable = 0;
-    // SG+0x1D3304: pointer to the CURRENT level's resource path string.
-    // Found by differential RE (tas_test level-hunt ptr) and verified on four
-    // tracks. The pointed-to string changes the instant a level loads, which is
-    // the level-change event. RELIABLE FOR AREA, NOT FOR DIFFICULTY: some tracks
-    // share the easy/ shadow asset, so Village Hard reads ".../Tracks/easy/...".
-    // Difficulty comes from the executable's selected-track config object;
-    // see setup_config_parse.hpp. That survives the shared-path outlier.
+    // SG+0x1D3304: pointer to the CURRENT level's resource path string. The
+    // string changes the instant a level loads, which is the level-change
+    // event. Reliable for area, not difficulty: some tracks share the easy/
+    // asset, so Village Hard reads ".../Tracks/easy/...". Difficulty comes from
+    // the selected-track config object (setup_config_parse.hpp).
     std::uint8_t* level_path_ptr = nullptr;
 
     // HMG_Cetsup_Win32.dll offsets

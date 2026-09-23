@@ -2,13 +2,10 @@
 // Pure logic, no Windows/hook deps — compile + run standalone:
 //   just test_dll      (from repo root)
 //
-// Regression from 2026-09-02 (Forest Easy, TAS_RACE_DIAG=1):
-//   stale_line_from_the_previous_level_does_not_make_the_next_race_ambiguous
-//     A menu trip rebuilds the HUD. The old player line stayed in the table
-//     with adv=7473, the new race's line advanced too, Classify saw two
-//     advancing lines and published nothing ("ambiguous") for every race
-//     after the first. By the fourth trip all eight slots held dead objects.
-//     game_in_game never drops at the menu, so the epoch reset never fired.
+// stale_line_from_the_previous_level_does_not_make_the_next_race_ambiguous:
+//   a menu trip rebuilds the HUD without dropping game_in_game, so the old
+//   player line must be evicted, or Classify sees two advancing lines and
+//   publishes nothing for every later race.
 
 #include "../race_timer_table.hpp"
 #include "check.hpp"

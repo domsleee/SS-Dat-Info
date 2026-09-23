@@ -217,13 +217,13 @@ struct TasSharedState {
     // proper mechanism can't silently regress to the fallback.
     uint32_t arg4_source;
 
-    // -- Live-input suppression during a CONT (UI writes, DLL reads) --
-    // 1 while a Continue cycle is in flight (from before the F5 restart until
-    // the bucket aligns). cave1c/cave1d block the real key handler whenever it
-    // is set, covering the OFF-mode spawn countdown the mode-based block
-    // misses. The level-scan worker retires a flag left set for >5 s of frozen
-    // cycle (a cycle that never tore down), which would otherwise leave the
-    // keyboard dead. ESC stays exempt.
+    // -- Live-input suppression across a restart (UI and DLL write, DLL reads) --
+    // 1 while a restart-then-replay cycle is in flight, from before the F5
+    // restart until the controller finishes or abandons the cycle.
+    // cave1c/cave1d block the real key handler whenever it is set, covering
+    // the OFF-mode spawn countdown the mode-based block misses. The level-scan
+    // worker retires a flag left set for >5 s of frozen cycle, which would
+    // otherwise leave the keyboard dead. ESC stays exempt.
     uint32_t cont_suppress_input;
 
     // -- Level context epoch (DLL level-scan worker writes; UI reads) --
@@ -251,28 +251,27 @@ struct TasSharedState {
     // unchanged EVEN value. level_scan.hpp is the only writer.
     volatile uint32_t level_ctx_seq;
 
-    // -- Judged PLAY / CONT controls (UI writes, cave2/cave5 read) --
-    // Bumped every time cave2 PROCESSES a replay-starting arm (ARM_PLAY /
-    // ARM_CONTINUE), refusals included. The judge uses it to tell this
-    // attempt's mode/position from the previous replay's.
+    // -- Gate-aligned PLAY / CONT --
+    // Bumped by cave2 as the LAST store of every replay-starting arm
+    // (ARM_PLAY / ARM_CONTINUE), refusals included. The controller uses it to
+    // tell this attempt's mode/position from the previous replay's.
     volatile uint32_t arm_generation;
-    // Countdown gate: tick_count and REC/PLAY index of the first captured
-    // frame whose position differs from frame 0 (the boarder leaving the
-    // spawn).
+    // Countdown gate (DLL writes): tick_count and REC/PLAY index of the first
+    // captured frame whose position differs from frame 0 (the boarder leaving
+    // the spawn).
     volatile uint32_t gate_tick;
     volatile uint32_t gate_index;
-    // The RECORDING's first-moving index; non-zero enables gate-relative input
-    // alignment for PLAY (recorded_index = playback_index - gate_index +
-    // gate_align_rec). 0 = index from the arm.
+    // The RECORDING's first-moving index (UI writes before the arm); non-zero
+    // enables gate-relative input alignment (recorded_index = playback_index -
+    // gate_index + gate_align_rec). 0 = index from the arm.
     volatile uint32_t gate_align_rec;
     // 1 while every coordinate capture this session has succeeded. A failed
     // capture still advances the index, leaving a stale hole in the prefix.
     volatile uint32_t capture_ok;
-    // Aligned-CONT splice interlock. Written 1 by the controller when the
-    // gate-relative watcher has validated the prefix. Until then cave5 parks
-    // playback at the aligned splice (0 ticks/frame) and cave2 refuses to
-    // splice. Cleared by ARM_CONTINUE and ClearGateAlign. Unaligned CONT
-    // (gate_align_rec == 0) ignores it.
+    // CONT splice interlock. Written 1 by the controller when its watcher has
+    // validated the prefix. Until then cave5 parks playback at the aligned
+    // splice (0 ticks/frame) and cave2 refuses to splice. Cleared by
+    // ARM_CONTINUE and ClearGateAlign; ignored when gate_align_rec == 0.
     volatile uint32_t cont_splice_approved;
 
     // -- Renderer / x87 precision (DLL writes) --

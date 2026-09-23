@@ -17,8 +17,7 @@
 //     human's own recorder and player are re-created at new addresses as well.
 //
 // No timing rule survives both: a pointer frozen for the run reads a dead
-// object after a ghost restart (every judged PLAY mismatches at gate+0), and
-// following the last pusher lets a countdown transient hijack the position
+// object after a ghost restart, and following the last pusher lets a countdown transient hijack the position
 // source mid-run. So the hook decides by IDENTITY: a recorder is adopted iff
 // its owner is the keyboard-driven rider - a plain `Player`, still linking
 // back to this recorder (replay_identity.hpp). That is true for the human's

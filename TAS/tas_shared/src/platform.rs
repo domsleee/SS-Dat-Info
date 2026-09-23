@@ -116,7 +116,7 @@ impl TasSharedMemoryClient {
     }
 
     pub fn send_command(&mut self, cmd: TasCommand) {
-        // Enforce proven zero-drift config before arming REC/PLAY
+        // Every arm runs on natural ticks.
         if matches!(
             cmd,
             TasCommand::ArmRec | TasCommand::ArmPlay | TasCommand::ArmContinue
@@ -152,12 +152,12 @@ impl TasSharedMemoryClient {
             || cmd == TAS_CMD_CLAIMED_STOP
     }
 
-    /// Raw x87 control word the DLL sampled on the game thread (v41).
+    /// Raw x87 control word the DLL sampled on the game thread.
     pub fn fpu_control_word(&self) -> u32 {
         unsafe { std::ptr::read_volatile(std::ptr::addr_of!((*self.ptr).fpu_control_word)) }
     }
 
-    /// Loaded renderer plugin (`TAS_RENDERER_*`, v41).
+    /// Loaded renderer plugin (`TAS_RENDERER_*`).
     pub fn renderer_id(&self) -> u32 {
         unsafe { std::ptr::read_volatile(std::ptr::addr_of!((*self.ptr).renderer_id)) }
     }
@@ -167,14 +167,14 @@ impl TasSharedMemoryClient {
         physics_mode_label(self.renderer_id(), self.fpu_control_word())
     }
 
-    /// Live rider stamp (character · stance, v42), `None` until the DLL
+    /// Live rider stamp (character · stance), `None` until the DLL
     /// has resolved the human rider's loadout.
     pub fn rider(&self) -> Option<String> {
         let (character, stance) = rider_pair(self.state());
         rider_label(character, stance)
     }
 
-    /// The current menu screen title (v44), `None` in a level.
+    /// The current menu screen title, `None` in a level.
     pub fn menu_screen(&self) -> Option<String> {
         menu_screen(self.state())
     }
@@ -324,8 +324,8 @@ mod tests {
         assert_eq!(b.state().command, TasCommand::Idle as u32);
     }
 
-    /// Arming REC, PLAY or CONT forces `force_fixed_tick` back to 0, the
-    /// proven zero-drift configuration.
+    /// Arming REC, PLAY or CONT forces `force_fixed_tick` back to 0 (natural
+    /// ticks).
     #[test]
     fn send_command_resets_fft_on_arm() {
         for cmd in [

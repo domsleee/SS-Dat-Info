@@ -58,8 +58,8 @@ pub trait TransportPort {
     fn reset_restart_state(&mut self);
     fn playback_pos(&self) -> u32;
     fn play_coords(&self) -> &[[f32; 3]];
-    /// The loaded recording's trajectory + length — for the bit-exact bucket
-    /// fingerprint (the replay must reproduce this, not just its first-move).
+    /// The loaded recording's trajectory, which the aligned replay must
+    /// reproduce bit for bit from the gate onward.
     fn rec_coords(&self) -> &[[f32; 3]];
     fn recorded_count(&self) -> u32;
     /// First live replay frame where the boarder left spawn. Zero until the
@@ -72,28 +72,22 @@ pub trait TransportPort {
     /// this attempt's replay state from the previous one's.
     fn arm_generation(&self) -> u32;
     /// False if any coordinate capture in this session failed, which would
-    /// leave a stale hole in the prefix a first-moving scan reads.
+    /// leave a stale hole in the trajectory the watcher compares.
     fn capture_ok(&self) -> bool;
-    /// Approve the aligned CONT splice: the gate-relative watcher has
-    /// validated the whole prefix it will ever see. The DLL parks
-    /// playback AT the splice until this is written, so a starved or
-    /// dead controller can never let an unjudged prefix be spliced.
-    /// Default no-op for ports without a DLL behind them.
+    /// Approve the CONT splice once the watcher has validated the whole
+    /// prefix it will see. The DLL parks playback at the splice until this
+    /// is written, so a starved or dead controller can never let an
+    /// unchecked prefix be spliced. Default no-op for ports without a DLL.
     fn approve_cont_splice(&mut self) {}
 }
 
-/// Fixed wall-clock delay (ms) between an acknowledged Stop and Restart.
-/// Command-slot serialization comes from the explicit idle/OFF
-/// acknowledgement; this additional delay fixes the F5 phase. The
-/// post-restart bucket is decided by the wall-clock-modulo-tick at the
-/// Restart, so a CONSISTENT Stop→Restart delay lands a consistent (good)
-/// bucket, where firing Restart at a poll-rate-dependent phase scatters hard
-/// recordings into wrong buckets. The same 50 ms as
-/// `restart_and_stabilize_inprocess` in tas_test, which lands hard
-/// recordings like FE-10065 reliably.
+/// Fixed delay (ms) between an acknowledged Stop and the Restart. Ordering
+/// comes from the idle/OFF acknowledgement, not from this delay; it only
+/// keeps the restart timing consistent. Matches
+/// `restart_and_stabilize_inprocess` in tas_test.
 pub const STOP_SETTLE_MS: u64 = 50;
 
-/// Delay (ms) between restart_state==2 and sending the Arm command.
+/// Fixed delay (ms) between restart_state == 2 and the Arm command.
 /// Alignment makes the exact arm point irrelevant; this only keeps it
 /// consistent.
 pub const ARM_SETTLE_MS: u64 = 10;
@@ -120,8 +114,8 @@ enum Phase {
 pub enum StepOutcome {
     /// Mid-cycle; call `step()` again (after a short poll delay).
     InProgress,
-    /// Wait exactly `ms` (wall-clock) before the next `step()` — used for the
-    /// fixed Stop→Restart settle that pins the F5 phase.
+    /// Wait `ms` (wall-clock) before the next `step()`: the fixed
+    /// STOP_SETTLE_MS and ARM_SETTLE_MS delays.
     Wait { ms: u64 },
     /// The aligned trajectory did not match, so the cycle restarts.
     /// `observed` is the first gate-relative mismatch, if there was one.
@@ -145,7 +139,7 @@ pub enum CompletedVia {
     Unjudged,
 }
 
-/// Drives one restart→arm(→judge→reroll) cycle to a terminal outcome.
+/// Drives one restart→arm(→watch→reroll) cycle to a terminal outcome.
 pub struct TransportController {
     cfg: ArmConfig,
     phase: Phase,
@@ -176,13 +170,8 @@ impl TransportController {
         }
     }
 
-    /// Which transition the cycle is waiting on, for diagnostics.
-    ///
-    /// A stalled cycle reports only "no progress within budget", which is
-    /// the same message whether the F5 restart never completed, the arm was
-    /// never processed, or the judge is waiting on a replay that will not
-    /// arrive. Those have completely different causes and the log could not
-    /// tell them apart.
+    /// Which transition the cycle is waiting on, so a stalled cycle's log
+    /// says whether the restart, the arm or the replay never arrived.
     pub fn phase_name(&self) -> &'static str {
         match self.phase {
             Phase::Start => "Start",
@@ -200,11 +189,10 @@ impl TransportController {
         matches!(self.phase, Phase::Done | Phase::Aborted)
     }
 
-    /// True while the NEXT transition's timing feeds the F5 spawn phase
-    /// (Stop acknowledgement, restart-done detection, arm settle): a driver
-    /// should poll these without vsync quantization. The multi-second
-    /// `Watch` replay gains nothing from sub-frame latency, so a UI
-    /// driver can poll it once per frame instead of spinning.
+    /// True during the short restart handshake (Stop acknowledgement,
+    /// restart-done detection, arm settle), which a driver should poll
+    /// without waiting for vsync. The multi-second `Watch` replay gains
+    /// nothing from that, so a UI driver can poll it once per frame.
     pub fn needs_tight_polling(&self) -> bool {
         matches!(
             self.phase,
@@ -236,10 +224,8 @@ impl TransportController {
                 // the controller contract so even a delayed STOP cannot let
                 // the previous PLAY's alignment leak into another arm.
                 port.set_gate_align_rec(0);
-                // Always Stop then settle a FIXED delay before Restart (as
-                // restart_and_stabilize_inprocess does), so the Restart
-                // fires at a consistent wall-clock phase → consistent (good)
-                // F5 bucket.
+                // Always Stop, then wait the fixed STOP_SETTLE_MS before
+                // Restart, even from OFF.
                 port.send_command(self.restart_stop_command());
                 if port.command_idle() && port.mode() == TasMode::Off as u32 {
                     self.phase = Phase::StopSettle;
@@ -250,9 +236,9 @@ impl TransportController {
                 }
             }
             Phase::StopWaitAck => {
-                // A wall-clock delay cannot serialize a command slot when
-                // the game can hitch longer than that delay. Begin the
-                // phase-pinning settle only after Stop is acknowledged.
+                // A wall-clock delay cannot serialize the command slot when
+                // the game can hitch for longer, so the settle starts only
+                // after Stop is acknowledged.
                 if port.command_idle() && port.mode() == TasMode::Off as u32 {
                     self.phase = Phase::StopSettle;
                     StepOutcome::Wait { ms: STOP_SETTLE_MS }
@@ -261,8 +247,7 @@ impl TransportController {
                 }
             }
             Phase::StopSettle => {
-                // The settle wait elapsed (caller honoured the Wait), so cave2
-                // has flipped to OFF. Fire the Restart now.
+                // The caller honoured the Wait and cave2 is OFF: restart.
                 port.reset_restart_state();
                 port.send_command(TasCommand::Restart);
                 self.phase = Phase::RestartWaitDone;
@@ -281,9 +266,9 @@ impl TransportController {
                 // cave2 reads these at ARM time — re-assert post-restart.
                 port.set_continue_from_frame(self.cfg.continue_from_frame);
                 port.set_gate_align_rec(self.cfg.gate_align_rec);
-                // Snapshot the arm counter BEFORE the command goes out, so
-                // the judge can tell this attempt's replay state from the
-                // previous one's no matter how the polling lands.
+                // Snapshot the arm counter before the command goes out, so
+                // Watch can tell this attempt's replay state from the
+                // previous one's however the polling lands.
                 self.arm_generation_at_arm = port.arm_generation();
                 port.send_command(self.cfg.arm.command());
                 // The gate fixes input indexing, but it does not fully identify
@@ -296,12 +281,10 @@ impl TransportController {
                 }
             }
             Phase::Watch => {
-                // Until the DLL has processed the arm, the mode and position
-                // being read still describe the PREVIOUS replay - so nothing
-                // here can be concluded from them yet. This has to come
-                // before EVERY mode interpretation, the REC one included: a
-                // stale REC from before the arm would otherwise read as
-                // "the splice already fired".
+                // Until the DLL has processed the arm, mode and position
+                // still describe the previous replay. This must precede
+                // every mode check, the REC one included: a stale REC would
+                // otherwise read as "the splice already fired".
                 if port.arm_generation() == self.arm_generation_at_arm {
                     return StepOutcome::InProgress;
                 }
@@ -311,10 +294,9 @@ impl TransportController {
                     // past the watcher and reached the splice.
                     return self.finish(CompletedVia::Matched);
                 }
-                // Past the arm, "not in PLAY" means the replay ENDED (or the
-                // DLL refused the arm outright, which leaves it OFF forever).
-                // Either way nothing more will arrive, so KeepWaiting has to
-                // become terminal rather than spin the cycle forever.
+                // Past the arm, "not in PLAY" means the replay ended or the
+                // DLL refused the arm. Nothing more will arrive, so a
+                // Pending verdict must become terminal rather than spin.
                 let replay_ended = mode != play;
                 let pos = port.playback_pos();
                 if pos == 0 && replay_ended {
@@ -349,11 +331,10 @@ impl TransportController {
                     port.approve_cont_splice();
                     return self.finish(CompletedVia::Unjudged);
                 }
-                // CONT: the watcher can only ever see the prefix up to the
-                // splice (the DLL parks playback there until the approval
-                // below), so cap the required depth at the splice-relative
-                // distance or the verdict could never complete. PLAY has no
-                // splice: full depth.
+                // CONT: the DLL parks playback at the splice until approved,
+                // so the watcher can only see the prefix up to it; cap the
+                // depth there or the verdict could never complete. PLAY is
+                // uncapped.
                 let max_depth_rel = if is_cont {
                     self.cfg.continue_from_frame - self.cfg.gate_align_rec
                 } else {
@@ -377,10 +358,9 @@ impl TransportController {
                     ),
                     AlignVerdict::Pending => StepOutcome::InProgress,
                     AlignVerdict::Matched => {
-                        // CONT: the DLL parks playback AT the splice until
-                        // this approval lands. Writing it is the ONLY way the
-                        // splice can fire, so a starved controller merely
-                        // delays the splice, never lets it through unjudged.
+                        // The approval is the only way a parked CONT splice
+                        // fires, so a starved controller delays the splice
+                        // but never lets it through unchecked.
                         if is_cont {
                             port.approve_cont_splice();
                         }
@@ -614,9 +594,7 @@ mod tests {
         let mut config = cfg(Arm::Play, 1);
         config.gate_align_rec = 299;
         let mut c = TransportController::new(config);
-        // Even from OFF, always Stop + settle (the same restart
-        // restart_and_stabilize_inprocess does; it lands hard buckets
-        // reliably).
+        // Even from OFF, always Stop + settle.
         assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: STOP_SETTLE_MS });
         assert_eq!(p.commands, vec![TasCommand::StopForRestart]);
         assert_eq!(
@@ -724,8 +702,8 @@ mod tests {
         ));
     }
 
-    /// Drive the controller through restart until it's armed CONT and in the
-    /// Watch phase. Returns once ArmContinue has been sent.
+    /// Drive the controller through the restart until it has sent the arm
+    /// command and entered Watch.
     fn drive_to_judge(c: &mut TransportController, p: &mut FakePort) {
         // Start publishes Stop. Tests may begin in REC/PLAY, so model Cave2
         // consuming it before the deterministic settle begins.
@@ -752,7 +730,7 @@ mod tests {
         c.step(p); // StopSettle -> Restart
         p.restart_state = 2;
         c.step(p); // RestartWaitDone -> ArmSettle (Wait)
-        c.step(p); // ArmSettle -> ArmContinue
+        c.step(p); // ArmSettle -> arm command
         p.mode = TasMode::Play as u32;
     }
 

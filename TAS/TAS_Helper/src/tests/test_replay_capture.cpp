@@ -4,7 +4,7 @@
 // Two live regressions pin the policy:
 //   ghost_restart_recreates_recorder_mid_play - with Time Attack ghosts an F5
 //     restart rebuilds the player set; the human's recorder/player come back at
-//     NEW addresses while a judged PLAY is active, so the cached pointer must
+//     NEW addresses while a PLAY is active, so the cached pointer must
 //     follow the re-created human recorder instead of reading a dead object.
 //   transient_pushers_never_hijack - around a restart, ghost / AI / garbage
 //     recorders push on some frames and must never be adopted.

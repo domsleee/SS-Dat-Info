@@ -15,9 +15,8 @@ pub fn level_code_from_id(level_id: u32) -> Option<&'static str> {
 ///
 /// The only sanctioned way for the UI to ask "which track are we on". Reading
 /// `state.level_id` directly is a bug: across a level change that word still
-/// holds the PREVIOUS track until the scan catches up, so a raw read confidently
-/// names the level you just left — which is how a recording gets saved into the
-/// wrong track's folder and how the wrong start-line geometry times a run.
+/// holds the previous track until the scan catches up, so a raw read names the
+/// level you just left (wrong save folder, wrong start-line geometry).
 pub fn resolved_level_code(state: &tas_shared::TasSharedState) -> Option<&'static str> {
     tas_shared::resolved_level_id(state).and_then(level_code_from_id)
 }

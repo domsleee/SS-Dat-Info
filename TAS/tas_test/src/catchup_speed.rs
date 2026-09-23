@@ -2,7 +2,7 @@
 //! faster than 1x.
 //!
 //! CONT replays frames 0..N as fast as it can before handing over to live REC.
-//! The drift and bucket-match suites only assert WHERE the player ends up, so
+//! The drift and gate-alignment suites only assert WHERE the player ends up, so
 //! a catch-up that collapses back to native speed passes them. Whether a higher
 //! speed reaches a given `playback_pos` in less wall time depends on the
 //! render/cycle rate ceiling, so it is measured: median time-to-splice at 1x

@@ -285,8 +285,8 @@ mod tests {
         );
         assert_eq!(d.max_drift_y, 3.0);
         assert_eq!(d.max_drift_frame_y, 30);
-        // Ground track really is identical — this is the case the old X/Z-only
-        // oracle silently passed.
+        // The ground track is identical, so an X/Z-only comparison would
+        // report no drift here.
         assert_eq!(d.max_drift_x, 0.0);
         assert_eq!(d.max_drift_z, 0.0);
     }

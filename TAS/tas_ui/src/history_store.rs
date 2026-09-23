@@ -1,4 +1,4 @@
-//! File-per-entry persistent history store (v2). See TAS/README.md.
+//! File-per-entry persistent history store. See TAS/README.md.
 //!
 //! Layout: `<dir>/<entry_id>.tasrec` (one immutable blob per snapshot entry)
 //! plus `<dir>/manifest.json` (ordered metadata + cursor + next_entry_id).
@@ -241,17 +241,12 @@ impl HistoryStore {
             }
         }
 
-        // Corrupt-store quarantine: a manifest that cannot be used, with
-        // surviving blobs, is a data-loss trap. The next persist would publish
-        // a valid EMPTY manifest, and the launch after that would GC every
-        // surviving recording as an orphan — with no new recording or explicit
-        // deletion in between. Move the orphans out of GC reach BEFORE
-        // anything can publish, and set a present-but-bad manifest aside for
-        // forensics. This covers a missing manifest too: blobs without any
-        // manifest are preserved, never treated as a fresh store.
-        // Quarantine is all-or-nothing: if ANY blob cannot be moved, the open
-        // fails and the store stays disabled (no writer, no replacement
-        // manifest) rather than publishing past an unprotected blob.
+        // Without a usable manifest (missing or corrupt), the next persist
+        // would publish an empty one and the following launch would GC every
+        // surviving blob as an orphan. Move the blobs out of GC reach before
+        // anything can publish, and set a bad manifest aside for forensics.
+        // All-or-nothing: if any blob cannot be moved, the open fails and the
+        // store stays disabled rather than publishing past an unprotected blob.
         let manifest_present = dir.join("manifest.json").exists();
         if manifest.is_none() && !disk_ids.is_empty() {
             quarantine_unmanifested_blobs(&dir, &disk_ids).map_err(|failed| {
@@ -424,7 +419,7 @@ impl HistoryStore {
     }
 }
 
-/// Default v2 store directory: `<data root>/history/`.
+/// Default store directory: `<data root>/history/`.
 pub fn default_history_dir() -> PathBuf {
     crate::settings::data_root_dir().join("history")
 }

@@ -321,7 +321,7 @@ static void Snapshot(uint32_t uiMenu, bool force) {
 }
 
 // ---------------------------------------------------------------------------
-// The COMMAND channel (shm v47/v48): the agent writes kind + target + the page
+// The COMMAND channel: the agent writes kind + target + the page
 // id it read, and bumps menu_cmd_seq; the menu thread executes it from the
 // Execute hook through the game's own entry points:
 //   UIT::UI_Component::Request_Focus(bool)       UIT.dll+0x196D0, ECX=comp, DL=1

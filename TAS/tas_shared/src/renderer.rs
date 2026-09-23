@@ -1,7 +1,7 @@
 //! The physics-mode stamp recordings carry: which renderer plugin sr.dll
 //! loaded and the x87 precision it leaves the game thread at.
 
-/// Renderer plugin ids published in `TasSharedState::renderer_id` (v41):
+/// Renderer plugin ids published in `TasSharedState::renderer_id`:
 /// which `srDD_*.dll` sr.dll loaded.
 pub const TAS_RENDERER_UNKNOWN: u32 = 0;
 pub const TAS_RENDERER_DIRECTX6: u32 = 1;

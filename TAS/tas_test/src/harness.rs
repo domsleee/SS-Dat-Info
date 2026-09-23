@@ -119,8 +119,8 @@ pub fn send_escape() -> bool {
 /// Post Enter to the game window to dismiss the post-run "Save attempt" dialog.
 ///
 /// PostMessage needs no focus, so it reaches the modal dialog that blocks focus
-/// changes. Without this the next F5 lands on the dialog and gets eaten, which
-/// shifts the F5 bucket alignment by a cycle. Harmless when no dialog is up.
+/// changes. Without this the next F5 lands on the dialog and is eaten.
+/// Harmless when no dialog is up.
 pub fn dismiss_save_dialog() {
     if let Some(hwnd) = win32::find_game_window() {
         win32::post_key(hwnd, win32::VK_RETURN, Duration::from_millis(30));
@@ -279,9 +279,8 @@ pub fn restart_and_stabilize_inprocess(client: &mut TasSharedMemoryClient) -> bo
     );
     // restart_state==2 is written by cave2 inside the Supreme::Cycle hook, so
     // reaching it already proves the game is alive. Do NOT add a liveness sleep
-    // here: every frame spent between restart and arm pushes play_coords[0]
-    // later into the spawn countdown, and recordings made by tas_ui (which arms
-    // immediately) then never match.
+    // here: tas_ui arms immediately after the restart, and tests should arm
+    // at the same point in the spawn countdown.
     true
 }
 
@@ -849,7 +848,7 @@ pub fn wait_continue_splice(client: &TasSharedMemoryClient, splice_frame: u32) -
 ///
 /// The controller reaches `Done` when the aligned prefix is accepted (before
 /// the splice fires); we then wait for the PLAY->REC splice. Returns
-/// `Some(reroll_count)` on a clean splice (0 = landed first try), `None` on
+/// `Some(reroll_count)` on a clean splice (0 = accepted first try), `None` on
 /// failure.
 pub fn restart_continue_and_splice_inprocess(
     client: &mut TasSharedMemoryClient,
@@ -886,7 +885,7 @@ pub fn restart_continue_and_splice_inprocess(
     dismiss_save_dialog();
 
     let poll_speed = (speed as f64).max(0.05);
-    // Per-attempt budget: restart handshake + replay-to-judge at this speed.
+    // Per-attempt budget: restart handshake + replay to the watcher verdict.
     let per_attempt = Duration::from_secs_f64(
         RESTART_TIMEOUT_SECS as f64 + (JUDGE_TIMEOUT_SECS as f64) * (1.0 / poll_speed).max(1.0),
     );
@@ -898,7 +897,7 @@ pub fn restart_continue_and_splice_inprocess(
                 if Instant::now() > attempt_deadline {
                     // Name the phase and the state it is reading: a restart
                     // that never completed, an arm the DLL never processed
-                    // and a judge waiting on a replay are three different bugs.
+                    // and a watcher waiting on a replay are three different bugs.
                     let st = client.state();
                     eprintln!(
                         "  ERROR: CONT attempt stalled in {} | mode={} restart_state={} playback_pos={} arm_generation={} recorded={}",
@@ -915,8 +914,8 @@ pub fn restart_continue_and_splice_inprocess(
                 thread::sleep(Duration::from_millis(5));
             }
             StepOutcome::Wait { ms } => {
-                // Fixed Stop->Restart settle so the Restart fires at a
-                // consistent F5 phase.
+                // The controller's fixed STOP_SETTLE_MS / ARM_SETTLE_MS
+                // delay.
                 thread::sleep(Duration::from_millis(ms));
             }
             StepOutcome::Reroll { attempt, observed } => {

@@ -4,11 +4,9 @@
 // or:
 //   cl /EHsc /std:c++17 /Fe:test_input_gate.exe test_input_gate.cpp && test_input_gate.exe
 //
-// The headline case is `cont_block_beats_pause` — the held-key-during-CONT
-// regression (f7553f0): a Continue's F5 reload / post-finish state stalls
-// Supreme::Cycle (game_paused), and the pause passthrough used to leak live
-// input through then, corrupting the spawn. This test FAILS on the pre-fix
-// policy (which required !game_paused for every block) and passes on the fix.
+// The key case is `cont_block_beats_pause`: a Continue's F5 reload and
+// post-finish state stall Supreme::Cycle (game_paused), and live input must
+// stay blocked through them or it corrupts the spawn.
 
 #include "../input_gate.hpp"
 #include "check.hpp"
@@ -20,10 +18,9 @@ int main() {
 
     std::printf("input_gate tests:\n");
 
-    // --- The regression this file exists for ---------------------------------
+    // --- CONT block beats the pause passthrough -------------------------------
     // CONT in flight + cycle stalled (F5 reload / post-finish): live input MUST
-    // be blocked. Pre-fix this returned false (block required !game_paused) and
-    // a held ctrl/Enter reached the spawn → F5 spawned at the finish line.
+    // be blocked, or a held key reaches the spawn.
     check(ShouldBlockRealInput(G{OFF, /*cont*/ true, /*inj*/ false,
                                  /*paused*/ true, /*esc*/ false}) == true,
           "cont_block_beats_pause (the held-key-during-CONT regression)");

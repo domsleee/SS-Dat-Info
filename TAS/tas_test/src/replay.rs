@@ -78,7 +78,7 @@ pub fn write_to_shared(client: &mut TasSharedMemoryClient, rec: &LoadedRecording
     }
 
     state.recorded_count = rec.count;
-    // Force proven zero-drift config
+    // Replay at natural ticks, never a forced tick count per frame.
     state.force_fixed_tick = 0;
 }
 

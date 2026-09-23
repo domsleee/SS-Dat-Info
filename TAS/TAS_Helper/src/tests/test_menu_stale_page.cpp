@@ -39,8 +39,8 @@ int main() {
     check(ValidateScreen("ID_B") == TAS_MENU_RESULT_STALE_PAGE, "other page is stale");
     check(ValidateScreen("") == TAS_MENU_RESULT_OK, "empty submission stays unchecked");
 
-    // Page changes to B. Before adoption the old page still validates — the
-    // exact window Execute used to act in. After adoption the old page is
+    // Page changes to B. Before adoption the old page still validates, which
+    // is why ConsumeCommand adopts first. After adoption the old page is
     // refused and only B validates.
     SetPageEvent("ID_B", 2);
     check(ValidateScreen("ID_A") == TAS_MENU_RESULT_OK, "pre-adoption still trusts the left page");

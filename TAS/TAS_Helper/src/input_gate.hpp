@@ -4,8 +4,7 @@
 // Pure decision logic for the keyboard-handler gate (cave1c), extracted from
 // the SafetyHook detours so it can be unit-tested WITHOUT the Windows / hook
 // context (see src/tests/test_input_gate.cpp). cave1c's detours build an
-// InputGateInputs from the live call and act on ShouldBlockRealInput; keeping
-// the policy here means the held-key-during-CONT regression has a guard.
+// InputGateInputs from the live call and act on ShouldBlockRealInput.
 //
 // "Block" = swallow the real key event so it never reaches the game's handler
 // (and thus never writes the DI buffer / fires the BB3B10 observer).
@@ -36,13 +35,10 @@ inline bool ShouldBlockRealInput(const InputGateInputs& in) {
     if (in.is_escape) return false;
 
     // CONT block — takes PRECEDENCE over the pause passthrough. While a
-    // Continue is in flight, live input must be inert through the WHOLE
-    // restart/replay, INCLUDING the F5 reload and post-finish/dialog state
-    // that legitimately stall Supreme::Cycle (game_paused). A held/pressed key
-    // reaching the spawn then corrupts the restart (observed: ctrl/Enter held
-    // during a post-finish CONT → F5 spawned the boarder at the finish line,
-    // drift 2315 at tick 1). Deliberately ignores game_paused — that is the
-    // whole point of this branch existing separately from the mode block.
+    // Continue is in flight, live input must be inert through the whole
+    // restart/replay, including the F5 reload and post-finish dialog that
+    // stall Supreme::Cycle (game_paused): a key held into the restart can
+    // spawn the boarder in the wrong place.
     if (in.cont_suppress) return true;
 
     // REC/PLAY symmetry block — pause-EXEMPT so the pause menu (and a

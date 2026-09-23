@@ -81,9 +81,8 @@ int main() {
     check(MatchOne("fore", 4, AREAS, 3) == -1, "MatchOne rejects prefix");
     check(MatchOne("", 0, AREAS, 3) == -1, "MatchOne rejects empty");
 
-    // LevelIdFrom: path area (reliable) + setup object difficulty. Practice is
-    // the regression that prompted these (2026-09-03): it skips the menu screen
-    // that writes the setup object, so the object holds a STALE Arcade
+    // LevelIdFrom: path area (reliable) + setup object difficulty. Practice
+    // skips the menu screen that writes the setup object, so the object holds a STALE Arcade
     // selection; the id must still come out 9 from the path alone.
     check(LevelIdFrom(3, "Village", "Hard") == 9, "Practice resolves to 9 despite a stale Village/Hard setup");
     check(LevelIdFrom(3, "", "") == 9, "Practice resolves to 9 with an unreadable setup");

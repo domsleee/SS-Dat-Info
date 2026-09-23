@@ -1,10 +1,8 @@
-//! END-TO-END validation of the two reported clock bugs, driven the way a USER
-//! hits them — real finishes, a real (Pico HID) keypress on the save-replay
-//! dialog, and the ACTUAL main menu afterwards:
-//!
-//!   "After finishing, if you don't press anything on the 'save replay?'
-//!    screen, it will play in fast forward when you do press it, for a while."
-//!   "The menu speed is sometimes slow and sometimes fast."
+//! End-to-end check of game-clock pacing around the save-replay dialog and the
+//! main menu, driven the way a user hits them: real finishes, a physical Pico
+//! keypress on the dialog, and the actual main menu afterwards. Idling at the
+//! dialog must not cause a fast-forward burst when it is dismissed, and the
+//! menu video must run at a normal rate.
 //!
 //! One continuous session, driven with real input:
 //!
@@ -35,7 +33,7 @@ const RECORDING: &str = "FE-decent-done.tasrec";
 /// coasts across the line with no live input, like a user redoing the ending.
 const CONT_SPLICE_FRAME: u32 = 6700;
 const DIALOG_IDLE_SECS: u64 = 12;
-/// Native is 100 ticks/sec; the 100ms buckets read ~10-11. A backlog burst is
+/// Native is 100 ticks/sec; each 100ms window reads ~10-11. A backlog burst is
 /// an order of magnitude out, so a generous ceiling still separates them.
 const MAX_TICKS_PER_SEC: f64 = 140.0;
 

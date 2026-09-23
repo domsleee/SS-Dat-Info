@@ -34,7 +34,9 @@ int main() {
     check(GateAlignedSplicePos(500, 297, 299) == 498, "splice_follows_an_early_live_gate");
     check(GateAlignedSplicePos(500, 299, 299) == 500, "splice_unchanged_when_the_gates_coincide");
     check(GateAlignedSplicePos(300, 301, 299) == 302, "one_tick_past_the_gate_is_aligned");
-    // Unaligned fallbacks: the plain arm-relative frame.
+    // Before the live gate, a splice past the recording's gate is pending.
+    // With no recorded gate, or a splice at/inside the countdown, it is the
+    // plain arm-relative frame.
     check(GateAlignedSplicePos(500, 0, 299) == GATE_ALIGN_SPLICE_PENDING,
           "splice_past_the_gate_waits_for_the_live_gate");
     check(GateAlignedSplicePos(300, 0, 299) == GATE_ALIGN_SPLICE_PENDING,

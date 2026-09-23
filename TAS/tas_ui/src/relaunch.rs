@@ -112,9 +112,8 @@ impl TasApp {
         if let Some(id) = self.history.entries().last().map(|e| e.entry_id) {
             // Restore the track the checkpoint was RECORDED on. push_* stamps
             // from the live level, which may be None here (startup runs before
-            // any level sync) — without this every recovered entry lands
-            // untagged AND pinned, i.e. permanently floating at the top of
-            // every track's history ("my favourited FE runs show on FM").
+            // any level sync); an untagged pinned entry would float at the top
+            // of every track's history.
             self.history.set_level(id, cp_level);
             self.history.set_rider(id, cp_rider);
             self.history.set_physics(id, cp_physics);

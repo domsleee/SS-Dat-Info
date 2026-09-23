@@ -48,17 +48,15 @@ use recording::{RecordingHistory, RecordingSessionKind};
 
 const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
 const PLAYBACK_SPEED_PRESETS: [f32; 4] = [0.25, 0.5, 1.0, 2.0];
-// Shared with the cont-reliability harness via tas_shared::align — the bucket
-// headroom now lives inside judge_cont_bucket (one source of truth).
+// Shared with the tas_test harness so both give up after the same attempts.
 const ALIGN_MAX_RETRIES: u32 = tas_shared::align::ALIGN_MAX_RETRIES;
 
-/// How long one judged cycle may run before the UI gives up on it.
+/// How long one transport cycle may run before the UI gives up on it.
 ///
-/// Generous on purpose — this is a stall guard, not a performance bound. A
-/// deep CONT catch-up plus its rerolls, or a PLAY judged all the way to
-/// first_moving + ALIGN_VERIFY_FRAMES at 1x, legitimately take tens of
-/// seconds. What it must not do is let a cycle that will never finish hold
-/// the input block forever.
+/// Generous on purpose: this is a stall guard, not a performance bound. A
+/// deep CONT catch-up, or a PLAY watched for ALIGN_VERIFY_FRAMES past the gate
+/// at 1x, can take tens of seconds. It exists so a cycle that will never
+/// finish cannot hold the input block forever.
 const CYCLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(180);
 
 fn normalize_playback_speed(speed: f32) -> f32 {
@@ -130,9 +128,9 @@ struct TasApp {
     /// Soft cap (max unpinned entries) — from settings.
     history_cap: usize,
     recovery_store: Option<recording::RecoveryStore>,
-    /// Serialized off-thread writer for recovery checkpoints. Replaces detached
-    /// `thread::spawn` per write so a late write can't land after `clear_pending`
-    /// and resurrect a stale checkpoint into a duplicate "Recovered" entry.
+    /// Serialized off-thread writer for recovery checkpoints. One writer keeps
+    /// writes ordered, so a late write can't land after `clear_pending` and
+    /// resurrect a stale checkpoint as a duplicate "Recovered" entry.
     recovery_writer: recording::RecoveryWriter,
     log_lines: ui_log::UiLog,
     timeline_view: timeline::TimelineView,
@@ -158,59 +156,46 @@ struct TasApp {
     last_mode: u32,
     resume_speed: Option<f32>, // speed to return to when a CONT catch-up ends
     cont_catchup_multiplier: f32, // configurable CONT catch-up speed (default 12x)
-    /// Which transport the in-flight controller cycle is for, for log lines.
-    /// The reroll/abort messages used to hardcode "CONT" because only CONT was
-    /// ever judged; PLAY can be judged now, and a PLAY that exhausts its
-    /// rerolls reporting "CONT aborted" would send someone hunting the wrong bug.
+    /// Which transport (PLAY or CONT) the in-flight cycle is for, so retry and
+    /// abort log lines name the right one.
     cycle_arm: tas_shared::transport::Arm,
     log_read_cursor: u32,
-    /// Finish-line watcher (1.7): scan cursor into rec_coords during REC so
+    /// Finish-line watcher: scan cursor into rec_coords during REC so
     /// each frame only examines new ticks, and the tick the run crossed the
     /// finish (drives the auto-stop + the 🏁 marker; reset when REC starts).
     finish_scan_cursor: u32,
     finished_at_tick: Option<u32>,
-    /// The HUD race time LATCHED at the moment the crossing was detected (v43
-    /// fix): the label used to re-read the live timer at STOP, and a timer
-    /// that blanked or moved in between turned an exact time into a wrong or
-    /// approximate one.
+    /// The HUD race time latched when the crossing was detected. Re-reading
+    /// the live timer at STOP is unreliable: it may have blanked or moved.
     finished_hud_cs: Option<u32>,
 
     drift_tracker: drift_scan::DriftTracker,
     last_logged_drift_level: u8, // 0=none, 1=any, 2=>=1.0, 3=>=5.0
 
-    /// In-flight restart→arm(→judge→reroll) cycle, driven by the shared
-    /// `tas_shared::transport` controller — the SAME state machine the tas_test
-    /// harness runs, so the test is a true oracle. Stepped once per egui frame
-    /// via `step_cycle`; `None` when idle. Encapsulates the old
-    /// two-step Stop→wait-OFF→Restart→wait-rs2 serialisation (the shared
-    /// `command` slot is a single u32, so Stop and Restart can't be written on
-    /// the same frame) plus the CONT bucket judge/reroll loop.
+    /// In-flight restart → arm → watch cycle, driven by the shared
+    /// `tas_shared::transport` controller, the same state machine the tas_test
+    /// harness runs. Stepped once per egui frame via `step_cycle`; `None` when
+    /// idle. It serialises Stop → wait OFF → Restart because the shared
+    /// `command` slot holds one u32, so both can't be written in one frame.
     cycle: Option<tas_shared::transport::TransportController>,
     /// Wall-clock deadline for the in-flight cycle to make a terminal
     /// transition. `None` when idle.
     ///
-    /// The controller has no clock and never blocks, so a phase that stops
-    /// progressing — an F5 restart that never completes, an arm the DLL never
-    /// processes — returns InProgress forever. The tas_test harness has always
-    /// had its own budget for this; the UI had none, so the same stall left the
-    /// cycle spinning with cont_suppress_input SET and the user's keyboard
-    /// swallowed until they found the STOP button.
+    /// The controller has no clock, so a phase that stops progressing (an F5
+    /// restart that never completes, an arm the DLL never processes) returns
+    /// InProgress forever, with `cont_suppress_input` set and the keyboard
+    /// swallowed. This deadline aborts such a cycle.
     cycle_deadline: Option<std::time::Instant>,
-    /// Carries the last CONT cycle's result (bucket attempts, how the bucket
-    /// was accepted) from controller-`Done` to the REC-start transition, where
-    /// the actual resume frame is known — so we can log one "resumed at frame X
-    /// after N bucket attempt(s) — <verdict>" summary.
+    /// The last CONT cycle's result (attempts, how it completed), carried from
+    /// controller `Done` to the REC-start transition, where the resume frame is
+    /// known, so one summary line can report both.
     cont_last_outcome: Option<(u32, tas_shared::transport::CompletedVia)>,
-    /// Previous-frame pressed state for the four global-shortcut keys
-    /// (F9, F10, F11, F12 in that order). Diffed against the current
-    /// GetAsyncKeyState result to detect press edges. Updated every
-    /// frame regardless of which window has focus so we never get
-    /// stuck on stale "was pressed" state after a focus change.
+    /// Previous-frame pressed state for F9, F10, F11, F12, diffed against
+    /// GetAsyncKeyState to detect press edges. Updated every frame regardless
+    /// of focus so a focus change can't leave a key stuck "pressed".
     prev_global_keys: [bool; 4],
-    /// Cached Supreme.exe PID. Resolved on first poll, invalidated when
-    /// the shared-memory connection drops (game closed/restarted).
-    /// Stored as Option so a re-resolution attempt is just `.take()`
-    /// followed by re-call.
+    /// Cached Supreme.exe PID. Resolved on first poll, invalidated when the
+    /// shared-memory connection drops (game closed or restarted).
     game_pid_cached: Option<u32>,
     /// Supreme.exe PID seen by the last 1 Hz health check: a relaunch is
     /// noticed by identity even when the frame counter cannot show it (a game
@@ -231,35 +216,30 @@ struct TasApp {
     last_frame_count: u32,
     stale_frame_ticks: u32,
     last_health_check: std::time::Instant,
-    // Cycle-activity tracker for the In-Game chip: game_in_game (exe+0x8895C)
-    // is written by the Supreme::Cycle hook, so when the cycle STOPS (quit to
-    // menu / pause / dialog) it freezes at its last value (1) instead of going
-    // to 0 — the "stale In Game (Forest Easy)" chip. frame_count only advances
-    // while the cycle runs, so a fresh advance means the game is actually
-    // ticking a level; a stale one means menu/paused. Sampled every frame.
+    // Engine-activity tracker. game_in_game (exe+0x8895C) is written by the
+    // Supreme::Cycle hook, so when the cycle stops (menu, pause, dialog) it
+    // freezes at 1 instead of going to 0. frame_count only advances while the
+    // cycle runs, so a recent advance means a level is really ticking.
+    // Sampled every frame.
     cycle_fc: u32,
-    // True once cycle_fc holds a real baseline sample. Without it the first
-    // sample after launch/reconnect counted as an "advance" and opened the
-    // transport gate ~400ms against a frozen engine.
+    // True once cycle_fc holds a real baseline sample, so the first sample
+    // after launch or reconnect is not mistaken for an advance.
     cycle_fc_seeded: bool,
     cycle_advance_at: std::time::Instant,
-    // The menu auto-stop debounce, on its OWN clock - it must never make the
+    // The menu auto-stop debounce, on its own clock so it never makes the
     // engine look alive to the transport gate.
     auto_stop_debounce: Option<std::time::Instant>,
 
-    // The last track we were CONFIDENTLY on. Only used to name a save: the
-    // engine stops its cycle for its own post-run dialog, so the live level
-    // reads unknown at exactly the moment the user clicks Save, and a recording
-    // belongs to the track it was recorded on regardless of what is on screen
-    // afterwards. Never used to decide what may be restored — that must be live.
+    // The last track we were confidently on, used only to name a save: the
+    // engine's post-run dialog stops the cycle, so the live level reads
+    // unknown just as the user clicks Save. Never used to decide what may be
+    // restored; that must be live.
     last_resolved_level: Option<String>,
-    // The level_epoch we were last RESOLVED in. Unresolved has two causes with
-    // opposite correct behaviour: a FREEZE (menu / pause / post-race dialog —
-    // the scan refuses to assert anything while the cycle is stopped, but the
-    // level is still resident and the epoch unchanged) and a REAL context
-    // change (root reallocated → epoch bumped). Hiding the history panel is
-    // only right for the second; hiding it on every save-high-time dialog was
-    // the "menu on the right disappears" report.
+    // The level_epoch we were last resolved in. "Unresolved" has two causes
+    // that need opposite handling: a freeze (menu, pause, post-race dialog;
+    // the level is still resident and the epoch unchanged) and a real context
+    // change (root reallocated, epoch bumped). Only the second should hide the
+    // history panel.
     last_resolved_epoch: Option<u32>,
 
     // One-shot: force dark title bar on first frame
@@ -432,10 +412,9 @@ impl TasApp {
         let recovered_checkpoint = app.recover_pending_checkpoint();
         app.persist_history_if_needed();
 
-        // Recovery-as-history: only AFTER the recovered entry is durably in the
-        // v2 store do we clear the checkpoint — so a crash can't lose it. The
-        // clear is gated on a CONFIRMED persist: if the flush reports the write
-        // failed, keep the checkpoint so the next launch recovers it again.
+        // Clear the checkpoint only after the recovered entry is confirmed
+        // durable in the history store; on a failed write keep it so the next
+        // launch recovers it again.
         if recovered_checkpoint {
             app.clear_recovery_after_durable_persist();
         }
@@ -580,9 +559,8 @@ impl TasApp {
         self.pending_session_kind = None;
         self.pending_continue_start_tick = None;
         self.cycle_deadline = None;
-        // Cancel any in-flight restart/arm/reroll cycle. STOP must mean STOP —
-        // without this the controller would keep stepping and silently start
-        // recording/playback after the restart completes.
+        // Cancel any in-flight restart/arm/watch cycle; otherwise the
+        // controller would keep stepping and start REC/PLAY after the restart.
         self.cycle = None;
         // A cancelled CONT must not leave live input blocked.
         self.set_cont_suppress_input(false);
@@ -590,9 +568,9 @@ impl TasApp {
 
     /// Write the CONT live-input-suppression flag into shared memory (no-op if
     /// the value is unchanged or the DLL isn't connected). While set, the DLL
-    /// blocks the real key handler so live input can't perturb the bucket
-    /// during a CONT's OFF-mode spawn countdown. Cleared the moment the bucket
-    /// aligns and on every CONT teardown (stop / abort / disconnect).
+    /// blocks the real key handler so live input can't disturb the run during
+    /// a cycle's OFF-mode spawn countdown. Cleared when the cycle hands over
+    /// and on every teardown (stop, abort, disconnect).
     fn set_cont_suppress_input(&mut self, on: bool) {
         if let Some(shared) = self.shared.as_mut() {
             let want = on as u32;
@@ -618,9 +596,8 @@ impl TasApp {
     fn send_action_command(&mut self, command: TasCommand) {
         if command == TasCommand::Stop {
             self.clear_cont_catchup();
-            // reset_continue_runtime_state also cancels any in-flight
-            // cycle cycle, so STOP after a RestartThen click can't
-            // silently complete the restart and start recording/playback.
+            // Also cancels any in-flight cycle, so STOP after a RestartThen
+            // click can't complete the restart and start REC/PLAY.
             self.reset_continue_runtime_state();
         }
         if let Some(shared) = self.shared.as_mut() {
@@ -630,14 +607,11 @@ impl TasApp {
     }
 
     /// Stop any active REC/PLAY and wait (bounded) for the DLL to reach OFF
-    /// BEFORE overwriting the recording buffer (load / history restore).
-    /// Without this, a load while recording races the DLL's cycle hook — it's
-    /// appending to input_log as the UI rewrites the whole buffer, corrupting
-    /// state and silently dropping the in-progress recording. Returns once the
-    /// DLL is OFF and the STOP command is acknowledged. Returns `false` rather
-    /// than overwriting the recording buffer if the bounded wait expires. The
-    /// file dialog that precedes a load already blocked far longer, so a
-    /// sub-frame spin here is unnoticeable.
+    /// before a load or history restore overwrites the recording buffer.
+    /// Otherwise the DLL's cycle hook could append to input_log while the UI
+    /// rewrites it. Returns `false`, leaving the buffer untouched, if STOP is
+    /// not acknowledged in time. The short spin is unnoticeable next to the
+    /// file dialog that precedes a load.
     fn stop_active_session_for_load(&mut self) -> bool {
         self.detach_input_editor();
         let (mode, command_idle) = self
@@ -682,14 +656,11 @@ impl TasApp {
             );
             return false;
         }
-        // Finalize the just-stopped recording into history NOW, before the
-        // caller overwrites the buffer — same as a normal STOP, so the
-        // in-progress take isn't lost (it becomes an undoable entry). Capturing
-        // it here (not next frame, like the mode-transition handler does) is
-        // essential: by next frame the buffer holds the LOADED recording, so
-        // the transition handler would snapshot the wrong data. We then pin
-        // last_mode = OFF so that handler sees no REC→OFF edge and can't
-        // double-finalize.
+        // Finalize the stopped take into history now, before the caller
+        // overwrites the buffer; by next frame the mode-transition handler
+        // would snapshot the loaded recording instead. last_mode is then
+        // pinned to OFF so that handler sees no REC→OFF edge and can't
+        // finalize twice.
         if was_rec {
             if let Some((recorded, snap)) = self.shared.as_ref().map(|s| {
                 (
@@ -706,15 +677,10 @@ impl TasApp {
         self.finished_at_tick = None;
         self.finished_hud_cs = None;
         self.finish_scan_cursor = 0;
-        // RE-READ THE LIVE LEVEL. This is the whole reason the guarantee needed
-        // more than a coherent read: we just spun up to 250ms waiting for the
-        // DLL to stop, and every caller of this function is about to overwrite
-        // the live buffer from history. The level the callers were filtering
-        // against was read at frame start, BEFORE that wait — so a quit to the
-        // menu or a track load during it would have gone unnoticed and the
-        // previous track's recording written in anyway. A seqlock makes a read
-        // coherent; it cannot make a stale read fresh. Re-reading here, at the
-        // last moment before the write, is what closes it.
+        // Re-read the live level: the callers' level filter was read at frame
+        // start, before the wait above, and every caller is about to overwrite
+        // the buffer. A track change during the wait must not let another
+        // track's recording through.
         self.sync_live_level();
         true
     }
@@ -730,25 +696,17 @@ impl TasApp {
         let Some(shared) = self.shared.as_ref() else {
             return;
         };
-        // Renderer + x87 precision the game thread is running under (v41).
-        // Stamped onto every pushed history entry, compared on restore/load.
+        // Renderer + x87 precision and rider (character · stance): stamped onto
+        // every pushed history entry and compared on restore/load.
         self.history.set_live_physics(shared.physics_mode());
-        // Who is on the board (character · stance, v42): stamped onto every
-        // pushed history entry, compared on restore/load.
         self.history.set_live_rider(shared.rider());
         self.history
             .set_live_stamps(recording::IdentityStamps::from_live(shared.state()));
-        // id and epoch from ONE seqlock window: a separate epoch read can pair
-        // the old track's id with the new epoch across a switch, and the stamp
-        // below then keeps the old track's history through the very change it
-        // exists to detect.
+        // id and epoch from one seqlock window: a separate epoch read could
+        // pair the old track's id with the new epoch across a switch.
         match tas_shared::resolved_level_id_with_epoch(shared.state()) {
             Some((id, epoch)) => {
                 let code = crate::level::level_code_from_id(id);
-                // Remember the last track we were CONFIDENTLY on. Used only for
-                // naming a save: the engine freezes its cycle for its own post-run
-                // dialog, so the level reads unknown at exactly the moment the user
-                // clicks Save, and a recording must not lose its tag to that.
                 if let Some(c) = code {
                     self.last_resolved_level = Some(c.to_string());
                 }
@@ -756,18 +714,11 @@ impl TasApp {
                 self.history.set_live_level(code);
             }
             None => {
-                // Unresolved is AMBIGUOUS. A freeze (menu / pause / the
-                // post-race save dialogs) unresolves too — the scan won't
-                // assert a track while the cycle is stopped — but the level is
-                // still resident and level_epoch unchanged, so the history
-                // panel must NOT vanish there (same-track restores stay safe).
-                // Only a genuinely new context (epoch moved past the one we
-                // last resolved in) hides the rows until the new track is
-                // identified.
-                // Plain (non-seqlock) epoch read is fine HERE: this branch
-                // stamps nothing. A read torn across a switch costs at most
-                // one frame of the wrong verdict and self-corrects on the
-                // next poll — unlike the Some() branch, whose stamp persists.
+                // A freeze (menu, pause, post-race dialog) also reads as
+                // unresolved but leaves level_epoch unchanged, and the history
+                // panel must stay. Only a moved epoch hides the rows until the
+                // new track is identified. A plain epoch read is fine here:
+                // this branch stamps nothing, so a torn read costs one frame.
                 let epoch_now = shared.state().level_epoch;
                 if self.last_resolved_epoch != Some(epoch_now) {
                     self.history.enter_resolving();
@@ -789,19 +740,14 @@ impl TasApp {
     }
 
     /// Single dispatch for a transport `Action`, shared by the keyboard-shortcut
-    /// path and the transport-bar button path so the two can never diverge. (The
-    /// button path used to inline its own copy — including a hand-rolled
-    /// first-moving scan — which silently bypassed `detect_first_moving`.)
+    /// path and the transport-bar button path so the two can never diverge.
     fn apply_transport_action(&mut self, cmd: transport::Action) {
         match cmd {
             transport::Action::Send(c) => self.send_action_command(c),
             transport::Action::RestartThen(c) => self.queue_restart_then(c),
-            // Undo/Redo overwrite the WHOLE shared input/coord buffer, exactly
-            // like a history-row restore — so they need the same guard. The
-            // panel path stops an active REC/PLAY first (see HistoryAction::
-            // Restore) precisely so the DLL is not writing input_log while we
-            // bulk-copy over it; Ctrl+Z did not, and its buttons are
-            // mode-independent, so undo during REC raced the DLL writer.
+            // Undo/Redo overwrite the whole shared input/coord buffer like a
+            // history restore, so they stop an active REC/PLAY first; the DLL
+            // must not be writing input_log during the copy.
             transport::Action::Undo => {
                 if self.stop_active_session_for_load() {
                     if let Some(snap) = self.history.undo() {
@@ -825,23 +771,17 @@ impl TasApp {
                 }
             }
             transport::Action::SetContinueFrame(frame) => {
-                // Stage the splice frame UI-side ONLY. Writing it straight into
-                // shared memory here armed cave2's per-frame splice check while
-                // the game could still be in PLAY (the CONT/From: controls are
-                // live during PLAY): if the playhead was at/past the frame, the
-                // replay flipped to REC mid-watch and truncated recorded_count.
-                // The TransportController is the only shared-memory writer now —
-                // it asserts the marker at arm time, and cave2's g_cave2_contArmed
-                // gate refuses any splice that wasn't a genuine ARM_CONTINUE.
+                // Stage the splice frame UI-side only. The TransportController
+                // is its sole shared-memory writer, at arm time; writing it
+                // here during PLAY could splice the running replay into REC.
                 self.continue_from_frame = frame;
                 self.continue_from_text = frame.to_string();
             }
             transport::Action::SetResumeSpeed(spd) => {
-                // Catch-up in flight: keep the saved resume speed and the staged
-                // shared cont_resume_speed in sync so the splice (cave2 reads
-                // cont_resume_speed) drops to the speed the user just picked.
-                // playback_speed stays the catch-up multiplier; clear_cont_catchup
-                // restores playback_speed from cont_catchup_speed at the splice.
+                // Catch-up in flight: keep the saved resume speed and the shared
+                // cont_resume_speed in sync so the DLL drops to the speed the
+                // user just picked at the splice. playback_speed stays the
+                // catch-up multiplier until clear_cont_catchup restores it.
                 self.resume_speed = Some(spd);
                 if let Some(shared) = self.shared.as_mut() {
                     shared.state_mut().cont_resume_speed = spd;
@@ -864,12 +804,9 @@ impl TasApp {
     }
 
     fn queue_restart_then(&mut self, command: TasCommand) {
-        // Debounce overlapping cycles: a transport cycle (REC/PLAY/CONT
-        // restart→arm) is already in flight, so a second F9/F10/F12 press
-        // would clobber the single-u32 command slot mid-sequence and could
-        // arm the wrong thing (observed: a stray ArmRec after a rapid double
-        // CONT wiped the recording to a fresh spawn run). Ignore until the
-        // current cycle finishes.
+        // Ignore a second transport request while a cycle is in flight: it
+        // would clobber the single-u32 command slot mid-sequence and could arm
+        // the wrong thing.
         if self.cycle.is_some() {
             self.log_lines.push(format!(
                 "{:?} ignored: a restart/arm cycle is already in progress",
@@ -889,14 +826,10 @@ impl TasApp {
             ));
             return;
         }
-        // Refuse degenerate CONT requests that would leave the app
-        // half-armed: cont_catchup_speed=Some, playback_speed=multiplier,
-        // but no actual playback ever starts (cave2 has nothing to splice),
-        // so the PLAY→REC transition that calls clear_cont_catchup never
-        // fires and the user is stuck at catchup speed in OFF mode with
-        // the green "Catching up..." label glued on. Two cases:
-        //   - recorded_count == 0: no recording to continue from
-        //   - continue_from_frame == 0: that's just PLAY, not CONT
+        // Refuse CONT requests with nothing to splice (no recording, or frame
+        // 0, which is just PLAY). They would never reach the PLAY→REC
+        // transition that calls clear_cont_catchup, leaving the app stuck at
+        // catch-up speed.
         if command == TasCommand::ArmContinue {
             let recorded = self
                 .shared
@@ -913,12 +846,10 @@ impl TasApp {
                     .push("CONT ignored: continue_from_frame=0 — press PLAY instead");
                 return;
             }
-            // Cave2 accepts continue_from_frame == recorded_count (= play
-            // the whole recording, then enter REC at the end). Only
-            // refuse the strictly-past-end case here. The strict-equal
-            // case is what the user hits after a successful CONT cycle:
-            // recorded_count caps at the splice frame and they want to
-            // press CONT again to redo the same prefix.
+            // continue_from_frame == recorded_count is valid (play it all,
+            // then REC). It is the normal state after a CONT, since
+            // recorded_count caps at the splice frame, so pressing CONT again
+            // redoes the same prefix.
             if self.continue_from_frame > recorded {
                 self.log_lines.push(format!(
                     "CONT ignored: continue_from_frame={} > recorded_count={}",
@@ -927,11 +858,10 @@ impl TasApp {
                 return;
             }
         }
-        // A take recorded as another character or stance cannot replay as
-        // the rider is now, and no restart changes that (the game bakes both
-        // into the rider when the level is entered from the menu) - say
-        // exactly which screen fixes it. The arm still goes ahead. REC keeps
-        // whatever the player chose.
+        // A take recorded as another character or stance cannot replay, and
+        // no restart changes that (both are set when the level is entered
+        // from the menu), so name the screen that fixes it. The arm still
+        // goes ahead. REC keeps whatever the player chose.
         if command != TasCommand::ArmRec {
             if let Some(advice) = tas_shared::rider_mismatch_advice(
                 self.loaded_rider.as_deref(),
@@ -955,9 +885,8 @@ impl TasApp {
             self.playback_speed = self.cont_catchup_multiplier;
             self.pending_session_kind = Some(RecordingSessionKind::Continue);
             self.pending_continue_start_tick = Some(self.continue_from_frame);
-            // CONT is gate-aligned: the prefix input is indexed from the
-            // observed gate and the splice fires at the aligned position, so
-            // the countdown length does not matter. The recording stays in
+            // The prefix input is indexed from the observed gate, so the
+            // countdown length does not matter. The recording stays in
             // rec-index space at the splice, so the resumed recording is
             // byte-consistent with the loaded one.
             gate_align_rec = self.recording_gate();
@@ -974,11 +903,9 @@ impl TasApp {
                 self.detach_input_editor();
                 self.playback_speed = DEFAULT_PLAYBACK_SPEED;
             }
-            // PLAY always starts from tick 0 and indexes its input relative to
-            // the recording's gate. The live gate can land on any countdown
-            // tick; cave2 shifts the source stream and endpoint by the observed
-            // offset. The controller then watches the gate-relative trajectory
-            // and rerolls if the hidden spawn state still differs.
+            // PLAY starts from tick 0 and indexes its input from the observed
+            // gate, which can land on any countdown tick. The controller then
+            // watches the gate-relative trajectory and restarts if it differs.
             if command == TasCommand::ArmPlay {
                 self.continue_from_frame = 0;
                 self.continue_from_text = "0".to_string();
@@ -986,12 +913,10 @@ impl TasApp {
             }
         }
 
-        // A recorded input transition inside the pre-gate hold window is
-        // replaced by the gate mask during an aligned replay (see
-        // gate_alignment.hpp). The shipped recordings hold their mask stable
-        // for 78-140 frames so this stays silent for them - but a recording
-        // that DOES pulse right before the gate would otherwise reroll or
-        // diverge with no visible reason.
+        // An aligned replay replaces recorded input in the pre-gate hold
+        // window with the gate mask (see gate_alignment.hpp). Warn when that
+        // changes anything, or such a recording would diverge with no
+        // visible reason.
         if gate_align_rec > 0 {
             if let Some(shared) = self.shared.as_ref() {
                 let n = tas_shared::align::pre_gate_hold_overwrites(
@@ -1009,9 +934,8 @@ impl TasApp {
 
         // Reflect the speed the controller will assert into the live state now
         // so the UI updates immediately (the controller re-asserts it too).
-        // For CONT, also stage the RESUME speed so the DLL drops to it
-        // atomically at the splice — otherwise the resumed recording
-        // fast-forwards at the catch-up rate until the UI polls.
+        // For CONT, also stage the resume speed so the DLL drops to it at the
+        // splice itself rather than when the UI next polls.
         let cont_resume_speed = if command == TasCommand::ArmContinue {
             self.resume_speed.unwrap_or(DEFAULT_PLAYBACK_SPEED)
         } else {
@@ -1023,11 +947,8 @@ impl TasApp {
             s.cont_resume_speed = cont_resume_speed;
         }
 
-        // Hand the whole restart→arm(→judge→reroll) cycle to the shared
-        // controller — the SAME state machine the tas_test harness drives. It
-        // serialises Stop→wait-OFF→Restart→wait-rs2→Arm (the command slot is a
-        // single u32, so Stop+Restart can't share a frame), runs the aligned
-        // watcher, and rerolls failures.
+        // Hand the restart → arm → watch cycle to the shared controller, which
+        // restarts and retries when the watcher finds a mismatch.
         let cfg = tas_shared::transport::ArmConfig {
             arm,
             speed: self.playback_speed,
@@ -1042,16 +963,11 @@ impl TasApp {
         self.cycle = Some(tas_shared::transport::TransportController::new(cfg));
         self.cycle_deadline = Some(std::time::Instant::now() + CYCLE_BUDGET);
         self.cycle_arm = arm;
-        // Block live input for the restart portion of any replay cycle — set BEFORE the
-        // controller's first command so it covers every restart's OFF-mode spawn
-        // countdown (the window the mode-based handler block misses). Cleared
-        // when the bucket aligns (step_cycle / Done) — from there the
-        // catch-up PLAY and resumed REC are handler-blocked by mode, and
-        // post-splice REC must see live input.
-        //
-        // An aligned replay needs it until the arm takes over input injection;
-        // otherwise a live key during the OFF-mode restart window can alter the
-        // state alignment is meant to replay.
+        // Block live input for a replay cycle's restarts. Set before the
+        // controller's first command so it covers each OFF-mode spawn
+        // countdown, which the mode-based handler block misses; a live key
+        // there would alter the state being replayed. Cleared at `Done`, after
+        // which PLAY is blocked by mode and post-splice REC needs live input.
         if gate_align_rec > 0 {
             if let Some(shared) = self.shared.as_mut() {
                 shared.state_mut().cont_suppress_input = 1;
@@ -1068,36 +984,19 @@ impl TasApp {
         ));
     }
 
-    /// Advance the in-flight transport controller one transition per egui frame
-    /// and handle its outcome. This replaces the old hand-rolled
-    /// poll_pending_stop_then_restart + pending_after_restart poll +
-    /// poll_continue_start_guard + schedule_cont_reroll machinery with the
-    /// shared state machine the tas_test harness also drives — so the app and
-    /// the test can't diverge. Logs/jitter/clear live here (egui side); the
-    /// transitions live in tas_shared::transport.
+    /// Advance the in-flight transport controller and handle its outcome. The
+    /// transitions live in tas_shared::transport, shared with the tas_test
+    /// harness; logging and cleanup live here.
     fn step_cycle(&mut self, ctx: &egui::Context) {
         if self.cycle.is_none() {
             return;
         }
         use tas_shared::transport::StepOutcome;
-        // Drive the controller with harness-grade timing precision.
-        //
-        // THE BUG this loop fixes: the old code did exactly ONE step() per egui
-        // frame and returned. After a Wait{ARM_SETTLE_MS} that means the Arm
-        // command only went out on the NEXT repaint — a vsync-limited, load-
-        // jittered ~16ms render frame landing BETWEEN the settle and the Arm.
-        // That scatters the F5 spawn-clock phase and was measured (cont-
-        // reliability, CONT_YIELD_MS mimic) to crater first-try from ~65% to 0%
-        // (real-world logs: 19%). The tas_test harness loops immediately after a
-        // settle with no render frame in between — which is why it sees 65–93%.
-        //
-        // So: handle Wait/Reroll inline and `continue` WITHOUT yielding to render
-        // (the post-settle command — Restart/Arm — fires immediately, phase
-        // intact). Only the InProgress polling phases (restart-done wait, bucket
-        // judge) yield to render, and only after a short bounded spin so the
-        // restart-done DETECTION isn't quantized to vsync either. The spin is
-        // skipped entirely in the judge phase (see below), so the multi-second
-        // replay renders at full rate.
+        // Wait and Reroll are handled inline without yielding to render, so
+        // the command after a settle fires on time rather than one jittered
+        // ~16ms render frame later, matching the tas_test harness. Only
+        // InProgress yields, after a short bounded spin in the phases that
+        // need tight polling.
         let spin_until = std::time::Instant::now() + std::time::Duration::from_millis(40);
         loop {
             let outcome = match (self.cycle.as_mut(), self.shared.as_mut()) {
@@ -1110,10 +1009,9 @@ impl TasApp {
             };
             match outcome {
                 StepOutcome::InProgress => {
-                    // Only InProgress can stall: every other outcome either
-                    // advances a phase or ends the cycle. Name the phase in the
-                    // log — an F5 restart that never completed and an arm the
-                    // DLL never processed look identical from here otherwise.
+                    // Only InProgress can stall. Name the phase in the log: a
+                    // restart that never completed and an arm the DLL never
+                    // processed look identical from here otherwise.
                     if self
                         .cycle_deadline
                         .is_some_and(|d| std::time::Instant::now() > d)
@@ -1127,9 +1025,9 @@ impl TasApp {
                         ));
                         self.clear_cont_catchup();
                         if let Some(shared) = self.shared.as_mut() {
-                            // Straight to the DLL, the same route the controller
-                            // takes for its own abort - send_action_command is the
-                            // button path and wants a timestamp we do not have here.
+                            // Straight to the DLL, as the controller does for
+                            // its own abort; reset_continue_runtime_state below
+                            // covers the rest of send_action_command's cleanup.
                             shared.send_command(TasCommand::Stop);
                             shared.state_mut().playback_speed = self.playback_speed;
                         }
@@ -1137,14 +1035,10 @@ impl TasApp {
                         self.set_cont_suppress_input(false);
                         return;
                     }
-                    // Safe to yield here: restart-done polling / bucket judging
-                    // don't set the F5 arm phase. Spin tightly for a bounded
-                    // budget (so restart-done detection stays ~3ms, not
-                    // vsync-quantized) ONLY while the phase feeds the arm
-                    // timing. The multi-second Watch replay gains nothing
-                    // from sub-frame latency, and spinning through it held every
-                    // PLAY/CONT at ~25 fps (measured 2026-09-02: 38-42 ms per
-                    // frame, all in this loop) - there, poll once per frame.
+                    // Spin with ~3ms polls only while the phase feeds arm
+                    // timing, so restart-done detection is not quantized to
+                    // vsync. The multi-second Watch phase polls once per frame:
+                    // spinning through it held the UI at ~25 fps.
                     let tight = self.cycle.as_ref().is_some_and(|c| c.needs_tight_polling());
                     if !tight || std::time::Instant::now() >= spin_until {
                         ctx.request_repaint();
@@ -1153,9 +1047,7 @@ impl TasApp {
                     std::thread::sleep(std::time::Duration::from_millis(3));
                 }
                 StepOutcome::Wait { ms } => {
-                    // Fixed Stop→Restart / arm settle. Sleep exactly this long so
-                    // the next command fires at a consistent F5 phase, then loop
-                    // IMMEDIATELY (no render frame between settle and command).
+                    // Fixed settle; loop straight on to the next command.
                     std::thread::sleep(std::time::Duration::from_millis(ms));
                 }
                 StepOutcome::Reroll { attempt, observed } => {
@@ -1183,13 +1075,12 @@ impl TasApp {
                         ));
                     }
                     // Stash for the resume summary emitted at the REC-start splice,
-                    // where the actual resume frame is known. attempts = rerolls + 1.
+                    // where the actual resume frame is known. attempts = retries + 1.
                     self.cont_last_outcome = Some((retries_used + 1, completed_via));
                     self.cycle = None;
-                    // Bucket aligned — release the live-input block. The
-                    // remaining catch-up PLAY → splice → REC are all
-                    // handler-blocked by mode, and post-splice REC must record
-                    // live input (the resumed recording).
+                    // Release the live-input block: the rest of the replay is
+                    // blocked by mode, and post-splice REC must record live
+                    // input.
                     self.set_cont_suppress_input(false);
                     return;
                 }
@@ -1197,7 +1088,7 @@ impl TasApp {
                     self.push_log(&format!("{} aborted: {}", self.cycle_label(), reason));
                     self.clear_cont_catchup();
                     // Push the restored speed through: an aborted PLAY must not
-                    // leave the game fast-forwarding at the judge speed.
+                    // leave the game fast-forwarding at the catch-up speed.
                     if let Some(shared) = self.shared.as_mut() {
                         shared.state_mut().playback_speed = self.playback_speed;
                     }
@@ -1210,13 +1101,11 @@ impl TasApp {
         }
     }
 
-    /// Clear the crash-recovery checkpoint, but ONLY after the history it
-    /// represents is durably committed. Mirrors the startup recovery ordering:
-    /// persist → flush (which now reports the real durability result) → clear.
-    /// If the flush says the manifest write failed, the checkpoint is KEPT so
-    /// the recording is recovered on the next launch instead of lost. The
+    /// Clear the crash-recovery checkpoint, but only after the history it
+    /// represents is durably committed (persist → flush → clear). If the flush
+    /// fails the checkpoint is kept, so the next launch recovers it. The
     /// recovery writer is drained first so no in-flight write can recreate the
-    /// checkpoint files after we delete them.
+    /// checkpoint files after they are deleted.
     fn clear_recovery_after_durable_persist(&mut self) {
         self.persist_history_if_needed();
         let flush = self.history_writer.as_ref().map(|writer| {
@@ -1296,12 +1185,10 @@ impl TasApp {
         if !writer.persist(entries, current, next, revision) {
             return;
         }
-        // The re-queue is a new attempt: forget the failure we already reacted
-        // to. `persist()` cleared the writer's failed marker, but if the worker
-        // fails again before this thread observes that 0, the marker comes
-        // back holding the SAME revision. Without this reset that would compare
-        // equal to `last_failed_revision`, no retry would be scheduled, and the
-        // revision would stay queued-but-never-durable until history changed.
+        // The re-queue is a new attempt, so forget the handled failure. If the
+        // worker fails again with the same revision before this thread sees
+        // the cleared marker, a stale `last_failed_revision` would suppress
+        // the retry.
         self.last_failed_revision = 0;
         self.last_queued_revision = revision;
         self.history_retry_after = None;
@@ -1332,11 +1219,8 @@ impl TasApp {
                 return;
             }
         };
-        // Never mutate the buffer the game is actively replaying/recording.
-        // Instead of dropping the edit, auto-STOP the run and keep the edit
-        // queued; it applies on the frame mode returns to Off. We issue STOP
-        // only once (latched) so we don't spam the command slot while the
-        // game settles.
+        // Never mutate the buffer the game is replaying or recording. Auto-STOP
+        // the run once (latched) and keep the edit queued until mode is Off.
         if mode != TasMode::Off as u32 {
             if !self.pending_edit_autostop {
                 self.pending_edit_autostop = true;
@@ -1446,7 +1330,7 @@ impl TasApp {
             return;
         };
         if session.kind != RecordingSessionKind::Continue {
-            return; // plain REC — no bucket/resume story to tell
+            return; // plain REC has no resume to report
         }
         let (attempts, via) = self
             .cont_last_outcome
@@ -1478,12 +1362,11 @@ impl TasApp {
                 store.retry_failed_write();
             }
         }
-        // Decide on the UI thread (throttle to one write per ~1.5s of recording
-        // GROWTH — see DEFAULT_RECOVERY_DEBOUNCE_MS), but run the disk write OFF
-        // it via the serialized RecoveryWriter so REC never hitches. STOP no
-        // longer forces a recovery write: finalize routes the finished recording
-        // into durable history instead, then clears the checkpoint. Best-effort:
-        // a failed background write just means a slightly staler recovery file.
+        // Decide on the UI thread (at most one write per ~1.5s of recording
+        // growth, see DEFAULT_RECOVERY_DEBOUNCE_MS) but write off it so REC
+        // never hitches. STOP does not write a checkpoint: finalize moves the
+        // take into durable history and then clears it. Best-effort: a failed
+        // write only leaves a slightly staler recovery file.
         let job = match self.recovery_store.as_mut() {
             Some(store) => {
                 store.take_write_job(snapshot, &self.segment_tracker.segments, session, force)
@@ -1491,9 +1374,6 @@ impl TasApp {
             None => None,
         };
         if let Some(job) = job {
-            // Submit to the single serialized writer (ordered + flushable),
-            // NOT a detached thread — a detached write could complete after a
-            // later `clear_pending()` and resurrect the checkpoint.
             if !self.recovery_writer.submit(job) {
                 self.log_lines
                     .push("Recovery writer unavailable; checkpoint was not queued");
@@ -1505,9 +1385,8 @@ impl TasApp {
     }
 
     fn update_recording_recovery_progress(&mut self, snapshot: &recording::RecordingSnapshot) {
-        // Stamp the track NOW, while we are recording and can still see it. If
-        // this checkpoint ever comes back, it comes back during startup — when
-        // nothing has read the live level yet — so asking then is too late.
+        // Stamp the track now, while it is visible. A checkpoint is recovered
+        // at startup, before anything has read the live level.
         let level = self.level_for_save().map(str::to_string);
         let live_stamps = self.shared.as_ref().map(|s| {
             (
@@ -1555,12 +1434,10 @@ impl TasApp {
         };
 
         // A session the finish-line watch stopped is labelled by its race
-        // time ("Finish 0:53.34", flag in the panel), not by its length. The
-        // HUD timer froze at the line; when the DLL's race-timer feed is
-        // empty, the start-line-to-finish-line tick count from the track
-        // geometry is that time (the in-game timer starts at the start
-        // trigger, ~5 s below the spawn on Forest Easy - NOT at first
-        // movement, which read 3:55.58 for a 3:50.57 run).
+        // time ("Finish 0:53.34"), not its length. Prefer the latched HUD time;
+        // without it, count ticks from the start line to the finish line. The
+        // in-game timer starts at the start trigger, not at first movement,
+        // which would overstate the time by several seconds.
         let finish = self.finished_at_tick.map(|tick| {
             let hud = self.finished_hud_cs.unwrap_or(u32::MAX);
             if hud != u32::MAX {
@@ -1599,14 +1476,11 @@ impl TasApp {
             finish,
         );
         if !pushed {
-            // An empty snapshot (a fresh mapping after the game restarted,
-            // for one) cannot stand in for the take: the checkpoint on disk
-            // is the only copy left. Bring it into history NOW — left on disk
-            // it would only survive until the next take's checkpoint replaced
-            // it or a later STOP cleared it. Only THIS session's checkpoint:
-            // a stop before the first tick (F9 then F11) has nothing to
-            // recover, and an older take whose clear was refused must not
-            // come back as a pinned duplicate.
+            // An empty snapshot (e.g. a fresh mapping after the game
+            // restarted) leaves the checkpoint on disk as the only copy, and
+            // the next take's checkpoint would replace it. Recover it into
+            // history now, but only this session's: an older take whose clear
+            // was refused must not come back as a pinned duplicate.
             self.push_log(&format!(
                 "Recording session ({}) was not added to history: the buffer is empty — \
                  recovering its checkpoint instead",
@@ -1617,35 +1491,30 @@ impl TasApp {
             }
             return;
         }
-        // Make the recording DURABLE in history BEFORE clearing the recovery
-        // checkpoint — otherwise a crash between "pushed to in-memory history"
-        // and "background writer committed" would lose it (checkpoint gone,
-        // blob not on disk). The clear is gated on a CONFIRMED persist.
+        // The checkpoint is cleared only once the take is durable in history,
+        // so a crash before the background write commits cannot lose it.
         self.clear_recovery_after_durable_persist();
     }
 
     /// Check if the game process is still alive by monitoring frame_count advancement.
     /// If frame_count hasn't changed for ~3 seconds, assume the game crashed.
     fn check_game_health(&mut self) {
-        // Sample cycle activity every frame (cheap) for the In-Game chip:
-        // game_in_game freezes at its last value when the Supreme::Cycle hook
-        // stops running (quit to menu / pause / dialog), so a fresh frame_count
-        // advance is the real "ticking a level" signal.
+        // Sample cycle activity every frame (cheap): game_in_game freezes when
+        // the Supreme::Cycle hook stops, so a fresh frame_count advance is the
+        // real "ticking a level" signal.
         if let Some(fc) = self
             .shared
             .as_ref()
             .map(|shared| shared.frame_count_volatile())
         {
             if !self.cycle_fc_seeded {
-                // Baseline only. The FIRST sample after launch or reconnect is
-                // not an advance — a frozen menu has a nonzero frame_count
-                // too, and counting it as one opened a ~400ms window where the
-                // transport gate read "ticking" against a stopped engine.
+                // Baseline only: a frozen menu has a nonzero frame_count too,
+                // so the first sample is not evidence of ticking.
                 self.cycle_fc_seeded = true;
                 self.cycle_fc = fc;
             } else if fc < self.cycle_fc {
-                // The counter only ever increments (cave2, once per cycle) —
-                // it goes backwards only when a fresh DLL zeroed the section.
+                // The counter only increments (once per cycle), so going
+                // backwards means a fresh DLL zeroed the section.
                 self.on_dll_reinitialised(fc);
             } else if fc != self.cycle_fc {
                 self.cycle_fc = fc;
@@ -1671,18 +1540,11 @@ impl TasApp {
             let current_frame = shared.frame_count_volatile();
             if current_frame == self.last_frame_count {
                 self.stale_frame_ticks += 1;
-                // Re-test liveness every 5 stale seconds, not once. The cycle
-                // also freezes at the menu while the game is alive, so a
-                // one-shot check passes there and then never runs again when
-                // the game exits later. That left tas_ui "connected" to a dead
-                // mapping for days: repainting at full rate against a stale
-                // MODE_PLAY, re-sending STOP every 2 s, and leaking until it
-                // burned most of a core (2026-09-02 post-mortem).
-                if self.stale_frame_ticks.is_multiple_of(5) {
-                    // Check if Supreme.exe is actually running
-                    if !win32::is_supreme_running() {
-                        self.disconnect_from_dead_game();
-                    }
+                // Re-test liveness every 5 stale seconds, not once: the cycle
+                // also freezes at the menu while the game is alive, and the
+                // game may exit later while still stale.
+                if self.stale_frame_ticks.is_multiple_of(5) && !win32::is_supreme_running() {
+                    self.disconnect_from_dead_game();
                 }
             } else {
                 self.last_frame_count = current_frame;
@@ -1694,28 +1556,22 @@ impl TasApp {
     /// Poll the global keyboard state for F9–F12 and emit the same
     /// transport actions the in-window shortcut handler would, but only
     /// when Supreme.exe is the foreground window. Lets the user trigger
-    /// REC/PLAY/STOP/CONT without alt-tabbing to tas_ui. Crucially, the
-    /// keys are *observed*, not consumed — the game still receives them.
+    /// REC/PLAY/STOP/CONT without alt-tabbing to tas_ui. The keys are
+    /// observed, not consumed, so the game still receives them.
     ///
-    /// Edge state is updated every frame regardless of focus so we
-    /// never strand on a "was pressed last time we looked" entry after
-    /// a focus change while a key was held.
+    /// Edge state is updated every frame regardless of focus so a key held
+    /// across a focus change is not left "pressed".
     fn poll_global_shortcuts(&mut self) -> Vec<transport::Action> {
-        // Step 1: read current pressed state for all four keys.
         let now: [bool; 4] =
             [win32::VK_F9, win32::VK_F10, win32::VK_F11, win32::VK_F12].map(win32::key_is_down);
-        // Step 2: compute edges and update cache (always — see doc comment).
         let edges = compute_global_key_edges(now, &mut self.prev_global_keys);
-        // Short-circuit if no key transitioned this frame.
         if !edges.iter().any(|&e| e) {
             return Vec::new();
         }
 
-        // Step 3: gate emission on Supreme.exe being the foreground window.
-        // If the cache is stale or unresolved, try to fill it. We invalidate
-        // the cache when shared-memory disconnects (game closed), so a stale
-        // PID only persists across a same-session game restart that doesn't
-        // tear down shared memory — rare and benign (the PID just won't match).
+        // Only act while Supreme.exe is the foreground window. A stale cached
+        // PID (game restarted without dropping shared memory) just fails to
+        // match, which is harmless.
         let game_pid = self.game_pid_cached.or_else(|| {
             let resolved = win32::find_supreme_pid();
             self.game_pid_cached = resolved;
@@ -1728,7 +1584,6 @@ impl TasApp {
             return Vec::new();
         }
 
-        // Step 4: emit actions for each newly-pressed key.
         let mut actions = Vec::new();
         if edges[GlobalShortcutSlot::F9 as usize] {
             actions.extend(self.shortcut_arm("Global F9 (in-game): REC", TasCommand::ArmRec));
@@ -1988,14 +1843,10 @@ impl TasApp {
         if !self.stop_active_session_for_load() {
             return;
         }
-        // Open bypassed the per-level guarantee entirely: the dialog merely
-        // STARTED in the current track's folder, then accepted any file the user
-        // picked and auto-played it. Recordings are named `<CODE>-<name>`, so the
-        // file itself says which track it belongs to — check it, against a level
-        // re-read after the stop above. Loading another track's recording is not
-        // a subtle failure: the spawn is somewhere else entirely and the run is
-        // meaningless. (Unknown on either side cannot prove a mismatch and is
-        // allowed through — same rule tas_test's pre-flight uses.)
+        // The dialog only starts in the current track's folder; the user can
+        // pick any file. Recordings are named `<CODE>-<name>`, so check the
+        // file against the level re-read after the stop above. Unknown on
+        // either side cannot prove a mismatch and is allowed, as in tas_test.
         let live_id = self
             .shared
             .as_ref()
@@ -2070,28 +1921,18 @@ impl eframe::App for TasApp {
         // captures the events that led up to it.
         self.flush_log_lines_to_file();
 
-        // Synchronise the live level FIRST, before anything reads or acts on
-        // it this frame.
-        //
-        // This used to run inside the central panel, AFTER the history panel had
-        // already rendered its rows and dispatched restores. On the first frame
-        // following a level change that panel therefore still listed — and would
-        // happily restore — the previous track's entries. Ordering is part of
-        // the guarantee: a per-frame fact has to be established before the frame
-        // consumes it.
+        // Synchronise the live level first: the history panel filters and
+        // restores against it later this frame, and must not see the previous
+        // track's value on the frame after a level change.
         self.sync_live_level();
 
         // Check game health (crash detection) — also samples cycle activity.
         self.check_game_health();
 
-        // Auto-stop REC/PLAY when you leave the level. Quitting to the menu
-        // tears the level down and STOPS Supreme::Cycle, so the DLL's
-        // root-change auto-stop (which runs in the cycle hook) can't fire — the
-        // recording would stay armed at the menu. tas_ui sees it: the cycle
-        // heartbeat (frame_count) freezes. A generous threshold rides out the
-        // CONT F5-reload stall and a brief pause-menu glance, but a sustained
-        // freeze means you've left → stop. (Pause >threshold also stops, which
-        // is fine — nothing meaningful records while paused.)
+        // Auto-stop REC/PLAY when the player leaves the level. Quitting to the
+        // menu stops Supreme::Cycle, so the DLL's own auto-stop (in the cycle
+        // hook) can't fire. The 5 s threshold rides out an F5 reload stall and
+        // a brief pause; a longer pause also stops, which is harmless.
         if let Some(ref shared) = self.shared {
             let mode = shared.mode_volatile();
             let racing = mode == TasMode::Rec as u32 || mode == TasMode::Play as u32;
@@ -2114,10 +1955,8 @@ impl eframe::App for TasApp {
                     }
                 ));
                 self.send_action_command(TasCommand::Stop);
-                // Debounce the re-fire on its OWN timestamp. This used to
-                // reset cycle_advance_at, which also told the transport gate
-                // "the engine is ticking" for 400ms — at a frozen menu, i.e.
-                // exactly when arming must stay refused.
+                // Debounce on its own timestamp: touching cycle_advance_at
+                // would make the transport gate allow arming at a frozen menu.
                 self.auto_stop_debounce = Some(std::time::Instant::now());
             }
         }
@@ -2134,9 +1973,6 @@ impl eframe::App for TasApp {
             // The snapshot copies ~850 KB (full input_log + rec_coords). Only a
             // live REC (recovery checkpoints) or a REC that just ended (history
             // entry) consumes it, so build it only then rather than every frame.
-            // (Measured 2026-09-02: the per-frame copy was not the source of
-            // the slow memory growth, but it is still 850 KB of memcpy a frame
-            // that nothing reads.)
             let need_snapshot = current_mode == 1 || (self.last_mode == 1 && current_mode == 0);
             let state_snapshot = if need_snapshot {
                 self.shared
@@ -2160,23 +1996,17 @@ impl eframe::App for TasApp {
                         .map(|s| recording::IdentityStamps::from_live(s.state()));
                     self.log_cont_resume_summary();
                     self.clear_cont_catchup();
-                    // Splice fired (or REC began).
-                    //
-                    // The controller has normally cleared itself long before
-                    // this: it accepts the bucket at first_moving + 64 while the
-                    // splice sits thousands of ticks later. But a splice EARLIER
-                    // than the judge window (a redo from a low frame) can reach
-                    // REC first, and this handler runs before step_cycle
-                    // in the same frame. Dropping the controller without its Done
-                    // path would strand cont_suppress_input SET - and the whole
-                    // point of the resumed REC is to record live input.
+                    // Splice fired (or REC began). This handler runs before
+                    // step_cycle, so REC can be seen before the controller
+                    // reports Done. Drop it here, and release
+                    // cont_suppress_input: the resumed REC records live input.
                     if self.cycle.take().is_some() {
                         self.cycle_deadline = None;
                         self.set_cont_suppress_input(false);
                     }
-                    // Fresh finish-line watch for this session. A CONT splice
-                    // resumes mid-run, so start the scan at the resume tick —
-                    // the prefix was already checked when it was recorded.
+                    // Fresh finish-line watch. A CONT resumes mid-run, so scan
+                    // from the resume tick; the prefix was checked when it was
+                    // recorded.
                     self.finish_scan_cursor = continue_from.max(1);
                     self.finished_at_tick = None;
                     self.finished_hud_cs = None;
@@ -2195,11 +2025,9 @@ impl eframe::App for TasApp {
                     self.update_recording_recovery_progress(snap);
                 }
 
-                // Finish-line watch (1.7): when the recording crosses the
-                // track's finish line, stop REC — the race is over, the timer
-                // froze at the line; recording the run-out is never wanted.
-                // Incremental: only the ticks since the last frame are
-                // scanned.
+                // Finish-line watch: stop REC when the run crosses the finish
+                // line, since the run-out is never wanted. Only ticks since
+                // the last frame are scanned.
                 if self.finished_at_tick.is_none() {
                     let resolved_geometry = self
                         .shared
@@ -2209,11 +2037,9 @@ impl eframe::App for TasApp {
                         .is_some();
                     let cross = self.shared.as_ref().and_then(|shared| {
                         let s = shared.state();
-                        // Resolved level only: this picks the FINISH-LINE
-                        // GEOMETRY, so a stale id mid-swap would test the run
-                        // against the previous track's line and could auto-stop
-                        // REC in the wrong place. Unresolved => no geometry =>
-                        // no crossing claimed, which is the safe direction.
+                        // Resolved level only: a stale id would test the run
+                        // against another track's finish line. Unresolved
+                        // means no crossing is claimed, the safe direction.
                         crate::start_line::finish_cross_tick(
                             &s.rec_coords,
                             recorded,
@@ -2222,15 +2048,14 @@ impl eframe::App for TasApp {
                             self.finish_scan_cursor,
                         )
                     });
-                    // Only advance past ticks we actually SCANNED. While the level
-                    // is unresolved there is no geometry, so those ticks were not
-                    // examined — advancing would skip a crossing permanently.
+                    // Advance only past ticks actually scanned; with no
+                    // geometry, advancing would skip a crossing permanently.
                     if resolved_geometry {
                         self.finish_scan_cursor = recorded.max(1);
                     }
                     if let Some(tick) = cross {
                         self.finished_at_tick = Some(tick);
-                        // Latch the HUD time NOW, in the same poll that saw the
+                        // Latch the HUD time in the same poll that saw the
                         // crossing, as one coherent pair read.
                         self.finished_hud_cs = self
                             .shared
@@ -2253,13 +2078,9 @@ impl eframe::App for TasApp {
             }
         }
 
-        // Process keyboard shortcuts first. handle_shortcuts handles
-        // keys delivered to tas_ui via egui (i.e. when tas_ui has
-        // focus); poll_global_shortcuts handles keys observed via
-        // GetAsyncKeyState when the game has focus. The two paths are
-        // mutually exclusive (gated on which window is foreground), so
-        // a single F-key press fires exactly one action regardless of
-        // which window the user was in.
+        // handle_shortcuts takes keys delivered to tas_ui by egui;
+        // poll_global_shortcuts takes keys seen while the game has focus.
+        // They are gated on the foreground window, so one press fires once.
         let mut shortcut_actions = self.handle_shortcuts(ctx);
         shortcut_actions.extend(self.poll_global_shortcuts());
 
@@ -2291,8 +2112,6 @@ impl eframe::App for TasApp {
                         self.load_recording_flow();
                     }
                     ui.separator();
-                    // Settings — moved out of the transport row to save
-                    // horizontal space there.
                     ui.label(
                         egui::RichText::new("Settings")
                             .small()
@@ -2357,10 +2176,9 @@ impl eframe::App for TasApp {
 
         // Connection error state
         if self.connect_error.is_some() {
-            // Retry on our own every 2 s (the repaint floor below): the game
-            // is often launched, or relaunched, after tas_ui, and the mapping
-            // only exists once TAS_Helper has initialized. Until 2026-09-02
-            // this needed a click on "Retry Connection".
+            // Retry every 2 s (the repaint floor below): the game is often
+            // launched after tas_ui, and the mapping only exists once
+            // TAS_Helper has initialized.
             if self.last_reconnect_attempt.elapsed() >= std::time::Duration::from_secs(2) {
                 self.last_reconnect_attempt = std::time::Instant::now();
                 self.try_reconnect();
@@ -2459,9 +2277,8 @@ impl eframe::App for TasApp {
                 .resizable(true)
                 .default_width(280.0)
                 .show(ctx, |ui| {
-                    // Compact header: "History" + count, autosave path
-                    // moved to a tooltip on hover (was wrapping over two
-                    // lines and burning vertical space).
+                    // Compact header: "History" + count, autosave path in
+                    // the tooltip.
                     ui.horizontal(|ui| {
                         let title = ui.label(
                             egui::RichText::new(format!("History · {}", self.history.len()))
@@ -2486,12 +2303,10 @@ impl eframe::App for TasApp {
                         }
                     });
 
-                    // The status chip's menu signal, reused: game_in_game is a
-                    // stale flag at menus (the Cycle hook stops writing it), so
-                    // gate on the cycle actually ticking. The panel uses this to
-                    // say "In Menu" instead of a perpetual "resolving…" — at a
-                    // menu nothing is being resolved, the scan is deliberately
-                    // suppressed there.
+                    // Same menu signal as the status chip (game_in_game is
+                    // stale at menus, so also require the cycle ticking). The
+                    // panel shows "In Menu" rather than "resolving…", since
+                    // nothing is resolved at a menu.
                     let in_menu = !(self
                         .shared
                         .as_ref()
@@ -2525,17 +2340,10 @@ impl eframe::App for TasApp {
             for action in history_actions {
                 match action {
                     history::HistoryAction::Restore(idx) => {
-                        // Restoring writes into the live game buffer — needs a
-                        // connection. Pin/rename don't. Stop any active REC/PLAY
-                        // first so the DLL isn't writing input_log while we
-                        // overwrite the whole buffer (clicking a history entry
-                        // mid-record must stop the record, not race it).
-                        //
-                        // Resolve the clicked row to its STABLE entry_id before
-                        // stopping: stop_active_session_for_load finalizes the
-                        // interrupted take into history, which can evict the
-                        // oldest entry and shift positional indices — so a
-                        // post-stop restore_index(idx) could target the wrong row.
+                        // Restoring overwrites the live buffer, so stop any
+                        // active REC/PLAY first. Resolve the row to its stable
+                        // entry_id before stopping: finalizing the stopped take
+                        // can evict the oldest entry and shift indices.
                         let target_id = self.history.entries().get(idx).map(|e| e.entry_id);
                         if !self.stop_active_session_for_load() {
                             continue;
@@ -2545,11 +2353,8 @@ impl eframe::App for TasApp {
                                 self.history.entries().iter().position(|e| e.entry_id == id)
                             })
                             .unwrap_or(idx);
-                        // stop_active_session_for_load re-read the live level
-                        // just now, so this decision is made against the track
-                        // we are on AFTER the wait, not the one we were on when
-                        // the frame began. Say so out loud rather than doing
-                        // nothing: a click that silently no-ops reads as a bug.
+                        // Checked against the level re-read after the stop.
+                        // Log the refusal: a silent no-op reads as a bug.
                         if !self.history.entry_on_current_level(idx) {
                             self.log_lines.push(format!(
                                 "History restore refused: that entry is not for the \
@@ -2590,7 +2395,7 @@ impl eframe::App for TasApp {
             }
         }
 
-        // Advance the in-flight restart/arm/reroll cycle (shared controller).
+        // Advance the in-flight restart/arm/watch cycle.
         self.step_cycle(ctx);
 
         // Apply shortcut actions to shared state (same dispatch as the buttons).
@@ -2610,26 +2415,10 @@ impl eframe::App for TasApp {
             let cmds = if let Some(ref mut shared) = self.shared {
                 let mode = shared.state().mode_enum();
                 let recorded = shared.state().recorded_count;
-                // During catch-up the resume speed lives in cont_catchup_speed
+                // During catch-up the resume speed lives in resume_speed
                 // (playback_speed is the catch-up multiplier); otherwise it's
-                // just the live play speed. The buttons highlight/edit this.
+                // the live play speed. The speed buttons highlight and edit it.
                 let resume_speed = self.resume_speed.unwrap_or(self.playback_speed);
-
-                // Stamp new history entries with the level they're made on
-                // (per-level history filter).
-                //
-                // level_id going KNOWN -> UNKNOWN means the level was torn down:
-                // its resource path strings left the heap, which is what the
-                // DLL's scan reads. Verified live that an F5 restart does NOT
-                // clear it (level_id stayed 0x0 across a CMD_RESTART while
-                // player_ptr moved 0x0b271a08 -> 0x0d97f340), so this fires on a
-                // real level change and not on every reroll — player_ptr would
-                // have been a false trigger.
-                //
-                // Without this the last level stayed asserted through the menu,
-                // the load, and the first ~1.5s of the NEW track, so the panel
-                // filtered to the old track and mis-stamped anything pushed
-                // mid-load. A wrong tag is worse than none: it can't be spotted.
 
                 transport::show(
                     ui,
@@ -2651,31 +2440,18 @@ impl eframe::App for TasApp {
                 Vec::new()
             };
 
-            // Dispatch button actions through the SAME path as keyboard
-            // shortcuts (apply_transport_action) so the two can't diverge. This
-            // routes CONT-arming through queue_restart_then →
-            // set_continue_start_guard → detect_first_moving (the shared fn),
-            // replacing the button path's old hand-rolled first-moving scan, and
-            // also fixes the button PLAY path to reset continue_from_frame.
+            // Same dispatch as keyboard shortcuts, so the two can't diverge.
             for cmd in cmds {
                 self.apply_transport_action(cmd);
             }
 
             if let Some(ref mut shared) = self.shared {
-                // Sync playback_speed to shared state for Cave 5 every frame.
-                // During a CONT catch-up self.playback_speed IS the catch-up
-                // multiplier (set in queue_restart_then), so this continuously
-                // re-asserts it — overriding the brief speed reset the in-process
-                // F5 restart causes. (Gating this on an in-flight controller
-                // removed the continuous re-assertion and the catch-up replayed
-                // at the play speed instead of the multiplier.)
-                //
-                // BUT: once the splice has fired (mode == REC) mid-catch-up, the
-                // DLL has already dropped playback_speed to the resume speed
-                // atomically. Assert THAT resume speed here — not the catch-up
-                // multiplier — so we don't stomp it back to e.g. 64x for the
-                // frame(s) before our mode-transition handler runs. This closes
-                // the post-splice overshoot.
+                // Re-assert playback_speed every frame. During a CONT catch-up
+                // it is the catch-up multiplier, and continuous re-assertion
+                // overrides the brief speed reset an F5 restart causes. Once
+                // the splice has fired (mode == REC) the DLL has already
+                // dropped to the resume speed, so assert that instead of
+                // pushing the multiplier back before the mode handler runs.
                 let catchup_active = self.resume_speed.is_some();
                 let mode = shared.state().mode;
                 let speed_to_assert = if catchup_active && mode == TasMode::Rec as u32 {
@@ -2767,9 +2543,7 @@ impl eframe::App for TasApp {
                     }
                 }
 
-                // Diagnostics footer — DLL counters. Only useful when
-                // debugging the DLL itself; gated on Debug Config so it's
-                // hidden during normal use.
+                // DLL counters, shown only with Debug Config.
                 if self.show_config {
                     ui.separator();
                     ui.horizontal(|ui| {
@@ -2830,16 +2604,10 @@ impl eframe::App for TasApp {
                     }
                 }
 
-                // NOTE: do NOT sync self.continue_from_frame → shared every
-                // frame. That value is *staging* for the next CONT, not a
-                // live signal: cave2's PLAY handler treats any non-zero
-                // continue_from_frame in shared as a splice marker and
-                // auto-switches PLAY → REC at that frame. If we synced
-                // every frame, then editing the "From:" textbox or dragging
-                // the timeline continue marker during PLAY would silently
-                // hijack PLAY into a CONT-like splice. Shared is written
-                // only when CONT is actually armed (queue_restart_then,
-                // SetContinueFrame action, retry paths).
+                // Do not sync continue_from_frame to shared memory here. It
+                // stages the next CONT; the DLL treats a non-zero shared value
+                // as a splice marker, so syncing it would let an edit during
+                // PLAY splice into REC. The controller writes it at arm time.
             }
         });
 
@@ -2850,31 +2618,20 @@ impl eframe::App for TasApp {
         }
         self.persist_history_if_needed();
 
-        // AUTO-REFRESH, but only as fast as there is something to show.
-        //
-        // Repainting at a flat 30fps costs the GAME about 10ms per menu frame —
-        // measured, and reversible within one session: 48.4ms with tas_ui closed,
-        // 58.4ms with it open, 48.4ms again once closed (3/3 each way). MINIMIZING
-        // tas_ui also removes it completely, which is what identifies our own
-        // RENDERING as the cost rather than the shared-memory polling. Two
-        // processes competing for the GPU, and the game loses ~20% of its menu
-        // video speed to a window that, while idle, is drawing the same pixels.
-        //
-        // So: full rate whenever anything is actually moving — a TAS mode is
-        // armed, or the engine cycle is ticking (in a level) — and a lazy rate
-        // when the game is sitting still at a menu. This does NOT make the UI
-        // feel sluggish: egui repaints immediately on input regardless, so
-        // `request_repaint_after` only sets the IDLE floor.
+        // Refresh only as fast as there is something to show. tas_ui's own
+        // rendering at a flat 30 fps costs the game ~10 ms per menu frame
+        // (48 ms vs 58 ms) through GPU contention. Full rate while a TAS mode
+        // is armed or the engine is ticking, a lazy rate at a menu. egui still
+        // repaints immediately on input; this only sets the idle floor.
         let mode_active = self
             .shared
             .as_ref()
             .map(|s| s.mode_volatile() != TasMode::Off as u32)
             .unwrap_or(false);
         let cycle_ticking = self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400);
-        // eframe 0.29 still runs update()+paint while minimized, and every
-        // painted frame costs a little renderer-side memory on the DX12/Vulkan
-        // path (measured ~15 KB/s at 60 fps, none on GL). Nobody can see a
-        // minimized window, so idle it hard regardless of mode.
+        // eframe still runs update and paint while minimized, and each painted
+        // frame leaks a little renderer memory on DX12/Vulkan (~15 KB/s at
+        // 60 fps), so idle hard when minimized regardless of mode.
         let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
         let refresh_ms = if minimized {
             500
@@ -2911,10 +2668,8 @@ fn main() -> eframe::Result {
         std::process::exit(0);
     }
 
-    // Default window 1100x680. Wider than the previous 960 to give the
-    // transport row breathing room when `from:` is visible alongside
-    // the 280 px history rail — at 960 the row clipped Redo and ate
-    // into the speed presets once a recording loaded.
+    // 1100 px wide so the transport row, with `from:` visible beside the
+    // 280 px history rail, does not clip Redo or the speed presets.
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 680.0]),
         ..Default::default()
@@ -3447,11 +3202,8 @@ mod tests {
         assert!((normalize_playback_speed(4.0) - 1.0).abs() < 0.001);
     }
 
-    /// The global-shortcut edge detector must fire exactly once per
-    /// false→true transition and update the previous-state cache so
-    /// subsequent calls with the same held state do NOT re-fire. If
-    /// this breaks, holding F9 in-game would spam REC actions every
-    /// frame instead of arming once.
+    /// The edge detector fires once per false→true transition, so holding
+    /// F9 in-game arms REC once rather than every frame.
     #[test]
     fn global_shortcut_edges_fire_only_on_press() {
         let mut prev = [false; 4];
@@ -3471,9 +3223,8 @@ mod tests {
         assert_eq!(edges, [true, false, false, false]);
     }
 
-    /// Holding a key across multiple frames with intervening focus loss
-    /// (simulated here by repeated identical reads) must not produce
-    /// repeated edges. This guarantees in-game F9 hold won't spam REC.
+    /// A key held across many frames (repeated identical reads) produces no
+    /// further edges.
     #[test]
     fn global_shortcut_held_does_not_repeat() {
         let mut prev = [false; 4];
@@ -3484,26 +3235,15 @@ mod tests {
         }
     }
 
-    /// Pressing CONT (via F12 or otherwise) with no recording loaded
-    /// must NOT leave the app half-armed at catchup speed. Previously
-    /// it set cont_catchup_speed=Some(saved) and playback_speed=multiplier,
-    /// then sent Restart, but cave2 couldn't start playback (nothing to
-    /// continue from). The PLAY→REC transition that normally calls
-    /// clear_cont_catchup never fires, leaving the UI stuck at e.g. 32×
-    /// in OFF mode with the green "Catching up..." label glued on.
-    ///
-    /// This test exercises queue_restart_then directly because the test
-    /// harness's prepare_restart_action helper bypasses the recorded-count
-    /// check. (We can't trigger the real shared-memory path in a unit
-    /// test without a live DLL.)
+    /// CONT with no recording loaded must not leave the app half-armed at
+    /// catch-up speed: with nothing to splice, the PLAY→REC transition that
+    /// calls clear_cont_catchup would never fire.
     #[test]
     fn cont_with_no_recording_does_not_arm_catchup() {
         let mut app = test_app();
         app.playback_speed = 1.0;
         app.cont_catchup_multiplier = 32.0;
-        // No shared memory set, so recorded_count is implicitly 0 (the
-        // helper returns 0 via the unwrap_or fallback). queue_restart_then
-        // should bail before touching catchup state.
+        // No shared memory, so recorded_count reads as 0.
         app.queue_restart_then(TasCommand::ArmContinue);
         assert!(
             app.resume_speed.is_none(),

@@ -6,7 +6,7 @@
 //
 // A racing cycle is DROPPED, not delayed: cave2 skips its callback for that
 // tick, losing one REC sample. Only reachable while the worker applies a STOP
-// to a cycle it judged frozen, so the take is ending anyway. Do not widen this
+// to a cycle it saw as frozen, so the take is ending anyway. Do not widen this
 // gate to anything the game does every frame.
 class CycleStopGuard {
     std::atomic_flag& flag;

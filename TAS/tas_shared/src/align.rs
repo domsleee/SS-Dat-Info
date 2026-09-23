@@ -190,8 +190,7 @@ mod tests {
 
     #[test]
     fn checks_past_the_settle_window() {
-        // Exact for the first 64 gate-relative frames, divergent at 80: a
-        // 64-frame window would accept this.
+        // Exact through the settle, divergent at gate-relative frame 80.
         let (mut play, rec) = aligned_trajectory(299, 297, 101);
         play[297 + 80][2] += 0.5;
         assert_eq!(

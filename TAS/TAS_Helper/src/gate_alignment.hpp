@@ -8,16 +8,13 @@ inline constexpr uint32_t GATE_ALIGN_INVALID_SOURCE = 0xFFFFFFFFu;
 // it: no play index reaches it.
 inline constexpr uint32_t GATE_ALIGN_SPLICE_PENDING = 0xFFFFFFFFu;
 
-// The product controller arms immediately after a settled restart. Deliberate
-// 0..40 ms arm-delay sweeps moved the live gate by at most four cycles. The
-// hold window exists so the gate cycle always receives the recording's gate
-// mask wherever the live gate lands — but every recorded input transition
-// INSIDE the window is REPLACED by that mask, so it must stay as narrow as
-// the jitter allows: 8 is twice the observed worst case, and a recorded
-// press/release pulse 9+ frames before the gate keeps its original timing.
-// (Was 64, which silently deleted legitimate transitions from a 640 ms
-// window; the four shipped test recordings hold their gate mask stable for
-// 78-140 frames, so they behave identically under either value.)
+// Frames before the recording's gate from which a replay holds the
+// recording's gate mask until its own gate fires. The controller arms right
+// after a settled restart, and 0..40 ms arm-delay sweeps moved the live gate
+// by at most four cycles; the hold makes the gate cycle receive the gate mask
+// wherever it lands. Every recorded transition inside the window is replaced
+// by that mask, so it stays as narrow as the jitter allows: 8 is twice the
+// observed worst case.
 inline constexpr uint32_t GATE_ALIGN_PRE_GATE_LEAD = 8u;
 
 // The play-index at which a CONT splice must fire when the prefix is
@@ -45,7 +42,7 @@ inline uint32_t GateAlignedSplicePos(uint32_t continue_from_frame,
 //
 // Approval can arrive while parked exactly at the splice. That next cycle
 // belongs to REC, not an additional PLAY tick; cap its batch to one so the
-// old catch-up speed cannot spill into recording before the clock reset.
+// catch-up speed cannot spill into recording before the clock reset.
 //
 // While the splice is pending, step one tick per frame from the pre-gate lead
 // on, so the gate is stamped on the exact tick and a catch-up batch cannot
@@ -61,6 +58,10 @@ inline uint32_t ContinueSpliceTickLimit(uint32_t pos, uint32_t splice, bool appr
     return pos < splice ? splice - pos : (approved ? 1u : 0u);
 }
 
+// The input_log index to replay at play-index pos, or
+// GATE_ALIGN_INVALID_SOURCE when there is none. Unaligned: pos itself. Before
+// the live gate: the recording's own input, then its gate mask from the
+// pre-gate lead on. After it: the same distance past the recording's gate.
 inline uint32_t GateAlignedInputSource(uint32_t pos, uint32_t live_gate,
                                        uint32_t rec_gate, uint32_t recorded_count) {
     if (rec_gate == 0 || rec_gate >= recorded_count) {

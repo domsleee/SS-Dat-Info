@@ -63,7 +63,6 @@ static bool ReadStdString(uint32_t obj, char* out, uint32_t cap) {
 }
 
 // Publish rider_character / rider_stance; log on change.
-//
 inline void Refresh(TasSharedState* s) {
     static uint32_t lastCharacter = 0xFFFFFFFFu;
     static uint32_t lastStance = 0xFFFFFFFFu;

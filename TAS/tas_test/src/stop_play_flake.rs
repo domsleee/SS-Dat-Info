@@ -2,15 +2,13 @@
 //! PLAY again, and require the second playback to reproduce a reference
 //! playback captured at the start of the run.
 //!
-//! FE-tremendous carries no rotation/velocity state, so an F5 bucket other
-//! than the original recorder's diverges from its own rec_coords at frame
-//! ~249. That drift is not what this measures: the question is whether STOP
-//! adds non-determinism on top of it, so the judge is "second playback ==
-//! reference playback", not "playback == recording".
+//! The question is whether STOP adds non-determinism, not whether the
+//! recording reproduces, so the judge is "second playback == reference
+//! playback" rather than "playback == recording".
 //!
-//! The test captures one reference play, then repeatedly stops and restarts at
-//! different frames. It rerolls F5 until the reference bucket returns and
-//! compares the replay coordinates bit for bit.
+//! The test captures one reference play, then repeatedly stops at different
+//! frames and plays again, retrying the restart until the leading frames match
+//! the reference, and compares the replay coordinates bit for bit.
 
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,7 +19,7 @@ const VERIFY_FRAMES: u32 = 1000;
 /// Stop points spread across the recording; the count is the iteration count.
 const STOP_AT_FRAMES: [u32; 10] = [1200, 800, 2000, 1500, 2400, 1800, 1100, 2200, 900, 1700];
 const RECORDING: &str = "FE-tremendous.tasrec";
-/// F5 rerolls allowed for the second PLAY to land the reference bucket.
+/// Restarts allowed for the second PLAY to match the reference's leading frames.
 const REF_MATCH_RETRIES: u32 = 30;
 /// Leading frames the retry loop checks against the reference; covers the
 /// stationary phase plus enough motion for a rotation mismatch to surface.
@@ -44,8 +42,7 @@ struct CycleResult {
     first_div_frame: Option<usize>,
 }
 
-/// tas_ui's PLAY button flow: in-process restart, then ARM_PLAY, whatever F5
-/// bucket the game lands on.
+/// tas_ui's PLAY button flow: in-process restart, then ARM_PLAY.
 fn restart_then_play(client: &mut tas_shared::TasSharedMemoryClient) -> bool {
     if !harness::restart_and_stabilize_inprocess(client) {
         return false;
@@ -61,7 +58,7 @@ fn first_bit_divergence(play: &[[f32; 3]], reference: &[[f32; 3]]) -> Option<usi
         .position(|(p, r)| p.iter().zip(r).any(|(a, b)| a.to_bits() != b.to_bits()))
 }
 
-/// Restart + ARM_PLAY, rerolling F5 until the first RETRY_VERIFY_FRAMES frames
+/// Restart + ARM_PLAY, retrying until the first RETRY_VERIFY_FRAMES frames
 /// match the reference bit-for-bit.
 fn restart_play_match_reference(
     client: &mut tas_shared::TasSharedMemoryClient,

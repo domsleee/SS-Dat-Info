@@ -17,8 +17,8 @@ pub struct Settings {
     pub playback_speed: f32,
     pub cont_catchup_speed: f32,
 
-    /// Max UNPINNED undo-history entries kept (the v2 store soft cap). Pinned
-    /// entries and the current entry are always kept.
+    /// Soft cap on UNPINNED undo-history entries. Pinned entries and the
+    /// current entry are always kept.
     pub history_cap: usize,
 }
 

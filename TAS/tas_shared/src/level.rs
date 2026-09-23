@@ -27,11 +27,9 @@ pub fn code_from_recording_name(path: &str) -> Option<&'static str> {
 
 /// Pre-flight check: can `recording_path` be replayed on the live track?
 ///
-/// Replaying a recording on the wrong track is not a subtle failure — the
-/// spawn is somewhere else entirely, so the harness's start-position matcher
-/// can never hit its target and simply burns its whole retry budget (~22s
-/// per attempt) before giving up. Catching it up front turns a ~10 minute
-/// mystery timeout into an immediate, accurate error.
+/// On the wrong track the spawn is somewhere else entirely, so the replay can
+/// never match and would burn the whole retry budget before timing out.
+/// Checking up front turns that into an immediate, accurate error.
 ///
 /// Returns `Err(message)` only when the live level is KNOWN and different.
 /// An unknown live level (menu, mid-teardown, scan not yet run) cannot prove

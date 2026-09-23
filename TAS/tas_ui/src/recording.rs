@@ -6,13 +6,10 @@ use std::time::{Duration, Instant};
 use tas_shared::{TasSharedState, TAS_MAX_TICKS};
 
 const TAS_TICKS_PER_SECOND: u32 = 100;
-// Crash-recovery checkpoint cadence while recording. Each checkpoint is a FULL
-// rewrite of the recording so far (~13 bytes/tick), so a fixed interval makes
-// total write volume ~quadratic in length. We instead save LESS often as the
-// run grows — a phase table that trades a little more max-loss-on-crash for
-// much less churn, hard-capped so a crash never loses more than the late
-// interval. (250ms/4x-sec was the original wild value; real tools autosave on
-// the order of seconds-to-minutes.)
+// Crash-recovery checkpoint cadence while recording. Each checkpoint rewrites
+// the whole recording (~13 bytes/tick), so a fixed interval makes total write
+// volume quadratic in length. The interval therefore grows with the run,
+// capped so a crash never loses more than the late interval.
 //
 // Phase     tick range        interval   max crash loss
 // early     0..12_000  (<2m)  1.5s       1.5s
@@ -123,24 +120,16 @@ pub struct RecoverySessionContext {
     pub start_tick: u32,
     pub end_tick: u32,
     pub label: String,
-    /// The track this recording was made on, captured while RECORDING.
+    /// The track this recording was made on, captured while recording.
     ///
-    /// A recovered checkpoint is pushed into history during app startup, before
-    /// anything has read the live level — so it was always stamped untagged, and
-    /// untagged entries show on EVERY track. Since recovered entries are also
-    /// pinned, the visible result was "my favourites from Forest Easy are
-    /// showing while I'm on Forest Medium", which is the exact bug report this
-    /// whole line of work started from. The level is known when the checkpoint
-    /// is written, so it is carried here rather than re-derived later.
-    ///
-    /// `serde(default)` so checkpoints written before this field still load.
+    /// A recovered checkpoint is pushed into history at startup, before the
+    /// live level is known, and an untagged entry would show on every track.
+    /// The level is known when the checkpoint is written, so it is carried here.
     #[serde(default)]
     pub level: Option<String>,
-    /// Physics and rider stamps captured while RECORDING (v43 fix): the
-    /// checkpoint writer rebuilds a zeroed shared state, so without these the
-    /// recovered .tasrec and history entry carried no renderer / precision /
-    /// rider stamp and mismatch detection was silently off for them. All
-    /// `serde(default)` so older checkpoints still load.
+    /// Physics and rider stamps captured while recording. The checkpoint
+    /// writer rebuilds a zeroed shared state, so without these the recovered
+    /// take would carry no stamps and mismatch detection would be off for it.
     #[serde(default)]
     pub fpu_control_word: Option<u32>,
     #[serde(default)]
@@ -671,10 +660,9 @@ impl RecordingFile {
             state.input_log[i] = 0;
         }
 
-        // Zero the FULL coord buffer first — loading a legacy/minimal .tasrec
-        // with no coord block used to silently leave the previous recording's
-        // coords in shared memory, which then corrupted CONT start-matching,
-        // drift analysis, and any re-save of the loaded file.
+        // Zero the full coord buffer first: a legacy .tasrec with no coord
+        // block must not inherit the previous recording's coords, which CONT,
+        // drift analysis and re-saves all read.
         for i in 0..TAS_MAX_TICKS {
             state.rec_coords[i] = [0.0, 0.0, 0.0];
         }
@@ -769,9 +757,8 @@ pub enum HistoryEntryKind {
 
 /// Where an entry's recording lives. Entries loaded from the v2 store start
 /// `OnDisk`: the panel only needs the metadata, and a restore reads the blob
-/// then. Keeping every snapshot resident cost a fixed 852 KB per entry (533
-/// entries = 454 MB at startup, measured 2026-09-02) and made every persist
-/// clone all of it on the UI thread.
+/// then. A resident snapshot costs a fixed 852 KB (fixed-size buffers), so
+/// keeping every entry resident would cost hundreds of MB.
 pub(crate) enum SnapshotSlot {
     /// Marker entry (save/load landmark): nothing to restore.
     Marker,
@@ -1151,16 +1138,13 @@ impl RecordingHistory {
     /// We are in a level context whose track has not been identified yet.
     ///
     /// Driven by the DLL's `level_epoch` / `level_scan_epoch` pair: the engine's
-    /// root object survives an F5 restart but is reallocated on quit-to-menu /
-    /// menu-demo / track switch, so a root change is the only trustworthy "the
-    /// level was swapped" event. Until a scan identifies the NEW track we must
-    /// not keep asserting the old one — that filtered the panel to the wrong
-    /// track and stamped entries pushed mid-load with it.
+    /// root object survives an F5 restart but is reallocated on quit-to-menu,
+    /// menu demo or track switch, so a root change is the only trustworthy
+    /// "level swapped" event. Until a scan identifies the new track the old one
+    /// must not be asserted: a wrong tag is worse than no tag, because an
+    /// untagged entry is visibly untagged and a mis-stamped one is not.
     ///
-    /// A wrong tag is worse than no tag: an untagged entry is visibly untagged,
-    /// a confidently mis-stamped one is indistinguishable from a correct one.
-    ///
-    /// Idempotent — called every frame while unresolved.
+    /// Idempotent; called every frame while unresolved.
     pub fn enter_resolving(&mut self) {
         self.live_level = None;
         self.level_resolving = true;
@@ -1375,28 +1359,23 @@ impl RecordingHistory {
     /// Whether entry `i` belongs to the track we are currently on — the SAME
     /// rule the history panel filters by (matching level, or untagged).
     ///
-    /// undo/redo must honour it: they walk snapshots directly, so without this
-    /// Ctrl+Z on Forest Medium happily restores a Forest Easy recording over the
-    /// live buffer. That is the per-level guarantee failing in the one path that
-    /// bypasses the list the user can actually see.
+    /// Undo, redo and restore all check it, because they index entries
+    /// directly and must not restore another track's recording over the
+    /// live buffer.
     pub fn entry_on_current_level(&self, i: usize) -> bool {
         if i >= self.entries.len() {
             return false;
         }
-        // While RESOLVING we do not know what track we are on, so nothing
-        // qualifies. Treating "no live level" as allow-all made the transition
-        // window show AND restore every track — strictly worse than the bug this
-        // began as, and hoisting the sync earlier only widened it.
+        // While resolving the track is unknown, so nothing qualifies.
         if self.level_resolving {
             return false;
         }
         match (self.live_level.as_deref(), self.entries[i].level.as_deref()) {
             (Some(want), Some(have)) => want == have,
-            // Untagged: entries from before per-level tagging, and entries made
-            // while the track was unknown. Deliberately allowed everywhere —
-            // they carry no claim about where they belong, and hiding them would
-            // strand the user's existing history. The guarantee is therefore
-            // "no recording TAGGED with another track", not "nothing unknown".
+            // Untagged entries (made before tagging, or while the track was
+            // unknown) are allowed everywhere: hiding them would strand the
+            // user's history. The guarantee is "nothing tagged with another
+            // track", not "nothing unknown".
             _ => true,
         }
     }
@@ -1430,12 +1409,8 @@ impl RecordingHistory {
         if index >= self.entries.len() {
             return None;
         }
-        // The same rule undo/redo and the row filter use. It was missing HERE —
-        // in the one path the user actually clicks. The panel hides other-track
-        // rows, so in practice a wrong row was hard to reach, but the index
-        // arrives from the UI and was trusted without checking, which made the
-        // whole per-level guarantee rest on a display filter. It does not any
-        // more.
+        // The index comes from the UI, so enforce the per-level rule here
+        // rather than relying on the panel's row filter.
         if !self.entry_on_current_level(index) {
             return None;
         }
@@ -1503,10 +1478,9 @@ impl RecordingHistory {
 
     /// Tag an entry with the track it belongs to.
     ///
-    /// For recovered checkpoints, which carry their level from when they were
-    /// RECORDED — at restore time (app startup) the live level is not known yet.
-    /// A `None` level leaves the entry untagged, i.e. visible everywhere, which
-    /// is the honest state when the checkpoint predates level stamping.
+    /// Used for recovered checkpoints, which carry the level they were
+    /// recorded on; the live level is unknown at startup. `None` leaves the
+    /// entry untagged, i.e. visible on every track.
     pub fn set_level(&mut self, entry_id: u64, level: Option<String>) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
@@ -1716,15 +1690,10 @@ impl RecordingHistory {
         &self.entries
     }
 
-    /// Soft cap: `capacity` bounds the number of UNPINNED entries. Pinned
-    /// entries are never evicted, and the current entry is never evicted.
-    /// Evicts the oldest unpinned, non-current entry until the unpinned count
-    /// fits (so the effective total can exceed `capacity` if there are many
-    /// pins — pins win).
+    /// Evict to the cap (see `evict_to_cap`), then select the newest
+    /// restorable entry if nothing is selected.
     fn enforce_capacity(&mut self) {
         self.evict_to_cap();
-        // After eviction (e.g. from a push), make sure something restorable is
-        // selected if nothing is.
         if self.current_index.is_none() {
             self.current_index = self
                 .entries
@@ -1907,17 +1876,10 @@ fn load_dir_for_level(level: Option<&str>) -> PathBuf {
     recordings_dir()
 }
 
-/// Default save name. The `<level>-<time>` convention (e.g. `FE-5876`) needs the
-/// level id + finish time from the game (pending the game-awareness RE); until
-/// then we default to a timestamp so saves still land somewhere sensible.
-/// `level` is the track this RECORDING belongs to, supplied by the caller.
-///
-/// Deliberately not read live here. A recording belongs to the track it was
-/// recorded on, not to whatever the game happens to be showing when the user
-/// gets around to clicking Save — and by then the engine may well be sitting in
-/// its post-run dialog, where the cycle is frozen and the level reads UNKNOWN.
-/// Reading live would strand exactly the recording the user just finished as
-/// untagged. `None` still degrades safely to a time-only name.
+/// Show the Save dialog and write the recording. `level` is the track the
+/// recording was made on, supplied by the caller rather than read live: by
+/// the time the user clicks Save the game may be in its post-run dialog,
+/// where the level reads unknown.
 pub fn save_dialog_with_segments(
     state: &TasSharedState,
     segments: &[Segment],
@@ -1925,10 +1887,9 @@ pub fn save_dialog_with_segments(
     level: Option<&str>,
     identity: Option<&IdentityStamps>,
 ) -> Option<PathBuf> {
-    // Default name: `<level>-<time>` (e.g. FE-5876). Mis-tagging is permanent —
-    // the level filter keys off the saved name and folder — so an unknown level
-    // degrades to a time-only name in the root folder, which is recoverable.
-    // Time is the in-race duration (gate→end) in cs.
+    // Default name: `<level>-<race cs>` (e.g. FE-5876). The level filter keys
+    // off the saved name and folder, so an unknown level falls back to a
+    // time-only name in the root folder rather than guessing.
     let race_cs = crate::level::race_centiseconds(&state.rec_coords, state.recorded_count);
     let default_name = crate::level::default_recording_name(level, race_cs);
     if let Some(path) = rfd::FileDialog::new()
@@ -1952,10 +1913,8 @@ pub fn save_dialog_with_segments(
 }
 
 /// Show the Load file dialog and return the chosen path WITHOUT loading it.
-/// Split from the load so the caller can STOP an active recording between the
-/// (cancellable) pick and the buffer-overwriting load — picking then loading
-/// in one call would force a stop-before-dialog that a cancel would waste.
-/// `level_id` selects the starting folder. None = the user cancelled.
+/// Split from the load so the caller can stop an active recording after the
+/// user commits to a file, not before a dialog they might cancel. `level_id` selects the starting folder. None = the user cancelled.
 pub fn pick_recording_path(level_id: u32) -> Option<PathBuf> {
     let level = crate::level::level_code_from_id(level_id);
     rfd::FileDialog::new()
@@ -2469,7 +2428,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// #7: a `recorded_count` beyond the fixed buffer size (corrupt shared
+    /// A `recorded_count` beyond the fixed buffer size (corrupt shared
     /// memory / a misbehaving DLL) must clamp, not panic-slice the hot path.
     #[test]
     fn from_state_clamps_overlong_recorded_count() {
@@ -2507,7 +2466,7 @@ mod tests {
         assert!(test.effective_debounce(60_000).is_zero());
     }
 
-    /// #2: `adopt_id_floor` raises the allocator (never lowers it), so an empty
+    /// `adopt_id_floor` raises the allocator (never lowers it), so an empty
     /// load that nonetheless has a high stored next-id can't reissue old ids.
     #[test]
     fn adopt_id_floor_only_raises() {
@@ -2518,7 +2477,7 @@ mod tests {
         assert_eq!(h.next_entry_id(), 50, "floor never lowers the allocator");
     }
 
-    /// #3: the serialized recovery writer's `flush()` is a real drain barrier —
+    /// The serialized recovery writer's `flush()` is a real drain barrier:
     /// after it returns the checkpoint is on disk, so a following `clear_pending`
     /// can't race an in-flight write that would resurrect the files.
     #[test]
@@ -2958,8 +2917,8 @@ mod tests {
 
     #[test]
     fn geometry_race_time_runs_from_the_start_line_not_first_movement() {
-        // Forest Easy coast, 2026-09-02: first moved at 288, crossed the start
-        // line at ~789, finish watch fired at 23846; the game said 3:50.57.
+        // Measured Forest Easy run: first moved at 288, crossed the start line
+        // at ~789, finish watch fired at 23846; the game said 3:50.57.
         assert_eq!(geometry_race_time_cs(23_846, Some(789), Some(288)), 23_057);
         // No start line known for the track: first movement is the best guess.
         assert_eq!(geometry_race_time_cs(23_846, None, Some(288)), 23_558);
@@ -3178,7 +3137,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    // ===== History E2E tests (SSB-283) =====
+    // ===== History end-to-end tests =====
 
     /// Helper: create state with N recorded ticks and distinct input per tick.
     fn state_with_ticks(n: u32) -> Box<TasSharedState> {
@@ -3225,26 +3184,17 @@ mod tests {
         assert_eq!(h.revision(), rev);
     }
 
-    /// The bug the user hit: quit FE, start LOADING Forest Medium, and the
-    /// panel still says FE — so it filters to FE and, worse, stamps anything
-    /// pushed during the load with FE too.
-    ///
-    /// The transition is: known(FE) -> unknown (menu + level load + up to ~1.5s
-    /// for the DLL heap scan to publish) -> known(FM). Stickiness carries "FE"
-    /// through that whole middle window, and nothing distinguishes "we are
-    /// confidently on FE" from "we have no idea yet".
-    ///
-    /// A wrong tag is worse than no tag: an untagged entry can be spotted and
-    /// fixed later, a confidently mis-stamped one cannot.
+    /// Quitting FE and loading Forest Medium goes known(FE) -> unknown -> known(FM).
+    /// During the unknown window the old level must not be asserted, or the
+    /// panel filters to FE and entries pushed mid-load are stamped FE.
     #[test]
     fn level_change_does_not_carry_the_old_level_into_the_new_one() {
         let mut h = RecordingHistory::new(8);
         h.set_live_level(Some("FE"));
         assert_eq!(h.live_level(), Some("FE"));
 
-        // Player quits to the menu and starts loading Forest Medium. The DLL
-        // publishes 0xFFFFFFFF throughout: menu, teardown, load, and the first
-        // ~1.5s of the new track before the scan resolves.
+        // Player quits to the menu and starts loading Forest Medium; the DLL
+        // reports an unknown level until the new track is identified.
         h.enter_resolving();
 
         assert_ne!(
@@ -3276,13 +3226,9 @@ mod tests {
         assert!(!h.level_is_resolving());
     }
 
-    /// Clicking a history row must not reach across tracks either.
-    ///
-    /// undo/redo were guarded and the panel filters its rows, so `restore_index`
-    /// looked safe — but it took an index straight from the UI and trusted it,
-    /// which left the whole per-level guarantee resting on a DISPLAY filter. A
-    /// row that is stale by one frame, or any future caller that indexes the
-    /// unfiltered list, walks straight through.
+    /// Clicking a history row must not reach across tracks. `restore_index`
+    /// takes an index from the UI, so it enforces the per-level rule itself
+    /// rather than relying on the panel's row filter.
     #[test]
     fn restore_index_does_not_cross_levels() {
         let mut h = RecordingHistory::new(8);
@@ -3310,8 +3256,7 @@ mod tests {
         // The FM entry restores fine.
         assert!(h.restore_index(1).is_some());
 
-        // While RESOLVING nothing qualifies — we do not know where we are, and
-        // guessing is what caused the original bug.
+        // While resolving nothing qualifies: the track is unknown.
         h.enter_resolving();
         assert!(
             h.restore_index(1).is_none(),
@@ -3319,24 +3264,15 @@ mod tests {
         );
     }
 
-    /// A RECOVERED recording must not haunt every other track.
-    ///
-    /// This is the reported bug, traced to its actual cause. Recovered
-    /// checkpoints are pushed into history during app STARTUP, before anything
-    /// has read the live level, so `push_*` stamped them untagged — and
-    /// untagged means visible on every track. Recovery also pins them, and
-    /// pinned entries float to the top of their day. So the user's Forest Easy
-    /// favourites sat at the top of the list while they were on Forest Medium.
-    ///
-    /// In the real history this was 16 of the 20 untagged entries — every one
-    /// of them pinned. The fix carries the level in the checkpoint, from when it
-    /// was recorded; this pins the behaviour that fix must produce.
+    /// A recovered recording must not show on every track. Recovered
+    /// checkpoints are pushed at startup, before the live level is known, so
+    /// the level comes from the checkpoint instead; pinning must not exempt
+    /// the entry from the per-level filter.
     #[test]
     fn a_recovered_entry_is_tagged_and_does_not_leak_across_tracks() {
         let mut h = RecordingHistory::new(8);
 
-        // Startup: nothing knows the level yet. This is the real ordering — the
-        // recovery push happens in the constructor, before any level sync.
+        // Startup ordering: the recovery push happens before any level sync.
         h.set_live_level(None);
         let mut snap = RecordingSnapshot::new_empty();
         snap.recorded_count = 10;
@@ -3384,13 +3320,8 @@ mod tests {
         assert!(h.entry_on_current_level(idx));
     }
 
-    /// Untagged entries stay restorable everywhere, deliberately.
-    ///
-    /// They predate per-level tagging (or were made while the track was
-    /// unknown), so they carry no claim about where they belong; hiding them
-    /// would strand the user's existing history. The guarantee is "no recording
-    /// TAGGED with another track", not "nothing unknown" — worth pinning down so
-    /// the looseness is a decision rather than an oversight.
+    /// Untagged entries stay restorable on every track, deliberately (see
+    /// `entry_on_current_level`), except while the track is resolving.
     #[test]
     fn untagged_entries_remain_restorable() {
         let mut h = RecordingHistory::new(8);
@@ -3413,10 +3344,8 @@ mod tests {
         assert!(h.restore_index(0).is_none());
     }
 
-    /// Ctrl+Z must not reach across tracks. undo/redo walk snapshots directly
-    /// rather than the filtered list the user sees, so without an explicit check
-    /// they restore another level's recording over the live buffer — the
-    /// per-level guarantee failing in the one path that bypasses the panel.
+    /// Ctrl+Z must not reach across tracks: undo/redo walk the unfiltered
+    /// entry list, not the rows the panel shows.
     #[test]
     fn undo_does_not_cross_levels() {
         let mut h = RecordingHistory::new(8);
@@ -3461,7 +3390,7 @@ mod tests {
         assert_eq!(h.live_level(), Some("AM"));
     }
 
-    // ===== Phase 2a: entry_id, pin, soft cap, store bridge =====
+    // ===== entry_id, pin, soft cap, store bridge =====
 
     #[test]
     fn entry_ids_unique_and_monotonic() {
@@ -3778,7 +3707,7 @@ mod tests {
         assert_eq!(meta.physics_label().as_deref(), Some("OpenGL/53-bit"));
         // The saved header recovers the same stamps: load → save is exact.
         assert_eq!(IdentityStamps::from_metadata(&meta), identity);
-        // Without an override the live words are stamped (unchanged behavior).
+        // Without an override the live words are stamped.
         let live_path = unique_temp_path("rec_identity_live", "tasrec");
         RecordingFile::save_with_segments(&live, &live_path, &[], None).unwrap();
         let live_meta = RecordingFile::read_metadata(&live_path).unwrap();
@@ -3862,9 +3791,8 @@ mod tests {
             "all three checkpoint stamps survive recovery"
         );
 
-        // DURABILITY: the recovered entry must round-trip through the v2 store —
-        // recovery is pointless if it only lives in memory. (Startup persists +
-        // flushes before clearing the checkpoint; prove the persisted form here.)
+        // The recovered entry must round-trip through the v2 store: startup
+        // persists and flushes it before clearing the checkpoint.
         let v2dir = std::env::temp_dir().join(format!(
             "ssb_recov_v2_{}_{}",
             std::process::id(),
@@ -4141,7 +4069,7 @@ mod tests {
         assert_eq!(format_recording_duration(359999), "59:59.99");
         // 360000 ticks = 1:00:00.00
         assert_eq!(format_recording_duration(360000), "1:00:00.00");
-        // Large value: 65536 ticks (the original bug case)
+        // 65536 ticks: past the 16-bit range
         assert_eq!(format_recording_duration(65536), "10:55.36");
     }
 

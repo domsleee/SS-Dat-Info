@@ -27,8 +27,7 @@ const STEER_START: usize = 360;
 /// ... to this tick. ~200 ticks (2s) of sustained turn.
 const STEER_END: usize = 560;
 const TOTAL: u32 = 580;
-/// A real sustained RIGHT swings the lateral (X) axis ~10 units (live runs:
-/// 9.7, 10.4).
+/// A real sustained RIGHT swings the lateral (X) axis ~10 units.
 const TURN_MIN: f64 = 6.0;
 /// A discarded injection leaves the boarder on its natural line — NOT zero
 /// lateral swing (terrain drifts it ~2.3 on Forest Easy), so the "discarded"

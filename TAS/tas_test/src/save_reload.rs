@@ -21,9 +21,9 @@ use crate::harness;
 use crate::patterns;
 use crate::replay;
 
-/// Long enough that the 1000-frame trajectory match covers real post-input
-/// motion: pattern + tail is ~1200 ticks, so the match window closes with the
-/// recording still running.
+/// Long enough that the watcher's 1024-frame bit-exact window covers real
+/// post-input motion: pattern + tail is ~1200 ticks, so the window closes with
+/// the recording still running.
 const PATTERN: &str = "LR";
 const HOLD_TICKS: u32 = 500;
 const TAIL_NEUTRAL_TICKS: u32 = 200;

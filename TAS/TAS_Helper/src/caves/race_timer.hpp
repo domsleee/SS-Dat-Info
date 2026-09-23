@@ -11,8 +11,8 @@
 // Race timer — reads the EXACT on-screen player race time, map-agnostically.
 //
 // start_ts is not a plain stored value (the displayed time is computed each
-// frame as clock - start_ts and formatted). So instead of hunting it, we read
-// the authoritative value the game already produced: the HUD time string.
+// frame as clock - start_ts and formatted), so we read the value the game
+// already produced: the HUD time string.
 //
 // HUD times render through SR_UIT.dll (HMG UI-text, exported symbols):
 //   Housemarque::SR_UIT::Sr_Plane_Text_Line::Append_Text   (SR_UIT + 0xED40)
@@ -27,7 +27,7 @@
 // be cleared on that flag).
 // We publish:
 //   race_time_cs  = exact on-screen race time, centiseconds (u32::MAX = idle)
-//   race_start_ts = 16-bit gate-cross clock value (F5 spawn-lottery metric)
+//   race_start_ts = 16-bit game clock value at the gate cross
 //   clock         = SG + 0x1D5334 (16-bit centiseconds, wraps at 65536)
 //
 // DIAGNOSTICS: set the env var TAS_RACE_DIAG=1 before launch to log every

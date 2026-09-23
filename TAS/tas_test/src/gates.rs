@@ -146,8 +146,8 @@ pub fn run_gates(state: &TasSharedState, rec_count: u32) -> GateAssessment {
     }
 }
 
-/// Run the same gates for gate-aligned PLAY. The countdown is intentionally
-/// allowed to end at a different arm-relative index, so PLAY movement and drift
+/// Run the same gates for gate-aligned PLAY. The countdown may end at a
+/// different arm-relative index, so PLAY movement and drift
 /// are evaluated at equal offsets from each side's observed gate.
 pub fn run_gates_aligned(
     state: &TasSharedState,

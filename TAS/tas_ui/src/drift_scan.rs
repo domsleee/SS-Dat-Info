@@ -7,11 +7,10 @@ use tas_shared::{TasMode, TasSharedState};
 ///
 /// Gate-aligned replays are correct when `play[live_gate+k] == rec[rec_gate+k]`,
 /// so the bases come from the DLL's gate fields while both are set and stay
-/// latched afterwards: the DLL clears both the moment playback completes, and
-/// re-scanning raw indices at that point reported the alignment shift itself as
-/// drift at the end of every bit-exact replay whose gate landed elsewhere
-/// (Time Attack ghosts move it ~11 ticks). A new `arm_generation` drops the
-/// latch; nothing else does.
+/// latched afterwards. The DLL clears both the moment playback completes;
+/// falling back to raw indices then would report the gate offset itself as
+/// drift (Time Attack ghosts move the gate ~11 ticks). A new `arm_generation`
+/// drops the latch; nothing else does.
 #[derive(Default)]
 pub struct DriftWindow {
     bases: Option<(usize, usize)>,
@@ -73,7 +72,7 @@ impl DriftWindow {
 
 /// Running maxima and the splice verdict of the current PLAY / CONT.
 ///
-/// `max_dx` / `max_dz` are the historical diagnostic: the largest difference
+/// `max_dx` / `max_dz` are a diagnostic only: the largest difference
 /// seen anywhere in the prefix, kept latched even after a transient heals.
 /// The banner must never verdict on those for a CONT; it uses the splice-tick
 /// drift, which is zero / `None` until playback has covered the splice.

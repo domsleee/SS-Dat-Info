@@ -46,14 +46,9 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
     if (s && !IsTasInjectionThread() && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
         g_bb3b10Arg4 = a3;
     }
-    // ESC passthrough: cave1c's REC/PLAY block exists to keep GAMEPLAY input
-    // symmetric between REC and PLAY (cave2 owns the DI buffer + BB3B10).
-    // ESC is not a gameplay key — the boarder never reads it — but blocking
-    // it made the pause menu unreachable during REC ("Escape key does not
-    // work with record"). Let the real handler process it; a1 is the Win32 VK
-    // (the dispatcher forwards wParam — see the Translate RE).
-    //
-    // Gate the real key event (policy in input_gate.hpp — unit-tested).
+    // Gate the real key event (policy in input_gate.hpp, unit-tested). ESC
+    // always passes: it is not a gameplay key, and the pause menu needs it
+    // during REC. a1 is the Win32 VK (the dispatcher forwards wParam).
     if (s && ShouldBlockRealInput({
             s->mode,
             s->cont_suppress_input != 0,
@@ -73,9 +68,8 @@ void __fastcall Cave1C_UpDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, 
     if (s && !IsTasInjectionThread() && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
         g_bb3b10Arg4 = a3;
     }
-    // Keep down/up symmetric (see DownDetour) — same gate policy. A key
-    // RELEASED during a CONT must be blocked too, else a press blocked on the
-    // way down but released after the flag clears lands an unbalanced up event.
+    // Same gate policy as DownDetour. A release during a CONT is blocked too,
+    // or a press blocked on the way down would land an unbalanced up event.
     if (s && ShouldBlockRealInput({
             s->mode,
             s->cont_suppress_input != 0,

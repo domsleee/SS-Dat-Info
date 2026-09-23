@@ -30,32 +30,23 @@ inline HANDLE g_thread = nullptr;
 
 // LEVEL CONTEXT = the engine's own level-path string.
 //
-// `[SG+0x1D3304]` points at the CURRENT level's resource path (verified on four
-// tracks). The string changes the instant a level loads, so a change IS the
-// level-change event — direct, immediate, and requiring no inference. (The
-// root pointer [SG+0x1D5450] does NOT change on a track switch, and the
-// level's files are not opened through CreateFile after injection, so neither
-// of those can serve as the event.)
+// `[SG+0x1D3304]` points at the CURRENT level's resource path. The string
+// changes the instant a level loads, so a change IS the level-change event.
+// (The root pointer [SG+0x1D5450] does not change on a track switch.)
 //
-// The path is RELIABLE FOR AREA but NOT FOR DIFFICULTY — some tracks share the
-// easy/ shadow asset, so Village Hard reads ".../Tracks/easy/...". So:
-//   the PATH gives the change event and an area cross-check (areaFromPath),
-//   the game-setup object gives the AUTHORITATIVE area + difficulty.
-// If the two areas disagree we are mid-switch, so nothing is published.
+// The path is reliable for AREA but not for DIFFICULTY: some tracks share the
+// easy/ asset, so Village Hard reads ".../Tracks/easy/...". So the path gives
+// the change event and the area; the game-setup object gives the difficulty.
 //
-// KNOWN LIMIT: because some tracks share a path, switching BETWEEN two such
-// tracks (e.g. Village Easy <-> Village Hard, both ".../village/Tracks/easy/")
-// produces NO string change and therefore no change event. The periodic rescan
-// still corrects level_id within a cadence, but no "resolving" state is entered
-// for that transition. Detecting it needs a per-track signal the path cannot
-// give.
+// Known limit: switching between two tracks that share a path (Village Easy <->
+// Village Hard) changes no string. The engine-cycle freeze of the switch
+// still unresolves and rescans (see below).
 inline uint32_t g_levelPathPtrAddr = 0;
 inline uint32_t (*g_readPtr)(uint32_t) = nullptr;
 
-// frame_count at the last context change. Supreme::Cycle is FROZEN for the whole
-// level load, so the cycle ticking again is proof the load FINISHED — and
-// identifying only after that removes the mid-load window in which the OLD
-// level's state is still what a read would return.
+// frame_count at the last context change. Supreme::Cycle is frozen for the
+// whole level load, so a tick after this proves the load finished; reads
+// before it can still return the old level's state.
 inline uint32_t g_frameAtEpochBump = 0;
 inline bool g_awaitingCycleTick = false;
 
@@ -65,30 +56,20 @@ inline char g_lastPath[TAS_LEVEL_PATH_MAX] = { 0 };
 // strings in the heap are residue from the one we left.
 inline bool g_noLevelPath = true;
 
-// ENGINE-CYCLE HEARTBEAT (cave2's g_lastCycleMs, passed in by main.cc so this
-// header stays free of the cave/safetyhook includes).
+// ENGINE-CYCLE HEARTBEAT (cave2's g_lastCycleMs, passed in by main.cc).
 //
-// This is the signal the whole design was missing, and it took a live probe at
-// the menu to see it. Returning to the menu does NOT tear the level down:
-// measured at the Arcade menu after quitting Village Easy, the level-path
-// pointer still read ".../village/Tracks/easy/...", the engine root was still
-// non-NULL, and the game's own "in a level" flag still read 1. Nothing we were
-// watching changed, so the UI went on confidently asserting the track the player
-// had already left — which is the bug this whole line of work started from.
+// Returning to the menu does NOT tear the level down: the level path, the
+// engine root and the game's "in a level" flag all still describe the track
+// just left. What does change is that Supreme::Cycle stops at static menus,
+// the pause menu and for a whole level load. So a frozen cycle means "no
+// level is running", and the identification must not be trusted then.
 //
-// What DOES change is that Supreme::Cycle STOPS at static menus, at the pause
-// menu, and for the whole of a level load. So a frozen cycle means "the engine
-// is not running a level right now", and that is exactly when our identification
-// must not be trusted: the heap still holds the old track's strings, so even a
-// rescan would confirm the wrong answer.
-//
-// 400ms matches tas_ui's "In Game" chip, which asks the same question of the
-// same heartbeat. Active gameplay ticks every ~7ms, so the margin is enormous.
+// 400 ms matches tas_ui's "In Game" chip, which reads the same heartbeat.
+// Active gameplay ticks every ~7 ms.
 inline volatile uint32_t* g_cycleMs = nullptr;
 static const uint32_t CYCLE_FROZEN_MS = 400;
 
-// Is the engine cycle stopped? False when no heartbeat was wired, so a build
-// that does not pass one behaves exactly as before rather than seizing up.
+// Is the engine cycle stopped? False when no heartbeat was wired.
 static bool cycleFrozen() {
     if (!g_cycleMs) return false;
     return (GetTickCount() - *g_cycleMs) > CYCLE_FROZEN_MS;
@@ -137,18 +118,15 @@ static bool readLevelPath(char* out, size_t cap) {
     return true;
 }
 
-// Parsing lives in level_path_parse.hpp so it can be unit-tested WITHOUT the
-// game (tests/test_level_path.cpp, run by `just test_dll`). Aliased here so the
-// shipped code and the tested code are the same code.
+// Parsing lives in level_path_parse.hpp so it can be unit-tested without the
+// game (tests/test_level_path.cpp).
 static int areaFromPath(const char* path) { return levelpath::AreaFrom(path); }
 
 // Seqlock writer. Marks the group as being mutated, applies `fn`, then commits.
 //
-// InterlockedIncrement rather than `++` so the sequence transitions are real
-// atomic release/acquire points and cannot be reordered around the payload by
-// either the compiler or the store buffer — which a plain store plus one
-// MemoryBarrier did not guarantee for a 128-byte array read from another
-// process.
+// InterlockedIncrement rather than `++` so the sequence transitions are full
+// barriers that neither the compiler nor the CPU can reorder around the
+// payload.
 // MUST NOT NEST: an inner pair would drive the sequence back to EVEN halfway
 // through the outer write, publishing a torn group as if it were stable. Hence
 // the *Locked helpers below rather than self-synchronising mutators.
@@ -165,19 +143,15 @@ static void publishContext(TasSharedState* s, F&& fn) {
 static void invalidateContextLocked(TasSharedState* s) {
     s->level_path[0] = '\0';
     s->level_path_gen++;
-    // No MemoryBarrier between the path and the epoch any more: the closing
-    // InterlockedIncrement is the release for the whole group, and ordering
-    // WITHIN the group no longer matters because a reader either sees all of it
-    // or rejects the read.
+    // Order within the group does not matter: a reader sees all of it or
+    // rejects the read.
     s->level_epoch++;
 }
 
 static void pollLevelContext(TasSharedState* s) {
     char cur[TAS_LEVEL_PATH_MAX];
     if (!readLevelPath(cur, sizeof(cur))) {
-        // No level path => no level. This MUST invalidate: leaving the old id
-        // resolved through the menu and the load is the original reported bug,
-        // and it is the same hole the root-based version had when root==0.
+        // No level path => no level, so the old id must not stay resolved.
         if (!g_noLevelPath || g_lastPath[0]) {
             g_noLevelPath = true;
             if (g_lastPath[0]) {
@@ -216,10 +190,9 @@ static void pollLevelContext(TasSharedState* s) {
 static const uint32_t STEADY_PERIOD_MS = 60000;
 
 // A cycle frozen this long with cont_suppress_input still set means the flag is
-// STALE: a CONT's reload freeze lasts a second or two, so a judged cycle that
-// never tore down (crashed harness, session end, quit-to-menu mid-cycle) left
-// it behind. Left alone, the input gate swallows every non-ESC key until
-// reinjection.
+// stale: a restart's reload freeze lasts a second or two, so a controller that
+// never cleared it (crash, quit to menu mid-restart) left it behind. Left
+// alone, the input gate swallows every non-ESC key.
 static const uint32_t STALE_SUPPRESS_MS = 5000;
 
 // Area from the path, difficulty from the setup object (see the header).
@@ -245,26 +218,19 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // reflected in the epoch this scan will be stamped with.
         pollLevelContext(s);
         uint32_t epochAtScan = s->level_epoch;
-        // Wait for a cycle tick after a context change before scanning: the
-        // cycle is frozen for the whole load, so a tick proves the load
-        // finished and the new track's resources are resident. Scanning
-        // mid-load reads the old track's strings, which are still dominant.
+        // Wait for a cycle tick after a context change before scanning (see
+        // g_frameAtEpochBump).
         if (g_awaitingCycleTick && s->frame_count != g_frameAtEpochBump) {
             g_awaitingCycleTick = false;
         }
 
         // A frozen cycle means static menu, pause or load: invalidate the
-        // identity and suppress scanning too, because the departed level's
-        // strings are still resident and a scan would "confirm" them. It is the
-        // only signal for a return to the menu (probed live, the path pointer,
-        // the engine root and game_in_game all still describe the track just
-        // left) and for a switch between two tracks that share a path.
+        // identity and do not scan. It is the only signal for a return to the
+        // menu and for a switch between two tracks that share a path.
         bool frozen = cycleFrozen();
         if (frozen) {
-            // STOP must have an out-of-cycle consumer: leaving a level freezes
-            // Supreme::Cycle, so waiting for cave2 to consume the command is a
-            // deadlock. This worker remains alive at menus and applies only
-            // raw/shared cleanup; observer callbacks are deferred to cave2.
+            // Out-of-cycle STOP consumer: cave2 cannot consume a STOP while
+            // the cycle is frozen. Observer callbacks are deferred to cave2.
             TryProcessStopCommand(s, false);
             if (s->cont_suppress_input && (GetTickCount() - *g_cycleMs) > STALE_SUPPRESS_MS) {
                 s->cont_suppress_input = 0;
@@ -276,9 +242,7 @@ static DWORD WINAPI threadProc(LPVOID param) {
                     s->level_scan_epoch = s->level_epoch - 1u;   // -> unresolved
                 });
             }
-            // Require a fresh tick before believing a scan again: the cycle
-            // resuming is what proves a level is actually running (and, after a
-            // load, that it finished).
+            // Require a fresh tick before believing a scan again.
             g_awaitingCycleTick = true;
             g_frameAtEpochBump = s->frame_count;
         }
@@ -310,22 +274,19 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // Skip identical publications so the sequence advances only on a real
         // context change (sole writer, so reading back to compare is safe).
         if (s->level_epoch != epochAtScan) {
-            // The context moved under the scan: whatever we found describes the
-            // level we just left. Discard it and stay unresolved — level_scan_epoch
-            // is deliberately NOT advanced, so resolved stays false until a scan
-            // completes entirely inside one context.
+            // The context moved under the scan, so the result may describe the
+            // level just left. Discard it; level_scan_epoch is not advanced, so
+            // resolved stays false until a scan completes inside one context.
             if (s->level_id != 0xFFFFFFFFu) {
                 publishContext(s, [&] { s->level_id = 0xFFFFFFFFu; });
             }
         } else if (settled && id >= 0) {
             bool alreadyResolved = (s->level_scan_epoch == epochAtScan);
             if (alreadyResolved && s->level_id != (uint32_t)id) {
-                // Same context, contradicting ids: either two tracks sharing
-                // one path (Village Easy/Hard) or a bad scan, indistinguishable
-                // from here, and one of the two must be false. Go unresolved
-                // and let the next scan decide, at the cost of ~200 ms of the
-                // unresolved cadence. epochAtScan == s->level_epoch here, so
-                // stepping it back leaves the pair unequal = unresolved.
+                // Same context, contradicting ids: two tracks sharing one path
+                // or a bad scan. Go unresolved and let the next scan (~200 ms)
+                // decide; stepping level_scan_epoch back leaves the pair
+                // unequal = unresolved.
                 publishContext(s, [&] {
                     s->level_id = 0xFFFFFFFFu;
                     s->level_scan_epoch = epochAtScan - 1u;
@@ -379,30 +340,23 @@ inline void Start(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readP
     g_cycleMs = cycleMs;
     g_lastPath[0] = 0;
     if (!s) return;
-    // Shared memory SURVIVES reinjection, so a previous DLL instance killed
-    // between the two increments leaves the sequence ODD — and every future read
-    // in every process would be rejected forever, permanently "resolving". We
-    // are the sole writer and nothing is in flight here, so this is the one
-    // place that can honestly re-establish an even sequence.
+    // Shared memory survives reinjection, so a previous DLL instance killed
+    // mid-write can leave the sequence ODD, which rejects every read forever.
+    // Nothing is in flight here, so re-establish an even sequence.
     if (InterlockedOr((volatile LONG*)&s->level_ctx_seq, 0) & 1) {
         InterlockedIncrement((volatile LONG*)&s->level_ctx_seq);
     }
     publishContext(s, [&] {
         s->level_id = 0xFFFFFFFFu;
-        // Reinjection can happen while a level is already loaded — so a stale
-        // level_scan_epoch could equal level_epoch and make the cleared level_id
-        // read as a trustworthy "we are at the menu". Force the pair unequal so
-        // this reads as "not identified in this context YET", which is the truth
-        // until the first scan of this DLL instance completes.
+        // Force the pair unequal ("not identified yet"): a stale equal pair
+        // would make the cleared level_id read as a resolved "at the menu".
         s->level_scan_epoch = s->level_epoch - 1u;
     });
     g_thread = CreateThread(nullptr, 0, threadProc, s, 0, nullptr);
     if (!g_thread) {
-        // Leave the epochs UNEQUAL. With no scanner the track is genuinely
-        // unknowable, and unresolved is the honest encoding of that. Restoring
-        // equality here (an earlier attempt) made resolved_level_id() return
-        // Some(0xFFFFFFFF) — "resolved, at the menu" — forever, which is a
-        // confident lie. The caller logs the failure.
+        // Leave the epochs UNEQUAL: with no scanner the track is unknowable,
+        // and an equal pair would read as "resolved, at the menu" forever.
+        // The caller logs the failure.
     }
 }
 

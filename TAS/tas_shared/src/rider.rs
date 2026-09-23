@@ -2,7 +2,7 @@
 //! which stance. Both change the physics, so a replay under a different rider
 //! cannot line up.
 
-/// Selectable riders published in `TasSharedState::rider_character` (v42).
+/// Selectable riders published in `TasSharedState::rider_character`.
 pub const TAS_CHARACTER_UNKNOWN: u32 = 0;
 pub const TAS_CHARACTER_KEITH: u32 = 1;
 pub const TAS_CHARACTER_VINCENT: u32 = 2;
@@ -84,8 +84,8 @@ pub fn rider_mismatch_advice(
     let want = loaded_rider?;
     let have = live_rider?;
     // "Keith · goofy" -> ("Keith", Some("goofy")); "Keith" -> ("Keith", None).
-    // A stamp without a stance (recorded before the setup object was found)
-    // carries no stance claim, so it can only ever disagree on the character.
+    // A stamp without a stance makes no stance claim, so it can only
+    // disagree on the character.
     fn split(label: &str) -> (&str, Option<&str>) {
         let mut parts = label.splitn(2, " · ");
         let character = parts.next().unwrap_or(label);

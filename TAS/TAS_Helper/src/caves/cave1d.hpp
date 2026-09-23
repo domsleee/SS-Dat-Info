@@ -20,7 +20,7 @@
 //
 // Uses SafetyHookInline for clean function interception.
 // BB3B10 is __thiscall with 4 stack args (ret 0010):
-//   ecx = keyboard+0x18, args: keyIndex, pressed, unk(0), 0x588
+//   ecx = keyboard+0x18, args: keyIndex, pressed, Time.lo, Time.hi
 // Detour uses __fastcall with dummy EDX to emulate thiscall.
 
 inline TasSharedState* g_cave1dState = nullptr;
@@ -52,25 +52,21 @@ void __fastcall Cave1D_BB3B10Detour(void* ecx, void* edx, uint32_t keyIndex,
         }
 
         bool gamePaused = (GetTickCount() - g_lastCycleMs) > 250;
-        // CONT block (defense-in-depth) — precedence over pause, ESC exempt.
-        // cave1c already blocks the +3940 handler (the only path real input
-        // reaches BB3B10), so this is a backstop: if any real observer call
-        // slips through during a Continue, drop it so it can't perturb the
-        // spawn. NOT pause-exempt (the F5 reload stalls the cycle).
+        // CONT block, a backstop to cave1c (the +3940 handler is the only
+        // path real input takes to BB3B10): drop any real observer call so it
+        // cannot perturb the spawn. ESC exempt; NOT pause-exempt, because the
+        // F5 reload stalls the cycle.
         if (s->cont_suppress_input && keyIndex != GameAddresses::KEY_ESC) {
             s->bb3b10_block_count++;
             return;
         }
 
-        // Block during REC: Cave 2 will call BB3B10 directly on transitions
+        // Block during REC: Cave 2 calls BB3B10 directly on transitions
         // for symmetric timing between REC and PLAY. Exempt:
-        //  - ESC (ki 0x48): not a gameplay key; the PAUSE MENU subscribes to
-        //    its broadcast — blocking it made ESC dead during REC even with
-        //    the cave1c handler passthrough in place.
-        //  - while PAUSED (cycle heartbeat stale): the sim isn't running, so
-        //    there's no REC/PLAY symmetry to protect, and the pause menu's
-        //    OWN navigation (arrows/enter) is observer-driven — without this
-        //    the menu opens but can't be operated during REC.
+        //  - ESC (ki 0x48): not a gameplay key; the pause menu subscribes to
+        //    its broadcast.
+        //  - while PAUSED (cycle heartbeat stale): the sim is not running, and
+        //    the pause menu's own navigation (arrows/enter) is observer-driven.
         if (s->mode == MODE_REC
             && keyIndex != GameAddresses::KEY_ESC && !gamePaused) {
             s->bb3b10_block_count++;

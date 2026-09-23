@@ -7,13 +7,11 @@
 // Release of F5 the moment the game has acted on it.
 //
 // The game restarts the level on every input poll that sees F5 down - about
-// one poll every 20-25 ms - and a restart itself takes only ~20 ms, so a key
-// held for any length of time restarts the level again and again (measured
-// 2026-09-09: a physical tap held 15 ms = 1-2 restarts, 50 ms = 2-3,
-// 150 ms = 6-7; Cave 2's old 10-cycle hold = 4 per arm). Every re-entry tears
-// the level down while the previous rebuild is still in flight; the crashes
-// seen at the next save/teardown (sr.dll+0x13568 in the srConfig unlink, a
-// use-after-free in the text-input callback) are the debt that leaves.
+// one poll every 20-25 ms - and a restart itself takes only ~20 ms, so a held
+// key restarts the level again and again (a 150 ms tap restarts it 6-7
+// times). Each re-entry tears the level down while the previous rebuild is
+// still in flight, and that corrupts the heap: the game crashes later, at the
+// next save or teardown (e.g. sr.dll+0x13568).
 //
 // So the key goes back up the moment the game has ACTED on it: the level
 // rebuild creates a new player recorder, and the replay-capture hook that
@@ -22,7 +20,8 @@
 // physical tap. For Cave 2's press a timed thread also clears the byte after
 // a short cap, in case a second poll lands before the rebuild reaches the
 // recorder; Cave 2 finishes the sequence (observer "up", restart_state) on
-// its next cycle either way.
+// its next cycle either way. A single Supreme::Cycle is not a usable hold:
+// the poll runs less often than the cycle, so a one-cycle press can be missed.
 //
 // Nothing here filters keyboard autorepeat, because the game already does:
 // Win32_Driver::Translate (HMG_Cetsup_Win32) forwards WM_KEYDOWN to the key

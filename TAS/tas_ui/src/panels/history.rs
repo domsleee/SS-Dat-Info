@@ -36,27 +36,20 @@ pub fn show(
     let today = Local::now().date_naive();
     let yesterday = today.pred_opt();
 
-    // Per-level view: history is ALWAYS scoped to the current track — you
-    // work one level at a time, and restoring another track's snapshot into
-    // this session would be wrong anyway. The scope is the last-KNOWN level
-    // (sticky across menu visits); before any level is seen, everything
-    // shows. Entries with no level tag (legacy, or unclassifiable shared
-    // spawns) are always shown — hiding them would "lose" pre-tag history.
+    // History is scoped to the last-known level (sticky across menu visits),
+    // since restoring another track's snapshot is never useful. Before any
+    // level is seen everything shows. Untagged entries (no level stamp, or an
+    // unclassifiable shared spawn) always show so they are never hidden.
     let level_filter = history.live_level().map(str::to_owned);
     let resolving = history.level_is_resolving();
     if history.level_is_resolving() {
         if in_menu {
-            // Quit-to-menu also unresolves the level context, but NOTHING is
-            // being resolved there — the scan is deliberately suppressed at
-            // menus (it would just re-confirm the track you left). A
-            // perpetual "resolving…" here read as a stuck spinner; say where
-            // the game actually is. Same three-way split as the status chip:
-            // the frozen-cycle state with the in-game flag still set could be
-            // the pause menu, a post-race dialog (save high time / save
-            // replay), OR the main menu after leaving a level — the engine
-            // keeps the level resident behind all of them, so they are
-            // indistinguishable from outside. Only a fresh boot (flag 0) is
-            // provably the plain menu.
+            // Quit-to-menu unresolves the level, but the scan is suppressed at
+            // menus, so nothing will resolve it: say where the game is instead
+            // of "resolving…". Same split as the status chip: with the in-game
+            // flag set, the pause menu, a post-race dialog and the main menu
+            // after a level all look identical (the engine keeps the level
+            // resident). Only a fresh boot (flag 0) is provably the menu.
             let (label, hover) = if game_in_game {
                 (
                     "Level: Menu / Paused",
@@ -80,11 +73,8 @@ pub fn show(
             )
             .on_hover_text(hover);
         } else {
-            // Between a level change and the scan publishing the new track we
-            // do NOT know where we are. Say so instead of asserting the old
-            // track — silently showing the previous level's entries here is
-            // exactly the "loading Forest Medium, seeing Forest Easy's saves"
-            // confusion.
+            // Between a level change and the scan publishing the new track the
+            // level is unknown; say so rather than show the previous track.
             ui.label(
                 egui::RichText::new("Level: resolving…")
                     .size(10.0)
@@ -99,15 +89,11 @@ pub fn show(
             );
         }
     } else if let Some(code) = level_filter.as_deref() {
-        // Only CLAIM untagged entries are shown when some actually are. The
-        // suffix was unconditional, so it kept advertising a caveat that had
-        // stopped applying — and a caveat you can't turn off reads as "this
-        // filter is approximate", which is the opposite of the truth once every
-        // entry is tagged.
+        // Mention untagged entries only when some exist, so a fully tagged
+        // history does not read as an approximate filter.
         let any_untagged = history.entries().iter().any(|e| e.level.is_none());
-        // The nine race tracks read naturally as their codes (FE/VH — the
-        // user's own naming convention), but "PE" is cryptic: the practice
-        // run has a name, use it. (Entries/files still use the PE code.)
+        // Race tracks read naturally as their codes (FE, VH), but "PE" is
+        // cryptic, so name the practice run. Entries and files keep "PE".
         let code = if code == "PE" { "Practice" } else { code };
         // The sticky level survives freezes (pause / post-race dialogs / the
         // menu) so the rows stay usable there — but say the engine is not
@@ -144,28 +130,21 @@ pub fn show(
         .id_salt("history_runs")
         .animated(false)
         .auto_shrink([false, false])
-        // Desktop: scroll with the wheel/scrollbar only. Without this, egui's
-        // touch-style "drag the content to scroll" fires when you press-and-hold
-        // a row (e.g. holding the pin while the screenshot tool grabs a drag).
+        // Wheel/scrollbar only: egui's drag-to-scroll would fire on a
+        // press-and-hold of a row or the pin.
         .drag_to_scroll(false)
         .show(ui, |ui| {
-            // Render order: sort by `created_at` descending with vec index
-            // as a tie-breaker, so the displayed list is true reverse-
-            // chronological even when entries were healed (e.g. mis-
-            // migrated future timestamps walked back a day) or pushed in
-            // non-chronological order (e.g. recovered from a prior
-            // session). The model itself stays in push/action order —
-            // we only sort the view, so `current_index` semantics and
-            // undo/redo remain unchanged. The vec index travels with
-            // each row so Restore(idx) still targets the right entry.
+            // Only the view is sorted (by `created_at`, newest first); the
+            // model stays in push order so `current_index` and undo/redo are
+            // unaffected. Each row carries its vec index so Restore(idx)
+            // still targets the right entry.
             let entries = history.entries();
             let mut visible: Vec<(usize, &HistoryEntry)> = entries
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| {
-                    // RESOLVING: we do not know the track, so nothing qualifies.
-                    // Leaving rows visible also leaves them RESTORABLE, which is
-                    // how the transition window became able to overwrite the live
+                    // While resolving, the track is unknown, so hide every row:
+                    // a visible row is restorable and could overwrite the live
                     // buffer with another track's recording.
                     if resolving {
                         return false;
@@ -201,8 +180,7 @@ pub fn show(
             let mut last_date: Option<NaiveDate> = None;
             // The header of the day being rendered. A reveal scrolls to the
             // span from this header down to the new row, so the day label and
-            // the pinned rows that float above the newest take stay in view;
-            // revealing the row alone pushed them just off the top.
+            // the pinned rows above the newest take stay in view.
             let mut day_header: Option<egui::Rect> = None;
             for (idx, entry) in visible {
                 let entry_date = entry.created_at.date_naive();
@@ -233,12 +211,9 @@ pub fn show(
                 }
             }
 
-            // Empty space below the last row acts as a "deselect" target:
-            // a click on the background clears the current-row highlight.
-            // We reserve at least 40 px so there's always something to
-            // click even when the entries fill the visible area; if the
-            // panel has more vertical room, allocate it all so the click
-            // target spans the whole gap to the bottom edge.
+            // Clicking the empty space below the last row clears the
+            // selection. At least 40 px is reserved so the target exists even
+            // when the rows fill the panel.
             let remaining = ui.available_height().max(40.0);
             let (rect, response) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width(), remaining),
@@ -276,9 +251,8 @@ fn render_day_header(
     yesterday: Option<NaiveDate>,
 ) -> egui::Rect {
     let top = ui.cursor().min;
-    // Avoid chrono's `%-d` (POSIX no-pad day) which is unsupported on
-    // Windows' strftime — would render the literal `-d` instead of the
-    // day number. Build the day-month string by hand.
+    // Built by hand: chrono's `%-d` (no-pad day) is unsupported on Windows
+    // and renders a literal `-d`.
     let short = format!("{} {}", date.day(), month_abbr(date.month()));
     let label = if date == today {
         format!("Today · {}", short)
@@ -348,9 +322,8 @@ fn render_row(
     let restorable = entry.can_restore();
     let time_str = entry.created_at.format("%H:%M").to_string();
 
-    // Color for markers (save/load) — italic + dimmed/blue. Snapshot rows
-    // get default text color so they're scannable. The whole row becomes
-    // a single click target.
+    // Markers (save/load) are dimmed or blue and italic; snapshot rows use the
+    // default text color so they stand out.
     let row_color = if parts.is_marker {
         match entry.kind {
             HistoryEntryKind::SaveMarker => egui::Color32::from_rgb(120, 170, 220),
@@ -374,10 +347,9 @@ fn render_row(
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
 
-                // --- Pin star: its OWN column + generous hit box, fully separate
-                //     from the restore area so it can never trigger a restore. ---
-                // Real Label as the base so the glyph is ALWAYS drawn (a pure
-                // painter star vanished in some pressed/active states).
+                // Pin star: its own column and hit box, separate from the
+                // restore area so it can never trigger a restore. A real Label
+                // is the base so the glyph is drawn in every press state.
                 let (glyph, base_color) = if entry.pinned {
                     ("★", egui::Color32::from_rgb(232, 184, 75))
                 } else {
@@ -388,10 +360,8 @@ fn render_row(
                     egui::Label::new(egui::RichText::new(glyph).size(16.0).color(base_color))
                         .sense(egui::Sense::click()),
                 );
-                // Hover/press overlay (additive — never hides the base glyph).
-                // Use contains_pointer (NOT hovered): egui's hovered() goes false
-                // while the button is held down, which made the highlight flicker
-                // off mid-press. Show a slightly stronger "pressed" state on hold.
+                // Additive hover/press overlay. Uses contains_pointer because
+                // egui's hovered() goes false while the button is held.
                 let over = star.contains_pointer();
                 let down = star.is_pointer_button_down_on();
                 if over || down {
@@ -429,8 +399,8 @@ fn render_row(
                     actions.push(HistoryAction::SetPin(entry.entry_id, !entry.pinned));
                 }
 
-                // --- Body: time (right), then ▶ + name/duration — or the rename
-                //     box if this row is being edited. ---
+                // Body: time on the right, then ▶ and name/duration, or the
+                // rename box while this row is being edited.
                 let editing = edit.as_ref().is_some_and(|(id, _)| *id == entry.entry_id);
                 let body = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if !editing {
@@ -475,23 +445,12 @@ fn render_row(
                                 ));
                             }
                         }
-                        // UNTAGGED marker. These belong to no known track, so
-                        // they show on EVERY one — which is indistinguishable
-                        // from "this row belongs here" unless we say otherwise.
-                        // That ambiguity is what made a screenful of Forest Easy
-                        // favourites look like a broken filter while on another
-                        // track. Dim and glyph-only: it must not compete with the
-                        // run time, which is what the eye is actually scanning.
-                        // (This layout is right-to-left, so adding it AFTER the
-                        // timestamp places it to the LEFT of it.)
-                        //
-                        // A WORD, not a symbol. The first attempt used "◌"
-                        // (U+25CC), which is not in egui's bundled fonts and
-                        // rendered as a tofu box — a marker nobody can read is
-                        // worse than none, and it took a screenshot to catch,
-                        // since the glyph looked fine in the source. Text also
-                        // matches the header's wording, so the row and the
-                        // summary say the same thing.
+                        // Untagged entries show on every track, so mark them or
+                        // they look like a broken filter. Dim so it does not
+                        // compete with the run time. A word, not a symbol:
+                        // egui's bundled fonts lack most marker glyphs. The
+                        // layout is right-to-left, so this lands left of the
+                        // timestamp.
                         if entry.level.is_none() {
                             ui.label(
                                 egui::RichText::new("untagged")
@@ -506,12 +465,10 @@ fn render_row(
                         }
                     }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        // A recovered entry is just a normal CONT entry that
-                        // was auto-pinned after a crash — it renders through
-                        // the SAME path as any entry (total + "from …"); the
-                        // only difference is a ⟲ leading glyph instead of ▶.
-                        // (Detected from the legacy "Recovered · …" name or the
-                        // new "⟲" marker, so old histories normalize too.)
+                        // A recovered entry (auto-pinned after a crash) renders
+                        // like any other, led by ⟲ instead of ▶. It is detected
+                        // by the "⟲" name or the "Recovered · …" name that
+                        // older histories carry.
                         let recovered = entry
                             .custom_name
                             .as_deref()
@@ -564,8 +521,8 @@ fn render_row(
                         } else if let Some(name) =
                             entry.custom_name.as_deref().filter(|_| !recovered)
                         {
-                            // Genuine user-typed name. Name leads + the total
-                            // (color gold is reserved for pin status).
+                            // User-typed name, then the total. Gold is reserved
+                            // for pin status.
                             ui.label(egui::RichText::new(name).size(13.0).strong());
                             if !parts.total.is_empty() {
                                 ui.label(
@@ -651,9 +608,8 @@ fn kind_color(kind: HistoryEntryKind) -> egui::Color32 {
 struct Parts {
     /// Duration like `1:08.24`. Empty for markers.
     total: String,
-    /// Right-justified context: `from 0:52.00`, `Saved → file`,
-    /// `Loaded ← file`. Empty for plain REC entries (the icon-color
-    /// + the duration already convey "recording").
+    /// Context text: `from 0:52.00`, `Saved file`, `Loaded file`. Empty for
+    /// plain REC entries.
     context: String,
     is_marker: bool,
 }
@@ -668,10 +624,8 @@ fn parse_entry(entry: &HistoryEntry) -> Parts {
     match entry.kind {
         HistoryEntryKind::SaveMarker => Parts {
             total: String::new(),
-            // The previous `Saved → file` form looked nice in monospace
-            // mockups but the `→` glyph (U+2192) rendered as a hollow
-            // square in egui's default font fallback. ASCII keeps it
-            // tight; the verb + icon color already convey "save".
+            // No arrow glyph: `→` renders as a hollow square in egui's
+            // default font.
             context: entry
                 .label
                 .strip_prefix("Save: ")
