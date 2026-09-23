@@ -71,8 +71,7 @@ pub fn run(source: &str, out: &str) -> Result<(), String> {
     harness::ensure_exclusive_runtime_ownership(&mut client, "baseline refresh");
     replay::write_to_shared(&mut client, &loaded);
 
-    let (rec_gate, play_gate) = harness::restart_play_aligned_inprocess(&mut client)
-        .ok_or("aligned PLAY was not accepted for refresh")?;
+    let (rec_gate, play_gate) = restart_play_aligned_unwatched(&mut client, &loaded)?;
     let owed = loaded.count.saturating_sub(rec_gate);
     if !harness::wait_playback(&client, play_gate + owed) {
         return Err("playback did not complete during refresh".into());
@@ -129,6 +128,37 @@ pub fn run(source: &str, out: &str) -> Result<(), String> {
     )?;
     println!("Saved refreshed baseline to {}", out);
     Ok(())
+}
+
+/// Aligned PLAY WITHOUT the bit-exact watcher. A refresh exists to capture a
+/// trajectory that changed (new physics, a renderer switch), which is exactly
+/// what the watcher would reject. Returns `(recording gate, live gate)`.
+fn restart_play_aligned_unwatched(
+    client: &mut tas_shared::TasSharedMemoryClient,
+    loaded: &replay::LoadedRecording,
+) -> Result<(u32, u32), String> {
+    let rec_gate = tas_shared::cont::detect_first_moving(&loaded.rec_coords, loaded.count)
+        .ok_or("source recording never leaves the spawn")?;
+    if !harness::restart_and_stabilize_inprocess(client) {
+        return Err("in-process restart failed".into());
+    }
+    client.state_mut().gate_align_rec = rec_gate;
+    harness::arm_play(client);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let play_gate = client.state().gate_index;
+        if play_gate != 0 {
+            println!(
+                "  Refresh aligned: recording gate {}, live gate {}",
+                rec_gate, play_gate
+            );
+            return Ok((rec_gate, play_gate));
+        }
+        if std::time::Instant::now() > deadline {
+            return Err("aligned PLAY never observed a live gate".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 /// `count` coordinates in recording index space: the spawn up to `rec_gate`,

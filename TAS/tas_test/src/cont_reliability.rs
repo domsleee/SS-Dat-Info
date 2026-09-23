@@ -349,6 +349,7 @@ fn assess_splice(
     rerolls: u32,
     resume_ms: f64,
     splice_frame: u32,
+    baseline_rec_coords: &[[f32; 3]],
 ) -> ContCycleResult {
     let state = client.state();
     let playback_pos_at_splice = state.playback_pos;
@@ -377,11 +378,19 @@ fn assess_splice(
     };
     let prefix_stats = analyze_prefix_coords(&state.play_coords, assessed_prefix);
     // The progress check stops a stationary prefix passing the drift check
-    // vacuously. Near the gate the recording has not moved forward yet
-    // either, so demand progress only where the recording's own prefix shows
-    // it.
+    // vacuously. Near the gate the recording has not moved forward yet either,
+    // so a prefix the recording itself did not progress through is exempt -
+    // but only when the recording moves at all: a capture that never leaves
+    // the spawn is broken, not early.
     let recorded_moves = analyze_prefix_coords(&state.rec_coords, splice_frame).forward_only_ok;
-    let forward_ok = prefix_stats.forward_only_ok || !recorded_moves;
+    // The whole source recording, not the live buffer: a splice inside the
+    // countdown truncates that to a prefix that has not moved yet.
+    let recording_has_gate = tas_shared::cont::detect_first_moving(
+        baseline_rec_coords,
+        baseline_rec_coords.len() as u32,
+    )
+    .is_some();
+    let forward_ok = prefix_stats.forward_only_ok || (!recorded_moves && recording_has_gate);
     println!(
         "  Drift over replayed prefix [0..{}): X={:.9} (frame {}) Y={:.9} Z={:.9} (frame {})",
         assessed_prefix,
@@ -614,7 +623,14 @@ pub fn run(
             );
             let resume_ms = resume_t0.elapsed().as_secs_f64() * 1000.0;
             results.push(match splice_result {
-                Some(rerolls) => assess_splice(&client, i, rerolls, resume_ms, splice_frame),
+                Some(rerolls) => assess_splice(
+                    &client,
+                    i,
+                    rerolls,
+                    resume_ms,
+                    splice_frame,
+                    &baseline_rec_coords,
+                ),
                 None => {
                     println!("  Splice failed before REC transition");
                     failed_splice(i, resume_ms)

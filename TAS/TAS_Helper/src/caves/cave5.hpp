@@ -270,7 +270,8 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             if (s->continue_from_frame > 0 && s->mode == MODE_PLAY) {
                 int32_t remaining = (int32_t)ContinueSpliceTickLimit(
                     s->playback_pos, aligned_splice,
-                    s->gate_align_rec == 0 || s->cont_splice_approved != 0);
+                    s->gate_align_rec == 0 || s->cont_splice_approved != 0,
+                    s->gate_align_rec);
                 if (realTick > remaining) realTick = remaining;
             }
         }

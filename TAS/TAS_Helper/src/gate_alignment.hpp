@@ -3,6 +3,11 @@
 
 inline constexpr uint32_t GATE_ALIGN_INVALID_SOURCE = 0xFFFFFFFFu;
 
+// An aligned CONT splice past the recording's gate whose position is not
+// known yet, because the live gate has not fired. Nothing parks or splices at
+// it: no play index reaches it.
+inline constexpr uint32_t GATE_ALIGN_SPLICE_PENDING = 0xFFFFFFFFu;
+
 // The product controller arms immediately after a settled restart. Deliberate
 // 0..40 ms arm-delay sweeps moved the live gate by at most four cycles. The
 // hold window exists so the gate cycle always receives the recording's gate
@@ -20,22 +25,36 @@ inline constexpr uint32_t GATE_ALIGN_PRE_GATE_LEAD = 8u;
 // which is (continue_from_frame - rec_gate) ticks past the recording's gate;
 // the replay reaches the equivalent state that many ticks past ITS gate.
 //
-// Falls back to the plain arm-relative continue_from_frame when alignment is
-// off, the gate has not fired yet, or the splice is at/inside the countdown
-// (where the boarder is stationary and there is nothing to align). Unaligned
-// CONT is therefore byte-identical to before.
+// Plain arm-relative continue_from_frame when alignment is off, or the splice
+// is at/inside the countdown (the boarder is stationary; nothing to align).
+// GATE_ALIGN_SPLICE_PENDING while an aligned splice past the gate waits for
+// the live gate: parking at the raw frame instead could stop the replay
+// before the gate it is waiting for.
 inline uint32_t GateAlignedSplicePos(uint32_t continue_from_frame,
                                      uint32_t live_gate, uint32_t rec_gate) {
-    if (rec_gate == 0 || live_gate == 0 || continue_from_frame <= rec_gate) {
+    if (rec_gate == 0 || continue_from_frame <= rec_gate) {
         return continue_from_frame;
+    }
+    if (live_gate == 0) {
+        return GATE_ALIGN_SPLICE_PENDING;
     }
     return live_gate + (continue_from_frame - rec_gate);
 }
 
+// Ticks cave5 may run this frame toward a CONT splice.
+//
 // Approval can arrive while parked exactly at the splice. That next cycle
 // belongs to REC, not an additional PLAY tick; cap its batch to one so the
 // old catch-up speed cannot spill into recording before the clock reset.
-inline uint32_t ContinueSpliceTickLimit(uint32_t pos, uint32_t splice, bool approved) {
+//
+// While the splice is pending, step one tick per frame from the pre-gate lead
+// on, so the gate is stamped on the exact tick and a catch-up batch cannot
+// carry the replay past a splice just beyond it.
+inline uint32_t ContinueSpliceTickLimit(uint32_t pos, uint32_t splice, bool approved,
+                                        uint32_t rec_gate) {
+    if (splice == GATE_ALIGN_SPLICE_PENDING) {
+        return pos + GATE_ALIGN_PRE_GATE_LEAD >= rec_gate ? 1u : 0x7FFFFFFFu;
+    }
     return pos < splice ? splice - pos : (approved ? 1u : 0u);
 }
 

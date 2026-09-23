@@ -35,16 +35,25 @@ int main() {
     check(GateAlignedSplicePos(500, 299, 299) == 500, "splice_unchanged_when_the_gates_coincide");
     check(GateAlignedSplicePos(300, 301, 299) == 302, "one_tick_past_the_gate_is_aligned");
     // Unaligned fallbacks: the plain arm-relative frame.
-    check(GateAlignedSplicePos(500, 0, 299) == 500, "no_live_gate_yet_falls_back_to_arm_relative");
+    check(GateAlignedSplicePos(500, 0, 299) == GATE_ALIGN_SPLICE_PENDING,
+          "splice_past_the_gate_waits_for_the_live_gate");
+    check(GateAlignedSplicePos(300, 0, 299) == GATE_ALIGN_SPLICE_PENDING,
+          "near_gate_splice_waits_for_the_live_gate");
     check(GateAlignedSplicePos(500, 301, 0) == 500, "no_recorded_gate_falls_back_to_arm_relative");
     check(GateAlignedSplicePos(299, 301, 299) == 299, "splice_at_the_gate_is_not_aligned");
     check(GateAlignedSplicePos(100, 301, 299) == 100, "splice_inside_the_countdown_is_not_aligned");
 
-    check(ContinueSpliceTickLimit(497, 498, false) == 1, "last_prefix_tick_can_run_before_approval");
-    check(ContinueSpliceTickLimit(498, 498, false) == 0, "unapproved_splice_stays_parked");
-    check(ContinueSpliceTickLimit(498, 498, true) == 1, "late_approval_allows_only_one_resume_tick");
-    check(ContinueSpliceTickLimit(497, 498, true) == 1, "early_approval_still_lands_on_splice");
-    check(ContinueSpliceTickLimit(495, 498, true) == 3, "catchup_batch_cannot_cross_splice");
+    check(ContinueSpliceTickLimit(497, 498, false, 299) == 1, "last_prefix_tick_can_run_before_approval");
+    check(ContinueSpliceTickLimit(498, 498, false, 299) == 0, "unapproved_splice_stays_parked");
+    check(ContinueSpliceTickLimit(498, 498, true, 299) == 1, "late_approval_allows_only_one_resume_tick");
+    check(ContinueSpliceTickLimit(497, 498, true, 299) == 1, "early_approval_still_lands_on_splice");
+    check(ContinueSpliceTickLimit(495, 498, true, 299) == 3, "catchup_batch_cannot_cross_splice");
+    check(ContinueSpliceTickLimit(100, GATE_ALIGN_SPLICE_PENDING, false, 299) == 0x7FFFFFFFu,
+          "pending_splice_runs_free_well_before_the_gate");
+    check(ContinueSpliceTickLimit(291, GATE_ALIGN_SPLICE_PENDING, false, 299) == 1,
+          "pending_splice_steps_one_tick_near_the_gate");
+    check(ContinueSpliceTickLimit(305, GATE_ALIGN_SPLICE_PENDING, false, 299) == 1,
+          "pending_splice_keeps_stepping_past_a_late_gate");
 
     return FinishTests();
 }

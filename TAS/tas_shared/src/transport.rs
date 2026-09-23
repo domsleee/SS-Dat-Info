@@ -403,8 +403,26 @@ impl TransportController {
                 let is_cont = self.cfg.arm == Arm::Continue;
                 if is_cont && self.cfg.continue_from_frame <= self.cfg.gate_align_rec {
                     // Spliced inside the countdown: the boarder has not moved
-                    // yet, so there is no trajectory to watch. The DLL parks at
-                    // the splice until approved, so approve now.
+                    // yet, so the only thing to check is the spawn itself. The
+                    // DLL parks at the splice until approved.
+                    if pos == 0 {
+                        return StepOutcome::InProgress;
+                    }
+                    if !port.capture_ok() {
+                        return self.reroll(port, "spawn capture was incomplete".to_string(), None);
+                    }
+                    let spawn_matches =
+                        match (port.play_coords().first(), port.rec_coords().first()) {
+                            (Some(p), Some(r)) => p.map(f32::to_bits) == r.map(f32::to_bits),
+                            _ => false,
+                        };
+                    if !spawn_matches {
+                        return self.reroll(
+                            port,
+                            "spawn differs from the recording".to_string(),
+                            Some(0),
+                        );
+                    }
                     port.approve_cont_splice();
                     return self.finish(CompletedVia::Unjudged);
                 }
@@ -957,14 +975,20 @@ mod tests {
         assert!(p.splice_approved);
     }
 
-    /// Spliced inside the countdown, the boarder has not moved, so there is
-    /// nothing to watch; the parked splice must be approved at once or it
-    /// would never fire.
+    /// Spliced inside the countdown, the boarder has not moved, so the spawn
+    /// is all there is to check; the parked splice is approved once it
+    /// matches, or it would never fire.
     #[test]
-    fn aligned_cont_inside_the_countdown_is_approved_at_once() {
+    fn aligned_cont_inside_the_countdown_checks_the_spawn_then_approves() {
         let mut p = aligned_port(101);
         let mut c = aligned_cont(250, 1);
         drive_to_judge(&mut c, &mut p);
+        assert_eq!(
+            c.step(&mut p),
+            StepOutcome::InProgress,
+            "nothing replayed yet"
+        );
+        p.playback_pos = 10;
         assert_eq!(
             c.step(&mut p),
             StepOutcome::Done {
@@ -973,6 +997,24 @@ mod tests {
             }
         );
         assert!(p.splice_approved);
+    }
+
+    /// A different spawn is a different starting state: reroll, never splice.
+    #[test]
+    fn aligned_cont_inside_the_countdown_rerolls_a_wrong_spawn() {
+        let mut p = aligned_port(101);
+        p.play_coords[0][0] = f32::from_bits(p.play_coords[0][0].to_bits() + 1);
+        let mut c = aligned_cont(250, 1);
+        drive_to_judge(&mut c, &mut p);
+        p.playback_pos = 10;
+        assert!(matches!(
+            c.step(&mut p),
+            StepOutcome::Reroll {
+                attempt: 1,
+                observed: Some(0)
+            }
+        ));
+        assert!(!p.splice_approved);
     }
 
     /// A reroll must re-assert the splice frame, or cave2 splices at the
