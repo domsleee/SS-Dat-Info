@@ -331,83 +331,138 @@ pub fn wait_playback(client: &TasSharedMemoryClient, expected: u32) -> bool {
     }
 }
 
+/// Restart and arm an aligned PLAY of the loaded recording WITHOUT the
+/// bit-exact watcher, for callers that must stop mid-replay or record a
+/// changed trajectory. Returns `(recording gate, live gate)` once the live
+/// gate fires.
+pub fn restart_play_aligned_unwatched(
+    client: &mut TasSharedMemoryClient,
+) -> Result<(u32, u32), String> {
+    let rec_gate = {
+        let s = client.state();
+        tas_shared::align::detect_first_moving(&s.rec_coords[..], s.recorded_count)
+            .ok_or("the loaded recording never leaves the spawn")?
+    };
+    if !restart_and_stabilize_inprocess(client) {
+        return Err("in-process restart failed".into());
+    }
+    client.state_mut().gate_align_rec = rec_gate;
+    // STOP and RESTART keep the previous session's gate and position; only the
+    // arm clears them. Wait for the arm counter to move before reading either.
+    let generation = client.state().arm_generation;
+    arm_play(client);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while client.state().arm_generation == generation {
+        if Instant::now() > deadline {
+            return Err("the DLL never processed ARM_PLAY".into());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    loop {
+        let play_gate = client.state().gate_index;
+        if play_gate != 0 {
+            return Ok((rec_gate, play_gate));
+        }
+        if Instant::now() > deadline {
+            return Err("aligned PLAY never observed a live gate".into());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Drive one restart -> arm -> watch cycle through the shared transport
+/// controller, the state machine tas_ui runs, until it finishes. Each attempt
+/// gets a restart budget plus the watcher's replay time at `cfg.speed`,
+/// renewed on every reroll. Returns the rerolls used, or None after printing
+/// why the cycle failed.
+fn drive_cycle(
+    client: &mut TasSharedMemoryClient,
+    cfg: tas_shared::transport::ArmConfig,
+    label: &str,
+) -> Option<u32> {
+    use tas_shared::transport::{StepOutcome, TransportController};
+
+    let mut controller = TransportController::new(cfg);
+    // Keep a competing tas_ui out of the single-slot command channel, and clear
+    // any post-run dialog before the first restart (it can eat the in-process F5).
+    stop_competing_tas_ui_writer();
+    dismiss_save_dialog();
+
+    let replay_secs = JUDGE_TIMEOUT_SECS as f64 / (cfg.speed as f64).clamp(0.05, 1.0);
+    let per_attempt = Duration::from_secs_f64(RESTART_TIMEOUT_SECS as f64 + replay_secs);
+    let mut attempt_deadline = Instant::now() + per_attempt;
+    loop {
+        match controller.step(client) {
+            StepOutcome::InProgress => {
+                if Instant::now() > attempt_deadline {
+                    // Name the phase and the state it is reading: a restart
+                    // that never completed, an arm the DLL never processed and
+                    // a watcher waiting on a replay are different bugs.
+                    let st = client.state();
+                    eprintln!(
+                        "  ERROR: {} attempt stalled in {} | mode={} restart_state={} playback_pos={} arm_generation={} recorded={}",
+                        label,
+                        controller.phase_name(),
+                        st.mode,
+                        st.restart_state,
+                        st.playback_pos,
+                        st.arm_generation,
+                        st.recorded_count
+                    );
+                    client.send_command(TasCommand::Stop);
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            StepOutcome::Wait { ms } => thread::sleep(Duration::from_millis(ms)),
+            StepOutcome::Reroll { attempt, observed } => {
+                println!(
+                    "  Retry {}/{}: {} watcher reroll (first mismatch at gate+{:?})",
+                    attempt, cfg.max_retries, label, observed
+                );
+                // Clear any save dialog that re-appeared after the Stop.
+                dismiss_save_dialog();
+                attempt_deadline = Instant::now() + per_attempt;
+            }
+            StepOutcome::Done { retries_used, .. } => return Some(retries_used),
+            StepOutcome::Aborted { reason } => {
+                eprintln!("  ERROR: {} aborted: {}", label, reason);
+                stop(client);
+                return None;
+            }
+        }
+    }
+}
+
 /// Restart and arm the product PLAY path with input indexed relative to the
-/// recording's gate. Returns `(recorded_gate, live_gate)` once the live gate has
-/// been observed and the gate-relative trajectory watcher accepts the attempt.
+/// recording's gate. Returns `(recorded_gate, live_gate)` once the
+/// gate-relative trajectory watcher accepts the attempt.
 pub fn restart_play_aligned_inprocess(client: &mut TasSharedMemoryClient) -> Option<(u32, u32)> {
-    use tas_shared::transport::{Arm, ArmConfig, StepOutcome, TransportController};
+    use tas_shared::transport::{Arm, ArmConfig};
 
     let rec_gate = {
         let s = client.state();
         tas_shared::align::detect_first_moving(&s.rec_coords[..], s.recorded_count)?
     };
-    let speed = client.state().playback_speed.max(1.0);
-    let mut controller = TransportController::new(ArmConfig {
+    let cfg = ArmConfig {
         arm: Arm::Play,
-        speed,
+        speed: client.state().playback_speed.max(1.0),
         continue_from_frame: 0,
         gate_align_rec: rec_gate,
         max_retries: tas_shared::align::ALIGN_MAX_RETRIES,
-    });
-
-    stop_competing_tas_ui_writer();
-    dismiss_save_dialog();
-    let deadline = Instant::now() + Duration::from_secs(180);
-    let retries_used = loop {
-        if Instant::now() > deadline {
-            eprintln!(
-                "  ERROR: aligned PLAY timed out in {}",
-                controller.phase_name()
-            );
-            stop(client);
-            return None;
-        }
-        match controller.step(client) {
-            StepOutcome::InProgress => thread::sleep(Duration::from_millis(5)),
-            StepOutcome::Wait { ms } => thread::sleep(Duration::from_millis(ms)),
-            StepOutcome::Done { retries_used, .. } => {
-                break retries_used;
-            }
-            StepOutcome::Reroll { attempt, observed } => {
-                let mismatch = observed
-                    .map(|frame| frame.to_string())
-                    .unwrap_or_else(|| "?".to_string());
-                println!(
-                    "  Aligned PLAY watcher rejected attempt {}/{} (first mismatch at gate+{})",
-                    attempt,
-                    tas_shared::align::ALIGN_MAX_RETRIES,
-                    mismatch
-                );
-            }
-            StepOutcome::Aborted { reason } => {
-                eprintln!("  ERROR: aligned PLAY aborted: {}", reason);
-                stop(client);
-                return None;
-            }
-        }
     };
-
-    let gate_deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let gate = client.state().gate_index;
-        if gate != 0 {
-            println!(
-                "  Aligned PLAY watcher accepted after {} retr{}: recording gate {}, live gate {} (offset {:+})",
-                retries_used,
-                if retries_used == 1 { "y" } else { "ies" },
-                rec_gate,
-                gate,
-                gate as i64 - rec_gate as i64
-            );
-            return Some((rec_gate, gate));
-        }
-        if client.mode_volatile() != TasMode::Play as u32 || Instant::now() > gate_deadline {
-            eprintln!("  ERROR: aligned PLAY never observed a live gate");
-            stop(client);
-            return None;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
+    let retries_used = drive_cycle(client, cfg, "PLAY")?;
+    // A match requires the live gate, so it is set by now.
+    let gate = client.state().gate_index;
+    println!(
+        "  Aligned PLAY watcher accepted after {} retr{}: recording gate {}, live gate {} (offset {:+})",
+        retries_used,
+        if retries_used == 1 { "y" } else { "ies" },
+        rec_gate,
+        gate,
+        gate as i64 - rec_gate as i64
+    );
+    Some((rec_gate, gate))
 }
 
 /// An environment variable the live launch path needs; no built-in default.
@@ -841,12 +896,9 @@ pub fn wait_continue_splice(client: &TasSharedMemoryClient, splice_frame: u32) -
     }
 }
 
-/// In-process CONT splice through the shared transport controller
-/// (`tas_shared::transport`) — the exact restart/arm/reroll state machine tas_ui
-/// drives, so this measures what the app does.
-///
-/// The controller reaches `Done` when the aligned prefix is accepted (before
-/// the splice fires); we then wait for the PLAY->REC splice. Returns
+/// In-process CONT splice through the shared transport controller. The
+/// controller finishes when the aligned prefix is accepted (before the splice
+/// fires); then this waits for the PLAY->REC splice. Returns
 /// `Some(reroll_count)` on a clean splice (0 = accepted first try), `None` on
 /// failure.
 pub fn restart_continue_and_splice_inprocess(
@@ -854,98 +906,26 @@ pub fn restart_continue_and_splice_inprocess(
     splice_frame: u32,
     max_retries: u32,
 ) -> Option<u32> {
-    use tas_shared::transport::{Arm, ArmConfig, StepOutcome, TransportController};
+    use tas_shared::transport::{Arm, ArmConfig};
 
-    // Gate-aligned CONT indexes the prefix input from the observed gate and
-    // fires the splice at the aligned position, so the countdown length does
-    // not matter.
     let gate_align_rec = {
         let s = client.state();
         tas_shared::align::detect_first_moving(&s.rec_coords[..], s.recorded_count).unwrap_or(0)
     };
-    println!(
-        "  CONT aligned on recording gate {} (shared controller)",
-        gate_align_rec
-    );
-
-    let speed = client.state().playback_speed;
+    println!("  CONT aligned on recording gate {}", gate_align_rec);
     let cfg = ArmConfig {
         arm: Arm::Continue,
-        speed,
+        speed: client.state().playback_speed,
         continue_from_frame: splice_frame,
         gate_align_rec,
         max_retries,
     };
-    let mut controller = TransportController::new(cfg);
-
-    // Keep a competing tas_ui out of the single-slot command channel, and clear
-    // any post-run dialog before the first restart (it can eat the in-process F5).
-    stop_competing_tas_ui_writer();
-    dismiss_save_dialog();
-
-    let poll_speed = (speed as f64).max(0.05);
-    // Per-attempt budget: restart handshake + replay to the watcher verdict.
-    let per_attempt = Duration::from_secs_f64(
-        RESTART_TIMEOUT_SECS as f64 + (JUDGE_TIMEOUT_SECS as f64) * (1.0 / poll_speed).max(1.0),
+    let retries_used = drive_cycle(client, cfg, "CONT")?;
+    println!(
+        "  CONT prefix accepted after {} reroll(s), waiting for splice...",
+        retries_used
     );
-    let mut attempt_deadline = Instant::now() + per_attempt;
-
-    loop {
-        match controller.step(client) {
-            StepOutcome::InProgress => {
-                if Instant::now() > attempt_deadline {
-                    // Name the phase and the state it is reading: a restart
-                    // that never completed, an arm the DLL never processed
-                    // and a watcher waiting on a replay are three different bugs.
-                    let st = client.state();
-                    eprintln!(
-                        "  ERROR: CONT attempt stalled in {} | mode={} restart_state={} playback_pos={} arm_generation={} recorded={}",
-                        controller.phase_name(),
-                        st.mode,
-                        st.restart_state,
-                        st.playback_pos,
-                        st.arm_generation,
-                        st.recorded_count
-                    );
-                    client.send_command(TasCommand::Stop);
-                    return None;
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
-            StepOutcome::Wait { ms } => {
-                // The controller's fixed STOP_SETTLE_MS / ARM_SETTLE_MS
-                // delay.
-                thread::sleep(Duration::from_millis(ms));
-            }
-            StepOutcome::Reroll { attempt, observed } => {
-                println!(
-                    "  Retry {}/{}: CONT watcher reroll  first mismatch at gate+{:?}",
-                    attempt, max_retries, observed
-                );
-                // Clear any save dialog that re-appeared after the Stop.
-                dismiss_save_dialog();
-                attempt_deadline = Instant::now() + per_attempt;
-            }
-            StepOutcome::Done { retries_used, .. } => {
-                if retries_used > 0 {
-                    println!(
-                        "  CONT prefix accepted (shared controller) after {} reroll(s)",
-                        retries_used
-                    );
-                }
-                println!("  CONT prefix accepted, waiting for splice...");
-                return if wait_continue_splice(client, splice_frame) {
-                    Some(retries_used)
-                } else {
-                    None
-                };
-            }
-            StepOutcome::Aborted { reason } => {
-                eprintln!("  WARNING: CONT aborted: {}", reason);
-                return None;
-            }
-        }
-    }
+    wait_continue_splice(client, splice_frame).then_some(retries_used)
 }
 
 /// Refresh held keys before the firmware's safety timeout. Timeout behavior is

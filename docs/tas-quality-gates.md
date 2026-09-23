@@ -83,14 +83,13 @@ safety release, so a hold lasts as long as the pattern says.
 
 | Mode | Pico | Pass signature | What it checks |
 |---|---|---|---|
-| `smoke` | no | `*** SMOKE TEST PASSED ***` | Pipeline liveness (~40 s): ticks captured, playback ran to completion, player moved in REC and PLAY. REC and PLAY start from different spawns here, so liveness is the whole verdict. `just test_smoke`. |
 | `segment` | yes | `*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***` | Product-aligned CONT at frame 500 while LEFT is held, then RIGHT steering. Requires two exact segment boundaries, released tail and complete gate-relative zero drift; covers approval arriving at the parked splice. |
 | `replay <file.tasrec> [--iterations N] [--verbose]` | no | `Result: ZERO DRIFT in all N iterations` | Loads a `.tasrec` and replays it N times through aligned PLAY; gate-relative drift, incomplete playback or a rejected alignment fails. `just test_replay FILE`. |
 | `reliability [--iterations N] [--speed X]` | yes | `*** RELIABILITY TEST PASSED ***` | N consecutive steered REC+PLAY cycles at one speed (default 10 at 12x). Shares its procedure with drift-speed but uses a 50-tick neutral tail (drift-speed: 100) and mandatory movement gates (drift-speed: optional). |
 | `drift-speed` | yes | `*** DRIFT-AT-SPEED TEST PASSED ***` | REC 2x/PLAY 2x and REC 1x/PLAY 2x both replay with zero drift. |
 | `save-reload` | yes | `*** SAVE/RELOAD/REPLAY PASSED: complete gate-relative comparison across game restart ***` | Verify steered REC, save to disk, kill/relaunch, reclaim Pico and command ownership, require exact input/coordinate round-trip and complete product-aligned zero-drift replay. |
 | `pause-resume` | yes | `*** PAUSE/RESUME REPLAY PASSED: ...` | Escape pause and resume during PLAY; the first 1000 frames stay bit-identical. |
-| `stop-play-flake [--iterations N]` | no | `*** STOP+PLAY FLAKE TEST PASSED: N/N iterations matched the reference ...` | PLAY, STOP at varying frames, PLAY again; second playbacks match a reference over their first 1000 frames. Default ten stop points, functional suite two. |
+| `stop-play-flake [--iterations N]` | no | `*** STOP+PLAY FLAKE TEST PASSED: N/N iterations matched the recording ***` | PLAY, STOP at varying frames, PLAY again; the second playback must match the recording bit for bit for 1000 frames from its gate. Default ten stop points, functional suite two. |
 | `rec-start [--file PATH]` | no | `*** REC-START OK: recording begins at the spawn ...` | A fresh recording starts at the stationary spawn with the countdown, not mid-fall; `--file` judges a saved `.tasrec` instead. |
 | `rec-repro` | yes | `*** REC-REPRO OK: N transitions match in order+mask ...` | The same driven input recorded twice yields the same transitions within tolerance. |
 | `steer-impact` | no | `*** STEER-IMPACT OK: ...` | Injected steering moves the player, and only with a live Kernel::Time stamp on the injection. |
@@ -117,7 +116,6 @@ safety release, so a hold lasts as long as the pattern says.
 | `cont-hijack` | no | `*** BUG #2 PASSED: replay crossed frame N still in PLAY — no REC hijack ***` | A `continue_from_frame` written during a plain PLAY leaves it in PLAY. |
 | `cont-restart-race` | no | `*** PASS: serialised Stop→Restart is accepted by cave2 ***` | The product controller serializes STOP/restart/arm and the DLL acknowledges CONT. Command-overwrite behavior is tested deterministically offline. |
 | `cont-input-protection` | no | every `PASS:` line, ending `PASS: ordinary STOP releases input protection (cont_suppress_input=0)` | Live input stays blocked through the CONT restart and STOP releases it, driven through the real transport controller. |
-| `gate-align [N] [recording]` | no | `*** Gate-offset input indexing matched the control in this sample. ***` | Gate-relative input indexing reproduces the recording's run over N aligned replays. |
 
 ### Diagnostics
 
@@ -226,8 +224,7 @@ Use `just test_live_full` for functional coverage, or `just test_live_soak` for
 the same cases with extended UI, acceptance, replay, STOP and CONT repetitions.
 The short lane uses two UI trials, one acceptance run and seven input cases.
 The functional lane uses two repeated STOP/CONT/reliability cycles per
-configuration; timing medians still require three samples. `smoke`
-remains a standalone diagnostic. Both full lanes include a fresh-game
+configuration; timing medians still require three samples. Both full lanes include a fresh-game
 save/reload and end at the main menu after dialog navigation, so save your work
 first and do not run them alongside another controller. They require a Pico, all
 three committed FE fixtures, Nushell and `REVIVE_SUPREME_SCRIPT`, the deployed

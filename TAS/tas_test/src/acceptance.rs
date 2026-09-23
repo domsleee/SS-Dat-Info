@@ -219,7 +219,7 @@ pub fn run() -> AcceptanceResult {
     let zero_drift = Verdict::from_bool(drift_result.is_zero());
 
     // 4-gate assessment
-    let assessment = gates::run_gates_aligned(state, rec_count, rec_gate, play_gate);
+    let assessment = gates::run_gates(state, rec_count, rec_gate, play_gate);
     assessment.print_summary();
 
     let result = AcceptanceResult {

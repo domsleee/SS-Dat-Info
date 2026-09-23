@@ -150,7 +150,7 @@ pub fn run() -> bool {
         }
     }
 
-    let assessment = gates::run_gates_aligned(state, total_count, rec_gate, play_gate);
+    let assessment = gates::run_gates(state, total_count, rec_gate, play_gate);
     assessment.print_summary();
 
     println!("\n=== SEGMENT TEST VERDICT ===");

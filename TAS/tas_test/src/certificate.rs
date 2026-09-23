@@ -23,8 +23,6 @@ pub fn write_regression(results: &[CaseResult], csv_path: &Path, cert_path: &Pat
             "failed": results.len() - passed,
             "max_replay_drift_x": max(|r| r.replay_drift_x),
             "max_replay_drift_z": max(|r| r.replay_drift_z),
-            "max_full_norm_drift_x": max(|r| r.full_norm_drift_x),
-            "max_full_norm_drift_z": max(|r| r.full_norm_drift_z),
             "csv_path": csv_path.display().to_string().replace('\\', "/"),
             "verdict": verdict(passed == results.len()),
             "cases": results,

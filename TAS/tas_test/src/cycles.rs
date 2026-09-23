@@ -56,7 +56,7 @@ fn cycle(client: &mut TasSharedMemoryClient, case: &Case) -> Result<bool, String
     if client.state().playback_speed != case.play_speed {
         return Err("PLAY speed was overwritten".into());
     }
-    let assessment = gates::run_gates_aligned(client.state(), count, rec_gate, play_gate);
+    let assessment = gates::run_gates(client.state(), count, rec_gate, play_gate);
     let drift = &assessment.drift;
     assessment.print_summary();
     println!(

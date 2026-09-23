@@ -76,95 +76,55 @@ fn gate0_reference_frames(count: usize) -> Vec<usize> {
     frames
 }
 
-/// Run all 4 gates on the current shared state after a REC->PLAY cycle.
-pub fn run_gates(state: &TasSharedState, rec_count: u32) -> GateAssessment {
+/// Run the four gates after a REC -> aligned PLAY cycle. REC checks read the
+/// recording; PLAY movement and drift compare each side from its own observed
+/// gate, since the countdown may end at a different arm-relative index.
+pub fn run_gates(
+    state: &TasSharedState,
+    rec_count: u32,
+    rec_gate: u32,
+    play_gate: u32,
+) -> GateAssessment {
     let n = rec_count as usize;
 
-    // Gate 0: Z-coordinate capture — check that REC coords were populated (non-zero Z at reference frames)
+    // Gate 0: Z-coordinate capture — REC coords were populated.
     let reference_frames = gate0_reference_frames(n);
     let ref_total = reference_frames.len();
     let ref_ok = reference_frames
         .iter()
         .filter(|&&frame| state.rec_coords[frame][2] != 0.0)
         .count();
-    let gate0_pass = ref_total > 0 && ref_ok == ref_total;
     let gate0 = GateResult {
         gate: 0,
         name: "Z-coord capture",
-        passed: gate0_pass,
+        passed: ref_total > 0 && ref_ok == ref_total,
         detail: format!("{}/{} reference frames have non-zero Z", ref_ok, ref_total),
     };
 
-    // Gate 1: REC movement — transitions > 0 and firstInput != -1
+    // Gate 1: REC movement — steering was recorded and the boarder moved.
     let transitions = drift::count_transitions(&state.input_log, n);
     let first_input = drift::first_input_tick(&state.input_log, n);
     let (rec_dx, _, rec_dz) = drift::compute_movement(&state.rec_coords, n);
-    let rec_moved = rec_dz > 0.1;
-    let gate1_pass = transitions > 0 && first_input >= 0 && rec_moved;
     let gate1 = GateResult {
         gate: 1,
         name: "REC movement",
-        passed: gate1_pass,
+        passed: transitions > 0 && first_input >= 0 && rec_dz > 0.1,
         detail: format!(
             "transitions={}, firstInput={}, recDeltaX={:.4} recDeltaZ={:.4}",
             transitions, first_input, rec_dx, rec_dz
         ),
     };
 
-    // Gate 2: PLAY movement — player moved during playback
-    let (play_dx, _, play_dz) = drift::compute_movement(&state.play_coords, n);
-    let play_moved = play_dz > 0.1;
-    let gate2_pass = play_moved;
-    let gate2 = GateResult {
-        gate: 2,
-        name: "PLAY movement",
-        passed: gate2_pass,
-        detail: format!("playDeltaX={:.4} playDeltaZ={:.4}", play_dx, play_dz),
-    };
-
-    // Gate 3: Zero drift
-    let drift_result = drift::compute_drift(state, rec_count);
-    let gate3_pass = drift_result.is_zero();
-    let gate3 = GateResult {
-        gate: 3,
-        name: "Zero drift",
-        passed: gate3_pass,
-        detail: format!(
-            "maxDriftX={:.9} (frame {}) maxDriftY={:.9} (frame {}) maxDriftZ={:.9} (frame {})",
-            drift_result.max_drift_x,
-            drift_result.max_drift_frame_x,
-            drift_result.max_drift_y,
-            drift_result.max_drift_frame_y,
-            drift_result.max_drift_z,
-            drift_result.max_drift_frame_z,
-        ),
-    };
-
-    GateAssessment {
-        gates: [gate0, gate1, gate2, gate3],
-        drift: drift_result,
-    }
-}
-
-/// Run the same gates for gate-aligned PLAY. The countdown may end at a
-/// different arm-relative index, so PLAY movement and drift
-/// are evaluated at equal offsets from each side's observed gate.
-pub fn run_gates_aligned(
-    state: &TasSharedState,
-    rec_count: u32,
-    rec_gate: u32,
-    play_gate: u32,
-) -> GateAssessment {
-    let mut assessment = run_gates(state, rec_count);
     let owed = rec_count.saturating_sub(rec_gate);
     let available = state.playback_pos.saturating_sub(play_gate).min(owed);
     let complete = available == owed && owed > 0;
 
+    // Gate 2: PLAY movement, from the live gate.
     let play_start = (play_gate as usize).min(state.play_coords.len());
     let play_count = (available as usize).min(state.play_coords.len().saturating_sub(play_start));
     let (play_dx, _, play_dz) =
         drift::compute_movement(&state.play_coords[play_start..], play_count);
-    assessment.gates[2] = GateResult {
+    let gate2 = GateResult {
         gate: 2,
         name: "PLAY movement",
         passed: play_dz > 0.1,
@@ -174,8 +134,9 @@ pub fn run_gates_aligned(
         ),
     };
 
+    // Gate 3: zero drift over the whole replay, gate-relative.
     let drift_result = drift::compute_gate_relative_drift(state, rec_gate, play_gate, available);
-    assessment.gates[3] = GateResult {
+    let gate3 = GateResult {
         gate: 3,
         name: "Gate-relative zero drift",
         passed: complete && drift_result.is_zero(),
@@ -191,8 +152,11 @@ pub fn run_gates_aligned(
             drift_result.max_drift_frame_z,
         ),
     };
-    assessment.drift = drift_result;
-    assessment
+
+    GateAssessment {
+        gates: [gate0, gate1, gate2, gate3],
+        drift: drift_result,
+    }
 }
 
 #[cfg(test)]
@@ -208,6 +172,7 @@ mod tests {
             state.rec_coords[i] = [x, 0.0, z];
             state.play_coords[i] = [x, 0.0, z];
         }
+        state.playback_pos = n as u32;
         for i in 0..n {
             state.input_log[i] = if (20..40).contains(&i) { 0x01 } else { 0x00 };
         }
@@ -217,14 +182,14 @@ mod tests {
     #[test]
     fn all_gates_pass_on_perfect_state() {
         let state = perfect_steered_state(1000);
-        let assessment = run_gates(&state, 1000);
+        let assessment = run_gates(&state, 1000, 0, 0);
         assert!(assessment.all_pass());
     }
 
     #[test]
     fn gate0_fails_when_rec_coords_all_zero() {
         let state = zeroed_state();
-        let assessment = run_gates(&state, 1000);
+        let assessment = run_gates(&state, 1000, 0, 0);
         assert!(!assessment.gates[0].passed);
     }
 
@@ -234,14 +199,14 @@ mod tests {
         for &frame in &REFERENCE_FRAMES {
             state.rec_coords[frame] = [0.0, 0.0, 100.0 + frame as f32];
         }
-        let assessment = run_gates(&state, 1000);
+        let assessment = run_gates(&state, 1000, 0, 0);
         assert!(assessment.gates[0].passed);
     }
 
     #[test]
     fn gate0_short_recording_uses_last_frame_fallback() {
         let state = zeroed_state();
-        let assessment = run_gates(&state, 30);
+        let assessment = run_gates(&state, 30, 0, 0);
         assert!(!assessment.gates[0].passed);
         assert_eq!(
             assessment.gates[0].detail,
@@ -253,7 +218,7 @@ mod tests {
     fn gate0_short_recording_passes_with_nonzero_last_frame() {
         let mut state = zeroed_state();
         state.rec_coords[24] = [0.0, 0.0, 123.0];
-        let assessment = run_gates(&state, 25);
+        let assessment = run_gates(&state, 25, 0, 0);
         assert!(assessment.gates[0].passed);
         assert_eq!(
             assessment.gates[0].detail,
@@ -268,7 +233,8 @@ mod tests {
             state.rec_coords[i] = [0.0, 0.0, i as f32];
             state.play_coords[i] = [0.0, 0.0, i as f32];
         }
-        let assessment = run_gates(&state, 1000);
+        state.playback_pos = 1000;
+        let assessment = run_gates(&state, 1000, 0, 0);
         assert!(!assessment.gates[1].passed);
     }
 
@@ -279,7 +245,8 @@ mod tests {
             state.rec_coords[i] = [0.0, 0.0, i as f32];
             state.input_log[i] = if i < 50 { 0x01 } else { 0x00 };
         }
-        let assessment = run_gates(&state, 200);
+        state.playback_pos = 200;
+        let assessment = run_gates(&state, 200, 0, 0);
         assert!(!assessment.gates[2].passed);
     }
 
@@ -287,7 +254,7 @@ mod tests {
     fn gate3_fails_with_drift() {
         let mut state = perfect_steered_state(1000);
         state.play_coords[500][0] += 1.0;
-        let assessment = run_gates(&state, 1000);
+        let assessment = run_gates(&state, 1000, 0, 0);
         assert!(!assessment.gates[3].passed);
         assert!(!assessment.drift.is_zero());
     }
@@ -303,7 +270,7 @@ mod tests {
         }
         state.playback_pos = (play_gate + 1000 - rec_gate) as u32;
 
-        let assessment = run_gates_aligned(&state, 1000, rec_gate as u32, play_gate as u32);
+        let assessment = run_gates(&state, 1000, rec_gate as u32, play_gate as u32);
         assert!(assessment.all_pass(), "{:#?}", assessment.gates);
     }
 }

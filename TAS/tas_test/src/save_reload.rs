@@ -96,8 +96,6 @@ pub fn run() -> bool {
     let meta_value = json!({
         "version": state.version,
         "recorded_count": state.recorded_count,
-        "max_drift_x": 0.0_f32,
-        "max_drift_z": 0.0_f32,
         "timestamp": "save_reload_test",
         "notes": "synthetic recording for save/reload e2e test",
         "segments": [],
@@ -155,7 +153,7 @@ pub fn run() -> bool {
     }
 
     let state = client.state();
-    let assessment = gates::run_gates_aligned(state, loaded.count, rec_gate, play_gate);
+    let assessment = gates::run_gates(state, loaded.count, rec_gate, play_gate);
     assessment.print_summary();
     let zero_drift = assessment.all_pass();
     println!(

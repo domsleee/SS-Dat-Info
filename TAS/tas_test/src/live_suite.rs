@@ -46,7 +46,6 @@ const FULL_CASES: &[(&str, &[&str])] = &[
     ("cont-hijack", &[]),
     ("cont-restart-race", &[]),
     ("cont-input-protection", &[]),
-    ("gate-align", &[]),
     ("level-seq", &[]),
     ("save-reload", &[]),
     ("dialog-e2e", &[]),
@@ -65,10 +64,6 @@ const EXCLUDED: &[(&str, &str)] = &[
     (
         "rec-start",
         "spawn/countdown assertions run on both rec-repro captures",
-    ),
-    (
-        "smoke",
-        "standalone liveness diagnostic; acceptance checks movement and replay",
     ),
     (
         "cont-reliability",
@@ -453,7 +448,6 @@ mod tests {
                 "2"
             );
         }
-        assert!(!functional.iter().any(|s| s.name == "smoke"));
         assert_eq!(functional[1].args, ["acceptance", "1"]);
     }
     #[test]

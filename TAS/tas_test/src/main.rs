@@ -17,7 +17,6 @@ mod cycles;
 mod dialog_e2e;
 mod drift;
 mod drift_speed;
-mod gate_align;
 mod gates;
 mod harness;
 mod level_seq;
@@ -37,7 +36,6 @@ mod replay;
 mod save_reload;
 mod segment;
 mod shm;
-mod smoke;
 mod speed;
 mod speed_reset;
 mod steer_impact;
@@ -101,12 +99,6 @@ const MODES: &[Mode] = &[
         usage: "",
         summary: "Seven input contracts: verify captured keys, then REC/PLAY zero drift; CSV + certificate",
         run: run_regression,
-    },
-    Mode {
-        name: "smoke",
-        usage: "",
-        summary: "Pipeline liveness: ticks captured, playback completes, player moves (not F5-aligned)",
-        run: |args| no_args(args) && smoke::run(),
     },
     Mode {
         name: "segment",
@@ -271,16 +263,6 @@ const MODES: &[Mode] = &[
         usage: "",
         summary: "Live input stays blocked through the CONT restart and STOP releases it",
         run: |args| no_args(args) && cont_restart_race::run_input_protection(),
-    },
-    Mode {
-        name: "gate-align",
-        usage: "[N] [recording]",
-        summary: "Gate-relative input indexing reproduces the run over N aligned replays",
-        run: |args| {
-            let flags = parse(args, &[], 2);
-            let iterations = positional_num(&flags, 0).unwrap_or(8);
-            gate_align::run(iterations, flags.positional.get(1).map(String::as_str))
-        },
     },
     Mode {
         name: "shm",

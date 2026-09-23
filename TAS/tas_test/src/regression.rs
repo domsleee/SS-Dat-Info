@@ -23,21 +23,6 @@ pub struct RegressionCase {
     pub pattern_str: String,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct WindowMetrics {
-    pub transitions: u32,
-    pub first_input_tick: i32,
-    pub frame0_dx: f64,
-    pub frame0_dz: f64,
-    pub full_norm_drift_x: f64,
-    pub full_norm_drift_z: f64,
-    pub active_start_dx: f64,
-    pub active_start_dz: f64,
-    pub active_window_ticks: u32,
-    pub active_norm_drift_x: f64,
-    pub active_norm_drift_z: f64,
-}
-
 /// Result of running one regression case; also the certificate's row.
 #[derive(Debug, Serialize)]
 pub struct CaseResult {
@@ -47,15 +32,6 @@ pub struct CaseResult {
     pub rec_count: u32,
     pub transitions: u32,
     pub first_input_tick: i32,
-    pub frame0_dx: f64,
-    pub frame0_dz: f64,
-    pub full_norm_drift_x: f64,
-    pub full_norm_drift_z: f64,
-    pub active_start_dx: f64,
-    pub active_start_dz: f64,
-    pub active_window_ticks: u32,
-    pub active_norm_drift_x: f64,
-    pub active_norm_drift_z: f64,
     pub replay_drift_x: f64,
     pub replay_drift_z: f64,
     pub replay_zero: bool,
@@ -192,12 +168,10 @@ pub fn run(csv_path: &Path) -> Vec<CaseResult> {
         append_csv(csv_path, &result);
 
         println!(
-            "  Result: alignmentAccepted={} gateRelativeDrift=({:.9}, {:.9}) fullNorm=({:.9}, {:.9}) replayZero={} gates={}",
+            "  Result: alignmentAccepted={} gateRelativeDrift=({:.9}, {:.9}) replayZero={} gates={}",
             result.alignment_accepted,
             result.replay_drift_x,
             result.replay_drift_z,
-            result.full_norm_drift_x,
-            result.full_norm_drift_z,
             result.replay_zero,
             if result.all_gates_pass {
                 "PASS"
@@ -218,13 +192,11 @@ pub fn run(csv_path: &Path) -> Vec<CaseResult> {
     );
     for r in &results {
         println!(
-            "  {} {} — gate-relative({:.9}, {:.9}) fullNorm({:.9}, {:.9}) alignmentAccepted={}",
+            "  {} {} — gate-relative({:.9}, {:.9}) alignmentAccepted={}",
             if r.all_gates_pass { "PASS" } else { "FAIL" },
             r.name,
             r.replay_drift_x,
             r.replay_drift_z,
-            r.full_norm_drift_x,
-            r.full_norm_drift_z,
             r.alignment_accepted,
         );
     }
@@ -283,27 +255,17 @@ fn run_single_case(
     }
 
     // Assess
-    let assessment = gates::run_gates_aligned(client.state(), rec_count, rec_gate, play_gate);
+    let assessment = gates::run_gates(client.state(), rec_count, rec_gate, play_gate);
     assessment.print_summary();
-    let metrics = collect_window_metrics(client.state(), rec_count);
-    print_window_metrics(&metrics);
+    let n = rec_count as usize;
 
     CaseResult {
         name: case.name.clone(),
         pattern: case.pattern_str.clone(),
         alignment_accepted: true,
         rec_count,
-        transitions: metrics.transitions,
-        first_input_tick: metrics.first_input_tick,
-        frame0_dx: metrics.frame0_dx,
-        frame0_dz: metrics.frame0_dz,
-        full_norm_drift_x: metrics.full_norm_drift_x,
-        full_norm_drift_z: metrics.full_norm_drift_z,
-        active_start_dx: metrics.active_start_dx,
-        active_start_dz: metrics.active_start_dz,
-        active_window_ticks: metrics.active_window_ticks,
-        active_norm_drift_x: metrics.active_norm_drift_x,
-        active_norm_drift_z: metrics.active_norm_drift_z,
+        transitions: drift::count_transitions(&client.state().input_log, n),
+        first_input_tick: drift::first_input_tick(&client.state().input_log, n),
         replay_drift_x: assessment.drift.max_drift_x,
         replay_drift_z: assessment.drift.max_drift_z,
         replay_zero: assessment.drift.is_zero(),
@@ -320,15 +282,6 @@ fn error_result(case: &RegressionCase, msg: &str) -> CaseResult {
         rec_count: 0,
         transitions: 0,
         first_input_tick: -1,
-        frame0_dx: 999.0,
-        frame0_dz: 999.0,
-        full_norm_drift_x: 999.0,
-        full_norm_drift_z: 999.0,
-        active_start_dx: 999.0,
-        active_start_dz: 999.0,
-        active_window_ticks: 0,
-        active_norm_drift_x: 999.0,
-        active_norm_drift_z: 999.0,
         replay_drift_x: 999.0,
         replay_drift_z: 999.0,
         replay_zero: false,
@@ -344,7 +297,7 @@ fn write_csv_header(path: &Path) {
     if let Ok(mut f) = fs::File::create(path) {
         let _ = writeln!(
             f,
-            "case_name,pattern,alignment_accepted,rec_count,transitions,first_input_tick,frame0_dx,frame0_dz,full_norm_drift_x,full_norm_drift_z,active_start_dx,active_start_dz,active_window_ticks,active_norm_drift_x,active_norm_drift_z,replay_drift_x,replay_drift_z,replay_zero,all_gates_pass,error"
+            "case_name,pattern,alignment_accepted,rec_count,transitions,first_input_tick,replay_drift_x,replay_drift_z,replay_zero,all_gates_pass,error"
         );
     }
 }
@@ -353,22 +306,13 @@ fn append_csv(path: &Path, r: &CaseResult) {
     if let Ok(mut f) = fs::OpenOptions::new().append(true).open(path) {
         let _ = writeln!(
             f,
-            "\"{}\",\"{}\",{},{},{},{},{:.9},{:.9},{:.9},{:.9},{:.9},{:.9},{},{:.9},{:.9},{:.9},{:.9},{},{},\"{}\"",
+            "\"{}\",\"{}\",{},{},{},{},{:.9},{:.9},{},{},\"{}\"",
             r.name,
             r.pattern,
             r.alignment_accepted,
             r.rec_count,
             r.transitions,
             r.first_input_tick,
-            r.frame0_dx,
-            r.frame0_dz,
-            r.full_norm_drift_x,
-            r.full_norm_drift_z,
-            r.active_start_dx,
-            r.active_start_dz,
-            r.active_window_ticks,
-            r.active_norm_drift_x,
-            r.active_norm_drift_z,
             r.replay_drift_x,
             r.replay_drift_z,
             r.replay_zero,
@@ -376,63 +320,6 @@ fn append_csv(path: &Path, r: &CaseResult) {
             r.error.as_deref().unwrap_or("")
         );
     }
-}
-
-fn collect_window_metrics(state: &tas_shared::TasSharedState, count: u32) -> WindowMetrics {
-    let n = count as usize;
-    let transitions = drift::count_transitions(&state.input_log, n);
-    let first_input_tick = drift::first_input_tick(&state.input_log, n);
-    let (frame0_dx, frame0_dz) = coord_offset(state, 0, n > 0);
-    let full_norm = drift::compute_normalized_drift_window(state, 0, count);
-
-    let mut metrics = WindowMetrics {
-        transitions,
-        first_input_tick,
-        frame0_dx,
-        frame0_dz,
-        full_norm_drift_x: full_norm.max_drift_x,
-        full_norm_drift_z: full_norm.max_drift_z,
-        ..WindowMetrics::default()
-    };
-
-    if first_input_tick >= 0 {
-        let idx = first_input_tick as usize;
-        let (active_start_dx, active_start_dz) = coord_offset(state, idx, idx < n);
-        let active_norm = drift::compute_normalized_drift_window(state, idx as u32, count);
-        metrics.active_start_dx = active_start_dx;
-        metrics.active_start_dz = active_start_dz;
-        metrics.active_window_ticks = count.saturating_sub(idx as u32);
-        metrics.active_norm_drift_x = active_norm.max_drift_x;
-        metrics.active_norm_drift_z = active_norm.max_drift_z;
-    }
-
-    metrics
-}
-
-fn coord_offset(state: &tas_shared::TasSharedState, idx: usize, present: bool) -> (f64, f64) {
-    if !present {
-        return (0.0, 0.0);
-    }
-    let dx = (state.rec_coords[idx][0] as f64 - state.play_coords[idx][0] as f64).abs();
-    let dz = (state.rec_coords[idx][2] as f64 - state.play_coords[idx][2] as f64).abs();
-    (dx, dz)
-}
-
-fn print_window_metrics(metrics: &WindowMetrics) {
-    println!(
-        "  Window metrics: transitions={} firstInput={} frame0Offset=({:.6}, {:.6}) fullNormDrift=({:.9}, {:.9}) activeStartOffset=({:.6}, {:.6}) activeTicks={} activeNormDrift=({:.9}, {:.9})",
-        metrics.transitions,
-        metrics.first_input_tick,
-        metrics.frame0_dx,
-        metrics.frame0_dz,
-        metrics.full_norm_drift_x,
-        metrics.full_norm_drift_z,
-        metrics.active_start_dx,
-        metrics.active_start_dz,
-        metrics.active_window_ticks,
-        metrics.active_norm_drift_x,
-        metrics.active_norm_drift_z,
-    );
 }
 
 #[cfg(test)]

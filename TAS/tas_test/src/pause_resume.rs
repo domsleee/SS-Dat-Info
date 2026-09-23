@@ -71,7 +71,7 @@ pub fn run() -> bool {
     let prefix_end = rec_gate
         .saturating_add(pos_at_pause.saturating_sub(play_gate))
         .min(rec_count);
-    let prefix = gates::run_gates_aligned(client.state(), prefix_end, rec_gate, play_gate);
+    let prefix = gates::run_gates(client.state(), prefix_end, rec_gate, play_gate);
     println!("Pre-pause trajectory, through replay frame {pos_at_pause}:");
     prefix.print_summary();
 
@@ -102,7 +102,7 @@ pub fn run() -> bool {
         eprintln!("ERROR: Playback did not complete after resume");
         return false;
     }
-    let assessment = gates::run_gates_aligned(client.state(), rec_count, rec_gate, play_gate);
+    let assessment = gates::run_gates(client.state(), rec_count, rec_gate, play_gate);
     assessment.print_summary();
     println!(
         "PAUSE/RESUME {}: full trajectory, including {} ticks after pause",
