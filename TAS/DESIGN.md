@@ -261,8 +261,8 @@ Each tick, Cave 2:
 2. In a CONT whose approved splice is already due, switches to REC before
    doing anything else, so this tick is recorded, not replayed.
 3. In REC, reads the keyboard; in PLAY, reads the logged input for this tick.
-4. Writes that input into the key buffer and the key state, and calls the
-   observer for each key that changed.
+4. Writes that input into the key buffer and calls the observer for each
+   key that changed.
 5. Logs the input (REC) and the position (REC and PLAY).
 6. After a PLAY tick, checks again whether a CONT splice can complete.
 

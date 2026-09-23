@@ -169,14 +169,10 @@ struct GameAddresses {
     static constexpr uint32_t LEVEL_PATH_PTR_OFFSET = 0x1D3304;
     static constexpr uint32_t KEYBOARD_OBJ_OFFSET = 0x530;
     static constexpr uint32_t DI_BUFFER_PTR_OFFSET = 0x30;
-
-    // Action state byte offsets from keyboard object (kbobj = [root+0x530])
-    static constexpr uint32_t AS_LEFT  = 0x455;
-    static constexpr uint32_t AS_UP    = 0x456;
-    static constexpr uint32_t AS_RIGHT = 0x457;
-    static constexpr uint32_t AS_DOWN  = 0x458;
-    static constexpr uint32_t AS_SHIFT = 0x440;
-    static constexpr uint32_t AS_JUMP  = 0x441;
+    // kbobj is a 0x38-byte Win32_Keyboard (HMG_Cetsup_Win32 operator_new(0x38)).
+    // The 256-byte buffer is the only key state the DLL may write: an earlier
+    // "action state" write at kbobj+0x440..0x458 landed in unrelated heap
+    // memory and crashed the game later with "Unknown exception".
 
     // Replay object: player ptr at [replayObj+0x84]
     static constexpr uint32_t REPLAY_PLAYER_OFFSET = 0x84;

@@ -20,7 +20,7 @@
 // FSAVE/FRSTOR; the command/capture helpers below still avoid float ops and
 // copy coordinates as integers so they stay safe wherever they are called.
 //
-// REC: sample the keyboard, write the DI buffer + action state, notify the
+// REC: sample the keyboard, write the DI buffer, notify the
 //      observer (BB3B10) on transitions, log the mask, capture coordinates.
 // PLAY: read the logged mask (gate-aligned when armed), write it into the
 //      game the same way, capture coordinates, splice to REC at the CONT
@@ -93,19 +93,6 @@ static void WriteDIBuffer(uint32_t buffer, uint8_t mask) {
         buf[GameAddresses::KEY_JUMP2]  = (mask & INPUT_JUMP)  ? 0x01 : 0x00;
         buf[GameAddresses::KEY_SHIFT]  = (mask & INPUT_SHIFT) ? 0x01 : 0x00;
         buf[GameAddresses::KEY_SHIFT2] = (mask & INPUT_SHIFT) ? 0x01 : 0x00;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-}
-
-static void WriteActionState(uint32_t kbobj, uint8_t mask) {
-    if (!kbobj) return;
-    __try {
-        auto kb = (uint8_t*)kbobj;
-        kb[GameAddresses::AS_LEFT]  = (mask & INPUT_LEFT)  ? 1 : 0;
-        kb[GameAddresses::AS_RIGHT] = (mask & INPUT_RIGHT) ? 1 : 0;
-        kb[GameAddresses::AS_UP]    = (mask & INPUT_UP)    ? 1 : 0;
-        kb[GameAddresses::AS_DOWN]  = (mask & INPUT_DOWN)  ? 1 : 0;
-        kb[GameAddresses::AS_JUMP]  = (mask & INPUT_JUMP)  ? 1 : 0;
-        kb[GameAddresses::AS_SHIFT] = (mask & INPUT_SHIFT) ? 1 : 0;
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
@@ -306,12 +293,11 @@ static uint8_t ClearTasInputState(GameAddresses* addr) {
     uint32_t kbobj = GetKeyboardObject(addr);
     if (!kbobj) return held;
     WriteDIBuffer(GetDIBuffer(kbobj), 0);
-    WriteActionState(kbobj, 0);
     return held;
 }
 
-// Release every input the TAS session injected: zero the DI buffer + action
-// states and notify the observer that held keys went UP (live Time stamp).
+// Release every input the TAS session injected: zero the DI buffer and
+// notify the observer that held keys went UP (live Time stamp).
 // MUST run on every TAS→OFF transition — without it a key held by the replay
 // at STOP stays "down" and the boarder keeps steering. Resolves the
 // kbobj fresh, so after an auto-stop (level swapped) it clears the NEW
@@ -694,15 +680,13 @@ static void RecTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
     }
 
     // Sample input via GAKS (Cave 1C blocks +3940, so game buffer is empty).
-    // This makes REC symmetric with PLAY: both write buffer + action_state
-    // + BB3B10 at the same point in Supreme::Cycle.
+    // This makes REC symmetric with PLAY: both write the buffer and call
+    // BB3B10 at the same point in Supreme::Cycle.
     uint8_t mask = SampleGAKS();
     uint8_t transitions = mask ^ g_prevMask;
 
     uint32_t buffer = GetDIBuffer(kbobj);
     WriteDIBuffer(buffer, mask);
-
-    WriteActionState(kbobj, mask);
 
     if (transitions) {
         CallBB3B10OnTransitions(s, addr, kbobj, mask, transitions);
@@ -760,8 +744,6 @@ static void PlayTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
 
     uint32_t buffer = GetDIBuffer(kbobj);
     WriteDIBuffer(buffer, mask);
-
-    WriteActionState(kbobj, mask);
 
     uint8_t transitions = mask ^ g_prevMask;
     if (transitions) {
