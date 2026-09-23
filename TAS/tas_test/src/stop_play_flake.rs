@@ -54,6 +54,12 @@ fn stop_then_replay(
         harness::stop(client);
         return Err(format!("the second PLAY did not reach gate + {window}"));
     }
+    // A failed capture leaves a stale coordinate from an earlier replay in its
+    // slot, which could match; without the watcher, check it here.
+    if client.state().capture_ok == 0 {
+        harness::stop(client);
+        return Err("a coordinate capture failed during the second PLAY".into());
+    }
     let d = drift::compute_gate_relative_drift(client.state(), rec_gate, play_gate, window);
     harness::stop(client);
     thread::sleep(Duration::from_millis(200));
