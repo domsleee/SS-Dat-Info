@@ -40,7 +40,6 @@ inline uint32_t g_diBuffer = 0;        // DI buffer Cave 2's press was written t
 inline uint32_t g_knownBuffer = 0;     // last DI buffer Cave 2 saw (for physical taps)
 inline DWORD g_pressMs = 0;            // GetTickCount at Cave 2's press
 inline volatile LONG g_pending = 0;    // 1 while Cave 2's F5 byte is still down
-inline volatile LONG g_releasedBy = 0; // diagnostic: 1 = restart hook, 2 = timed cap, 3 = cycle cap
 inline volatile LONG g_physicalClears = 0;  // restarts that took a physical F5 back up
 inline HANDLE g_thread = nullptr;
 
@@ -80,7 +79,6 @@ inline LONG g_releasesLogged = 0;
 inline bool ReleaseByteNow(LONG by) {
     if (InterlockedExchange(&g_pending, 0) == 0) return false;
     if (g_diBuffer) SafeWriteF5(g_diBuffer, false);
-    InterlockedExchange(&g_releasedBy, by);
     InterlockedExchange(&g_lastHoldMs, (LONG)(GetTickCount() - g_pressMs));
     InterlockedExchange(&g_lastBy, by);
     InterlockedIncrement(&g_releases);
@@ -112,7 +110,6 @@ inline void Pressed(uint32_t buffer) {
     DWORD now = GetTickCount();
     g_diBuffer = buffer;
     g_pressMs = now;
-    InterlockedExchange(&g_releasedBy, 0);
     InterlockedExchange(&g_pending, 1);
     if (!g_thread) g_thread = CreateThread(nullptr, 0, ReleaseThread, nullptr, 0, nullptr);
 }

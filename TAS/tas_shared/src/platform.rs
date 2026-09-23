@@ -1,7 +1,7 @@
 //! The Win32 client for the `Local\SupremeTAS` mapping TAS_Helper.dll creates.
 
 use std::ffi::CString;
-use std::sync::atomic::{compiler_fence, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::menu_screen;
 use crate::state::{
@@ -291,46 +291,15 @@ impl transport::TransportPort for TasSharedMemoryClient {
             std::ptr::write_volatile(&mut self.state_mut().playback_speed as *mut f32, speed);
         }
     }
-    fn set_speed_handoff(&mut self, pos: u32, speed: f32) {
-        // Payload first, THEN the marker that arms it. cave2 tests the marker
-        // and reads the speed only when it is armed, so this order is what
-        // stops it acting on an armed handover with a stale speed beside it -
-        // and a stale 0.0 there reads as "leave the speed alone", i.e. the run
-        // would keep fast-forwarding with the request already consumed.
-        //
-        // Volatile, not plain, and with a compiler fence between. The other
-        // side of these words is a different PROCESS, which Rust's memory model
-        // cannot see: plain accesses may be reordered, merged, cached in a
-        // register or elided entirely because nothing in this program appears
-        // to read them. x86 not reordering stores only matters once the
-        // compiler has emitted them in that order.
-        let s = self.state_mut();
-        unsafe {
-            std::ptr::write_volatile(&mut s.speed_after_handoff as *mut f32, speed);
-            compiler_fence(std::sync::atomic::Ordering::SeqCst);
-            std::ptr::write_volatile(&mut s.speed_handoff_pos as *mut u32, pos);
-        }
-    }
-    fn speed_handoff_pending(&self) -> bool {
-        // Volatile for the same reason: cave2 clears this from the game
-        // process, and a plain load can be hoisted out of the caller's loop.
-        unsafe { std::ptr::read_volatile(&self.state().speed_handoff_pos as *const u32) != 0 }
-    }
     fn arm_generation(&self) -> u32 {
         unsafe { std::ptr::read_volatile(&self.state().arm_generation as *const u32) }
-    }
-    fn arm_restart_tick(&self) -> u32 {
-        unsafe { std::ptr::read_volatile(&self.state().arm_restart_tick as *const u32) }
-    }
-    fn arm_consumed_tick(&self) -> u32 {
-        unsafe { std::ptr::read_volatile(&self.state().arm_consumed_tick as *const u32) }
     }
     fn capture_ok(&self) -> bool {
         unsafe { std::ptr::read_volatile(&self.state().capture_ok as *const u32) != 0 }
     }
     fn approve_cont_splice(&mut self) {
-        // Volatile: the reader is cave5 in another process (see
-        // set_speed_handoff for why plain stores are not enough).
+        // Volatile: the reader is cave5 in another process, which Rust's
+        // memory model cannot see, so a plain store may be elided.
         let s = self.state_mut();
         unsafe {
             std::ptr::write_volatile(&mut s.cont_splice_approved as *mut u32, 1);

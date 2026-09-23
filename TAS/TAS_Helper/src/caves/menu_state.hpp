@@ -102,6 +102,7 @@ static bool IsIdLike(const char* s) { return s[0] == 'I' && s[1] == 'D' && s[2] 
 // ---------------------------------------------------------------------------
 inline SRWLOCK g_pubLock = SRWLOCK_INIT;
 inline char g_lastDoc[TAS_MENU_DOC_MAX] = {};   // what shm holds (under g_pubLock)
+inline uint32_t g_lastSelector = 0xFFFFFFFFu;   // last published selector (under g_pubLock)
 
 // `doc` fits TAS_MENU_DOC_MAX including its NUL (BuildDoc's cap).
 static void Publish(const char* screen, uint32_t selector, const char* doc) {
@@ -109,13 +110,13 @@ static void Publish(const char* screen, uint32_t selector, const char* doc) {
     AcquireSRWLockExclusive(&g_pubLock);
     const bool changed = strcmp(doc, g_lastDoc) != 0 ||
                          strncmp(g_state->menu_screen, screen, TAS_MENU_SCREEN_MAX) != 0 ||
-                         g_state->menu_selector != selector;
+                         g_lastSelector != selector;
     if (changed) {
         InterlockedIncrement((volatile LONG*)&g_state->menu_seq);   // odd: writing
         uint32_t i = 0;
         for (; screen[i] && i < TAS_MENU_SCREEN_MAX - 1; i++) g_state->menu_screen[i] = screen[i];
         g_state->menu_screen[i] = 0;
-        g_state->menu_selector = selector;
+        g_lastSelector = selector;
         const size_t n = strlen(doc) + 1;
         memcpy(g_state->menu_doc, doc, n);
         InterlockedIncrement((volatile LONG*)&g_state->menu_seq);   // even: stable

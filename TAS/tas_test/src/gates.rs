@@ -195,19 +195,6 @@ pub fn run_gates_aligned(
     assessment
 }
 
-/// The gates for a straight-line test: no steering input is expected, so Gate 1
-/// is skipped.
-pub fn run_gates_straight(state: &TasSharedState, rec_count: u32) -> GateAssessment {
-    let mut assessment = run_gates(state, rec_count);
-    assessment.gates[1] = GateResult {
-        gate: 1,
-        name: "REC movement (skip: straight)",
-        passed: true,
-        detail: "skipped for straight-line test".into(),
-    };
-    assessment
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,17 +305,5 @@ mod tests {
 
         let assessment = run_gates_aligned(&state, 1000, rec_gate as u32, play_gate as u32);
         assert!(assessment.all_pass(), "{:#?}", assessment.gates);
-    }
-
-    #[test]
-    fn run_gates_straight_skips_gate1() {
-        let mut state = zeroed_state();
-        for i in 0..1000 {
-            state.rec_coords[i] = [0.0, 0.0, i as f32];
-            state.play_coords[i] = [0.0, 0.0, i as f32];
-        }
-        let assessment = run_gates_straight(&state, 1000);
-        assert!(assessment.gates[1].passed);
-        assert!(assessment.all_pass());
     }
 }

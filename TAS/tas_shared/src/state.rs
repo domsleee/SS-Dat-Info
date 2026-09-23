@@ -9,7 +9,7 @@ use crate::rider::TAS_CHARACTER_UNKNOWN;
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
 
 /// Bumped whenever `TasSharedState` changes layout (mirrors shared_state.hpp).
-pub const TAS_SHARED_VERSION: u32 = 51;
+pub const TAS_SHARED_VERSION: u32 = 52;
 /// Size of the menu document buffer (JSON, NUL-terminated).
 pub const TAS_MENU_DOC_MAX: usize = 4096;
 /// Size of the menu command target (id or label, NUL-terminated).
@@ -147,8 +147,6 @@ pub struct TasSharedState {
     pub player_x: f32,
     pub player_y: f32,
     pub player_z: f32,
-    pub max_drift_x: f32,
-    pub max_drift_z: f32,
 
     // Diagnostics
     pub bb3b10_call_count: u32,
@@ -254,32 +252,18 @@ pub struct TasSharedState {
     /// through [`level_context`]; `with_seqlock` documents the memory model.
     pub level_ctx_seq: AtomicU32,
 
-    /// Replay position at which the DLL drops `playback_speed` to
-    /// `speed_after_handoff` on that exact tick and clears the catch-up clock
-    /// backlog. 0 = no handoff. This is CONT's splice mechanism generalised so
-    /// a judged PLAY can replay the countdown fast and hand back to 1x exactly
-    /// where the run becomes worth watching.
-    pub speed_handoff_pos: u32,
-    /// Speed to assert at the handoff (0 = leave the speed alone).
-    pub speed_after_handoff: f32,
     /// Bumped by cave2 every time it PROCESSES an arm that starts a replay
     /// (ARM_PLAY / ARM_CONTINUE), refusals included. The judge uses it to tell
     /// this attempt's mode/position from the previous replay's: mode is
     /// transient and position holds the previous replay's final value until
     /// the arm resets it.
     pub arm_generation: u32,
-    /// `tick_count` when the in-process F5 restart completed (restart_state -> 2).
-    pub restart_done_tick: u32,
     /// `tick_count` at the first captured frame whose position differs from the
     /// session's frame 0 (the countdown gate).
     pub gate_tick: u32,
     /// The REC/PLAY index at that same moment: `first_moving` as stamped by the
     /// DLL.
     pub gate_index: u32,
-    /// `restart_done_tick` as it stood when THIS attempt's arm was consumed,
-    /// published before `arm_generation` so the pair always comes from one
-    /// attempt.
-    pub arm_restart_tick: u32,
     /// The RECORDING's first-moving index. Non-zero turns on gate-relative
     /// input alignment for PLAY (`recorded_index = playback_index - gate_index +
     /// gate_align_rec`), which makes the gate index irrelevant instead of
@@ -289,8 +273,6 @@ pub struct TasSharedState {
     /// failed capture still advances the index, leaving a stale coordinate
     /// inside the prefix that a first-moving scan could read as movement.
     pub capture_ok: u32,
-    /// `tick_count` at which the most recent arm was consumed.
-    pub arm_consumed_tick: u32,
     /// Aligned-CONT splice interlock. The controller writes 1 when the
     /// gate-relative watcher has validated the prefix; until then cave5 parks
     /// playback at the aligned splice and cave2 refuses to splice. Cleared by
@@ -319,10 +301,6 @@ pub struct TasSharedState {
     /// Character", ...); all-zero while a level is running. Read via
     /// [`menu_screen`].
     pub menu_screen: [u8; TAS_MENU_SCREEN_MAX],
-
-    /// Which menu item is focused, as a stable per-item id within the page
-    /// (`u32::MAX` = no menu / unreadable). Creation order, not display order.
-    pub menu_selector: u32,
 
     /// Seqlock over `menu_doc`; read the document through [`menu_doc`].
     pub menu_seq: AtomicU32,
@@ -600,40 +578,40 @@ mod tests {
     #[test]
     fn layout_pinned_to_shared_state_hpp() {
         use std::mem::offset_of;
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_651_504);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_651_472);
         let pins = [
-            ("input_log", offset_of!(TasSharedState, input_log), 416),
-            ("rec_coords", offset_of!(TasSharedState, rec_coords), 65_952),
+            ("input_log", offset_of!(TasSharedState, input_log), 408),
+            ("rec_coords", offset_of!(TasSharedState, rec_coords), 65_944),
             (
                 "play_coords",
                 offset_of!(TasSharedState, play_coords),
-                852_384,
+                852_376,
             ),
             (
                 "log_write_seq",
                 offset_of!(TasSharedState, log_write_seq),
-                1_638_816,
+                1_638_808,
             ),
             (
                 "cont_resume_speed",
                 offset_of!(TasSharedState, cont_resume_speed),
-                1_647_012,
+                1_647_004,
             ),
             (
                 "level_ctx_seq",
                 offset_of!(TasSharedState, level_ctx_seq),
-                1_647_184,
+                1_647_176,
             ),
             (
                 "fpu_control_word",
                 offset_of!(TasSharedState, fpu_control_word),
-                1_647_232,
+                1_647_204,
             ),
-            ("menu_doc", offset_of!(TasSharedState, menu_doc), 1_647_296),
+            ("menu_doc", offset_of!(TasSharedState, menu_doc), 1_647_264),
             (
                 "menu_cmd_result",
                 offset_of!(TasSharedState, menu_cmd_result),
-                1_651_500,
+                1_651_468,
             ),
         ];
         for (name, actual, expected) in pins {

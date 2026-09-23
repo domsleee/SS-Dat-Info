@@ -215,10 +215,4 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
     return (bool)g_tickHook && (bool)g_aptHook;
 }
 
-inline void Stop() {
-    g_tickHook = {};
-    g_aptHook = {};
-    g_state = nullptr;
-}
-
 } // namespace racetimer

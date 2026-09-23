@@ -464,8 +464,6 @@ pub struct RecordingMetadata {
     pub version: u32,
     pub recorded_count: u32,
     pub force_fixed_tick: u32,
-    pub max_drift_x: f32,
-    pub max_drift_z: f32,
     pub timestamp: String,
     pub notes: String,
     #[serde(default)]
@@ -612,8 +610,6 @@ impl RecordingFile {
             version: state.version,
             recorded_count: state.recorded_count,
             force_fixed_tick: state.force_fixed_tick,
-            max_drift_x: state.max_drift_x,
-            max_drift_z: state.max_drift_z,
             timestamp: chrono::Local::now().to_rfc3339(),
             notes: String::new(),
             segments: segments.to_vec(),
@@ -2619,8 +2615,6 @@ mod tests {
         state.version = 4;
         state.recorded_count = 10;
         state.force_fixed_tick = 0;
-        state.max_drift_x = 0.0;
-        state.max_drift_z = 0.0;
 
         for i in 0..10 {
             state.input_log[i] = (i as u8) & 0x3F;

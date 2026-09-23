@@ -9,13 +9,6 @@ fn set_u32(meta: &mut serde_json::Map<String, Value>, key: &str, value: u32) {
     meta.insert(key.to_string(), Value::Number(Number::from(value as u64)));
 }
 
-fn set_f32(meta: &mut serde_json::Map<String, Value>, key: &str, value: f32) -> Result<(), String> {
-    let number = Number::from_f64(value as f64)
-        .ok_or_else(|| format!("cannot serialize {}={} as JSON number", key, value))?;
-    meta.insert(key.to_string(), Value::Number(number));
-    Ok(())
-}
-
 /// Overwrite the identity keys of a refreshed baseline with the words of the
 /// game that produced its new coordinates. `Value::Null` clears a stale
 /// source value when the live half is unknown — never inherited.
@@ -78,40 +71,31 @@ pub fn run(source: &str, out: &str) -> Result<(), String> {
     harness::ensure_exclusive_runtime_ownership(&mut client, "baseline refresh");
     replay::write_to_shared(&mut client, &loaded);
 
-    let target = loaded.rec_coords[0];
-    println!(
-        "Target start position: ({:.6}, {:.6}, {:.6})",
-        target[0], target[1], target[2]
-    );
-
-    if !harness::restart_play_and_match_inprocess(&mut client, target, harness::START_MATCH_RETRIES)
-    {
-        return Err("could not position-match live playback for refresh".into());
-    }
-
-    if !harness::wait_playback(&client, loaded.count) {
+    let (rec_gate, play_gate) = harness::restart_play_aligned_inprocess(&mut client)
+        .ok_or("aligned PLAY was not accepted for refresh")?;
+    let owed = loaded.count.saturating_sub(rec_gate);
+    if !harness::wait_playback(&client, play_gate + owed) {
         return Err("playback did not complete during refresh".into());
     }
 
     let state = client.state();
     let expected = loaded.count as usize;
-    if state.playback_pos < loaded.count {
+    if state.playback_pos < play_gate + owed {
         return Err(format!(
             "playback shortfall during refresh: {}/{}",
-            state.playback_pos, loaded.count
+            state.playback_pos,
+            play_gate + owed
         ));
     }
+    // The live gate can land on a different tick from the recording's, so
+    // re-index the live trajectory to the recording's gate. Before the gate
+    // the boarder is stationary at the spawn.
+    let coords = gate_shifted(&state.play_coords, rec_gate, play_gate, expected);
 
     println!(
         "Refreshed baseline start: ({:.6}, {:.6}, {:.6})",
-        state.play_coords[0][0], state.play_coords[0][1], state.play_coords[0][2]
+        coords[0][0], coords[0][1], coords[0][2]
     );
-    if expected > 250 {
-        println!(
-            "Refreshed baseline @250: ({:.6}, {:.6}, {:.6})",
-            state.play_coords[250][0], state.play_coords[250][1], state.play_coords[250][2]
-        );
-    }
 
     let mut raw_meta = loaded.raw_meta;
     let meta_obj = raw_meta
@@ -119,8 +103,6 @@ pub fn run(source: &str, out: &str) -> Result<(), String> {
         .ok_or_else(|| "source metadata is not a JSON object".to_string())?;
     set_u32(meta_obj, "recorded_count", loaded.count);
     set_u32(meta_obj, "force_fixed_tick", 0);
-    set_f32(meta_obj, "max_drift_x", 0.0)?;
-    set_f32(meta_obj, "max_drift_z", 0.0)?;
     // The output coordinates were just captured from the live game, so the
     // output identity must be the live identity — not the source file's.
     // Unknown live halves clear stale source values instead of inheriting
@@ -143,10 +125,21 @@ pub fn run(source: &str, out: &str) -> Result<(), String> {
         Path::new(out),
         &raw_meta,
         &loaded.input_log[..expected],
-        &state.play_coords[..expected],
+        &coords,
     )?;
     println!("Saved refreshed baseline to {}", out);
     Ok(())
+}
+
+/// `count` coordinates in recording index space: the spawn up to `rec_gate`,
+/// then the live trajectory from `play_gate` on.
+fn gate_shifted(play: &[[f32; 3]], rec_gate: u32, play_gate: u32, count: usize) -> Vec<[f32; 3]> {
+    (0..count)
+        .map(|i| match (i as u32).checked_sub(rec_gate) {
+            Some(k) => play[(play_gate + k) as usize],
+            None => play[0],
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -164,6 +157,18 @@ mod tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn gate_shift_reindexes_the_live_trajectory_to_the_recording_gate() {
+        let spawn = [1.0, 2.0, 3.0];
+        let mut play = vec![spawn; 10];
+        play[4] = [5.0, 0.0, 0.0];
+        play[5] = [6.0, 0.0, 0.0];
+        let out = gate_shifted(&play, 6, 4, 8);
+        assert_eq!(&out[..6], &[spawn; 6]);
+        assert_eq!(out[6], [5.0, 0.0, 0.0]);
+        assert_eq!(out[7], [6.0, 0.0, 0.0]);
     }
 
     #[test]

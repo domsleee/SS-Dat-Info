@@ -9,7 +9,7 @@
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
 
-constexpr uint32_t TAS_SHARED_VERSION = 51;
+constexpr uint32_t TAS_SHARED_VERSION = 52;
 constexpr uint32_t TAS_MENU_DOC_MAX = 4096;  // menu document buffer (JSON, NUL-terminated)
 constexpr uint32_t TAS_MENU_CMD_TARGET_MAX = 64;  // menu command target (id or label, NUL-terminated)
 // menu_cmd_kind
@@ -133,7 +133,6 @@ struct TasSharedState {
     uint32_t recorded_count;        // ticks recorded
     uint32_t playback_pos;          // current playback tick
     float    player_x, player_y, player_z;
-    float    max_drift_x, max_drift_z;
 
     // -- Diagnostics --
     uint32_t bb3b10_call_count;     // BB3B10 observer calls (Cave 2 direct)
@@ -253,24 +252,15 @@ struct TasSharedState {
     volatile uint32_t level_ctx_seq;
 
     // -- Judged PLAY / CONT controls (UI writes, cave2/cave5 read) --
-    // Replay position at which cave2 drops playback_speed to
-    // speed_after_handoff on that exact tick and asks cave5 to clear the
-    // catch-up backlog. 0 = no handoff.
-    volatile uint32_t speed_handoff_pos;
-    volatile float speed_after_handoff;
     // Bumped every time cave2 PROCESSES a replay-starting arm (ARM_PLAY /
     // ARM_CONTINUE), refusals included. The judge uses it to tell this
     // attempt's mode/position from the previous replay's.
     volatile uint32_t arm_generation;
-    // Countdown gate. tick_count when restart_state -> 2; tick_count and
-    // REC/PLAY index of the first captured frame whose position differs from
-    // frame 0 (the boarder leaving the spawn); restart_done_tick latched at
-    // this attempt's arm (published before arm_generation so the pair never
-    // straddles two attempts).
-    volatile uint32_t restart_done_tick;
+    // Countdown gate: tick_count and REC/PLAY index of the first captured
+    // frame whose position differs from frame 0 (the boarder leaving the
+    // spawn).
     volatile uint32_t gate_tick;
     volatile uint32_t gate_index;
-    volatile uint32_t arm_restart_tick;
     // The RECORDING's first-moving index; non-zero enables gate-relative input
     // alignment for PLAY (recorded_index = playback_index - gate_index +
     // gate_align_rec). 0 = index from the arm.
@@ -278,8 +268,6 @@ struct TasSharedState {
     // 1 while every coordinate capture this session has succeeded. A failed
     // capture still advances the index, leaving a stale hole in the prefix.
     volatile uint32_t capture_ok;
-    // tick_count at which the most recent arm was consumed.
-    volatile uint32_t arm_consumed_tick;
     // Aligned-CONT splice interlock. Written 1 by the controller when the
     // gate-relative watcher has validated the prefix. Until then cave5 parks
     // playback at the aligned splice (0 ticks/frame) and cave2 refuses to
@@ -312,10 +300,6 @@ struct TasSharedState {
     // seqlocked: a torn read is a one-frame cosmetic blip.
     char menu_screen[TAS_MENU_SCREEN_MAX];
 
-    // The focused menu item's index within the current page (0xFFFFFFFF = no
-    // menu / unreadable). See menu_state.hpp.
-    volatile uint32_t menu_selector;
-
     // The MENU DOCUMENT: the current page's items with visible labels and
     // stable ids as compact JSON, e.g.
     //   {"screen":"ID_ARCADE_MENU","sel":0,"items":[
@@ -343,18 +327,18 @@ struct TasSharedState {
 #define TAS_PIN_OFFSET(field, expected) \
     static_assert(offsetof(TasSharedState, field) == (expected), \
                   "TasSharedState." #field " moved: bump TAS_SHARED_VERSION and update tas_shared/src/state.rs")
-static_assert(sizeof(TasSharedState) == 1651504,
+static_assert(sizeof(TasSharedState) == 1651472,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/state.rs");
-TAS_PIN_OFFSET(input_log, 416);
-TAS_PIN_OFFSET(rec_coords, 65952);
-TAS_PIN_OFFSET(play_coords, 852384);
-TAS_PIN_OFFSET(log_write_seq, 1638816);
-TAS_PIN_OFFSET(cont_resume_speed, 1647012);
-TAS_PIN_OFFSET(level_ctx_seq, 1647184);
-TAS_PIN_OFFSET(fpu_control_word, 1647232);
-TAS_PIN_OFFSET(menu_doc, 1647296);
-TAS_PIN_OFFSET(menu_cmd_result, 1651500);
+TAS_PIN_OFFSET(input_log, 408);
+TAS_PIN_OFFSET(rec_coords, 65944);
+TAS_PIN_OFFSET(play_coords, 852376);
+TAS_PIN_OFFSET(log_write_seq, 1638808);
+TAS_PIN_OFFSET(cont_resume_speed, 1647004);
+TAS_PIN_OFFSET(level_ctx_seq, 1647176);
+TAS_PIN_OFFSET(fpu_control_word, 1647204);
+TAS_PIN_OFFSET(menu_doc, 1647264);
+TAS_PIN_OFFSET(menu_cmd_result, 1651468);
 #undef TAS_PIN_OFFSET
 
 // Write a log entry to the ring buffer. Safe to call from hook callbacks
@@ -421,7 +405,6 @@ public:
         state->race_time_cs = 0xFFFFFFFFu;
         state->race_start_ts = 0xFFFFFFFFu;
         state->rider_stance = 0xFFFFFFFFu;    // unknown until the setup object is read
-        state->menu_selector = 0xFFFFFFFFu;   // no menu selection until the menu publishes one
         state->arg4_source = ARG4_SOURCE_NONE;
         // level_epoch == level_scan_epoch with level_id unknown reads as
         // "trustworthy but unknown" (at the menu / not yet scanned).

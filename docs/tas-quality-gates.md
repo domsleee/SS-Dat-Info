@@ -84,9 +84,8 @@ refreshes its long holds; other steered patterns do not silently acquire keepali
 | Mode | Pico | Pass signature | What it checks |
 |---|---|---|---|
 | `smoke` | no | `*** SMOKE TEST PASSED ***` | Pipeline liveness (~40 s): ticks captured, playback ran to completion, player moved in REC and PLAY. REC and PLAY start from different spawns here, so liveness is the whole verdict. `just test_smoke`. |
-| `f5` | no | `=== Overall: ALL GATES PASS ===` | F5-aligned straight-line REC then PLAY through the gate checks. |
 | `segment` | yes | `*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***` | Product-aligned CONT at frame 500 while LEFT is held, then RIGHT steering. Requires two exact segment boundaries, released tail and complete gate-relative zero drift; covers approval arriving at the parked splice. |
-| `replay <file.tasrec> [--iterations N] [--verbose] [--no-match]` | no | `Result: ZERO DRIFT in all N iterations` | Loads a `.tasrec` and replays it N times; drift, incomplete playback or a failed start match fails. `just test_replay FILE`. |
+| `replay <file.tasrec> [--iterations N] [--verbose]` | no | `Result: ZERO DRIFT in all N iterations` | Loads a `.tasrec` and replays it N times through aligned PLAY; gate-relative drift, incomplete playback or a rejected alignment fails. `just test_replay FILE`. |
 | `reliability [--iterations N] [--speed X]` | yes | `*** RELIABILITY TEST PASSED ***` | N consecutive steered REC+PLAY cycles at one speed (default 10 at 12x). Shares the procedure with drift-speed, preserving its 50-tick rather than 100-tick neutral tail and mandatory movement gates. |
 | `drift-speed` | yes | `*** DRIFT-AT-SPEED TEST PASSED ***` | REC 2x/PLAY 2x and REC 1x/PLAY 2x both replay with zero drift. |
 | `save-reload` | yes | `*** SAVE/RELOAD/REPLAY PASSED: complete gate-relative comparison across game restart ***` | Verify steered REC, save to disk, kill/relaunch, reclaim Pico and command ownership, require exact input/coordinate round-trip and complete product-aligned zero-drift replay. |
@@ -105,7 +104,6 @@ refreshes its long holds; other steered patterns do not silently acquire keepali
 | `speed-reset` | no | `*** SPEED RESET TEST PASSED ***` | After 2x REC and STOP the OFF-mode tick rate and F5 are back to normal. |
 | `catchup-speed` | no | `*** CATCH-UP SPEED OK: 64× catch-up is Nx faster than 1× ...` | Median time-to-splice at 64x versus 1x stays above the required ratio. |
 | `play-pace` | no | `*** PLAY-PACE OK: 1× PLAY ran at N% of native wall time ...` | 1x PLAY of a fixed frame window takes native wall time. |
-| `play-judge [--iterations N]` | no | `*** PLAY JUDGE HANDOVER PASSED ***` | A judged PLAY replays the countdown at catch-up speed and hands back at `first_moving + 1` with the run unchanged. |
 | `video-rate [secs] [--at X Y]` | no | rate summary | Distinct frames per second reaching the screen, measured from outside the process; works with no DLL injected. |
 | `dialog-e2e` | yes | `*** DIALOG-E2E PASSED: save-dialog and menu behave at native speed end to end ***` | Real finishes with a Pico Escape on the save dialog in PLAY and after a CONT splice, then the main menu speed; the quit navigates by menu-document ids after one physical ESC. |
 
@@ -230,9 +228,8 @@ Use `just test_live_full` for functional coverage, or `just test_live_soak` for
 the same cases with extended UI, acceptance, replay, STOP and CONT repetitions.
 The short lane uses two UI trials, one acceptance run and seven input cases.
 The functional lane uses two repeated STOP/CONT/reliability cycles per
-configuration; timing medians still require three samples. `smoke` and `f5`
-remain standalone diagnostics; `play-judge` is an explicit legacy-path test,
-not a routine product gate. Both full lanes include a fresh-game
+configuration; timing medians still require three samples. `smoke`
+remains a standalone diagnostic. Both full lanes include a fresh-game
 save/reload and ends at the main menu after dialog navigation, so save your work
 first and do not run it alongside another controller. It requires a Pico, all
 three committed FE fixtures, Nushell and `REVIVE_SUPREME_SCRIPT`, the deployed
@@ -291,9 +288,7 @@ three successful finite measurements, not a median of surviving trials.
   callbacks in the text-input and sound threads). `TAS_Helper.dll` releases
   F5 the moment a restart is observed, for its own arms and for physical taps
   (`restart_release.hpp`; the log line `Restart F5: byte up after N ms`
-  should read about 30 ms), and skips a corrupt srConfig unlink instead of
-  crashing (`srconfig_guard.hpp`; a `SKIPPED corrupt unlink` line means the
-  heap was already damaged). Count `Player reset (2)` lines in `HMGEHLOG.TXT`
+  should read about 30 ms). Count `Player reset (2)` lines in `HMGEHLOG.TXT`
   per restart: one restart must add exactly one. Crash dumps land in
   `%LOCALAPPDATA%\CrashDumps`; WinDbg reads them with
   `WinDbgX -z <dump> -logo <file> -c ".ecxr; !analyze -v; kb; q"`.

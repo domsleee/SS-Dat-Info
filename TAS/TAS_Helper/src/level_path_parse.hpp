@@ -16,17 +16,6 @@ inline bool IsSep(char c) { return c == '/' || c == (char)0x5C; }
 
 inline char Lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
 
-// Case-insensitive: does `hay` contain `needle` (lowercase, NUL-terminated)?
-inline bool ContainsNoCase(const char* hay, const char* needle) {
-    if (!hay || !needle) return false;
-    for (size_t i = 0; hay[i]; i++) {
-        size_t j = 0;
-        while (needle[j] && hay[i + j] && Lower(hay[i + j]) == needle[j]) j++;
-        if (!needle[j]) return true;
-    }
-    return false;
-}
-
 // Case-insensitive equality of [p, p+n) against one of `count` lowercase needles.
 // Returns the index, or -1.
 inline int MatchOne(const char* p, size_t n, const char* const* table, int count) {

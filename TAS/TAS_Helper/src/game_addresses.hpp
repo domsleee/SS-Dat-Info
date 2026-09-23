@@ -145,7 +145,6 @@ struct GameAddresses {
     // Difficulty comes from the executable's selected-track config object;
     // see setup_config_parse.hpp. That survives the shared-path outlier.
     std::uint8_t* level_path_ptr = nullptr;
-    std::uint8_t* vk_table = nullptr;       // SG+0x9AD8: VK -> keyIndex lookup
 
     // HMG_Cetsup_Win32.dll offsets
     std::uint8_t* cave1c_down = nullptr;    // HMG+0x3940: key handler (down)
@@ -191,7 +190,6 @@ struct GameAddresses {
     // adopts a recorder only if its owner is a Player that still points at it
     // (see replay_identity.hpp). Both vtable RVAs are validated against the
     // constructors' `mov [this], offset vtable` immediates in Resolve.
-    static constexpr uint32_t PLAYER_RECORDER_OFFSET = 0x14C;
     // Rider identity (live object-graph dump). The Player's
     // loadout object ([player+0x20], no RTTI) holds MSVC6 std::strings
     // ({allocator, char* ptr, size, capacity} = 16 bytes each): the character
@@ -280,7 +278,6 @@ struct GameAddresses {
         replay_capture_site = sgBase + 0x9E8F0;
         player_base = sgBase + ROOT_PTR_OFFSET;
         level_path_ptr = sgBase + GameAddresses::LEVEL_PATH_PTR_OFFSET;
-        vk_table = sgBase + 0x9AD8;
 
         // HMG_Cetsup_Win32.dll offsets
         cave1c_down = hmgBase + 0x3940;
@@ -338,7 +335,6 @@ struct GameAddresses {
         Log(std::format("Cave 1C up (+3980): {:p}", (void*)cave1c_up));
         Log(std::format("BB3B10 (+3B10): {:p}", (void*)bb3b10));
         Log(std::format("Player base ptr: {:p}", (void*)player_base));
-        Log(std::format("VK table: {:p}", (void*)vk_table));
         Log(std::format("Kernel::Time::Current: {:p}", (void*)time_current));
 
         return true;

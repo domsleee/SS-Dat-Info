@@ -82,11 +82,8 @@ const STABILIZE_FRAMES: u32 = 500;
 const RESTART_TIMEOUT_SECS: u64 = 15;
 /// Playback timeout (long enough for 65536 frames at ~50fps unfocused).
 const PLAYBACK_TIMEOUT_SECS: u64 = 120;
-/// Time allowed at 1x for a CONT replay to reach the bucket judge point.
+/// Time allowed at 1x for a CONT replay to reach the watcher's verdict.
 const JUDGE_TIMEOUT_SECS: u64 = 10;
-/// Retry budget for landing a matching F5 start bucket. Acceptance has needed
-/// up to 13; 60 covers that tail with margin.
-pub const START_MATCH_RETRIES: u32 = 60;
 
 /// Bring the game window to the front. Best effort: a missing window is left alone.
 pub fn focus_game() {
@@ -349,10 +346,7 @@ pub fn restart_play_aligned_inprocess(client: &mut TasSharedMemoryClient) -> Opt
         catchup_speed,
         continue_from_frame: 0,
         gate_align_rec: rec_gate,
-        target: None,
         max_retries: tas_shared::cont::START_MATCH_MAX_RETRIES,
-        resume_speed: 0.0,
-        predict_bucket: false,
     });
 
     stop_competing_tas_ui_writer();
@@ -373,12 +367,7 @@ pub fn restart_play_aligned_inprocess(client: &mut TasSharedMemoryClient) -> Opt
             StepOutcome::Done { retries_used, .. } => {
                 break retries_used;
             }
-            StepOutcome::Reroll {
-                attempt,
-                suggested_delay_ms,
-                observed,
-                ..
-            } => {
+            StepOutcome::Reroll { attempt, observed } => {
                 let mismatch = observed
                     .map(|frame| frame.to_string())
                     .unwrap_or_else(|| "?".to_string());
@@ -388,7 +377,6 @@ pub fn restart_play_aligned_inprocess(client: &mut TasSharedMemoryClient) -> Opt
                     tas_shared::cont::START_MATCH_MAX_RETRIES,
                     mismatch
                 );
-                thread::sleep(Duration::from_millis(suggested_delay_ms));
             }
             StepOutcome::Aborted { reason } => {
                 eprintln!("  ERROR: aligned PLAY aborted: {}", reason);
@@ -789,134 +777,6 @@ pub fn print_status(client: &TasSharedMemoryClient) {
     );
 }
 
-/// Pico F5 restart, then PLAY, retrying until play_coords[0] and the leading
-/// trajectory match the recording. F5 lands on one of a few quantized spawn
-/// buckets, so this rerolls until the right one comes up.
-pub fn restart_play_and_match(
-    client: &mut TasSharedMemoryClient,
-    target: [f32; 3],
-    max_retries: u32,
-) -> bool {
-    restart_play_and_match_with(client, target, max_retries, |c| restart_and_stabilize(c))
-}
-
-/// In-process restart variant of PLAY start matching, for file-backed replays
-/// whose restart semantics must match the tas_ui transport path.
-pub fn restart_play_and_match_inprocess(
-    client: &mut TasSharedMemoryClient,
-    target: [f32; 3],
-    max_retries: u32,
-) -> bool {
-    restart_play_and_match_with(client, target, max_retries, |c| {
-        restart_and_stabilize_inprocess(c)
-    })
-}
-
-/// Leading PLAY frames that must track the recording for a start match.
-///
-/// Must span any stationary phase at the start of a recording (a race-start
-/// countdown holds still for 200-300 frames): on a 10-frame check a stationary
-/// prefix trivially matches any F5 bucket while the rotation/velocity is wrong,
-/// and the divergence only appears once physics activates. 1000 frames covers
-/// every realistic countdown plus several seconds of steered gameplay.
-const MATCH_VERIFY_FRAMES: u32 = 1000;
-
-fn restart_play_and_match_with<F>(
-    client: &mut TasSharedMemoryClient,
-    target: [f32; 3],
-    max_retries: u32,
-    mut restart_fn: F,
-) -> bool
-where
-    F: FnMut(&mut TasSharedMemoryClient) -> bool,
-{
-    for attempt in 0..=max_retries {
-        if attempt > 0 {
-            println!("  Retry {}/{}: restarting...", attempt, max_retries);
-        }
-        if !restart_fn(client) {
-            eprintln!("  ERROR: Game not alive after restart");
-            return false;
-        }
-
-        arm_play(client);
-        // Poll until playback_pos reaches the verify window (or the end of the
-        // recording), capped at 20 s wall so retries stay bounded.
-        let wait_until = MATCH_VERIFY_FRAMES.min(client.state().recorded_count);
-        let wait_start = Instant::now();
-        loop {
-            let pos = client.playback_pos_volatile();
-            if pos >= wait_until {
-                break;
-            }
-            if wait_start.elapsed() > Duration::from_secs(20) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-        let s = client.state();
-        if s.playback_pos == 0 {
-            eprintln!("  WARNING: Playback didn't start");
-            stop(client);
-            continue;
-        }
-        let pc0 = s.play_coords[0];
-        let match_x = pc0[0].to_bits() == target[0].to_bits();
-        let match_y = pc0[1].to_bits() == target[1].to_bits();
-        let match_z = pc0[2].to_bits() == target[2].to_bits();
-        if !(match_x && match_y && match_z) {
-            let dx = (pc0[0] as f64 - target[0] as f64).abs();
-            let dz = (pc0[2] as f64 - target[2] as f64).abs();
-            println!("  play_coords[0] offset: dx={:.9} dz={:.9}", dx, dz);
-            stop(client);
-            continue;
-        }
-
-        // Frame 0 matched; the following frames must track the recording within
-        // BUCKET_MATCH_EPSILON, not bit-for-bit: the game wiggles low bits each
-        // tick, so a bit-exact gate rejects the correct bucket over a ~0.003
-        // blip, while a wrong-rotation bucket diverges far past epsilon.
-        let eps = tas_shared::cont::BUCKET_MATCH_EPSILON;
-        let frames_available = s
-            .playback_pos
-            .min(s.recorded_count)
-            .min(MATCH_VERIFY_FRAMES);
-        let mut traj_ok = true;
-        let mut diverge_frame = 0u32;
-        let mut diverge_dx = 0.0f64;
-        let mut diverge_dz = 0.0f64;
-        for i in 1..frames_available as usize {
-            let p = s.play_coords[i];
-            let r = s.rec_coords[i];
-            if (p[0] - r[0]).abs() > eps || (p[1] - r[1]).abs() > eps || (p[2] - r[2]).abs() > eps {
-                traj_ok = false;
-                diverge_frame = i as u32;
-                diverge_dx = (p[0] as f64 - r[0] as f64).abs();
-                diverge_dz = (p[2] as f64 - r[2] as f64).abs();
-                break;
-            }
-        }
-        if traj_ok {
-            println!(
-                "  Position + trajectory matched ({} frames verified, attempt {})",
-                frames_available,
-                attempt + 1
-            );
-            return true;
-        }
-        println!(
-            "  Trajectory diverges at frame {}: dx={:.9} dz={:.9} (likely rotation/velocity mismatch — retrying for different F5 bucket)",
-            diverge_frame, diverge_dx, diverge_dz
-        );
-        stop(client);
-    }
-    eprintln!(
-        "  WARNING: Could not match position+trajectory after {} retries",
-        max_retries
-    );
-    false
-}
-
 /// Print drift results (drift computed post-hoc from coordinate arrays).
 pub fn print_results(client: &TasSharedMemoryClient) {
     let s = client.state();
@@ -985,65 +845,36 @@ pub fn wait_continue_splice(client: &TasSharedMemoryClient, splice_frame: u32) -
 /// (`tas_shared::transport`) — the exact restart/arm/reroll state machine tas_ui
 /// drives, so this measures what the app does.
 ///
-/// The controller reaches `Done` when the bucket is accepted (before the splice
-/// fires); we then wait for the PLAY->REC splice at `splice_frame`. Returns
+/// The controller reaches `Done` when the aligned prefix is accepted (before
+/// the splice fires); we then wait for the PLAY->REC splice. Returns
 /// `Some(reroll_count)` on a clean splice (0 = landed first try), `None` on
 /// failure.
 pub fn restart_continue_and_splice_inprocess(
     client: &mut TasSharedMemoryClient,
-    target: [f32; 3],
     splice_frame: u32,
     max_retries: u32,
 ) -> Option<u32> {
-    use tas_shared::transport::{Arm, ArmConfig, BucketTarget, StepOutcome, TransportController};
+    use tas_shared::transport::{Arm, ArmConfig, StepOutcome, TransportController};
 
-    let expected_start_bits = [
-        target[0].to_bits(),
-        target[1].to_bits(),
-        target[2].to_bits(),
-    ];
-    let expected_first_moving = {
+    // Gate-aligned CONT indexes the prefix input from the observed gate and
+    // fires the splice at the aligned position, so the countdown length does
+    // not matter.
+    let gate_align_rec = {
         let s = client.state();
-        tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count)
+        tas_shared::cont::detect_first_moving(&s.rec_coords[..], s.recorded_count).unwrap_or(0)
     };
-    match expected_first_moving {
-        Some(fm) => println!(
-            "  CONT bucket criteria (shared controller): spawn match + first-moving frame {}",
-            fm
-        ),
-        None => println!(
-            "  CONT bucket criteria (shared controller): recording never moves — spawn match only"
-        ),
-    }
+    println!(
+        "  CONT aligned on recording gate {} (shared controller)",
+        gate_align_rec
+    );
 
     let catchup_speed = client.state().playback_speed;
-    // Gate-aligned CONT indexes the prefix input from the observed gate and
-    // fires the splice at the aligned position, so a countdown landing on a
-    // different tick no longer forces a reroll. Only align when the splice is
-    // comfortably past the gate: the gate-relative watcher needs
-    // BUCKET_MATCH_WINDOW samples BEFORE the destructive splice. Below that,
-    // fall back to the bucket match.
-    let rg = expected_first_moving.unwrap_or(0);
-    let align_ok = rg > 0 && splice_frame > rg + tas_shared::cont::BUCKET_MATCH_WINDOW;
-    let gate_align_rec = if align_ok { rg } else { 0 };
     let cfg = ArmConfig {
         arm: Arm::Continue,
         catchup_speed,
         continue_from_frame: splice_frame,
         gate_align_rec,
-        target: if gate_align_rec > 0 {
-            None
-        } else {
-            Some(BucketTarget {
-                expected_start_bits,
-                expected_first_moving,
-            })
-        },
         max_retries,
-        // CONT hands the speed back at the splice (cont_resume_speed), not
-        // mid-replay, so it stages no handover here.
-        resume_speed: 0.0,
-        predict_bucket: gate_align_rec == 0,
     };
     let mut controller = TransportController::new(cfg);
 
@@ -1086,30 +917,23 @@ pub fn restart_continue_and_splice_inprocess(
                 // consistent F5 phase.
                 thread::sleep(Duration::from_millis(ms));
             }
-            StepOutcome::Reroll {
-                attempt,
-                suggested_delay_ms,
-                observed,
-                expected,
-            } => {
+            StepOutcome::Reroll { attempt, observed } => {
                 println!(
-                    "  Retry {}/{}: CONT bucket reroll  observed first-moving={:?} expected={:?}",
-                    attempt, max_retries, observed, expected
+                    "  Retry {}/{}: CONT watcher reroll  first mismatch at gate+{:?}",
+                    attempt, max_retries, observed
                 );
-                // Clear any save dialog that re-appeared after the Stop, then
-                // jitter the wall clock so the next F5 lands at a new phase.
+                // Clear any save dialog that re-appeared after the Stop.
                 dismiss_save_dialog();
-                thread::sleep(Duration::from_millis(suggested_delay_ms));
                 attempt_deadline = Instant::now() + per_attempt;
             }
             StepOutcome::Done { retries_used, .. } => {
                 if retries_used > 0 {
                     println!(
-                        "  CONT bucket accepted (shared controller) after {} reroll(s)",
+                        "  CONT prefix accepted (shared controller) after {} reroll(s)",
                         retries_used
                     );
                 }
-                println!("  CONT bucket accepted, waiting for splice...");
+                println!("  CONT prefix accepted, waiting for splice...");
                 return if wait_continue_splice(client, splice_frame) {
                     Some(retries_used)
                 } else {

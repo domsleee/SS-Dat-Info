@@ -602,23 +602,17 @@ impl TasApp {
         }
     }
 
-    /// Build the CONT bucket fingerprint (spawn bits + first-moving frame) from
-    /// the loaded recording, or `None` if nothing is loaded. Uses the shared
-    /// `detect_first_moving` so the app and the harness judge identically.
-    fn cont_bucket_target(&self) -> Option<tas_shared::transport::BucketTarget> {
-        let shared = self.shared.as_ref()?;
-        let state = shared.state();
-        if state.recorded_count == 0 {
-            return None;
-        }
-        let rec0 = state.rec_coords[0];
-        Some(tas_shared::transport::BucketTarget {
-            expected_start_bits: [rec0[0].to_bits(), rec0[1].to_bits(), rec0[2].to_bits()],
-            expected_first_moving: tas_shared::cont::detect_first_moving(
-                &state.rec_coords,
-                state.recorded_count,
-            ),
-        })
+    /// The loaded recording's gate (its first-moving frame), or 0 if nothing
+    /// is loaded or it never moves. Uses the shared `detect_first_moving` so
+    /// the app and the harness align identically.
+    fn recording_gate(&self) -> u32 {
+        self.shared
+            .as_ref()
+            .and_then(|shared| {
+                let state = shared.state();
+                tas_shared::cont::detect_first_moving(&state.rec_coords, state.recorded_count)
+            })
+            .unwrap_or(0)
     }
 
     fn send_action_command(&mut self, command: TasCommand) {
@@ -952,7 +946,6 @@ impl TasApp {
             _ => tas_shared::transport::Arm::Rec,
         };
 
-        let mut target: Option<tas_shared::transport::BucketTarget> = None;
         let mut gate_align_rec = 0;
         let mut continue_from_frame = 0;
         if command == TasCommand::ArmContinue {
@@ -962,27 +955,12 @@ impl TasApp {
             self.playback_speed = self.cont_catchup_multiplier;
             self.pending_session_kind = Some(RecordingSessionKind::Continue);
             self.pending_continue_start_tick = Some(self.continue_from_frame);
-            // CONT is gate-aligned too: the prefix input is indexed from the
-            // observed gate and the splice fires at the aligned position, so a
-            // countdown landing on a different tick no longer forces a reroll
-            // (fe10065-cont: 5/8 -> 8/8 first-try). The recording stays in
+            // CONT is gate-aligned: the prefix input is indexed from the
+            // observed gate and the splice fires at the aligned position, so
+            // the countdown length does not matter. The recording stays in
             // rec-index space at the splice, so the resumed recording is
-            // byte-consistent with the loaded one. target stays None so the
-            // controller runs the gate-relative watcher, not the old bucket
-            // fingerprint.
-            // Only align when the splice is comfortably past the gate, so the
-            // watcher completes before the destructive splice and near-gate
-            // edge cases fall back to the proven bucket match (see harness).
-            let rg = self
-                .cont_bucket_target()
-                .and_then(|t| t.expected_first_moving)
-                .unwrap_or(0);
-            if rg > 0 && self.continue_from_frame > rg + tas_shared::cont::BUCKET_MATCH_WINDOW {
-                gate_align_rec = rg; // aligned → controller runs the watcher
-            } else {
-                // Near-gate splice: fall back to the proven bucket match.
-                target = self.cont_bucket_target();
-            }
+            // byte-consistent with the loaded one.
+            gate_align_rec = self.recording_gate();
             continue_from_frame = self.continue_from_frame;
         } else {
             self.clear_cont_catchup();
@@ -1004,10 +982,7 @@ impl TasApp {
             if command == TasCommand::ArmPlay {
                 self.continue_from_frame = 0;
                 self.continue_from_text = "0".to_string();
-                gate_align_rec = self
-                    .cont_bucket_target()
-                    .and_then(|t| t.expected_first_moving)
-                    .unwrap_or(0);
+                gate_align_rec = self.recording_gate();
             }
         }
 
@@ -1051,21 +1026,18 @@ impl TasApp {
         // Hand the whole restart→arm(→judge→reroll) cycle to the shared
         // controller — the SAME state machine the tas_test harness drives. It
         // serialises Stop→wait-OFF→Restart→wait-rs2→Arm (the command slot is a
-        // single u32, so Stop+Restart can't share a frame), runs the CONT bucket
-        // judge or aligned PLAY watcher, and rerolls failures.
+        // single u32, so Stop+Restart can't share a frame), runs the aligned
+        // watcher, and rerolls failures.
         let cfg = tas_shared::transport::ArmConfig {
             arm,
             catchup_speed: self.playback_speed,
             continue_from_frame,
             gate_align_rec,
-            target,
-            max_retries: if target.is_some() || gate_align_rec > 0 {
+            max_retries: if gate_align_rec > 0 {
                 CONT_START_MATCH_MAX_RETRIES
             } else {
                 0
             },
-            predict_bucket: true,
-            resume_speed: 0.0,
         };
         self.cont_controller = Some(tas_shared::transport::TransportController::new(cfg));
         self.cont_cycle_deadline = Some(std::time::Instant::now() + CONT_CYCLE_BUDGET);
@@ -1077,10 +1049,10 @@ impl TasApp {
         // catch-up PLAY and resumed REC are handler-blocked by mode, and
         // post-splice REC must see live input.
         //
-        // CONT needs this while its bucket is judged. Aligned PLAY needs it until
-        // ARM_PLAY takes over input injection; otherwise a live key during the
-        // OFF-mode restart window can alter the state alignment is meant to replay.
-        if target.is_some() || gate_align_rec > 0 {
+        // An aligned replay needs it until the arm takes over input injection;
+        // otherwise a live key during the OFF-mode restart window can alter the
+        // state alignment is meant to replay.
+        if gate_align_rec > 0 {
             if let Some(shared) = self.shared.as_mut() {
                 shared.state_mut().cont_suppress_input = 1;
             }
@@ -1163,11 +1135,7 @@ impl TasApp {
                             // takes for its own abort - send_action_command is the
                             // button path and wants a timestamp we do not have here.
                             shared.send_command(TasCommand::Stop);
-                            let sp = self.playback_speed;
-                            let st = shared.state_mut();
-                            st.speed_handoff_pos = 0;
-                            st.speed_after_handoff = 0.0;
-                            st.playback_speed = sp;
+                            shared.state_mut().playback_speed = self.playback_speed;
                         }
                         self.reset_continue_runtime_state();
                         self.set_cont_suppress_input(false);
@@ -1197,33 +1165,17 @@ impl TasApp {
                     // IMMEDIATELY (no render frame between settle and command).
                     std::thread::sleep(std::time::Duration::from_millis(ms));
                 }
-                StepOutcome::Reroll {
-                    attempt,
-                    suggested_delay_ms,
-                    observed,
-                    expected,
-                } => {
-                    if self.cont_cycle_arm == tas_shared::transport::Arm::Play {
-                        let mismatch = observed
-                            .map(|frame| frame.to_string())
-                            .unwrap_or_else(|| "?".to_string());
-                        self.push_log(&format!(
-                            "PLAY watcher reroll {}/{} (first mismatch at gate+{})",
-                            attempt, CONT_START_MATCH_MAX_RETRIES, mismatch
-                        ));
-                    } else {
-                        self.push_log(&format!(
-                            "{} bucket reroll {}/{} (observed first-moving={:?} expected={:?})",
-                            self.cont_cycle_label(),
-                            attempt,
-                            CONT_START_MATCH_MAX_RETRIES,
-                            observed,
-                            expected
-                        ));
-                    }
-                    // Vary the wall clock so the next F5 lands at a different
-                    // accumulator-modulo-tick phase, then loop immediately.
-                    std::thread::sleep(std::time::Duration::from_millis(suggested_delay_ms));
+                StepOutcome::Reroll { attempt, observed } => {
+                    let mismatch = observed
+                        .map(|frame| frame.to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    self.push_log(&format!(
+                        "{} watcher reroll {}/{} (first mismatch at gate+{})",
+                        self.cont_cycle_label(),
+                        attempt,
+                        CONT_START_MATCH_MAX_RETRIES,
+                        mismatch
+                    ));
                 }
                 StepOutcome::Done {
                     retries_used,
@@ -1267,15 +1219,10 @@ impl TasApp {
                 StepOutcome::Aborted { reason } => {
                     self.push_log(&format!("{} aborted: {}", self.cont_cycle_label(), reason));
                     self.clear_cont_catchup();
-                    // Drop any handover the aborted attempt had staged, and push
-                    // the restored speed through: an aborted PLAY must not leave
-                    // the game fast-forwarding at the judge speed.
+                    // Push the restored speed through: an aborted PLAY must not
+                    // leave the game fast-forwarding at the judge speed.
                     if let Some(shared) = self.shared.as_mut() {
-                        let sp = self.playback_speed;
-                        let st = shared.state_mut();
-                        st.speed_handoff_pos = 0;
-                        st.speed_after_handoff = 0.0;
-                        st.playback_speed = sp;
+                        shared.state_mut().playback_speed = self.playback_speed;
                     }
                     // also clears cont_controller
                     self.reset_continue_runtime_state();
@@ -1514,10 +1461,8 @@ impl TasApp {
     }
 
     /// Emit one diagnostic line at the CONT splice: where the recording
-    /// actually resumed (the requested splice tick), how many F5 bucket attempts
-    /// it took, and HOW the bucket was accepted. A `NoSignal` accept is flagged
-    /// loudly because it was not positively confirmed — the resume may be on a
-    /// near-miss bucket, which is the likely cause of an "off" resume.
+    /// actually resumed (the requested splice tick), how many attempts it
+    /// took, and whether the prefix was watched.
     fn log_cont_resume_summary(&mut self) {
         use tas_shared::transport::CompletedVia;
         let Some(session) = self.active_recording_session else {
@@ -1532,9 +1477,6 @@ impl TasApp {
             .unwrap_or((1, CompletedVia::Unjudged));
         let verdict = match via {
             CompletedVia::BucketMatched => "bucket matched",
-            CompletedVia::NoSignal => {
-                "⚠ bucket UNCONFIRMED (no-signal accept — resume may be on a near-miss bucket)"
-            }
             CompletedVia::Unjudged => "bucket unjudged",
         };
         self.push_log(&format!(
@@ -2756,20 +2698,6 @@ impl eframe::App for TasApp {
                 // multiplier — so we don't stomp it back to e.g. 64x for the
                 // frame(s) before our mode-transition handler runs. This closes
                 // the post-splice overshoot.
-                //
-                // A judged PLAY is different again: its handover fires mid-replay
-                // with no mode change to notice it by, and it can be staged and
-                // consumed between two frames of this closure. So rather than
-                // race it, this yields the field entirely - the controller owns
-                // playback_speed for that whole cycle, asserting the catch-up
-                // before the handover and the resume speed after, and it steps at
-                // least as often as this runs. Two writers with different views of
-                // the same handover is exactly how the catch-up got reinstated
-                // over it.
-                let controller_owns_speed = self
-                    .cont_controller
-                    .as_ref()
-                    .is_some_and(|c| c.owns_playback_speed());
                 let catchup_active = self.cont_catchup_speed.is_some();
                 let mode = shared.state().mode;
                 let speed_to_assert = if catchup_active && mode == TasMode::Rec as u32 {
@@ -2777,9 +2705,7 @@ impl eframe::App for TasApp {
                 } else {
                     self.playback_speed
                 };
-                if !controller_owns_speed {
-                    shared.state_mut().playback_speed = speed_to_assert;
-                }
+                shared.state_mut().playback_speed = speed_to_assert;
 
                 ui.separator();
 
@@ -3461,10 +3387,7 @@ mod tests {
                 catchup_speed: 256.0,
                 continue_from_frame: 400,
                 gate_align_rec: 299,
-                target: None,
                 max_retries: 1,
-                resume_speed: 1.0,
-                predict_bucket: false,
             }));
             app.cont_catchup_speed = Some(1.0);
             app.playback_speed = 256.0;
@@ -3581,31 +3504,6 @@ mod tests {
             let edges = compute_global_key_edges([true, true, true, true], &mut prev);
             assert_eq!(edges, [false, false, false, false]);
         }
-    }
-
-    /// The CONT retry-jitter sequence must visit a spread of distinct
-    /// values so timing varies enough to cross tick-accumulator
-    /// boundaries between retries. If everyone hits the same ms, we'd
-    /// re-land in the same F5 bucket every retry.
-    #[test]
-    fn cont_retry_jitter_visits_distinct_values() {
-        use tas_shared::transport::{cont_retry_jitter_ms, NATURAL_RESTART_ATTEMPTS};
-        // The escape jitter (after the un-jittered natural-variance attempts)
-        // should cycle through distinct phases (gcd(7,17) = 1).
-        let lo = NATURAL_RESTART_ATTEMPTS + 1;
-        let values: std::collections::HashSet<u64> =
-            (lo..lo + 17).map(cont_retry_jitter_ms).collect();
-        assert!(
-            values.len() >= 10,
-            "Jitter sequence too repetitive: {} distinct values",
-            values.len()
-        );
-        // No value should exceed ~20ms — a single retry shouldn't feel
-        // like an unresponsive UI freeze.
-        let max = (lo..lo + 17).map(cont_retry_jitter_ms).max().unwrap();
-        assert!(max <= 20, "Jitter ms upper bound too large: {}", max);
-        // And the first attempts must be jitter-free.
-        assert_eq!(cont_retry_jitter_ms(1), 0);
     }
 
     /// Pressing CONT (via F12 or otherwise) with no recording loaded

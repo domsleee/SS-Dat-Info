@@ -46,10 +46,7 @@ fn serialised_stop_then_restart(client: &mut TasSharedMemoryClient) -> bool {
         catchup_speed: 1.0,
         continue_from_frame: SPLICE_FRAME,
         gate_align_rec: 0,
-        target: None,
         max_retries: 0,
-        resume_speed: 0.0,
-        predict_bucket: false,
     });
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -89,10 +86,7 @@ pub fn run_input_protection() -> bool {
         catchup_speed: original_speed,
         continue_from_frame: 4705,
         gate_align_rec: 299,
-        target: None,
         max_retries: 30,
-        resume_speed: original_speed,
-        predict_bucket: false,
     };
     let mut controller = TransportController::new(config);
     // Same setup as tas_ui's restart queue, immediately before stepping.

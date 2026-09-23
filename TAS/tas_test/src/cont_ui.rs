@@ -57,7 +57,7 @@ fn original_recording_file() -> Vec<u8> {
     let metadata = serde_json::to_vec(&serde_json::json!({
         "version": 1, "recorded_count": count, "inject_mode": 6,
         "force_fixed_tick": 0, "force_direct": 2, "input_source": 0,
-        "max_drift_x": 0.0, "max_drift_z": 0.0, "timestamp": timestamp.to_string(),
+        "timestamp": timestamp.to_string(),
         "notes": "UI break at 4500: original history entry 2431; metadata envelope added for live UI loading"
     })).unwrap();
     let mut file = (metadata.len() as u32).to_le_bytes().to_vec();

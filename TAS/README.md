@@ -34,8 +34,7 @@ input contracts). `test_live_full` adds distinct transport, timing, persistence
 and menu checks; repeated STOP/CONT/reliability checks use two cycles per
 configuration. Timing medians retain three samples. `test_live_soak` increases
 UI, acceptance, replay, STOP and CONT repetitions without changing their judges.
-Standalone `smoke` and `f5` remain diagnostics; `play-judge` exercises the retired
-PLAY handover path and is not a routine product gate.
+Standalone `smoke` remains a diagnostic.
 The spawn/countdown checks from `rec-start` run on both `rec-repro` captures,
 avoiding a separate recording procedure. Its standalone/file-check mode remains.
 
@@ -73,7 +72,7 @@ resolves the same dependency versions.
 baseline and drives `fe-cont-reliability`, `stop-play-flake`,
 `catchup-speed`, `play-pace` and `cont-restart-race`; `FE-10065.tasrec`
 (7,162 ticks, 221 segments) drives `fe10065-cont`, `gate-align`,
-`play-judge` and `cont-hijack`; `FE-decent-done.tasrec` (8,149 ticks, crosses
+and `cont-hijack`; `FE-decent-done.tasrec` (8,149 ticks, crosses
 the finish line) drives `dialog-e2e`. A `.tasrec` is a little-endian `u32`
 header length, a JSON header, then the per-tick input bytes and XYZ
 coordinates. Headers written by the current `tas_ui` carry `renderer`,

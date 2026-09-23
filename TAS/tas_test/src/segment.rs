@@ -78,9 +78,7 @@ pub fn run() -> bool {
         SPLICE_FRAME
     );
     client.state_mut().cont_resume_speed = 1.0;
-    if harness::restart_continue_and_splice_inprocess(&mut client, rec_start, SPLICE_FRAME, 30)
-        .is_none()
-    {
+    if harness::restart_continue_and_splice_inprocess(&mut client, SPLICE_FRAME, 30).is_none() {
         eprintln!("ERROR: Could not position-match for CONT after retries");
         return false;
     }

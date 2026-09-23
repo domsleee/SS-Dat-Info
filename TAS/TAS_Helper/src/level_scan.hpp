@@ -5,7 +5,6 @@
 #include <cstddef>
 #include "shared_state.hpp"
 #include "caves/cave2.hpp"
-#include "srconfig_guard.hpp"
 #include "renderer_info.hpp"
 #include "caves/menu_state.hpp"
 #include "setup_object.hpp"
@@ -27,7 +26,6 @@
 // housekeeping and flushes cave2's deferred log lines.
 namespace levelscan {
 
-inline std::atomic<bool> g_stop{ false };
 inline HANDLE g_thread = nullptr;
 
 // LEVEL CONTEXT = the engine's own level-path string.
@@ -242,7 +240,7 @@ static int32_t scanLevelId(int areaHint) {
 
 static DWORD WINAPI threadProc(LPVOID param) {
     TasSharedState* s = (TasSharedState*)param;
-    while (!g_stop) {
+    for (;;) {
         // Poll BEFORE sampling the epoch, so a swap that already happened is
         // reflected in the epoch this scan will be stamped with.
         pollLevelContext(s);
@@ -351,15 +349,13 @@ static DWORD WINAPI threadProc(LPVOID param) {
         // Cadence: the safety-net period while resolved, 200 ms while
         // unresolved (a read is ~free, and this is when latency matters). The
         // sleep is EDGE-AWARE: a context change (new level path) or a cycle
-        // freeze (load / menu) ends it at once. Sliced so Stop() joins promptly.
+        // freeze (load / menu) ends it at once.
         bool resolved = (s->level_scan_epoch == s->level_epoch);
         const int slices = resolved ? (int)(STEADY_PERIOD_MS / 100u) : 2;
         const uint32_t epochAtSleep = s->level_epoch;
-        for (int i = 0; i < slices && !g_stop.load(std::memory_order_relaxed); i++) {
+        for (int i = 0; i < slices; i++) {
             Sleep(100);
             FlushPendingLog();           // cave2's mode-transition lines (queued inside the hook)
-            srconfigguard::Install();    // no-op once in place; sr.dll may load after injection
-            srconfigguard::FlushLog();   // corrupt unlinks the guard skipped (srconfig_guard.hpp)
             restartrelease::FlushLog();  // F5 hold timing per restart (restart_release.hpp)
             pollLevelContext(s);
             renderer::Refresh(s);
@@ -400,7 +396,6 @@ inline void Start(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readP
         // until the first scan of this DLL instance completes.
         s->level_scan_epoch = s->level_epoch - 1u;
     });
-    g_stop.store(false, std::memory_order_relaxed);
     g_thread = CreateThread(nullptr, 0, threadProc, s, 0, nullptr);
     if (!g_thread) {
         // Leave the epochs UNEQUAL. With no scanner the track is genuinely
@@ -409,27 +404,6 @@ inline void Start(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readP
         // Some(0xFFFFFFFF) — "resolved, at the menu" — forever, which is a
         // confident lie. The caller logs the failure.
     }
-}
-
-// Signal the worker and JOIN it before the caller tears down shared memory.
-// Without the join the worker could write s->level_id through a pointer that
-// DLL_PROCESS_DETACH has already unmapped (use-after-free), or resume into the
-// unloading DLL's code. A timeout is a failed stop, not permission to discard
-// the only handle that can prove the worker is gone.
-inline bool Stop(DWORD timeoutMs = 3000) {
-    g_stop.store(true, std::memory_order_relaxed);
-    if (g_thread) {
-        DWORD wait = WaitForSingleObject(g_thread, timeoutMs);
-        if (wait != WAIT_OBJECT_0) {
-            Log(std::format("Level scan: worker did not stop (wait={}, error={}); "
-                            "retaining thread handle and shared state",
-                            wait, wait == WAIT_FAILED ? GetLastError() : 0));
-            return false;
-        }
-        CloseHandle(g_thread);
-        g_thread = nullptr;
-    }
-    return true;
 }
 
 } // namespace levelscan

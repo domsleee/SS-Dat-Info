@@ -17,7 +17,6 @@ mod cycles;
 mod dialog_e2e;
 mod drift;
 mod drift_speed;
-mod f5;
 mod gate_align;
 mod gates;
 mod harness;
@@ -28,7 +27,6 @@ mod menu;
 mod patterns;
 mod pause_resume;
 mod pico;
-mod play_judge;
 mod play_pace;
 mod rec_repro;
 mod rec_start;
@@ -111,12 +109,6 @@ const MODES: &[Mode] = &[
         run: |args| no_args(args) && smoke::run(),
     },
     Mode {
-        name: "f5",
-        usage: "",
-        summary: "F5-aligned straight-line REC then PLAY through the gate checks",
-        run: |args| no_args(args) && f5::run(),
-    },
-    Mode {
         name: "segment",
         usage: "",
         summary: "Two-segment CONT (LEFT, F5-matched CONT into RIGHT) with zero boundary drift",
@@ -124,7 +116,7 @@ const MODES: &[Mode] = &[
     },
     Mode {
         name: "replay",
-        usage: "<file.tasrec> [--iterations N] [--verbose] [--no-match]",
+        usage: "<file.tasrec> [--iterations N] [--verbose]",
         summary: "Replay a .tasrec N times; drift, incomplete playback or a failed start match fails",
         run: run_replay,
     },
@@ -220,15 +212,6 @@ const MODES: &[Mode] = &[
         usage: "",
         summary: "1x PLAY of a fixed frame window takes native wall time",
         run: |args| no_args(args) && play_pace::run(),
-    },
-    Mode {
-        name: "play-judge",
-        usage: "[--iterations N]",
-        summary: "A judged PLAY replays the countdown at catch-up speed and hands back exactly",
-        run: |args| {
-            let flags = parse(args, &[flag("--iterations", Some("-n"))], 0);
-            play_judge::run(num(&flags, "--iterations", 5))
-        },
     },
     Mode {
         name: "video-rate",
@@ -493,7 +476,6 @@ fn run_replay(args: &[String]) -> bool {
         &[
             flag("--iterations", Some("-n")),
             switch("--verbose", Some("-v")),
-            switch("--no-match", None),
         ],
         1,
     );
@@ -501,20 +483,19 @@ fn run_replay(args: &[String]) -> bool {
         usage_error("replay needs <path.tasrec>");
     };
     let iterations = num(&flags, "--iterations", 5u32);
-    let no_match = flags.is_set("--no-match");
-    let report = replay::run(path, iterations, flags.is_set("--verbose"), no_match);
+    let report = replay::run(path, iterations, flags.is_set("--verbose"));
     // Zero iterations would make `.any()` vacuously false.
     if report.results.is_empty() {
         eprintln!("ERROR: replay produced no iterations — nothing was verified");
         return false;
     }
-    // Drift, incomplete playback and (unless --no-match) a failed start match
-    // all fail; drift alone is not enough because a run that never started
-    // reports 0.0 drift over zero frames.
+    // Drift, incomplete playback and a rejected alignment all fail; drift
+    // alone is not enough because a run that never started reports 0.0 drift
+    // over zero frames.
     !report
         .results
         .iter()
-        .any(|r| r.has_drift() || !r.playback_complete || (!no_match && !r.position_matched))
+        .any(|r| r.has_drift() || !r.playback_complete || !r.position_matched)
 }
 
 fn run_cont_reliability(args: &[String]) -> bool {

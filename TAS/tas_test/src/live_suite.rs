@@ -71,14 +71,6 @@ const EXCLUDED: &[(&str, &str)] = &[
         "standalone liveness diagnostic; acceptance checks movement and replay",
     ),
     (
-        "f5",
-        "standalone physical restart diagnostic; product gate uses aligned transport",
-    ),
-    (
-        "play-judge",
-        "retired PLAY handover path; run explicitly for legacy changes",
-    ),
-    (
         "cont-reliability",
         "covered by the two named CONT case presets",
     ),
@@ -461,9 +453,7 @@ mod tests {
                 "2"
             );
         }
-        assert!(!functional
-            .iter()
-            .any(|s| matches!(s.name, "smoke" | "f5" | "play-judge")));
+        assert!(!functional.iter().any(|s| s.name == "smoke"));
         assert_eq!(functional[1].args, ["acceptance", "1"]);
     }
     #[test]

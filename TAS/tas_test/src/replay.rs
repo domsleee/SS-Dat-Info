@@ -158,7 +158,7 @@ impl ReplayReport {
     }
 }
 
-pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> ReplayReport {
+pub fn run(path: &str, iterations: u32, verbose: bool) -> ReplayReport {
     println!("=== Replay Drift Test ===");
     println!("File: {}", path);
     println!("Iterations: {}", iterations);
@@ -187,7 +187,7 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
     harness::print_status(&client);
 
     // The recording must belong to the live track: on the wrong track the
-    // start matcher can never hit and burns its whole retry budget. The
+    // aligned watcher can never accept and burns its whole retry budget. The
     // harness has already waited for the level to resolve (or exited), so an
     // unresolved level here means `TAS_TEST_LEVEL=any` bypassed the guard.
     match tas_shared::resolved_level_id(client.state()) {
@@ -205,12 +205,6 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
     // Write recording data into shared memory
     write_to_shared(&mut client, &rec);
 
-    let target = rec.rec_coords[0];
-    println!(
-        "Target start position: ({:.6}, {:.6}, {:.6})",
-        target[0], target[1], target[2]
-    );
-
     let mut results = Vec::new();
 
     for i in 1..=iterations {
@@ -219,28 +213,18 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
         // Focus game for full framerate playback
         harness::focus_game();
 
-        let matched = if no_match {
-            // Just restart and immediately arm play (no position matching)
-            harness::restart_and_stabilize(&client);
-            harness::arm_play(&mut client);
-            println!("  Position matching skipped (--no-match)");
-            false
-        } else {
-            let m = harness::restart_play_and_match_inprocess(
-                &mut client,
-                target,
-                harness::START_MATCH_RETRIES,
-            );
-            if !m {
-                println!("  WARNING: Position match failed");
-            }
-            m
-        };
-
-        let play_ok = harness::wait_playback(&client, rec.count);
+        let alignment = harness::restart_play_aligned_inprocess(&mut client);
+        let matched = alignment.is_some();
+        if !matched {
+            println!("  WARNING: aligned PLAY was not accepted");
+        }
+        let (rec_gate, play_gate) = alignment.unwrap_or((0, 0));
+        let owed = rec.count.saturating_sub(rec_gate);
+        let play_ok = matched && harness::wait_playback(&client, play_gate + owed);
 
         let state = client.state();
-        let d = drift::compute_drift(state, rec.count.min(state.playback_pos));
+        let played = state.playback_pos.saturating_sub(play_gate).min(owed);
+        let d = drift::compute_gate_relative_drift(state, rec_gate, play_gate, played);
 
         let r = ReplayResult {
             iteration: i,
@@ -263,10 +247,10 @@ pub fn run(path: &str, iterations: u32, verbose: bool, no_match: bool) -> Replay
             );
             // The first bit-level divergence tells a sudden rotation mismatch
             // at the start from a gradual one.
-            let played = rec.count.min(state.playback_pos) as usize;
             let mut first_div: Option<(usize, [f32; 3], [f32; 3])> = None;
-            for i in 0..played {
-                let p = state.play_coords[i];
+            for k in 0..played as usize {
+                let i = rec_gate as usize + k;
+                let p = state.play_coords[play_gate as usize + k];
                 let r = state.rec_coords[i];
                 if p[0].to_bits() != r[0].to_bits()
                     || p[1].to_bits() != r[1].to_bits()

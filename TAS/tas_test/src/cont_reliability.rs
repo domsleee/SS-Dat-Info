@@ -352,8 +352,8 @@ fn assess_splice(
 ) -> ContCycleResult {
     let state = client.state();
     let playback_pos_at_splice = state.playback_pos;
-    // Alignment is only in effect when the gate fired AND the splice is past
-    // it, mirroring the controller's own fallback.
+    // A splice inside the countdown fires at its raw index (the DLL has
+    // nothing to align there), so only a splice past the gate is shifted.
     let aligned =
         state.gate_align_rec > 0 && state.gate_index > 0 && splice_frame > state.gate_align_rec;
     let (rec_gate, play_gate) = if aligned {
@@ -376,6 +376,12 @@ fn assess_splice(
         drift::compute_drift(state, assessed_prefix)
     };
     let prefix_stats = analyze_prefix_coords(&state.play_coords, assessed_prefix);
+    // The progress check stops a stationary prefix passing the drift check
+    // vacuously. Near the gate the recording has not moved forward yet
+    // either, so demand progress only where the recording's own prefix shows
+    // it.
+    let recorded_moves = analyze_prefix_coords(&state.rec_coords, splice_frame).forward_only_ok;
+    let forward_ok = prefix_stats.forward_only_ok || !recorded_moves;
     println!(
         "  Drift over replayed prefix [0..{}): X={:.9} (frame {}) Y={:.9} Z={:.9} (frame {})",
         assessed_prefix,
@@ -396,7 +402,7 @@ fn assess_splice(
         prefix_stats.backward_steps,
         prefix_stats.flat_steps
     );
-    if !prefix_stats.forward_only_ok {
+    if !forward_ok {
         println!(
             "  Forward-progress check FAIL: net_z={:.6}, z_range={:.6}, forward_steps={}",
             prefix_stats.net_z, prefix_stats.z_range, prefix_stats.forward_steps
@@ -422,7 +428,7 @@ fn assess_splice(
         max_drift_z: d.max_drift_z,
         max_drift_frame_x: d.max_drift_frame_x,
         max_drift_frame_z: d.max_drift_frame_z,
-        forward_only_ok: prefix_stats.forward_only_ok,
+        forward_only_ok: forward_ok,
         prefix_net_z: prefix_stats.net_z,
     }
 }
@@ -489,87 +495,87 @@ pub fn run(
             );
         }
 
-        let (baseline_ticks, rec_start, baseline_profile_label, baseline_transitions) =
-            if let Some(path) = source_tasrec {
-                println!("--- Baseline load from .tasrec ---");
-                let loaded = match replay::load_tasrec(std::path::Path::new(path)) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("ERROR: Failed to load {}: {}", path, e);
-                        std::process::exit(1);
-                    }
-                };
-                if loaded.count == 0 || loaded.rec_coords.is_empty() {
-                    eprintln!("ERROR: Baseline recording is empty");
+        let (baseline_ticks, _, baseline_profile_label, baseline_transitions) = if let Some(path) =
+            source_tasrec
+        {
+            println!("--- Baseline load from .tasrec ---");
+            let loaded = match replay::load_tasrec(std::path::Path::new(path)) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("ERROR: Failed to load {}: {}", path, e);
                     std::process::exit(1);
                 }
-                replay::write_to_shared(&mut client, &loaded);
-                println!(
-                    "  Loaded: {} ticks, fft={}",
-                    loaded.count, loaded.meta.force_fixed_tick
-                );
-                if !loaded.meta.notes.is_empty() {
-                    println!("  Notes: {}", loaded.meta.notes);
-                }
-                let rec_start = loaded.rec_coords[0];
-                println!(
-                    "  REC start: ({:.6}, {:.6}, {:.6})",
-                    rec_start[0], rec_start[1], rec_start[2]
-                );
-                let baseline_transitions =
-                    drift::count_transitions(&loaded.input_log, loaded.count as usize);
-                println!("  Input transitions: {}", baseline_transitions);
-                (
-                    loaded.count,
-                    rec_start,
-                    "file (.tasrec)".to_string(),
-                    baseline_transitions,
-                )
-            } else {
-                println!("--- Baseline REC build (single pass) ---");
-                client.state_mut().playback_speed = 1.0;
-                // Focus BEFORE the restart: the CONT cycles arm immediately
-                // after their restart, so wall time spent between restart and
-                // ARM_REC here would shift the baseline's first-moving index
-                // under every replay's and the bucket judge would reroll forever.
-                harness::focus_game();
-                if !harness::restart_and_stabilize_inprocess(&mut client) {
-                    eprintln!("ERROR: Game not alive for baseline REC (in-process restart)");
-                    std::process::exit(1);
-                }
-                harness::arm_rec(&mut client);
-                let baseline_steps =
-                    build_baseline_steps(splice_frame, baseline_profile, tap_ticks);
-                println!(
-                    "  Driving baseline pattern for {} ticks ({})",
-                    patterns::total_ticks(&baseline_steps),
-                    baseline_profile.label(tap_ticks)
-                );
-                if let Err(error) = harness::drive_pico_steps(&baseline_steps) {
-                    eprintln!("{error}");
-                    harness::stop(&mut client);
-                    client.state_mut().playback_speed = 1.0;
-                    std::process::exit(1);
-                }
-                thread::sleep(Duration::from_millis(200));
-                let baseline_ticks = client.state().recorded_count;
-                let rec_start = client.state().rec_coords[0];
-                let baseline_transitions =
-                    drift::count_transitions(&client.state().input_log, baseline_ticks as usize);
-                harness::stop(&mut client);
-                println!("  Baseline recorded: {} ticks", baseline_ticks);
-                println!("  Input transitions: {}", baseline_transitions);
-                println!(
-                    "  REC start: ({:.6}, {:.6}, {:.6})",
-                    rec_start[0], rec_start[1], rec_start[2]
-                );
-                (
-                    baseline_ticks,
-                    rec_start,
-                    baseline_profile.label(tap_ticks),
-                    baseline_transitions,
-                )
             };
+            if loaded.count == 0 || loaded.rec_coords.is_empty() {
+                eprintln!("ERROR: Baseline recording is empty");
+                std::process::exit(1);
+            }
+            replay::write_to_shared(&mut client, &loaded);
+            println!(
+                "  Loaded: {} ticks, fft={}",
+                loaded.count, loaded.meta.force_fixed_tick
+            );
+            if !loaded.meta.notes.is_empty() {
+                println!("  Notes: {}", loaded.meta.notes);
+            }
+            let rec_start = loaded.rec_coords[0];
+            println!(
+                "  REC start: ({:.6}, {:.6}, {:.6})",
+                rec_start[0], rec_start[1], rec_start[2]
+            );
+            let baseline_transitions =
+                drift::count_transitions(&loaded.input_log, loaded.count as usize);
+            println!("  Input transitions: {}", baseline_transitions);
+            (
+                loaded.count,
+                rec_start,
+                "file (.tasrec)".to_string(),
+                baseline_transitions,
+            )
+        } else {
+            println!("--- Baseline REC build (single pass) ---");
+            client.state_mut().playback_speed = 1.0;
+            // Focus BEFORE the restart: the CONT cycles arm immediately
+            // after their restart, so wall time spent between restart and
+            // ARM_REC here would shift the baseline's first-moving index
+            // under every replay's and the bucket judge would reroll forever.
+            harness::focus_game();
+            if !harness::restart_and_stabilize_inprocess(&mut client) {
+                eprintln!("ERROR: Game not alive for baseline REC (in-process restart)");
+                std::process::exit(1);
+            }
+            harness::arm_rec(&mut client);
+            let baseline_steps = build_baseline_steps(splice_frame, baseline_profile, tap_ticks);
+            println!(
+                "  Driving baseline pattern for {} ticks ({})",
+                patterns::total_ticks(&baseline_steps),
+                baseline_profile.label(tap_ticks)
+            );
+            if let Err(error) = harness::drive_pico_steps(&baseline_steps) {
+                eprintln!("{error}");
+                harness::stop(&mut client);
+                client.state_mut().playback_speed = 1.0;
+                std::process::exit(1);
+            }
+            thread::sleep(Duration::from_millis(200));
+            let baseline_ticks = client.state().recorded_count;
+            let rec_start = client.state().rec_coords[0];
+            let baseline_transitions =
+                drift::count_transitions(&client.state().input_log, baseline_ticks as usize);
+            harness::stop(&mut client);
+            println!("  Baseline recorded: {} ticks", baseline_ticks);
+            println!("  Input transitions: {}", baseline_transitions);
+            println!(
+                "  REC start: ({:.6}, {:.6}, {:.6})",
+                rec_start[0], rec_start[1], rec_start[2]
+            );
+            (
+                baseline_ticks,
+                rec_start,
+                baseline_profile.label(tap_ticks),
+                baseline_transitions,
+            )
+        };
 
         if baseline_ticks <= splice_frame {
             eprintln!(
@@ -603,7 +609,6 @@ pub fn run(
             let resume_t0 = std::time::Instant::now();
             let splice_result = harness::restart_continue_and_splice_inprocess(
                 &mut client,
-                rec_start,
                 splice_frame,
                 CONT_RESTART_RETRIES,
             );

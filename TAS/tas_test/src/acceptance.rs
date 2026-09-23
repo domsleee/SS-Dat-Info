@@ -261,18 +261,6 @@ pub fn run() -> AcceptanceResult {
         println!("\n*** ACCEPTANCE TEST PASSED ***");
     } else {
         println!("\n*** ACCEPTANCE TEST FAILED ***");
-
-        println!("\n--- Failure control: legacy matched-bucket PLAY ---");
-        if harness::restart_play_and_match_inprocess(&mut client, rec_start, 12) {
-            let control_complete = harness::wait_playback(&client, rec_count);
-            let control = drift::compute_drift(client.state(), rec_count);
-            println!(
-                "  control complete={} max drift X/Y/Z={:.9}/{:.9}/{:.9}",
-                control_complete, control.max_drift_x, control.max_drift_y, control.max_drift_z
-            );
-        } else {
-            println!("  legacy control could not find an acceptable bucket");
-        }
     }
 
     result

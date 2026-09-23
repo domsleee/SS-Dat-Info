@@ -278,11 +278,9 @@ pub fn run() -> bool {
     // Phase A's run is done; reload so recorded_count/input are pristine
     // (a splice truncates them).
     replay::write_to_shared(&mut client, &loaded);
-    let target = client.state().rec_coords[0];
     client.state_mut().cont_resume_speed = 1.0; // ride the ending at 1x, like a user
     client.state_mut().playback_speed = 64.0;
-    if harness::restart_continue_and_splice_inprocess(&mut client, target, CONT_SPLICE_FRAME, 30)
-        .is_none()
+    if harness::restart_continue_and_splice_inprocess(&mut client, CONT_SPLICE_FRAME, 30).is_none()
     {
         eprintln!("ERROR: CONT cycle failed");
         return false;

@@ -275,17 +275,6 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             }
         }
 
-        // Same treatment for a PLAY speed handover: land the batch exactly ON the
-        // handoff position so the speed changes at that tick and not up to a whole
-        // batch late. Without this the catch-up would routinely overshoot by tens
-        // of ticks, which for a judged PLAY means skipping the start of the very
-        // run the user asked to watch.
-        if (s->speed_handoff_pos > 0 && s->mode == MODE_PLAY
-            && s->playback_pos < s->speed_handoff_pos) {
-            int32_t remaining = (int32_t)(s->speed_handoff_pos - s->playback_pos);
-            if (realTick > remaining) realTick = remaining;
-        }
-
         if (s->force_fixed_tick > 0) {
             // Deterministic mode: exact tick count per frame (0 while parked)
             ctx.esi = splice_parked ? 0 : (uintptr_t)s->force_fixed_tick;
