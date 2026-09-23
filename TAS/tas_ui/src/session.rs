@@ -178,8 +178,8 @@ impl TasApp {
                 store.retry_failed_write();
             }
         }
-        // Decide on the UI thread (at most one write per ~1.5s of recording
-        // growth, see DEFAULT_RECOVERY_DEBOUNCE_MS) but write off it so REC
+        // Decide on the UI thread (the interval grows with the take, see
+        // recording/recovery.rs) but write off it so REC
         // never hitches. STOP does not write a checkpoint: finalize moves the
         // take into durable history and then clears it. Best-effort: a failed
         // write only leaves a slightly staler recovery file.

@@ -53,9 +53,8 @@ play manually during a test. Prerequisites:
 - Windows, Rust, and Supreme Snowboarding with the current TAS DLL deployed
   (`just deploy_run`).
 - A Pico HID board running the firmware in `TAS/pico/` for the modes marked
-  Pico below. The harness writes only on mask changes and the firmware
-  releases every key 500 ms after the last byte, so the regression baselines
-  include that release.
+  Pico below. The firmware releases every key 500 ms after the last byte, so
+  the harness resends held keys every 200 ms to keep long holds going.
 - `SUPREME_FOLDER` and `REVIVE_SUPREME_SCRIPT` in the environment so the
   harness can launch the game, or a game already running with `NO_REVIVE=1`.
 - The game on Forest Easy, unless `TAS_TEST_LEVEL` says otherwise.
@@ -104,7 +103,7 @@ safety release, so a hold lasts as long as the pattern says.
 | `catchup-speed` | no | `*** CATCH-UP SPEED OK: 64× catch-up is Nx faster than 1× ...` | Median time-to-splice at 64x versus 1x stays above the required ratio. |
 | `play-pace` | no | `*** PLAY-PACE OK: 1× PLAY ran at N% of native wall time ...` | 1x PLAY of a fixed frame window takes native wall time. |
 | `video-rate [secs] [--at X Y]` | no | rate summary | Distinct frames per second reaching the screen, measured from outside the process; works with no DLL injected. |
-| `dialog-e2e` | yes | `*** DIALOG-E2E PASSED: save-dialog and menu behave at native speed end to end ***` | Real finishes with a Pico Escape on the save dialog in PLAY and after a CONT splice, then the main menu speed; the quit navigates by menu-document ids after one physical ESC. |
+| `dialog-e2e` | yes | `*** DIALOG-E2E PASSED: save-dialog and menu behave at native speed end to end ***` | Real finishes that answer the save dialog No (Pico RIGHT, then Enter) in PLAY and after a CONT splice, then the main menu speed; the quit navigates by menu-document ids after one physical ESC. |
 
 ### CONT
 
@@ -162,7 +161,7 @@ not classify.
 | `TAS_TEST_OUTPUT` | `tas_test` | Artifact directory; default is next to `tas_test.exe`. |
 | `TAS_PICO_PORT` | `tas_test`, `tas_ui` | Pico CDC data port (default `COM7`). |
 | `TAS_PICO_SERIAL` | Pico updater and live-suite preflight | Select a physical board by USB serial. Discovery joins its disk and both CDC ports by PnP ancestry; multiple boards without a selector fail. Live preflight verifies files/ACK and forwards the discovered data port to children. |
-| `SSB_INSPECT_DATA_DIR` | `tas_ui` | Root for history, recovery, recordings, settings and the session log; default is `data/` next to a deployed exe, or `~/.ssb-inspector` for a dev build. |
+| `SSB_INSPECT_DATA_DIR` | `tas_ui` | Root for history, recovery, recordings, settings and the session log. Without it, settings sit next to the exe in every build, and the rest defaults to `data/` next to a deployed exe, or `~/.ssb-inspector` for a dev build. |
 | `TAS_RACE_DIAG` | `TAS_Helper.dll` | `1` before launch: log every race-timer HUD line event. |
 | `TAS_MENU_DIAG` | `TAS_Helper.dll` | `1` before launch: log the menu item list on every change. |
 | `SSB_INSPECT_E2E_RECORDING`, `SSB_INSPECT_E2E_SPLICE` | `tas_ui` | Harness-only. `cont-ui-left-spam` sets them on the UI it launches: load this recording and set From to this splice at startup. The UI refuses them without an isolated `SSB_INSPECT_DATA_DIR`. |

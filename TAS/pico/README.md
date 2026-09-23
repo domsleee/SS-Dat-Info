@@ -63,9 +63,10 @@ three-second countdown. Do not run this alongside a live game test.
 
 ## USB connection
 
-The UI and the harness use `TAS_PICO_PORT` (default `COM7`) and check VID
-`2E8A`, PID `000B` and interface `02`. These identify the USB interface, not
-the firmware version.
+The UI and the harness use `TAS_PICO_PORT` (default `COM7`). The UI and the
+live-suite preflight check VID `2E8A`, PID `000B` and interface `02`; a single
+`tas_test` mode run on its own opens the port without that check. These
+identify the USB interface, not the firmware version.
 
 Use the CDC **data** interface (`MI_02`), never the CDC console (`MI_00`).
 Both have the same VID/PID; sending a mask such as `0x03` to the console can

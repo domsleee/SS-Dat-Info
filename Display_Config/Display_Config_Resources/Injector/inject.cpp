@@ -96,13 +96,14 @@ bool Inject(DWORD pid, const std::string& dll) {
     // A DLL that keeps its DllMain loader-lock-safe may export an explicit
     // initializer instead. Resolve its RVA from a local, reference-free load
     // and run it in the target only after LoadLibrary has returned there. A
-    // DLL without the export is simply loaded; an export that fails is a
-    // failed injection.
+    // DLL without the export is simply loaded; an export that fails, or
+    // exports that can't be inspected, is a failed injection.
     bool ok = true;
     HMODULE localModule = LoadLibraryExA(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
     if (!localModule) {
         Log("Could not inspect the DLL's exports locally (error " +
-            std::to_string(GetLastError()) + "); assuming no initializer");
+            std::to_string(GetLastError()) + "); its initializer may not have run");
+        ok = false;
     } else {
         if (FARPROC localInit = GetProcAddress(localModule, "TAS_Initialize")) {
             uintptr_t initRva = reinterpret_cast<uintptr_t>(localInit)

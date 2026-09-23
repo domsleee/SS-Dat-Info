@@ -289,8 +289,8 @@ struct TasSharedState {
     volatile uint32_t race_seq;
 
     // -- Menu screen title ("Main Menu", "Select Character", ...); empty while
-    // a level runs. Captured by the race timer's SR_UIT text hook. Not
-    // seqlocked: a torn read is a one-frame cosmetic blip.
+    // a level runs. Published by the menu reader together with the menu
+    // document, under menu_seq (caves/menu_state.hpp).
     char menu_screen[TAS_MENU_SCREEN_MAX];
 
     // The MENU DOCUMENT: the current page's items with visible labels and

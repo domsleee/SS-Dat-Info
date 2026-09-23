@@ -81,8 +81,9 @@ relaunch: require_supreme_folder
     Start-Process -FilePath '{{supreme_folder}}\Supreme.exe' -WorkingDirectory '{{supreme_folder}}'; \
     Start-Sleep -Seconds 4; \
     $dest = '{{supreme_folder}}\Display_Config_Resources\TAS'; \
+    & '{{supreme_folder}}\Display_Config_Resources\Injector.exe' "$dest\TAS_Helper.dll"; \
     Start-Process -FilePath "$dest\tas_ui.exe" -WorkingDirectory $dest; \
-    Write-Host "Relaunched game + tas_ui (navigate into the race manually)"
+    Write-Host "Relaunched game with TAS_Helper + tas_ui (navigate into the race manually)"
 
 # One-shot: build, stop, deploy, relaunch — the only deploy flow to use.
 deploy_run: deploy relaunch

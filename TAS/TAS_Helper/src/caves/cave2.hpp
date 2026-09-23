@@ -12,7 +12,8 @@
 #include "cave5.hpp"   // g_contResetPending (cave2 sets at the splice, cave5 consumes)
 
 // Cave 2: Supreme::Cycle hook (SG+0x13FE40)
-// Main REC/PLAY engine. Fires every render frame during gameplay.
+// Main REC/PLAY engine. Fires once per physics tick during gameplay (Cave 5
+// can run several ticks per rendered frame).
 //
 // FPU PRESERVATION:
 // SafetyHookMid does NOT save x87 FPU state. The game does fld/fmul
