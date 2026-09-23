@@ -4,6 +4,8 @@ on:
     paths:
       - .github/workflows/release.yaml
       - Display_Config/scripts/release*.mjs
+      - Display_Config/justfile
+      - justfile
 name: release
 permissions:
   contents: write
@@ -58,7 +60,9 @@ jobs:
           $expected = @(
             "Display_Config.exe",
             "Display_Config_Resources/Display_Config_Helper.dll",
-            "Display_Config_Resources/Injector.exe"
+            "Display_Config_Resources/Injector.exe",
+            "Display_Config_Resources/TAS/TAS_Helper.dll",
+            "Display_Config_Resources/TAS/tas_ui.exe"
           )
           foreach ($file in $expected) {
             if (-not (Test-Path (Join-Path $output $file))) { throw "Build did not produce $file" }

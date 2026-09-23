@@ -1,4 +1,4 @@
-set shell := ["pwsh.exe", "-NoProfile", "-c"]
+set shell := ["pwsh.exe", "-NoProfile", "-c", "$ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true;"]
 set unstable
 
 # The game folder comes from the SUPREME_FOLDER environment variable
@@ -92,7 +92,7 @@ stage_display_config profile: require_supreme_folder
     Copy-Item .\Display_Config\output\Display_Config.exe '{{supreme_folder}}\' -Force; \
     $dest = '{{supreme_folder}}\Display_Config_Resources'; \
     if (!(Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }; \
-    Copy-Item .\Display_Config\output\Display_Config_Resources\* $dest\ -Force; \
+    Copy-Item .\Display_Config\output\Display_Config_Resources\* $dest\ -Recurse -Force; \
     Write-Host "Deployed Display_Config ({{profile}}) to {{supreme_folder}}"
 
 deploy_display_config: require_supreme_folder display_config stop_game (stage_display_config dc_profile)
@@ -148,7 +148,6 @@ test_live_soak: tas_rust
     cd TAS && cargo run --release --bin tas_test -- live-soak
 
 clean:
-    $ErrorActionPreference = 'Stop'; \
-    cd Display_Config && just clean; \
-    if (Test-Path .\TAS\Release) { Remove-Item .\TAS\Release -Recurse -Force }; \
+    just --justfile Display_Config/justfile clean; \
+    if (Test-Path .\TAS\TAS_Helper\Release) { Remove-Item .\TAS\TAS_Helper\Release -Recurse -Force }; \
     if (Test-Path .\TAS\target) { Remove-Item .\TAS\target -Recurse -Force }

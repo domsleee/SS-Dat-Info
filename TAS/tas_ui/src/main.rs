@@ -1197,14 +1197,6 @@ impl TasApp {
                             ));
                         }
                     }
-                    // A judged PLAY has no splice to restore its speed at: the
-                    // DLL already handed back at the first moving frame, so all
-                    // that is left is to stop treating the judge speed as the
-                    // user's. CONT must NOT go through here - its catch-up is
-                    // still running toward the splice.
-                    if self.cont_cycle_arm == tas_shared::transport::Arm::Play {
-                        self.clear_cont_catchup();
-                    }
                     // Stash for the resume summary emitted at the REC-start splice,
                     // where the actual resume frame is known. attempts = rerolls + 1.
                     self.cont_last_outcome = Some((retries_used + 1, completed_via));
@@ -1832,6 +1824,7 @@ impl TasApp {
             // F5: Restart game (Pico F5)
             if input.key_pressed(egui::Key::F5) {
                 if self.pico.connected {
+                    win32::focus_game();
                     match self.pico.send_f5() {
                         Ok(()) => {
                             actions.push(transport::Action::Log("Shortcut: F5 restart".into()))

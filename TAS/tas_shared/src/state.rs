@@ -518,7 +518,11 @@ impl TasSharedState {
     /// that dies mid-write stalls the cursor until the cursor resets (the UI
     /// resets it on reconnect), which is preferred to silent loss.
     pub fn read_log_entries(&self, after_seq: u32) -> (Vec<(u32, TasLogSeverity, String)>, u32) {
-        let write_seq = self.log_write_seq;
+        // Every read below is volatile: the DLL rewrites these fields from
+        // another process, and plain loads would let the compiler merge the
+        // two `sequence` reads and drop the torn-copy check.
+        let read = |p: &u32| unsafe { std::ptr::read_volatile(p) };
+        let write_seq = read(&self.log_write_seq);
         if write_seq == 0 || after_seq >= write_seq {
             return (Vec::new(), after_seq);
         }
@@ -533,7 +537,7 @@ impl TasSharedState {
             let idx = (seq % TAS_LOG_RING_SIZE as u32) as usize;
             let entry = &self.log_ring[idx];
             // Sequence in entry is seq+1 (0 means unused)
-            let published = entry.sequence;
+            let published = read(&entry.sequence);
             if published != seq + 1 {
                 if published > seq + 1 {
                     // Reused past the retained window (or torn mid-copy below):
@@ -545,9 +549,17 @@ impl TasSharedState {
                 // this seq next poll.
                 break;
             }
-            let severity = entry.severity_enum();
-            let text = entry.text_str().to_string();
-            if entry.sequence != seq + 1 {
+            let mut copy = TasLogEntry {
+                sequence: published,
+                severity: read(&entry.severity),
+                text: [0; TAS_LOG_ENTRY_SIZE],
+            };
+            for (dst, src) in copy.text.iter_mut().zip(&entry.text) {
+                *dst = unsafe { std::ptr::read_volatile(src) };
+            }
+            let severity = copy.severity_enum();
+            let text = copy.text_str().to_string();
+            if read(&entry.sequence) != seq + 1 {
                 // Reused between the check and the copy: discard the torn
                 // text; the replacement is visited at its own seq.
                 cursor = seq + 1;

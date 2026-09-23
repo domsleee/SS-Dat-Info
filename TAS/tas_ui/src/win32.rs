@@ -129,6 +129,15 @@ pub fn focus_window_titled(title: &str) {
     }
 }
 
+/// Bring the game to the front so a Pico key reaches it. The Pico is a real
+/// keyboard, so its keys go to whichever window has focus, and when the user
+/// triggers one from here that window is tas_ui. The short wait lets the focus
+/// change land before the key does.
+pub fn focus_game() {
+    focus_window_titled("Supreme Snowboarding Copyright (C) 1999 by Housemarque, Inc.");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+}
+
 /// Whether the virtual key is held right now, whichever window has focus.
 pub fn key_is_down(vk: i32) -> bool {
     unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 }

@@ -61,8 +61,10 @@ impl Settings {
 
     pub fn save(&self) {
         let path = settings_path();
+        // Temp file + rename: a crash mid-write must not leave a half file,
+        // which `load` would silently turn into default settings.
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
+            let _ = tas_codec::save_atomic(&path, json.as_bytes());
         }
     }
 }

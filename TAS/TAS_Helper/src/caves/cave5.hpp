@@ -30,9 +30,9 @@
 inline TasSharedState* g_cave5State = nullptr;
 static SafetyHookMid cave5Hook{};
 
-// CONT clock-backlog reset: cave2 sets it at the splice (and at a judged
-// PLAY's speed handover), cave5 consumes it on the next tick by advancing the
-// game's time accumulator to "now" without processing the backlog ticks.
+// CONT clock-backlog reset: cave2 sets it at the splice, cave5 consumes it on
+// the next tick by advancing the game's time accumulator to "now" without
+// processing the backlog ticks.
 // DLL-private: both hooks run on the game thread.
 inline volatile uint32_t g_contResetPending = 0;
 
@@ -432,7 +432,10 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
         DWORD oldProtect = 0;
         if (!VirtualProtect(g_tickAdvancePtr, sizeof(float), PAGE_READWRITE, &oldProtect)) {
             Log(std::format("Cave 5: VirtualProtect on tick advance constant FAILED (err={})", GetLastError()));
-            // Non-fatal: speed scaling won't work but fixed tick still does
+            // Non-fatal: speed scaling won't work but fixed tick still does.
+            // Drop the pointer, or the per-frame callback would write to the
+            // read-only page and fault on the game thread.
+            g_tickAdvancePtr = nullptr;
         } else {
             g_tickAdvanceOriginalProtect = oldProtect;
             g_tickAdvanceProtectionChanged = true;

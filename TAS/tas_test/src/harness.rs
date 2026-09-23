@@ -215,7 +215,9 @@ pub fn check_liveness(client: &TasSharedMemoryClient) -> bool {
     let fc1 = client.frame_count_volatile();
     thread::sleep(Duration::from_millis(500));
     let fc2 = client.frame_count_volatile();
-    let delta = fc2 - fc1;
+    // A relaunch re-creates the section and restarts the count, so fc2 can be
+    // below fc1; that is not proof of life.
+    let delta = fc2.saturating_sub(fc1);
     println!("  Liveness: {} frames/500ms", delta);
     delta > 0
 }

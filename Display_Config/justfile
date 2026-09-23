@@ -11,7 +11,7 @@ _build: display_config display_config_helper tas_helper
 
 display_config:
     cd Display_Config && bun tauri build {{ if dc_profile == "debug" { "--debug" } else { "" } }} -- --locked;
-    if (!(Test-Path ./output)) { mkdir output > $null }; \
+    New-Item -ItemType Directory -Force ./output | Out-Null; \
     cp Display_Config\src-tauri\target\{{dc_profile}}\display-config.exe ./output/Display_Config.exe
 
 display_config_helper:
@@ -21,8 +21,7 @@ display_config_helper:
     & $msbuild .\Display_Config_Resources\Display_Config_Helper\Display_Config_Helper.vcxproj /v:minimal /p:Configuration=Release; \
     & $msbuild .\Display_Config_Resources\Injector\Injector.vcxproj /v:minimal /p:Configuration=Release; \
 
-    if (!(Test-Path ./output)) { mkdir output > $null }; \
-    if (!(Test-Path ./output/Display_Config_Resources)) { mkdir ./output/Display_Config_Resources > $null }; \
+    New-Item -ItemType Directory -Force ./output/Display_Config_Resources | Out-Null; \
     cp .\Display_Config_Resources\Display_Config_Helper\Release\Display_Config_Helper.dll ./output/Display_Config_Resources/; \
     cp .\Display_Config_Resources\Injector\Release\Injector.exe ./output/Display_Config_Resources/
 

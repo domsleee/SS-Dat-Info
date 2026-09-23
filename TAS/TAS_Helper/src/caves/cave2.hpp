@@ -24,7 +24,7 @@
 //      observer (BB3B10) on transitions, log the mask, capture coordinates.
 // PLAY: read the logged mask (gate-aligned when armed), write it into the
 //      game the same way, capture coordinates, splice to REC at the CONT
-//      point or hand the speed over at a judged PLAY's marker.
+//      point.
 
 inline TasSharedState* g_cave2State = nullptr;
 inline std::atomic_flag g_cycleStopGate = ATOMIC_FLAG_INIT;
@@ -832,10 +832,14 @@ static void __declspec(noinline) Cave2_Logic() {
         // early stops 4 gate-relative ticks short — its last four source
         // indices run past recorded_count and inject nothing, and the run ends
         // before the recording did.
-        uint32_t play_end = s->recorded_count;
-        if (s->gate_align_rec > 0 && s->gate_index > 0
-                && s->recorded_count > s->gate_align_rec) {
-            play_end = s->gate_index + (s->recorded_count - s->gate_align_rec);
+        //
+        // recorded_count is written by the UI process; cap it at the buffer so
+        // a bad value can never index past input_log.
+        const uint32_t rec_count =
+            s->recorded_count < TAS_MAX_TICKS ? s->recorded_count : TAS_MAX_TICKS;
+        uint32_t play_end = rec_count;
+        if (s->gate_align_rec > 0 && s->gate_index > 0 && rec_count > s->gate_align_rec) {
+            play_end = s->gate_index + (rec_count - s->gate_align_rec);
         }
         if (pos >= play_end) {
             s->mode = MODE_OFF;
@@ -868,8 +872,7 @@ static void __declspec(noinline) Cave2_Logic() {
         // earlier transitions still matters to the input observer.
         uint32_t src = pos;
         if (s->gate_align_rec > 0) {
-            src = GateAlignedInputSource(pos, s->gate_index, s->gate_align_rec,
-                                         s->recorded_count);
+            src = GateAlignedInputSource(pos, s->gate_index, s->gate_align_rec, rec_count);
         }
         uint8_t mask = (src == GATE_ALIGN_INVALID_SOURCE) ? (uint8_t)0 : s->input_log[src];
 

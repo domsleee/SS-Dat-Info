@@ -20,6 +20,19 @@ const ROW_ACTIONS: &[&str] = &["left", "right", "up", "down", "jump", "shift"];
 /// stops the brush handle from collapsing to nothing.
 const MIN_WINDOW: u32 = 60;
 
+/// Left brush handle dragged to tick `t`: stays at least MIN_WINDOW before
+/// `end` when there is room, else pins to 0. Not `clamp`, which panics when a
+/// recording shorter than MIN_WINDOW inverts the bounds.
+fn brush_start(t: i32, end: u32) -> u32 {
+    t.min(end as i32 - MIN_WINDOW as i32).max(0) as u32
+}
+
+/// Right brush handle dragged to tick `t`: stays at least MIN_WINDOW past
+/// `start`, but never beyond the recording.
+fn brush_end(t: i32, start: u32, total: u32) -> u32 {
+    t.max((start + MIN_WINDOW) as i32).min(total as i32).max(0) as u32
+}
+
 /// Default window for a fresh view (ticks = 10ms, so 1500 ≈ 15s). Fitting the
 /// WHOLE recording by default renders multi-minute runs as unreadable slivers
 /// ("the default zoom is way too small"); open at a workable zoom instead and
@@ -784,8 +797,7 @@ fn brush(
     if l_resp.dragged() {
         if let Some(p) = l_resp.interact_pointer_pos() {
             let t = ((p.x - inner_left) / ppt).round() as i32;
-            let ns = t.clamp(0, view.end as i32 - MIN_WINDOW as i32);
-            view.start = ns.max(0) as u32;
+            view.start = brush_start(t, view.end);
         }
     }
     let r_resp = ui
@@ -794,8 +806,7 @@ fn brush(
     if r_resp.dragged() {
         if let Some(p) = r_resp.interact_pointer_pos() {
             let t = ((p.x - inner_left) / ppt).round() as i32;
-            let ne = t.clamp(view.start as i32 + MIN_WINDOW as i32, total as i32);
-            view.end = ne as u32;
+            view.end = brush_end(t, view.start, total);
         }
     }
 }
@@ -875,6 +886,21 @@ fn active_timeline_tick(state: &TasSharedState) -> Option<(usize, ActiveTickMode
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A recording shorter than MIN_WINDOW used to panic in `clamp` the
+    /// moment either brush handle was dragged.
+    #[test]
+    fn brush_handles_survive_a_recording_shorter_than_the_min_window() {
+        let total = 40;
+        for t in [-10, 0, 20, 40, 100] {
+            assert_eq!(brush_start(t, total), 0);
+            assert_eq!(brush_end(t, 0, total), total);
+        }
+        assert_eq!(brush_start(500, 1000), 500);
+        assert_eq!(brush_start(990, 1000), 940);
+        assert_eq!(brush_end(10, 100, 1000), 160);
+        assert_eq!(brush_end(2000, 100, 1000), 1000);
+    }
     use tas_shared::{zeroed_boxed, TasMode};
 
     #[test]

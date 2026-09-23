@@ -240,6 +240,7 @@ pub fn show_panel(ui: &mut egui::Ui, pico: &mut PicoState, log: &mut UiLog) {
     if pico.connected {
         ui.horizontal(|ui| {
             if ui.button("F5 Restart").clicked() {
+                crate::win32::focus_game();
                 match pico.send_f5() {
                     Ok(()) => log.push("Pico: sent F5"),
                     Err(e) => log.push(format!("Pico F5 error: {}", e)),
