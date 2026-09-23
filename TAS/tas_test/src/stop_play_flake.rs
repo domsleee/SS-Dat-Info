@@ -1,7 +1,8 @@
 //! STOP+PLAY flakiness against FE-tremendous: PLAY, STOP mid-playback, PLAY
 //! again, and require the second playback to reproduce the recording bit for
 //! bit from its gate. The question is whether a mid-run STOP leaves state
-//! behind that changes the next replay.
+//! behind that changes the next replay, so both PLAYs are armed without the
+//! watcher: its rerolls would hide exactly that.
 
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,8 +12,6 @@ use crate::{drift, harness, replay};
 /// Gate-relative frames the second playback must reproduce exactly.
 const VERIFY_FRAMES: u32 = 1000;
 /// Stop points spread across the recording; the count is the iteration count.
-/// Several fall before the watcher could accept a PLAY (gate + 1024), so the
-/// first PLAY is armed without it.
 const STOP_AT_FRAMES: [u32; 10] = [1200, 800, 2000, 1500, 2400, 1800, 1100, 2200, 900, 1700];
 const RECORDING: &str = "FE-tremendous.tasrec";
 
@@ -48,8 +47,7 @@ fn stop_then_replay(
     thread::sleep(Duration::from_millis(200));
 
     replay::write_to_shared(client, rec);
-    let (rec_gate, play_gate) = harness::restart_play_aligned_inprocess(client)
-        .ok_or("the second PLAY was not accepted")?;
+    let (rec_gate, play_gate) = harness::restart_play_aligned_unwatched(client)?;
     let window = VERIFY_FRAMES.min(rec.count.saturating_sub(rec_gate));
     let end = play_gate + window;
     if wait_for_pos(client, end, Duration::from_secs(60)) < end {

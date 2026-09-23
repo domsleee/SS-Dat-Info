@@ -82,8 +82,9 @@ const STABILIZE_FRAMES: u32 = 500;
 const RESTART_TIMEOUT_SECS: u64 = 15;
 /// Playback timeout (long enough for 65536 frames at ~50fps unfocused).
 const PLAYBACK_TIMEOUT_SECS: u64 = 120;
-/// Time allowed at 1x for a CONT replay to reach the watcher's verdict.
-const JUDGE_TIMEOUT_SECS: u64 = 10;
+/// Replay time at 1x for the watcher's verdict: the ~3 s countdown plus
+/// ALIGN_VERIFY_FRAMES at 100 ticks/s, doubled for slow frames.
+const WATCH_TIMEOUT_SECS: f64 = 2.0 * (3.0 + tas_shared::align::ALIGN_VERIFY_FRAMES as f64 / 100.0);
 
 /// Bring the game window to the front. Best effort: a missing window is left alone.
 pub fn focus_game() {
@@ -388,7 +389,7 @@ fn drive_cycle(
     stop_competing_tas_ui_writer();
     dismiss_save_dialog();
 
-    let replay_secs = JUDGE_TIMEOUT_SECS as f64 / (cfg.speed as f64).clamp(0.05, 1.0);
+    let replay_secs = WATCH_TIMEOUT_SECS / (cfg.speed as f64).clamp(0.05, 1.0);
     let per_attempt = Duration::from_secs_f64(RESTART_TIMEOUT_SECS as f64 + replay_secs);
     let mut attempt_deadline = Instant::now() + per_attempt;
     loop {
