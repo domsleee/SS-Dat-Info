@@ -48,8 +48,12 @@ int main() {
     check(ContinueSpliceTickLimit(498, 498, true, 299) == 1, "late_approval_allows_only_one_resume_tick");
     check(ContinueSpliceTickLimit(497, 498, true, 299) == 1, "early_approval_still_lands_on_splice");
     check(ContinueSpliceTickLimit(495, 498, true, 299) == 3, "catchup_batch_cannot_cross_splice");
-    check(ContinueSpliceTickLimit(100, GATE_ALIGN_SPLICE_PENDING, false, 299) == 0x7FFFFFFFu,
-          "pending_splice_runs_free_well_before_the_gate");
+    check(ContinueSpliceTickLimit(100, GATE_ALIGN_SPLICE_PENDING, false, 299) == 191,
+          "pending_splice_batch_stops_at_the_stepping_window");
+    check(ContinueSpliceTickLimit(290, GATE_ALIGN_SPLICE_PENDING, false, 299) == 1,
+          "pending_splice_last_tick_before_the_window");
+    check(ContinueSpliceTickLimit(0, GATE_ALIGN_SPLICE_PENDING, false, 5) == 1,
+          "pending_splice_with_a_gate_inside_the_lead_steps_from_zero");
     check(ContinueSpliceTickLimit(291, GATE_ALIGN_SPLICE_PENDING, false, 299) == 1,
           "pending_splice_steps_one_tick_near_the_gate");
     check(ContinueSpliceTickLimit(305, GATE_ALIGN_SPLICE_PENDING, false, 299) == 1,

@@ -49,11 +49,14 @@ inline uint32_t GateAlignedSplicePos(uint32_t continue_from_frame,
 //
 // While the splice is pending, step one tick per frame from the pre-gate lead
 // on, so the gate is stamped on the exact tick and a catch-up batch cannot
-// carry the replay past a splice just beyond it.
+// carry the replay past a splice just beyond it. A batch before the window
+// stops at its first tick rather than jumping across it.
 inline uint32_t ContinueSpliceTickLimit(uint32_t pos, uint32_t splice, bool approved,
                                         uint32_t rec_gate) {
     if (splice == GATE_ALIGN_SPLICE_PENDING) {
-        return pos + GATE_ALIGN_PRE_GATE_LEAD >= rec_gate ? 1u : 0x7FFFFFFFu;
+        const uint32_t window =
+            rec_gate > GATE_ALIGN_PRE_GATE_LEAD ? rec_gate - GATE_ALIGN_PRE_GATE_LEAD : 0u;
+        return pos < window ? window - pos : 1u;
     }
     return pos < splice ? splice - pos : (approved ? 1u : 0u);
 }

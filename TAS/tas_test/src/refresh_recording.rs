@@ -78,6 +78,9 @@ pub fn run(source: &str, out: &str) -> Result<(), String> {
     }
 
     let state = client.state();
+    if state.capture_ok == 0 {
+        return Err("a coordinate capture failed during refresh; not saving".into());
+    }
     let expected = loaded.count as usize;
     if state.playback_pos < play_gate + owed {
         return Err(format!(
@@ -143,8 +146,17 @@ fn restart_play_aligned_unwatched(
         return Err("in-process restart failed".into());
     }
     client.state_mut().gate_align_rec = rec_gate;
+    // STOP and RESTART keep the previous session's gate and position; only the
+    // arm clears them. Wait for the arm counter to move before reading either.
+    let generation = client.state().arm_generation;
     harness::arm_play(client);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while client.state().arm_generation == generation {
+        if std::time::Instant::now() > deadline {
+            return Err("the DLL never processed ARM_PLAY".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     loop {
         let play_gate = client.state().gate_index;
         if play_gate != 0 {
