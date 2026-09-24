@@ -119,6 +119,9 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - uses: extractions/setup-just@v4
       - uses: arduino/setup-task@v3
+        with:
+          # Authenticated, so GitHub's API rate limit for runners can't fail the job.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - run: cd Display_Config/Display_Config && bun install --frozen-lockfile
       - run: cd Display_Config/Display_Config && just
   tasTest:
