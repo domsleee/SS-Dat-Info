@@ -37,6 +37,7 @@ const FULL_CASES: &[(&str, &[&str])] = &[
     ("stop-play-flake", &["--iterations", "2"]),
     ("rec-repro", &[]),
     ("steer-impact", &[]),
+    ("restart-stress", &["--count", "40"]),
     ("speed", &[]),
     ("speed-reset", &[]),
     ("catchup-speed", &[]),

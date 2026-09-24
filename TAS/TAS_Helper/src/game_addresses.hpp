@@ -127,11 +127,13 @@ struct GameAddresses {
 
     // Supreme.exe offsets
     std::uint8_t* cave5_site = nullptr;     // exe+0x25C81: after ftol+mov esi,eax (tick override)
+    std::uint8_t* f5_accept_site = nullptr; // exe+0x25C3F: F5 down and accepted, restart call next
     std::uint8_t* is_in_game = nullptr;     // exe+0x8895C: 0=main menu, 1=in-game (race/level)
 
     // Supreme_Game.dll offsets
     std::uint8_t* cave2_site = nullptr;     // SG+0x13FE40: Supreme::Cycle
     std::uint8_t* replay_capture_site = nullptr; // SG+0x9E8F0: replay object capture
+    std::uint8_t* f5_done_site = nullptr;   // SG+0x14199F: Set_Game_Mode's mode init returned
     std::uint8_t* player_base = nullptr;    // SG+0x1D5450: root pointer
     // Live vtable addresses (SG base + RVA) the replay-capture hook classifies
     // recorder owners with; 0 until Resolve validated the constructor sites.
@@ -170,9 +172,8 @@ struct GameAddresses {
     static constexpr uint32_t KEYBOARD_OBJ_OFFSET = 0x530;
     static constexpr uint32_t DI_BUFFER_PTR_OFFSET = 0x30;
     // kbobj is a 0x38-byte Win32_Keyboard (HMG_Cetsup_Win32 operator_new(0x38)).
-    // The 256-byte buffer is the only key state the DLL may write: an earlier
-    // "action state" write at kbobj+0x440..0x458 landed in unrelated heap
-    // memory and crashed the game later with "Unknown exception".
+    // The 256-byte buffer at +0x30 is the only key state the DLL writes; it is
+    // what the game's key polls read (Win32_Keyboard::State).
 
     // Replay object: player ptr at [replayObj+0x84]
     static constexpr uint32_t REPLAY_PLAYER_OFFSET = 0x84;
@@ -263,11 +264,13 @@ struct GameAddresses {
 
         // Supreme.exe offsets
         cave5_site = exeBase + 0x25C81;
+        f5_accept_site = exeBase + 0x25C3F;
         is_in_game = exeBase + 0x8895C;  // 0=menu, 1=in-game (RE'd via menu↔game diff)
 
         // Supreme_Game.dll offsets
         cave2_site = sgBase + 0x13FE40;
         replay_capture_site = sgBase + 0x9E8F0;
+        f5_done_site = sgBase + 0x14199F;
         player_base = sgBase + ROOT_PTR_OFFSET;
         level_path_ptr = sgBase + GameAddresses::LEVEL_PATH_PTR_OFFSET;
 
@@ -301,7 +304,19 @@ struct GameAddresses {
         // mov dword ptr [ebp+0], offset Ghost_Player vtable (imm32 at +3).
         static constexpr uint8_t kGhostCtor[] =
             { 0xC7, 0x45, 0x00, 0x74, 0x9B, 0x16, 0x10 };
+        // The race loop's F5 poll: mov eax,[ecx]; mov edx,0x58 (F5);
+        // call [eax+0x14] (Win32_Keyboard::State); test al,al; je +0x29.
+        static constexpr uint8_t kF5Poll[] =
+            { 0x8B, 0x01, 0xBA, 0x58, 0x00, 0x00, 0x00, 0xFF, 0x50, 0x14, 0x84, 0xC0, 0x74, 0x29 };
+        // Its accepted branch: mov edx,[ebp]; mov ecx,ebp; call [edx] (restart).
+        static constexpr uint8_t kF5Accept[] = { 0x8B, 0x55, 0x00, 0x8B, 0xCD, 0xFF, 0x12 };
+        // Set_Game_Mode, after the mode-init call: call SG+0x13E410; mov eax,[eax+0x17C].
+        static constexpr uint8_t kF5Done[] =
+            { 0xE8, 0x6C, 0xCA, 0xFF, 0xFF, 0x8B, 0x80, 0x7C, 0x01, 0x00, 0x00 };
         if (!ValidateCode("Supreme.exe+0x25C81", cave5_site, kCave5) ||
+            !ValidateCode("Supreme.exe+0x25C0F (F5 poll)", exeBase + 0x25C0F, kF5Poll) ||
+            !ValidateCode("Supreme.exe+0x25C3F (F5 accept)", f5_accept_site, kF5Accept) ||
+            !ValidateCode("Supreme_Game.dll+0x14199F (Set_Game_Mode done)", f5_done_site, kF5Done) ||
             !ValidateCode("Supreme_Game.dll+0x13FE40", cave2_site, kCave2) ||
             !ValidateCode("Supreme_Game.dll+0x9E8F0", replay_capture_site, kReplay) ||
             !ValidateCodeOrHooked("HMG_Cetsup_Win32.dll+0x3940", cave1c_down, kKeyDown) ||

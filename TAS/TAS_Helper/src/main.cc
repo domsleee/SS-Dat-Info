@@ -42,13 +42,15 @@ bool run() {
     bool cave1c_ok = InstallCave1C(g_addr, state);
     bool cave2_ok = InstallCave2(g_addr, state);
     bool cave5_ok = InstallCave5(g_addr, state);
+    bool f5_ok = f5restart::Install(g_addr);
 
     // These hooks are one functional unit. Reporting ready after any of them
     // failed leaves a partially intercepted input/game loop in production and
     // makes Injector.exe's explicit initialization result meaningless. Roll
     // back in reverse dependency order while shared state is still mapped.
-    if (!(replay_ok && cave1d_ok && cave1c_ok && cave2_ok && cave5_ok)) {
+    if (!(replay_ok && cave1d_ok && cave1c_ok && cave2_ok && cave5_ok && f5_ok)) {
         Log("FATAL: required TAS hook installation failed; rolling back all core hooks");
+        f5restart::Uninstall();
         UninstallCave5();
         UninstallCave2();
         UninstallCave1C();
@@ -64,6 +66,7 @@ bool run() {
     Log(std::format("  Cave 1C (handler gate):      {}", cave1c_ok ? "OK" : "FAILED"));
     Log(std::format("  Cave 2  (Supreme::Cycle):    {}", cave2_ok ? "OK" : "FAILED"));
     Log(std::format("  Cave 5  (fixed tick):        {}", cave5_ok ? "OK" : "FAILED"));
+    Log(std::format("  F5 restart (accept/done):    {}", f5_ok ? "OK" : "FAILED"));
 
     // Background worker: level identity, rider identity, renderer, menu
     // housekeeping, and the out-of-cycle STOP consumer (a STOP sent at a menu

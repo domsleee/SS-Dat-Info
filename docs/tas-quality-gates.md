@@ -92,6 +92,7 @@ safety release, so a hold lasts as long as the pattern says.
 | `rec-start [--file PATH]` | no | `*** REC-START OK: recording begins at the spawn ...` | A fresh recording starts at the stationary spawn with the countdown, not mid-fall; `--file` judges a saved `.tasrec` instead. |
 | `rec-repro` | yes | `*** REC-REPRO OK: N transitions match in order+mask ...` | The same driven input recorded twice yields the same transitions within tolerance. |
 | `steer-impact` | no | `*** STEER-IMPACT OK: ...` | Injected steering moves the player, and only with a live Kernel::Time stamp on the injection. |
+| `restart-stress` | no | `*** RESTART-STRESS PASSED ***` | 40 in-process F5 restarts (suite) at varied spacing all complete; reports how long each took. |
 | `refresh-tasrec <source.tasrec> <out.tasrec>` | no | `Saved refreshed baseline to PATH` | Replays a recording in the live game and writes it back with the freshly captured coordinates. |
 
 ### Speed and timing

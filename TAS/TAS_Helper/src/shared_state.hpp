@@ -152,7 +152,7 @@ struct TasSharedState {
     // Variable speed playback (1.0 = normal, 0.5 = half, 2.0 = double)
     float    playback_speed;            // UI writes, Cave 5 reads
 
-    // In-process restart state machine: 0=idle, 1=F5 held, 2=released (done)
+    // In-process restart: 0=idle, 1=F5 held, 2=done (the game rebuilt the level)
     volatile uint32_t restart_state;
 
     // -- Telemetry (DLL writes, UI reads) --

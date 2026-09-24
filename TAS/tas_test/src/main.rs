@@ -33,6 +33,7 @@ mod refresh_recording;
 mod regression;
 mod reliability;
 mod replay;
+mod restart_stress;
 mod save_reload;
 mod segment;
 mod shm;
@@ -119,6 +120,15 @@ const MODES: &[Mode] = &[
         run: |args| {
             let flags = parse(args, &[flag("--iterations", Some("-n")), flag("--speed", Some("-s"))], 0);
             reliability::run(num(&flags, "--iterations", 10), num(&flags, "--speed", 12.0))
+        },
+    },
+    Mode {
+        name: "restart-stress",
+        usage: "[--count N]",
+        summary: "N in-process F5 restarts (default 100) at varied spacing; times each, fails if one never completes",
+        run: |args| {
+            let flags = parse(args, &[flag("--count", Some("-n"))], 0);
+            restart_stress::run(num(&flags, "--count", 100))
         },
     },
     Mode {

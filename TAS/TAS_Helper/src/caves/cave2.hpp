@@ -7,7 +7,7 @@
 #include "../input_gate.hpp"
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
-#include "../restart_release.hpp"
+#include "f5_restart.hpp"
 #include <safetyhook.hpp>
 #include "cave5.hpp"   // g_contResetPending (cave2 sets at the splice, cave5 consumes)
 
@@ -253,37 +253,6 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
     }
 }
 
-// In-process F5 restart. restart_release.hpp owns the F5 byte and explains
-// why it must go up as soon as the game has acted on it. This cycle cap only
-// bounds the observer "up" if neither of its releases fires.
-static constexpr uint32_t RESTART_F5_MAX_HOLD_FRAMES = 30;
-static uint32_t g_restartFramesHeld = 0;                    // Cycles since the press
-
-// Press or release F5 in the DI buffer and notify BB3B10.
-static void InjectF5(GameAddresses* addr, uint32_t kbobj, bool pressed) {
-    uint32_t buffer = GetDIBuffer(kbobj);
-    if (buffer) {
-        // The SEH write stays in a leaf function: MSVC rejects __try in a
-        // function that also holds the ScopedTasInjection below (C2712).
-        restartrelease::SafeWriteF5(buffer, pressed);
-    }
-
-    if (kbobj) {
-        auto bb3b10 = (BB3B10Fn)(addr->bb3b10);
-        void* thisPtr = (void*)(kbobj + GameAddresses::BB3B10_THIS_OFFSET);
-        ScopedTasInjection injectionScope;
-        // Stamp F5 with the live Kernel::Time too. The restart itself is
-        // driven by the DI-buffer write (the observer call is auxiliary), but
-        // a wrong stamp here POISONS the observer's event-time window: a stamp
-        // in the future makes later steering events look out-of-order and get
-        // silently dropped — dead steering right after every injected F5.
-        KernelTime ft = { 0, GameAddresses::BB3B10_ARG4 };
-        GetKernelTimeNow(addr, &ft);
-        ft.lo = 0;  // floored like the steering stamp (see CallBB3B10OnTransitions)
-        bb3b10(thisPtr, GameAddresses::KEY_F5, pressed ? 1 : 0,
-               ft.lo, ft.hi);
-    }
-}
 
 // Clear the raw input state and return the mask that still needs observer UP
 // notifications. The direct writes are safe from an out-of-cycle caller;
@@ -378,6 +347,11 @@ static void ApplyStopTransition(TasSharedState* s, bool notifyObserverNow, bool 
     // restart window. Ordinary STOP still releases it for menu navigation.
     s->cont_suppress_input = protectRestart ? 1u : 0u;
     s->mode = MODE_OFF;
+    // A controller that stops mid-restart has abandoned it: let go of F5.
+    if (s->restart_state == 1) {
+        f5restart::Cancel();
+        s->restart_state = 0;
+    }
     if (notifyObserverNow) {
         ReleaseTasInput(s, g_cave2Addr);
     } else {
@@ -492,8 +466,9 @@ static void ArmContinue(TasSharedState* s) {
 
 // Begin in-process F5 restart sequence
 static void BeginRestart(TasSharedState* s) {
+    f5restart::Cancel();  // a new request replaces an unfinished one
+    f5restart::Request();
     s->restart_state = 1;
-    g_restartFramesHeld = 0;
     // The controller stages alignment AFTER the restart; anything
     // older is stale.
     ClearGateAlign(s);
@@ -555,7 +530,7 @@ static void FlushPendingLog() {
         case 5: Log(std::format("Cave 2: continue record (PLAY until frame {})", param)); break;
         case 6: Log(std::format("Cave 2: spliced to REC at frame {}", param)); break;
         case 7: Log("Cave 2: in-process F5 restart initiated"); break;
-        case 8: Log("Cave 2: F5 released, restart complete"); break;
+        case 8: Log("Cave 2: restart complete (the game rebuilt the level)"); break;
     }
 }
 
@@ -620,28 +595,12 @@ static void PublishLivePosition(TasSharedState* s) {
     }
 }
 
-// In-process F5 restart state machine (runs regardless of mode)
-static void StepInProcessRestart(TasSharedState* s, GameAddresses* addr) {
-    if (s->restart_state == 1) {
-        uint32_t kbobj = GetKeyboardObject(addr);
-        if (kbobj) {
-            if (g_restartFramesHeld == 0) {
-                // Press: the byte AND the observer. restart_release.hpp
-                // takes the byte back the moment the restart is observed.
-                restartrelease::Pressed(GetDIBuffer(kbobj));
-                InjectF5(addr, kbobj, true);
-            }
-            g_restartFramesHeld++;
-            // Finish once the byte is up (the restart hook or the worker's
-            // wall-clock cap released it): observer "up" + done. The cycle
-            // cap only bounds a run where neither ever fires.
-            if (!restartrelease::Pending() || g_restartFramesHeld >= RESTART_F5_MAX_HOLD_FRAMES) {
-                restartrelease::ReleaseByteNow(3);
-                InjectF5(addr, kbobj, false);
-                s->restart_state = 2;  // Done
-                g_cave2_pendingLog = 8;
-            }
-        }
+// In-process F5 restart (runs regardless of mode): f5_restart.hpp holds the
+// key until the game has rebuilt the level; then the restart is done.
+static void StepInProcessRestart(TasSharedState* s) {
+    if (s->restart_state == 1 && f5restart::Step()) {
+        s->restart_state = 2;
+        g_cave2_pendingLog = 8;
     }
 }
 
@@ -789,11 +748,7 @@ static void __declspec(noinline) Cave2_Logic() {
 
     if (!ProcessCommand(s)) return;
 
-    // The restart hook cuts a PHYSICAL F5 short too (restart_release.hpp);
-    // it needs the key buffer, which only this thread can resolve.
-    if (uint32_t kb = GetKeyboardObject(addr)) restartrelease::NoteBuffer(GetDIBuffer(kb));
-
-    StepInProcessRestart(s, addr);
+    StepInProcessRestart(s);
 
     // The level-context epoch is bumped by level_scan.hpp's worker, not here:
     // Supreme::Cycle is frozen during the menus and loads it must detect.

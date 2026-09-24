@@ -319,7 +319,6 @@ static DWORD WINAPI threadProc(LPVOID param) {
         for (int i = 0; i < slices; i++) {
             Sleep(100);
             FlushPendingLog();           // cave2's mode-transition lines (queued inside the hook)
-            restartrelease::FlushLog();  // F5 hold timing per restart (restart_release.hpp)
             pollLevelContext(s);
             renderer::Refresh(s);
             rider::Refresh(s);

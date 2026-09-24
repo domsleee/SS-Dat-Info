@@ -42,11 +42,12 @@ const MAX_TICKS_PER_SEC: f64 = 140.0;
 /// runs against a short, slow table instead and puts the player's back after.
 const HIGH_TIMES: &str = r"Saved_Data\Forest_Tracks_Easy_high_times.txt";
 const HIGH_TIMES_BACKUP: &str = r"Saved_Data\Forest_Tracks_Easy_high_times.txt.tas-test-backup";
-const SLOW_HIGH_TIMES: &str = "{\r\n\t\"penguy\",40.0,80.0,120.0,\"Cloudy\",\"1999/10/17\",1 \r\n}\r\n";
+const SLOW_HIGH_TIMES: &str =
+    "{\r\n\t\"penguy\",40.0,80.0,120.0,\"Cloudy\",\"1999/10/17\",1 \r\n}\r\n";
 
 /// Swaps in `SLOW_HIGH_TIMES` with the game closed (the game reads the table at
 /// launch and rewrites it at a finish) and restores the player's table, again
-/// with the game closed, when dropped. The backup stays on disk until then: a
+/// with the game closed, when dropped, then relaunches it. The backup stays on disk until then: a
 /// run that dies without dropping this (a harness `process::exit`) leaves it,
 /// and the next run restores it before anything else.
 struct TestHighTimes {
@@ -79,7 +80,13 @@ impl TestHighTimes {
     fn restore(&self) -> Result<(), String> {
         std::fs::copy(&self.backup, &self.table)
             .and_then(|_| std::fs::remove_file(&self.backup))
-            .map_err(|e| format!("restoring {} from {}: {e}", self.table.display(), self.backup.display()))
+            .map_err(|e| {
+                format!(
+                    "restoring {} from {}: {e}",
+                    self.table.display(),
+                    self.backup.display()
+                )
+            })
     }
 }
 
@@ -92,6 +99,8 @@ impl Drop for TestHighTimes {
         } else if let Err(error) = self.restore() {
             eprintln!("ERROR: {error}; your table is still in the backup file");
         }
+        // Leave a running game, as every other stage does.
+        harness::ensure_game_running();
     }
 }
 

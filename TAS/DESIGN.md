@@ -2,7 +2,7 @@
 
 How the Supreme Snowboarding TAS (tool-assisted speedrun) tooling works: what
 each piece does, how a run is recorded and replayed, and why the design looks
-the way it does. It covers the work added in PR #41. For build and deploy
+the way it does. For build and deploy
 commands see the [TAS README](README.md); for the test contract see
 [TAS quality gates](../docs/tas-quality-gates.md).
 
@@ -106,12 +106,10 @@ a replay is checked against.
 ### Replaying from the gate
 
 After a restart there's a countdown at the spawn point, and the first moving
-tick isn't at the same arm-relative tick every time. It depends on exactly
-when the arm lands relative to the restart (sweeps of 0–40 ms arm delay moved
-it by up to four ticks, per `gate_alignment.hpp`), and a Time Attack ghost
-moves it by about 11–12 ticks (`drift_scan.rs`). If input were counted from
-the arm, a gate one tick later would shift every input by a tick and the run
-would drift.
+tick isn't at the same arm-relative tick every time: it depends on when the
+arm lands relative to the restart, and on whether a Time Attack ghost is
+racing. If input were counted from the arm, a gate one tick later would
+shift every input by a tick and the run would drift.
 
 So input is counted from the **gate**, the first tick where the boarder's
 position differs from the spawn (`gate_alignment.hpp`,
@@ -232,7 +230,7 @@ them.
 
 ## Inside the DLL
 
-The patches are called "caves" (code caves) for historical reasons.
+The code calls its patches "caves" (code caves).
 
 ### How game input works, and how the DLL feeds it
 
@@ -308,17 +306,22 @@ the game runs at 2x; at 0.04 it runs at 0.25x.
 
 ### F5 restart
 
-A replay must start from a freshly restarted level, so the DLL restarts it by
-pressing F5 in the key buffer (`RESTART`). No real key press or window focus
-is needed. F5 must be released as soon as the game acts on it: the game
-restarts again on every input poll that sees F5 down (a 150 ms physical tap
-measured 6–7 restarts). Those re-entrant restarts were blamed for later
-heap-corruption crashes, but most of that evidence predates the fix for a
-stray DLL write that corrupted the heap on its own (8938e19), so the link is
-unproven. The replay-capture hook releases F5 when it adopts the new human
-recorder the restart creates; a 25 ms timer (which also covers a recorder
-reallocated at the same address) and a 30-tick cap are fallbacks
-(`restart_release.hpp`).
+A replay must start from a freshly restarted level, so the DLL restarts it
+with the game's own F5 handling (`RESTART`, `caves/f5_restart.hpp`); no real
+key press or window focus is needed. Once per loop iteration, before the tick
+batch, the game reads F5 from the key buffer and, if the race accepts a
+restart, rebuilds the level on the spot. Two hooks follow it:
+
+- **Accept** (`Supreme.exe+0x25C3F`, the accepted-F5 branch) takes the key
+  back up the moment the game acts on it, for a real key too. The game would
+  otherwise restart again on every poll that still sees F5 down.
+- **Done** (`Supreme_Game+0x14199F`, after `Set_Game_Mode` has rebuilt the
+  player and its recorder) marks the restart complete. `restart_state`
+  becomes 2 on the next tick.
+
+Until Done, Cave 2 keeps F5 down, so a restart the game refused is taken on
+its next poll. A STOP lets go of the key. `tas_test restart-stress` runs
+hundreds of restarts in one session.
 
 ### Stopping
 
@@ -371,9 +374,8 @@ What's in it:
   `ARM_PLAY`, `ARM_CONTINUE`, `STOP`, `RESTART`, `STOP_FOR_RESTART`) and the
   DLL resets it to `IDLE` once applied. There's no queue: a new command
   overwrites an unconsumed one, so controllers wait for `IDLE`. For
-  `RESTART`, `IDLE` means the restart has begun; `restart_state` reaching 2
-  means F5 is back up and the observer has been told. It doesn't confirm the
-  rebuild has finished.
+  `RESTART`, `IDLE` means the restart has begun; `restart_state` 2 means the
+  game has rebuilt the level (see F5 restart).
 - **Status**: `mode` (OFF, REC or PLAY; CONT is PLAY until the splice),
   `recorded_count`, `playback_pos`, live position and velocity.
 - **The recording itself**: `input_log`, `rec_coords` and `play_coords`. The
@@ -432,8 +434,7 @@ The UI's responsibilities:
   (`panels/input_script.rs`). Edits apply only while stopped; the UI stops a
   running session first.
 - **Finish line**: start and finish trigger planes come from level data
-  (`start_line.rs`, generated for the nine main tracks, Practice added by
-  hand). While recording on a known track, the UI sends STOP once the run
+  (`start_line.rs`) for the nine main tracks and Practice. While recording on a known track, the UI sends STOP once the run
   crosses the finish, since the run-out is never wanted. The STOP lands a few
   ticks after the crossing.
 - **Drift banner** (`drift_scan.rs`): compares replay and recording X/Z
@@ -542,7 +543,7 @@ release layout.
 ### Live (developer machine)
 
 `tas_test` drives the real game. `just test_live` is a short gate.
-`just test_live_full` runs 23 stages (`tas_test/src/live_suite.rs`): replay,
+`just test_live_full` runs 24 stages (`tas_test/src/live_suite.rs`): replay,
 reliability, pause and resume, speed and pace, CONT variants, input
 protection, level sequence, save and reload, menu dialogs and more.
 `just test_live_soak` repeats the same checks more times. Live tests replace
@@ -571,13 +572,15 @@ splice.
   rounding (renderer, rider, a hook that disturbs the FPU) breaks replays.
 - **An injected key with the wrong timestamp is silently ignored**, and one
   stamped in the future makes later keys look out of order and get dropped.
-- **Holding F5 restarts the level on every input poll**, so the DLL
-  releases it the moment the restart starts.
-- **A write past the end of a game object crashes much later, somewhere
-  else.** `WriteActionState` wrote six bytes past the 0x38-byte keyboard
-  object on every tick and surfaced as an octree crash and the game's
-  "Unknown exception" dialog. Check a write's offset against the object's
-  allocation size in the decompiled source.
+- **Holding F5 restarts the level on every input poll.** Only
+  `f5_restart.hpp` writes F5, and its accept hook takes the key up the
+  moment the game acts on it.
+- **The game's DLLs are always relocated**, so a byte signature must stop
+  before any absolute address inside the instruction it checks.
+- **Writes into game memory must stay inside the target object's
+  allocation.** Check offsets against the allocation size in the decompiled
+  source (the keyboard object is 0x38 bytes); a stray write corrupts
+  whatever follows it and crashes much later, somewhere else.
 - **Two controllers on one game will confuse each other.** The command slot
   and `arm_generation` assume one.
 - **History blobs aren't `.tasrec` files**, despite the extension.
@@ -587,6 +590,8 @@ splice.
 - Works only with Supreme Snowboarding v1.035.
 - One game with the DLL at a time (the shared memory name is fixed).
 - Recordings are at most 65,536 ticks (about 10 min 55 s).
+- An in-process restart waits for the game to take F5, which it doesn't do
+  in the pause menu or a dialog; the controller's timeout then gives up.
 - Switching between two tracks that share a level path (Village Easy and
   Village Hard) changes no path; detection relies on the game loop pausing
   during the load instead.
