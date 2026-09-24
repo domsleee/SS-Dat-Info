@@ -14,8 +14,9 @@
 //   Game's next instruction: cmp esi, 14h; ja -> mov esi, 14h (clamp to 20)
 //
 // Speed scaling:
-//   The game keeps an accumulator: prev_time += ticks * per-tick advance, where
-//   the advance (EXE+0x46DB08) is normally 0.01 (= 1/100 s). Scaling it by
+//   Each frame the game owes (now - its clock) * 100 ticks and advances its
+//   clock by ticks * per-tick advance, where the advance (EXE+0x46DB08) is
+//   normally 0.01 (= 1/100 s). Scaling it by
 //   1/speed changes how fast the game consumes wall time:
 //     - 0.25x speed: per_tick = 0.04 → 25 ticks/s
 //     - 2.0x speed:  per_tick = 0.005 → 200 ticks/s
@@ -28,12 +29,6 @@
 
 inline TasSharedState* g_cave5State = nullptr;
 static SafetyHookMid cave5Hook{};
-
-// CONT clock-backlog reset: cave2 sets it at the splice, cave5 consumes it on
-// the next tick by advancing the game's time accumulator to "now" without
-// processing the backlog ticks.
-// DLL-private: both hooks run on the game thread.
-inline volatile uint32_t g_contResetPending = 0;
 
 // Pointer to the game's per-tick time advance constant (EXE + 0x46DB08).
 // VirtualProtect'd to PAGE_READWRITE during init so we can write it.
@@ -58,7 +53,8 @@ inline float g_privateTickAdvance = 0.01f;
 //   +0x25CE0  fmul -> per-tick timestamp offset   (i * advance)
 //   +0x25D89  fmul -> Time::Add(clock,  ticks_run * advance)
 //   +0x25DB2  fmul -> Time::Add(clock2, ticks_demanded * advance)
-//   +0x25E2B  fmul -> prev_time += ticks_demanded * advance   ([ebp+0x0C])
+//   +0x25E2B  fmul -> game-object time [ebp+0x0C] += ticks_demanded * advance
+//                     (not the clock tick demand is computed from)
 static constexpr uint32_t CAVE5_TICK_ADVANCE_OPERANDS[] = {
     0x25CE2, 0x25D8B, 0x25DB4, 0x25E2D,
 };
@@ -194,29 +190,6 @@ static bool IsSpliceParked(TasSharedState* s) {
     return splice_parked;
 }
 
-// CONT clock-backlog reset. When cave2 flags a splice, advance the
-// game's time accumulator to "now" so the resumed REC runs in real
-// time from the splice frame. At this hook site ctx.ebp is the clock
-// object and [ebp+0x0C] its seconds accumulator. Raw demand is
-// realTick = elapsed * [0x46DB0C] (=100) = (now-prev)/native, a separate
-// constant from the tick advance, so scaling the advance does not scale
-// this conversion; adding realTick * native(0.01) moves prev to now.
-// NATIVE, not the scaled advance, keeps it speed-independent, and the
-// backlog ticks are never run, so REC records no burst.
-// Returns true when the reset was applied this frame.
-static bool ApplyContClockReset(SafetyHookContext& ctx, int32_t realTick, bool splice_parked) {
-    bool did_reset = false;
-    if (g_contResetPending && !splice_parked) {  // parked: keep it pending, no tick may leak
-        if (ctx.ebp) {
-            float* prev_time = (float*)(uintptr_t)(ctx.ebp + 0x0C);
-            *prev_time += (float)realTick * g_nativeTickAdvance;
-        }
-        g_contResetPending = 0;
-        did_reset = true;
-    }
-    return did_reset;
-}
-
 // Land the catch-up batch EXACTLY on the splice, so the PLAY→REC
 // switch happens on the batch's last tick and no catch-up tick spills
 // into REC. While the splice is still pending on the live gate, step
@@ -236,12 +209,8 @@ static int32_t LimitTicksToSplice(TasSharedState* s, int32_t realTick) {
 
 // Choose this frame's tick count (esi).
 static void ChooseTickCount(SafetyHookContext& ctx, TasSharedState* s, int32_t realTick,
-                            bool did_reset, bool catchup_drain, bool splice_parked) {
-    if (did_reset) {
-        // Splice frame's backlog was just zeroed (prev → now); process a
-        // single resume tick so the first REC frame doesn't re-burst.
-        ctx.esi = 1;
-    } else if (catchup_drain) {
+                            bool catchup_drain, bool splice_parked) {
+    if (catchup_drain) {
         // Set tick_advance large enough that 1 tick drains the whole
         // wall-time gap (gap ≈ realTick * native because __ftol used
         // tick_advance = native last frame).
@@ -327,11 +296,9 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
             && !splice_parked  // a parked splice must not leak a drain tick
             && (s->playback_speed == 1.0f || resumed_from_freeze);
 
-        bool did_reset = ApplyContClockReset(ctx, realTick, splice_parked);
-
         realTick = LimitTicksToSplice(s, realTick);
 
-        ChooseTickCount(ctx, s, realTick, did_reset, catchup_drain, splice_parked);
+        ChooseTickCount(ctx, s, realTick, catchup_drain, splice_parked);
 
         ApplyPlaybackSpeed(s, catchup_drain);
     }

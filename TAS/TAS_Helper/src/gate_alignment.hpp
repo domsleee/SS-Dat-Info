@@ -42,7 +42,7 @@ inline uint32_t GateAlignedSplicePos(uint32_t continue_from_frame,
 //
 // Approval can arrive while parked exactly at the splice. That next cycle
 // belongs to REC, not an additional PLAY tick; cap its batch to one so the
-// catch-up speed cannot spill into recording before the clock reset.
+// catch-up speed cannot spill into recording.
 //
 // While the splice is pending, step one tick per frame from the pre-gate lead
 // on, so the gate is stamped on the exact tick and a catch-up batch cannot

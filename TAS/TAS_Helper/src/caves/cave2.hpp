@@ -9,7 +9,7 @@
 #include "../game_addresses.hpp"
 #include "f5_restart.hpp"
 #include <safetyhook.hpp>
-#include "cave5.hpp"   // g_contResetPending (cave2 sets at the splice, cave5 consumes)
+#include "cave5.hpp"
 
 // Cave 2: Supreme::Cycle hook (SG+0x13FE40)
 // Main REC/PLAY engine. Fires once per physics tick during gameplay (Cave 5
@@ -553,9 +553,9 @@ static void CompleteContinueSplice(TasSharedState* s) {
         if (s->cont_resume_speed > 0.0f) {
             s->playback_speed = s->cont_resume_speed;
         }
-        // Tell cave5 to discard the catch-up clock backlog so REC starts
-        // frame-exact at the resume speed.
-        g_contResetPending = 1;
+        // The catch-up leaves the game clock owing ~70 ticks; at 1x cave5's
+        // catch-up drain runs them as a single tick, so REC starts without a
+        // burst.
 
         uint32_t segIdx = s->segment_count;
         if (segIdx < TAS_MAX_SEGMENTS) {
