@@ -79,8 +79,9 @@ the real success signal.)
 `TAS_Initialize` (`TAS_Helper/src/main.cc`):
 
 1. Checks that the game modules are exactly the expected v1.035 build
-   (`game_addresses.hpp`). Every patch is at a fixed address, so any other
-   build is refused.
+   (`game_addresses.hpp`). Every patch is at a fixed offset into its module
+   (the game's DLLs are relocated at load, so offsets, not addresses), so any
+   other build is refused.
 2. Creates the shared memory. A named mutex, `Local\SupremeTAS.Owner`, stops
    a second injected game from taking it over.
 3. Installs the five core hooks. They are all-or-nothing: if any fails, all
@@ -104,11 +105,13 @@ a replay is checked against.
 
 ### Replaying from the gate
 
-After a restart there's a countdown at the spawn point, and it isn't the same
-length every time: it depends on exactly when the arm lands relative to the
-restart (up to four ticks apart in tests). If input were counted from the
-arm, a countdown one tick longer would shift every input by a tick and the
-run would drift.
+After a restart there's a countdown at the spawn point, and the first moving
+tick isn't at the same arm-relative tick every time. It depends on exactly
+when the arm lands relative to the restart (sweeps of 0–40 ms arm delay moved
+it by up to four ticks, per `gate_alignment.hpp`), and a Time Attack ghost
+moves it by about 11–12 ticks (`drift_scan.rs`). If input were counted from
+the arm, a gate one tick later would shift every input by a tick and the run
+would drift.
 
 So input is counted from the **gate**, the first tick where the boarder's
 position differs from the spawn (`gate_alignment.hpp`,
@@ -202,7 +205,7 @@ the splice. For a recording with a gate:
 If anything goes wrong, `cont_suppress_input` is also cleared on abort,
 cancel and disconnect. As backstops, the DLL clears it after 5 s with the
 game loop frozen, and the UI clears it if it's been left set for 10 s with
-nothing armed.
+nothing armed (a check it skips while `tas_test` is running).
 
 Only a successful CONT arm can splice. The permission flag lives inside the
 DLL, so a stray splice value in shared memory can't turn a plain replay into
@@ -250,16 +253,17 @@ half).
 | Hook | Where | Job |
 | --- | --- | --- |
 | **Cave 2** | `Supreme::Cycle` | Runs once per tick. Applies commands and records or replays that tick's input. |
-| **Cave 1C** | key handlers | Blocks real key events during REC and PLAY, so input only enters through Cave 2. |
+| **Cave 1C** | key handlers | Blocks real key events during REC and PLAY, so input only enters through Cave 2, and whenever a CONT is in flight (`cont_suppress_input`), even with the mode OFF. |
 | **Cave 1D** | observer `BB3B10` | Blocks real observer calls during REC and while a CONT is in flight. |
 | **Cave 5** | tick loop in `Supreme.exe` | Decides how many ticks run each rendered frame: speed control, pause catch-up, parking at a splice. |
 | **Replay capture** | the game's replay recorder | Finds the human player's object so Cave 2 can read its position. Ignores AI and ghost riders. |
 
 Each tick, Cave 2:
 
-1. Applies a pending command (arm, stop, restart).
+1. Applies a pending command (arm, stop, restart), steps an in-progress F5
+   restart, and stops an armed mode if the level has been replaced.
 2. In a CONT whose approved splice is already due, switches to REC before
-   doing anything else, so this tick is recorded, not replayed.
+   this tick's input is chosen, so this tick is recorded, not replayed.
 3. In REC, reads the keyboard; in PLAY, reads the logged input for this tick.
 4. Writes that input into the key buffer and calls the observer for each
    key that changed.
@@ -297,19 +301,24 @@ the game runs at 2x; at 0.04 it runs at 0.25x.
   at a private copy instead of changing the original. (If that can't be done,
   it changes the original and logs that the menu will run fast.)
 - The game's limit of 20 ticks per frame is raised to 64 for fast-forward.
-  At 1x the original 20 still applies.
+  At 1x and slower the original 20 still applies.
 - After a pause the game would run the whole paused time as a burst of
-  ticks. Cave 5 runs one tick that absorbs the gap instead.
+  ticks. Cave 5 runs one tick that absorbs the gap instead (this path
+  bypasses the 20-tick limit).
 
 ### F5 restart
 
 A replay must start from a freshly restarted level, so the DLL restarts it by
 pressing F5 in the key buffer (`RESTART`). No real key press or window focus
 is needed. F5 must be released as soon as the game acts on it: the game
-restarts again on every input poll that sees F5 down, and overlapping
-restarts corrupt the heap and crash the game later. The replay-capture hook
-sees the new player object the restart creates and releases F5 right then;
-a 25 ms timer and a 30-tick cap are fallbacks (`restart_release.hpp`).
+restarts again on every input poll that sees F5 down (a 150 ms physical tap
+measured 6–7 restarts). Those re-entrant restarts were blamed for later
+heap-corruption crashes, but most of that evidence predates the fix for a
+stray DLL write that corrupted the heap on its own (8938e19), so the link is
+unproven. The replay-capture hook releases F5 when it adopts the new human
+recorder the restart creates; a 25 ms timer (which also covers a recorder
+reallocated at the same address) and a 30-tick cap are fallbacks
+(`restart_release.hpp`).
 
 ### Stopping
 
@@ -363,7 +372,8 @@ What's in it:
   DLL resets it to `IDLE` once applied. There's no queue: a new command
   overwrites an unconsumed one, so controllers wait for `IDLE`. For
   `RESTART`, `IDLE` means the restart has begun; `restart_state` reaching 2
-  means it's done.
+  means F5 is back up and the observer has been told. It doesn't confirm the
+  rebuild has finished.
 - **Status**: `mode` (OFF, REC or PLAY; CONT is PLAY until the splice),
   `recorded_count`, `playback_pos`, live position and velocity.
 - **The recording itself**: `input_log`, `rec_coords` and `play_coords`. The
@@ -379,8 +389,10 @@ Two processes share this memory without locks, so it relies on conventions:
 
 - The controller writes commands and their parameters; the DLL writes
   status. The UI writes the recording arrays and `recorded_count` only while
-  the DLL is stopped. A few flags (`cont_suppress_input`, the alignment
-  fields) are set by the controller and cleared by the DLL.
+  the DLL is stopped. A few flags are written by both sides: the controller
+  sets the alignment fields and the DLL clears them, and
+  `cont_suppress_input` is set and cleared by the UI and also by the DLL
+  (`STOP_FOR_RESTART` sets it, a plain STOP clears it).
 - The command word is written last. The controller writes the parameters
   first and the command last; the DLL writes all resulting status first and
   resets the command last. The command is written and read with atomic
@@ -390,7 +402,7 @@ Two processes share this memory without locks, so it relies on conventions:
 - Fields read as a group (level context, rider, race time, menu document) are
   protected by **seqlocks**: the writer makes a counter odd, writes, then
   makes it even; a reader retries until it sees the same even value before
-  and after, and reports "unknown" after a few failed tries. The level id is
+  and after, and reports "unknown" after 64 failed tries. The level id is
   trusted only when its scan matches the currently loaded level, not the one
   before.
 - `arm_generation` is bumped as the last write of every PLAY or CONT arm,
@@ -400,8 +412,9 @@ Two processes share this memory without locks, so it relies on conventions:
   background thread can both consume it, and an atomic claim ensures only one
   does.
 
-Nothing enforces a single controller. The harness closes any running
-`tas_ui` before it starts. The menu reader uses a separate command channel
+Nothing stops the UI and the harness driving the same game at once; the
+harness closes any running `tas_ui` before it starts. (`tas_ui` does refuse
+a second instance of itself.) The menu reader uses a separate command channel
 of its own (sequence, target, acknowledgement, result).
 
 ## SSB Inspect (tas_ui)
@@ -467,13 +480,16 @@ Saving writes new blobs first, then the manifest, then deletes blobs nothing
 references any more. Metadata edits rewrite only the manifest. Blobs are
 verified when restored; a corrupt one is quarantined, never deleted, and its
 id is never reused. If the manifest itself is unusable or from an
-incompatible version (such as an older bincode store), the blobs are kept as
+incompatible version (wrong magic, schema, blob format or hash), the blobs are kept as
 `*.tasrec.orphaned` for manual recovery. All writes go through one background
 worker that coalesces bursts; its `flush` reports whether the data actually
 reached disk.
 
 The data directory is `SSB_INSPECT_DATA_DIR` if set, otherwise `data/` next
-to a deployed `tas_ui.exe`, or `~/.ssb-inspector` for a dev build.
+to `tas_ui.exe` when it's deployed (its folder is inside
+`Display_Config_Resources`), otherwise `~/.ssb-inspector`. Settings are the
+exception: without the variable they're stored next to the exe in every
+build.
 
 ### Crash recovery
 
@@ -495,8 +511,9 @@ few seconds.
 If the game dies or restarts while the UI stays open (`relaunch.rs`), the UI
 still has the old shared memory mapped. If it still holds the dead game's
 data, the UI saves the take from it. If the new DLL has already reset it, the
-UI falls back to the checkpoint. It also clears input blocks left by a
-controller that died mid-cycle.
+UI falls back to the checkpoint. It releases an input block its own cycle
+left set; a block left by another controller that died mid-cycle is cleared
+by the 10 s backstop.
 
 A relaunch usually produces two signals, in either order: the game's process
 id changes, and the DLL's tick counter goes backwards. The UI handles them as
@@ -516,7 +533,7 @@ id alone has to catch it.
   setup parsing). They run with hidden windows, because a console window
   taking focus pauses the game.
 - Python tests for the level tools and the Pico firmware (simulated USB and
-  serial faults).
+  serial faults), and a PowerShell test of Pico discovery.
 - `cargo fmt` and Clippy, warnings as errors.
 
 CI also builds the DLL, the injector and the Rust binaries and checks the
@@ -554,7 +571,13 @@ splice.
   rounding (renderer, rider, a hook that disturbs the FPU) breaks replays.
 - **An injected key with the wrong timestamp is silently ignored**, and one
   stamped in the future makes later keys look out of order and get dropped.
-- **Holding F5 crashes the game later**, not immediately.
+- **Holding F5 restarts the level on every input poll**, so the DLL
+  releases it the moment the restart starts.
+- **A write past the end of a game object crashes much later, somewhere
+  else.** `WriteActionState` wrote six bytes past the 0x38-byte keyboard
+  object on every tick and surfaced as an octree crash and the game's
+  "Unknown exception" dialog. Check a write's offset against the object's
+  allocation size in the decompiled source.
 - **Two controllers on one game will confuse each other.** The command slot
   and `arm_generation` assume one.
 - **History blobs aren't `.tasrec` files**, despite the extension.
