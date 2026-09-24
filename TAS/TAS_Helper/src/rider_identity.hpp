@@ -27,9 +27,9 @@
 //               Read-only: the stance cannot be switched in-process, so a
 //               mismatch is reported, never "fixed".
 //
-// All reads are SEH-guarded from the level-scan worker (~10 Hz): the player
-// set is rebuilt on every restart, so a read can land on a dead object; a
-// failed or implausible read keeps the last published value.
+// Refreshed by Cave 2 on the first tick of each race (the stance only changes
+// in the menus). All reads are SEH-guarded: a failed or implausible read keeps
+// the last published value.
 namespace rider {
 
 static bool SafeCopy(uint32_t src, void* dst, uint32_t n) {

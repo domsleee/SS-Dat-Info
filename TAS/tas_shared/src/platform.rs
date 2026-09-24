@@ -5,8 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::menu_screen;
 use crate::state::{
-    rider_pair, TasCommand, TasSharedState, TAS_CMD_CLAIMED_STOP, TAS_SHARED_MEMORY_NAME,
-    TAS_SHARED_VERSION,
+    rider_pair, TasCommand, TasSharedState, TAS_SHARED_MEMORY_NAME, TAS_SHARED_VERSION,
 };
 use crate::{physics_mode_label, rider_label, transport};
 
@@ -132,14 +131,6 @@ impl TasSharedMemoryClient {
 
     pub fn command_idle(&self) -> bool {
         self.command_word() == TasCommand::Idle as u32
-    }
-
-    /// True while a STOP is published or being consumed by the DLL.
-    pub fn stop_pending(&self) -> bool {
-        let cmd = self.command_word();
-        cmd == TasCommand::Stop as u32
-            || cmd == TasCommand::StopForRestart as u32
-            || cmd == TAS_CMD_CLAIMED_STOP
     }
 
     /// Raw x87 control word the DLL sampled on the game thread.

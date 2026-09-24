@@ -128,12 +128,14 @@ struct GameAddresses {
     // Supreme.exe offsets
     std::uint8_t* cave5_site = nullptr;     // exe+0x25C81: after ftol+mov esi,eax (tick override)
     std::uint8_t* f5_accept_site = nullptr; // exe+0x25C3F: F5 down and accepted, restart call next
-    std::uint8_t* is_in_game = nullptr;     // exe+0x8895C: 0=main menu, 1=in-game (race/level)
+    std::uint8_t* launch_site = nullptr;    // exe+0x25BD7: race loop entered the level, game mode set
+    std::uint8_t* pump_site = nullptr;      // exe+0x55920: the game's message pump (runs in every state)
 
     // Supreme_Game.dll offsets
     std::uint8_t* cave2_site = nullptr;     // SG+0x13FE40: Supreme::Cycle
     std::uint8_t* replay_capture_site = nullptr; // SG+0x9E8F0: replay object capture
     std::uint8_t* f5_done_site = nullptr;   // SG+0x14199F: Set_Game_Mode's mode init returned
+    std::uint8_t* stop_site = nullptr;      // SG+0x1408F0: Supreme::Stop (the race is being left)
     std::uint8_t* player_base = nullptr;    // SG+0x1D5450: root pointer
     // Live vtable addresses (SG base + RVA) the replay-capture hook classifies
     // recorder owners with; 0 until Resolve validated the constructor sites.
@@ -265,12 +267,14 @@ struct GameAddresses {
         // Supreme.exe offsets
         cave5_site = exeBase + 0x25C81;
         f5_accept_site = exeBase + 0x25C3F;
-        is_in_game = exeBase + 0x8895C;  // 0=menu, 1=in-game (RE'd via menu↔game diff)
+        launch_site = exeBase + 0x25BD7;
+        pump_site = exeBase + 0x55920;
 
         // Supreme_Game.dll offsets
         cave2_site = sgBase + 0x13FE40;
         replay_capture_site = sgBase + 0x9E8F0;
         f5_done_site = sgBase + 0x14199F;
+        stop_site = sgBase + 0x1408F0;
         player_base = sgBase + ROOT_PTR_OFFSET;
         level_path_ptr = sgBase + GameAddresses::LEVEL_PATH_PTR_OFFSET;
 
@@ -313,7 +317,19 @@ struct GameAddresses {
         // Set_Game_Mode, after the mode-init call: call SG+0x13E410; mov eax,[eax+0x17C].
         static constexpr uint8_t kF5Done[] =
             { 0xE8, 0x6C, 0xCA, 0xFF, 0xFF, 0x8B, 0x80, 0x7C, 0x01, 0x00, 0x00 };
+        // Race loop, after Set_Game_Mode: lea ecx,[esp+0xB4]; mov [esp+0x60],ebx; mov [esp+0x64],ebx.
+        static constexpr uint8_t kLaunch[] =
+            { 0x8D, 0x8C, 0x24, 0xB4, 0x00, 0x00, 0x00, 0x89, 0x5C, 0x24, 0x60, 0x89, 0x5C, 0x24, 0x64 };
+        // Message pump entry: sub esp,0x24; push edi; push 0 (x4).
+        static constexpr uint8_t kPump[] =
+            { 0x83, 0xEC, 0x24, 0x57, 0x6A, 0x00, 0x6A, 0x00, 0x6A, 0x00, 0x6A, 0x00 };
+        // Supreme::Stop entry: push esi; mov esi,ecx; call rel32; call rel32; mov ecx,[eax+0x40].
+        static constexpr uint8_t kStop[] =
+            { 0x56, 0x8B, 0xF1, 0xE8, 0xA8, 0x6C, 0xFC, 0xFF, 0xE8, 0x13, 0xDB, 0xFF, 0xFF, 0x8B, 0x48, 0x40 };
         if (!ValidateCode("Supreme.exe+0x25C81", cave5_site, kCave5) ||
+            !ValidateCode("Supreme.exe+0x25BD7 (race launched)", launch_site, kLaunch) ||
+            !ValidateCode("Supreme.exe+0x55920 (message pump)", pump_site, kPump) ||
+            !ValidateCode("Supreme_Game.dll+0x1408F0 (Supreme::Stop)", stop_site, kStop) ||
             !ValidateCode("Supreme.exe+0x25C0F (F5 poll)", exeBase + 0x25C0F, kF5Poll) ||
             !ValidateCode("Supreme.exe+0x25C3F (F5 accept)", f5_accept_site, kF5Accept) ||
             !ValidateCode("Supreme_Game.dll+0x14199F (Set_Game_Mode done)", f5_done_site, kF5Done) ||

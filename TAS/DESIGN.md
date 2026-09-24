@@ -196,8 +196,9 @@ the splice. For a recording with a gate:
    the saved normal speed, marks a segment boundary and switches to REC. The
    recording keeps the original's tick numbering: the new take is the old
    prefix followed by new input.
-6. The DLL moves the game clock forward to "now" without running the ticks
-   the catch-up owed, so recording starts in real time with no burst.
+6. The game clock still owes the ticks the catch-up skipped (about 70). At a
+   1x resume Cave 5's catch-up drain runs them as a single tick, so recording
+   starts in real time with no burst.
 7. The UI sees REC, starts a new session, and the player carries on live.
 
 If anything goes wrong, `cont_suppress_input` is also cleared on abort,
@@ -326,23 +327,29 @@ hundreds of restarts in one session.
 ### Stopping
 
 A STOP command ends either mode. PLAY also stops at the end of the
-recording, and REC when the buffer is full. The DLL stops an armed mode when
-a running tick finds the level has been replaced (a new player root). If the
-game loop stays frozen instead, as at the main menu, the UI sends STOP after
-5 s. Every stop releases the keys the DLL was holding, so the boarder doesn't
-keep steering.
+recording, and REC when the buffer is full. Leaving the race (quitting to the
+menu, switching track) stops an armed mode too. Every stop releases the keys
+the DLL was holding, so the boarder doesn't keep steering; pausing doesn't
+stop anything.
 
-The game loop doesn't run at the menus. Anything that must work there runs on
-the DLL's background thread instead of in a game-loop hook: consuming a STOP,
-noticing a level change, clearing a stale input block.
+### The race lifecycle
 
-### Detecting the level, rider and renderer
+`caves/lifecycle.hpp` follows the game's own transition points, all on the
+game thread:
 
-A background thread (`level_scan.hpp`, about 10 Hz) publishes:
+| Hook | Where | Job |
+| --- | --- | --- |
+| **Launch** | `Supreme.exe+0x25BD7`, after the race loop enters the level | Identifies the track and publishes it; `game_in_game` = 1. Rider and renderer stamps refresh on the race's first tick. |
+| **Stop** | `Supreme::Stop` (`Supreme_Game+0x1408F0`) | Stops an armed mode while the level still exists; publishes "no race"; `game_in_game` = 0. |
+| **Pump** | the game's message pump (`Supreme.exe+0x55920`) | Runs in every state, including the menus, the pause menu and dialogs where `Supreme::Cycle` doesn't. Consumes STOP there, clears a stale input block, expires menu commands and writes the DLL's queued log lines. |
 
-- **Level**: the area from the game's current level resource path (whose
-  change also signals a level load), and the difficulty from the game's setup
-  object, because some tracks share assets.
+The level is the area from the game's level resource path plus the
+difficulty from the game's setup object (`level_context.hpp`), because some
+tracks share a path: Village Hard loads `.../Tracks/easy/...`. It is
+identified at every launch, so switching between two such tracks is seen
+like any other. A DLL injected into a race already running identifies it on
+the race's first tick.
+
 - **Rider**: character and stance.
 - **Renderer**: which renderer plugin loaded. (Cave 2 separately publishes
   the game thread's x87 control word, which gives the precision.)
@@ -410,9 +417,9 @@ Two processes share this memory without locks, so it relies on conventions:
 - `arm_generation` is bumped as the last write of every PLAY or CONT arm,
   even a refused one. Until it changes, `mode` and `playback_pos` still
   describe the *previous* replay, so the watcher waits for it.
-- STOP must work while the game loop is frozen. The game-loop hook and the
-  background thread can both consume it, and an atomic claim ensures only one
-  does.
+- STOP must work while the game loop is frozen. Cave 2 consumes it while a
+  race ticks and the message-pump hook everywhere else; both run on the game
+  thread, so all DLL-side state has a single writer thread.
 
 Nothing stops the UI and the harness driving the same game at once; the
 harness closes any running `tas_ui` before it starts. (`tas_ui` does refuse
@@ -425,9 +432,9 @@ The UI's responsibilities:
 
 - **Transport**: REC, PLAY, CONT and STOP buttons, also on F9 to F12 while
   the game has focus. Each start runs the transport cycle above.
-- **Sessions**: when REC starts it opens a session; when REC stops it saves
-  the take to history. It stops REC/PLAY if the game loop has been frozen for
-  5 s (usually the player quitting to the menu; a long pause also counts).
+- **Sessions**: when REC starts it opens a session; when REC stops, including
+  when the DLL stops it because the race was left, it saves the take to
+  history.
 - **Editing**: inputs appear as held-key spans on a timeline
   (`panels/timeline.rs`), or in a TMInterface-style text script
   (`324-372 press left`, ticks, end exclusive) that reloads on save
@@ -581,6 +588,15 @@ splice.
   allocation.** Check offsets against the allocation size in the decompiled
   source (the keyboard object is 0x38 bytes); a stray write corrupts
   whatever follows it and crashes much later, somewhere else.
+- **SafetyHook mid-hooks don't save the x87 state.** A hook that can touch the
+  FPU (floats, formatting) wraps its body in FSAVE/FRSTOR, as Caves 2 and 5
+  and the lifecycle hooks do.
+- **`Supreme::Cycle` doesn't run at the menus, the pause menu or dialogs.**
+  Anything that must work there belongs in the message-pump hook.
+- **The decompiled source mislabels arguments and control flow.** Ghidra
+  drops register arguments (`Supreme::Enter` takes its start info on the
+  stack, with objects in ECX/EDX) and marks allocations as not returning;
+  check a hook site against the disassembly.
 - **Two controllers on one game will confuse each other.** The command slot
   and `arm_generation` assume one.
 - **History blobs aren't `.tasrec` files**, despite the extension.
@@ -592,8 +608,9 @@ splice.
 - Recordings are at most 65,536 ticks (about 10 min 55 s).
 - An in-process restart waits for the game to take F5, which it doesn't do
   in the pause menu or a dialog; the controller's timeout then gives up.
-- Switching between two tracks that share a level path (Village Easy and
-  Village Hard) changes no path; detection relies on the game loop pausing
-  during the load instead.
 - The watcher checks the first 1,024 ticks after the gate; later divergence
   is only visible in the drift banner.
+- Editing inputs keeps the original take's positions, so an edit inside the
+  watched window makes PLAY reroll until it gives up.
+- A CONT that resumes at a speed other than 1x doesn't get the catch-up
+  drain, so the ticks the catch-up owed can run as a short burst.

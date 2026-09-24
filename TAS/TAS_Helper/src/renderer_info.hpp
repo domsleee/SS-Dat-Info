@@ -22,7 +22,7 @@ namespace renderer {
 
 inline uint32_t Detect() {
     // The plugin cannot change at runtime: resolve it once instead of taking
-    // the loader lock five times every 100 ms from the worker.
+    // the loader lock on every refresh.
     static uint32_t s_cached = TAS_RENDERER_UNKNOWN;
     if (s_cached != TAS_RENDERER_UNKNOWN) return s_cached;
     static const char* const kModules[] = {
@@ -53,7 +53,8 @@ inline const char* Name(uint32_t id) {
 }
 
 // Publish renderer_id; log whenever the renderer or the game thread's control
-// word changes. Called from the level-scan worker (~10 Hz), never from a hook.
+// word changes. Called by Cave 2 on the first tick of each race, inside its
+// FSAVE/FRSTOR.
 inline void Refresh(TasSharedState* s) {
     static uint32_t lastRenderer = 0xFFFFFFFFu;
     static uint32_t lastCw = 0xFFFFFFFFu;

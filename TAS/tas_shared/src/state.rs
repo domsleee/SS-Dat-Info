@@ -37,11 +37,6 @@ pub const TAS_MAX_SEGMENTS: usize = 32;
 pub const TAS_LOG_RING_SIZE: usize = 64;
 pub const TAS_LOG_ENTRY_SIZE: usize = 120;
 
-/// Value the DLL parks in the command slot while an out-of-cycle consumer
-/// (level-scan worker / SwapBuffers hook) applies a STOP (`CAVE2_CMD_CLAIMED_STOP`
-/// in cave2.hpp). It is not a `TasCommand`; readers treat it as "STOP in flight".
-pub const TAS_CMD_CLAIMED_STOP: u32 = u32::MAX;
-
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TasCommand {
@@ -192,9 +187,8 @@ pub struct TasSharedState {
     /// atomically at the splice. 0.0 = unset.
     pub cont_resume_speed: f32,
 
-    /// 0 = main menu, 1 = in-game. Written each frame by cave2 from
-    /// `Supreme.exe + 0x8895C`; stays 1 through a return to the menu, which
-    /// only the cycle heartbeat notices.
+    /// 1 from a race's launch until it is left (menu, track switch), including
+    /// while paused; 0 at the menus. Written by the DLL's lifecycle hooks.
     pub game_in_game: u32,
 
     /// Current track: `0..9 = area*3 + difficulty` (area 0=Forest, 1=Alpine,
@@ -223,15 +217,14 @@ pub struct TasSharedState {
     /// 1 while a Continue cycle is in flight, from before the F5 restart until
     /// the cycle ends. The UI sets and clears it (cave2 also sets it on
     /// StopForRestart). While set, the DLL blocks the real key handler, ESC
-    /// excepted; the level-scan worker retires a flag left set through more
-    /// than 5 s of frozen cycle.
+    /// excepted; the DLL clears a flag left set through more than 5 s of
+    /// frozen cycle, and when the race is left.
     pub cont_suppress_input: u32,
 
-    /// Bumped by the DLL on every level-path change (a level loaded or
-    /// unloaded).
+    /// Bumped by the DLL on every race launch and every exit from a race.
     pub level_epoch: u32,
-    /// The `level_epoch` the scan worker had observed when it last published a
-    /// concrete `level_id`. `level_id` is trustworthy iff the two are equal.
+    /// The `level_epoch` the published `level_id` belongs to (historical
+    /// name). `level_id` is trustworthy iff the two are equal.
     pub level_scan_epoch: u32,
 
     /// The engine's own path for the current level's resources

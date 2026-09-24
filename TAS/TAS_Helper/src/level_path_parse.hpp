@@ -5,7 +5,7 @@
 //
 // Deliberately dependency-free (no windows.h, no shared state, no SEH) so it can
 // be compiled and unit-tested standalone — `just test_dll`. The surrounding
-// level_scan.hpp cannot be: it needs the game process. Keeping the decisions
+// level_context.hpp cannot be: it needs the game process. Keeping the decisions
 // that are actually easy to get wrong (bounds, grammar, which segment is the
 // area) in a testable unit is the point.
 namespace levelpath {

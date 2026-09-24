@@ -43,18 +43,6 @@ fn stop_is_acknowledged(mode: u32, command_idle: bool) -> bool {
     mode == TasMode::Off as u32 && command_idle
 }
 
-/// `stop_pending` = a STOP is already published or being consumed. Any OTHER
-/// pending command (e.g. a tick-scheduled arm that never fired because the
-/// level was left) must not suppress the auto-stop: STOP overwrites it.
-fn should_request_auto_stop(
-    racing: bool,
-    cycle_frozen: bool,
-    debounced: bool,
-    stop_pending: bool,
-) -> bool {
-    racing && cycle_frozen && !debounced && !stop_pending
-}
-
 #[derive(Clone, Copy)]
 struct ActiveRecordingSession {
     kind: RecordingSessionKind,
@@ -185,19 +173,15 @@ struct TasApp {
     last_frame_count: u32,
     stale_frame_ticks: u32,
     last_health_check: std::time::Instant,
-    // Engine-activity tracker. game_in_game (exe+0x8895C) is written by the
-    // Supreme::Cycle hook, so when the cycle stops (menu, pause, dialog) it
-    // freezes at 1 instead of going to 0. frame_count only advances while the
-    // cycle runs, so a recent advance means a level is really ticking.
-    // Sampled every frame.
+    // Engine-activity tracker. game_in_game says a race is launched (it stays
+    // 1 while paused); frame_count only advances while Supreme::Cycle runs,
+    // so a recent advance means the race is really ticking. Sampled every
+    // frame.
     cycle_fc: u32,
     // True once cycle_fc holds a real baseline sample, so the first sample
     // after launch or reconnect is not mistaken for an advance.
     cycle_fc_seeded: bool,
     cycle_advance_at: std::time::Instant,
-    // The menu auto-stop debounce, on its own clock so it never makes the
-    // engine look alive to the transport gate.
-    auto_stop_debounce: Option<std::time::Instant>,
 
     // The last track we were confidently on, used only to name a save: the
     // engine's post-run dialog stops the cycle, so the live level reads
@@ -329,7 +313,6 @@ impl TasApp {
             cycle_advance_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(600))
                 .unwrap_or_else(std::time::Instant::now),
-            auto_stop_debounce: None,
             last_resolved_level: None,
             last_resolved_epoch: None,
             #[cfg(windows)]
@@ -929,7 +912,6 @@ impl eframe::App for TasApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync_frame_state(ctx);
-        self.auto_stop_if_level_left();
         self.track_mode_transitions();
 
         // handle_shortcuts takes keys delivered to tas_ui by egui;
@@ -1003,40 +985,6 @@ impl TasApp {
 
         // Check game health (crash detection) — also samples cycle activity.
         self.check_game_health();
-    }
-
-    fn auto_stop_if_level_left(&mut self) {
-        // Auto-stop REC/PLAY when the player leaves the level. Quitting to the
-        // menu stops Supreme::Cycle, so the DLL's own auto-stop (in the cycle
-        // hook) can't fire. The 5 s threshold rides out an F5 reload stall and
-        // a brief pause; a longer pause also stops, which is harmless.
-        if let Some(ref shared) = self.shared {
-            let mode = shared.mode_volatile();
-            let racing = mode == TasMode::Rec as u32 || mode == TasMode::Play as u32;
-            let frozen = self.cycle_fc != 0
-                && self.cycle_advance_at.elapsed() > std::time::Duration::from_secs(5);
-            let debounced = self
-                .auto_stop_debounce
-                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2));
-            // Once STOP is pending, do not overwrite/re-log it every two
-            // seconds. At a static menu the DLL's out-of-cycle fallback
-            // acknowledges it because Supreme::Cycle is not running.
-            let stop_pending = shared.stop_pending();
-            if should_request_auto_stop(racing, frozen, debounced, stop_pending) {
-                self.log_lines.push(format!(
-                    "Auto-stopped: left the level (game cycle stopped while {})",
-                    if mode == TasMode::Rec as u32 {
-                        "recording"
-                    } else {
-                        "playing"
-                    }
-                ));
-                self.send_action_command(TasCommand::Stop);
-                // Debounce on its own timestamp: touching cycle_advance_at
-                // would make the transport gate allow arming at a frozen menu.
-                self.auto_stop_debounce = Some(std::time::Instant::now());
-            }
-        }
     }
 
     fn track_mode_transitions(&mut self) {
@@ -1897,17 +1845,6 @@ mod tests {
         assert!(stop_is_acknowledged(TasMode::Off as u32, true));
     }
 
-    #[test]
-    fn pending_frozen_stop_is_not_reissued() {
-        // Idle slot, or a stale non-STOP command: request the stop.
-        assert!(should_request_auto_stop(true, true, false, false));
-        // STOP already published/claimed: leave it alone.
-        assert!(!should_request_auto_stop(true, true, false, true));
-        assert!(!should_request_auto_stop(false, true, false, false));
-        assert!(!should_request_auto_stop(true, false, false, false));
-        assert!(!should_request_auto_stop(true, true, true, false));
-    }
-
     /// Test constructor: creates TasApp without shared memory or Pico.
     fn test_app() -> TasApp {
         TasApp {
@@ -1972,7 +1909,6 @@ mod tests {
             cycle_advance_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(600))
                 .unwrap_or_else(std::time::Instant::now),
-            auto_stop_debounce: None,
             last_resolved_level: None,
             last_resolved_epoch: None,
             #[cfg(windows)]

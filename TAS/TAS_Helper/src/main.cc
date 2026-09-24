@@ -9,7 +9,7 @@
 #include "caves/cave5.hpp"
 #include "caves/race_timer.hpp"
 #include "caves/menu_state.hpp"
-#include "level_scan.hpp"
+#include "caves/lifecycle.hpp"
 
 static TasSharedMemory g_sharedMem;
 static GameAddresses g_addr;
@@ -43,13 +43,17 @@ bool run() {
     bool cave2_ok = InstallCave2(g_addr, state);
     bool cave5_ok = InstallCave5(g_addr, state);
     bool f5_ok = f5restart::Install(g_addr);
+    // Level identity, leaving a race, and STOP while Supreme::Cycle is frozen
+    // (menus, pause, dialogs) all hang off the game's own lifecycle points.
+    bool lifecycle_ok = lifecycle::Install(g_addr, state);
 
     // These hooks are one functional unit. Reporting ready after any of them
     // failed leaves a partially intercepted input/game loop in production and
     // makes Injector.exe's explicit initialization result meaningless. Roll
     // back in reverse dependency order while shared state is still mapped.
-    if (!(replay_ok && cave1d_ok && cave1c_ok && cave2_ok && cave5_ok && f5_ok)) {
+    if (!(replay_ok && cave1d_ok && cave1c_ok && cave2_ok && cave5_ok && f5_ok && lifecycle_ok)) {
         Log("FATAL: required TAS hook installation failed; rolling back all core hooks");
+        lifecycle::Uninstall();
         f5restart::Uninstall();
         UninstallCave5();
         UninstallCave2();
@@ -67,18 +71,7 @@ bool run() {
     Log(std::format("  Cave 2  (Supreme::Cycle):    {}", cave2_ok ? "OK" : "FAILED"));
     Log(std::format("  Cave 5  (fixed tick):        {}", cave5_ok ? "OK" : "FAILED"));
     Log(std::format("  F5 restart (accept/done):    {}", f5_ok ? "OK" : "FAILED"));
-
-    // Background worker: level identity, rider identity, renderer, menu
-    // housekeeping, and the out-of-cycle STOP consumer (a STOP sent at a menu
-    // would otherwise wait for a level's Supreme::Cycle to run again). It
-    // takes cave2's cycle heartbeat because a frozen cycle is the only signal
-    // that notices a return to the menu.
-    levelscan::Start(state, (uint32_t)g_addr.level_path_ptr, &SafeReadPtr, &g_lastCycleMs);
-    if (levelscan::g_thread) {
-        Log("  Level scan thread: started");
-    } else {
-        Log("  Level scan thread: FAILED TO START — level stays unresolved");
-    }
+    Log(std::format("  Lifecycle (launch/stop/pump): {}", lifecycle_ok ? "OK" : "FAILED"));
 
     // Race timer: read the exact on-screen race time (HUD/SR_UIT) -> shared state.
     if (racetimer::Install(g_addr, state)) {
@@ -91,7 +84,7 @@ bool run() {
     // object via a Change_Page hook, deferred until that DLL loads.
     menustate::Install(g_addr, state);
 
-    Log(std::format("  Renderer plugin at init: {} (x87 control word is sampled on the game thread; see level-scan log lines)",
+    Log(std::format("  Renderer plugin at init: {} (the x87 precision is logged when a race starts)",
         renderer::Name(renderer::Detect())));
     Log("=== TAS_Helper.dll ready ===");
     return true;

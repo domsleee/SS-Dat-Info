@@ -180,12 +180,12 @@ struct TasSharedState {
     // recording doesn't fast-forward at the catch-up rate. 0 = unset.
     float    cont_resume_speed;
 
-    // -- Game-state awareness (DLL writes each frame from exe+0x8895C) --
-    // 0 = main menu, 1 = in-game (in a race/level). Note: stays 1 through a
-    // return to the menu; the cycle heartbeat is what notices that.
+    // -- Race running (DLL writes at the game's launch and stop points) --
+    // 1 from a race's launch until it is left (menu, track switch); stays 1
+    // while paused. 0 at the menus.
     uint32_t game_in_game;
 
-    // -- Current track (DLL level-scan worker writes; UI reads) --
+    // -- Current track (DLL writes at launch and stop, level_context.hpp; UI reads) --
     // 0..9 = area*3 + difficulty (area 0=Forest,1=Alpine,2=Village,3=Practice;
     // diff 0=Easy,1=Medium,2=Hard). 0xFFFFFFFF = unknown / menu. Trustworthy
     // only while level_scan_epoch == level_epoch (see below).
@@ -216,16 +216,16 @@ struct TasSharedState {
     // 1 while a restart-then-replay cycle is in flight, from before the F5
     // restart until the controller finishes or abandons the cycle.
     // cave1c/cave1d block the real key handler whenever it is set, covering
-    // the OFF-mode spawn countdown the mode-based block misses. The level-scan
-    // worker retires a flag left set for >5 s of frozen cycle, which would
-    // otherwise leave the keyboard dead. ESC stays exempt.
+    // the OFF-mode spawn countdown the mode-based block misses. The
+    // message-pump hook retires a flag left set for >5 s of frozen cycle, which
+    // would otherwise leave the keyboard dead; leaving the race clears it too.
+    // ESC stays exempt.
     uint32_t cont_suppress_input;
 
-    // -- Level context epoch (DLL level-scan worker writes; UI reads) --
-    //   level_epoch:      bumped on every level-path change (a new level loaded
-    //                     or the level unloaded).
-    //   level_scan_epoch: the epoch the worker had observed when it last
-    //                     published a CONCRETE level_id.
+    // -- Level context epoch (DLL writes at launch and stop; UI reads) --
+    //   level_epoch:      bumped on every launch and every exit from a race.
+    //   level_scan_epoch: the epoch the published level_id belongs to (the
+    //                     field keeps its historical name).
     // level_id is trustworthy iff level_scan_epoch == level_epoch; otherwise
     // the context changed and the new track is not identified yet.
     uint32_t level_epoch;
@@ -243,7 +243,7 @@ struct TasSharedState {
     // level_id, level_path, level_path_gen): ODD = write in progress. The path
     // is a 128-byte array, so a reader in the other process can see it half
     // copied unless it takes the sequence before and after and accepts only an
-    // unchanged EVEN value. level_scan.hpp is the only writer.
+    // unchanged EVEN value. level_context.hpp is the only writer.
     volatile uint32_t level_ctx_seq;
 
     // -- Gate-aligned PLAY / CONT --
@@ -275,7 +275,7 @@ struct TasSharedState {
     volatile uint32_t fpu_control_word;
     volatile uint32_t renderer_id;
 
-    // -- Rider identity (DLL level-scan worker writes) --
+    // -- Rider identity (DLL writes on each race's first tick) --
     // rider_character: TasCharacterId (0 = not resolved yet).
     // rider_stance: 0 = regular, 1 = goofy, 0xFFFFFFFF = unknown. Read from the
     // game-setup object; cannot be switched in-process.
@@ -394,7 +394,7 @@ public:
         memset(state, 0, sizeof(TasSharedState));
         state->version = TAS_SHARED_VERSION;
         state->playback_speed = 1.0f;
-        state->level_id = 0xFFFFFFFFu;        // unknown until the scan thread runs
+        state->level_id = 0xFFFFFFFFu;        // no race until the first launch
         state->race_time_cs = 0xFFFFFFFFu;
         state->race_start_ts = 0xFFFFFFFFu;
         state->rider_stance = 0xFFFFFFFFu;    // unknown until the setup object is read

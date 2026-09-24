@@ -23,15 +23,15 @@
 //     page's items (field reads + the game's own Get_Active_Component /
 //     Want_Focus), publishes screen + selector + document together under
 //     menu_seq, and executes pending agent commands through the game's own
-//     entry points. Everything that touches a UI object happens here, on the
-//     thread that owns those objects, never on the worker: a worker-side
-//     traversal races page teardown, and a vtable inside a UI image proves
-//     nothing about liveness.
+//     entry points. Everything that touches a UI object happens here, inside
+//     the menu's own Execute: a traversal from anywhere else can race page
+//     teardown, and a vtable inside a UI image proves nothing about liveness.
 //
-// The level-scan worker only does housekeeping: it clears the document when
-// Execute stops heartbeating (a level, a load, the in-game pause menu - none
-// of which run UI_Menu::Execute) and expires commands nobody can consume.
-// Both writers share a lock, so the odd/even seqlock always has one writer.
+// Housekeeping runs from the message-pump hook (lifecycle.hpp): it clears the
+// document when Execute stops heartbeating (a level, a load, the in-game pause
+// menu - none of which run UI_Menu::Execute) and expires commands nobody can
+// consume. Both writers share a lock, so the odd/even seqlock always has one
+// writer.
 namespace menustate {
 
 inline TasSharedState* g_state = nullptr;
@@ -96,7 +96,7 @@ static bool IsIdLike(const char* s) { return s[0] == 'I' && s[1] == 'D' && s[2] 
 
 // ---------------------------------------------------------------------------
 // PUBLISHING: screen + selector + document go out TOGETHER under menu_seq.
-// Two writers exist (the menu thread's snapshot, the worker's clear), so the
+// Two writers exist (the Execute snapshot, the housekeeping clear), so the
 // section is serialized by g_pubLock and the seqlock never sees two writers.
 // Runs inside the Execute hook: fixed buffers, no allocation, no file log.
 // ---------------------------------------------------------------------------
@@ -339,15 +339,15 @@ static void Snapshot(uint32_t uiMenu, bool force) {
 // A command names the page it was read from and is refused (STALE_PAGE) if
 // the page moved on; one command is outstanding at a time (the agent side
 // refuses to submit while seq != ack); a command nobody can consume - no
-// menu executing - is EXPIRED by the worker after 3 s, so nothing stays armed
+// menu executing - is EXPIRED by the housekeeping after 3 s, so nothing stays armed
 // to fire on a later page.
 // ---------------------------------------------------------------------------
 using MenuAction = void(__fastcall*)(uint32_t);
 using RequestFocusFn = void(__fastcall*)(uint32_t, uint32_t);
 inline MenuAction g_trigger = nullptr, g_up = nullptr, g_down = nullptr, g_left = nullptr, g_right = nullptr;
 inline RequestFocusFn g_requestFocus = nullptr;
-inline SRWLOCK g_cmdLock = SRWLOCK_INIT;   // one handler per command: menu thread executes, worker expires
-inline uint32_t g_pendingSeq = 0;          // worker: the sequence it is timing
+inline SRWLOCK g_cmdLock = SRWLOCK_INIT;   // one handler per command: Execute runs it, housekeeping expires it
+inline uint32_t g_pendingSeq = 0;          // housekeeping: the sequence it is timing
 inline uint64_t g_pendingSinceMs = 0;
 static constexpr uint64_t kExpireMs = 3000;
 static constexpr uint64_t kExecuteIdleMs = 1500;   // no Execute for this long = no menu on screen

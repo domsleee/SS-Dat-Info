@@ -1,12 +1,12 @@
 #pragma once
 #include "../stdafx.h"
-#include <atomic>
-#include "../cycle_stop_gate.hpp"
 #include "../log.hpp"
 #include "../gate_alignment.hpp"
 #include "../input_gate.hpp"
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
+#include "../renderer_info.hpp"
+#include "../rider_identity.hpp"
 #include "f5_restart.hpp"
 #include <safetyhook.hpp>
 #include "cave5.hpp"
@@ -28,7 +28,6 @@
 //      point.
 
 inline TasSharedState* g_cave2State = nullptr;
-inline std::atomic_flag g_cycleStopGate = ATOMIC_FLAG_INIT;
 inline GameAddresses* g_cave2Addr = nullptr;
 static SafetyHookMid cave2Hook{};
 
@@ -255,8 +254,7 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
 
 
 // Clear the raw input state and return the mask that still needs observer UP
-// notifications. The direct writes are safe from an out-of-cycle caller;
-// calling game code from that potentially different thread is not.
+// notifications.
 static uint8_t ClearTasInputState(GameAddresses* addr) {
     uint8_t held = g_prevMask;
     g_prevMask = 0;
@@ -281,28 +279,6 @@ static void ReleaseTasInput(TasSharedState* s, GameAddresses* addr) {
     CallBB3B10OnTransitions(s, addr, kbobj, 0, held);
 }
 
-// A STOP consumed out-of-cycle (the level-scan worker) clears the memory
-// immediately, then defers observer callbacks until Supreme::Cycle is running
-// on its normal hook thread again. Multiple frozen stops simply merge their
-// held masks.
-static volatile LONG g_deferredInputReleaseMask = 0;
-
-static void DeferTasInputRelease(GameAddresses* addr) {
-    uint8_t held = ClearTasInputState(addr);
-    if (held) InterlockedOr(&g_deferredInputReleaseMask, (LONG)held);
-}
-
-static void FlushDeferredTasInputRelease(TasSharedState* s, GameAddresses* addr) {
-    LONG held = InterlockedExchange(&g_deferredInputReleaseMask, 0);
-    if (!held) return;
-    uint32_t kbobj = GetKeyboardObject(addr);
-    if (!kbobj) {
-        InterlockedOr(&g_deferredInputReleaseMask, held);
-        return;
-    }
-    CallBB3B10OnTransitions(s, addr, kbobj, 0, (uint8_t)held);
-}
-
 // Drop any gate-relative input alignment. gate_align_rec is persistent shared
 // memory that the controller stages right before each arm, and a leftover
 // value would silently re-index a later replay and move its splice point. It
@@ -316,12 +292,9 @@ static inline void ClearGateAlign(TasSharedState* s) {
 static volatile uint32_t g_cave2_pendingLog = 0;  // 0=none, 1=REC, 2=PLAY, 3=STOP, 4=playback_done
 static volatile uint32_t g_cave2_logParam = 0;
 
-// Root player pointer ([SG+1D5450]) captured at ARM time. It survives F5
-// restarts but is reallocated when the level is torn down (quit to menu, the
-// attract demo loading, a track switch). A mode left armed across that would
-// record the demo, fast-forward the menu video and eat native keys, so Cave 2
-// auto-stops when the live root no longer matches.
-inline volatile uint32_t g_armedRoot = 0;
+// Set by the lifecycle hook when a race launches: Cave 2 refreshes the rider
+// and renderer stamps on the race's first tick, once the player exists.
+inline volatile LONG g_refreshStamps = 0;
 
 // Splice gate: 1 only between a SUCCESSFUL CMD_ARM_CONTINUE and its splice
 // (or any stop/re-arm). The PLAY handler's splice check requires this flag,
@@ -331,18 +304,10 @@ inline volatile uint32_t g_armedRoot = 0;
 // field — external processes must not be able to set it.
 static volatile uint32_t g_cave2_contArmed = 0;
 
-// STOP also has to work while Supreme::Cycle is frozen. That is not an edge
-// case: leaving a level is detected precisely because the Cycle hook stopped
-// running. A STOP left for ProcessCommand() could therefore remain pending
-// forever, leaving MODE_PLAY/MODE_REC asserted. The level-scan worker
-// (level_scan.hpp) calls TryProcessStopCommand() while the cycle is frozen,
-// so every consumer needs an atomic claim word.
-static constexpr LONG CAVE2_CMD_CLAIMED_STOP = -1;
-
-// Apply the complete TAS -> OFF transition. No logging/formatting/float
-// arithmetic: this is called from the Cycle mid-hook and from the
-// out-of-cycle consumer above.
-static void ApplyStopTransition(TasSharedState* s, bool notifyObserverNow, bool protectRestart) {
+// Apply the complete TAS -> OFF transition. Game thread only (Cave 2, or the
+// message pump while Supreme::Cycle is frozen). No logging/formatting/float
+// arithmetic: it runs inside hooks.
+static void ApplyStopTransition(TasSharedState* s, bool protectRestart) {
     // Install protection before publishing OFF so real keys cannot enter the
     // restart window. Ordinary STOP still releases it for menu navigation.
     s->cont_suppress_input = protectRestart ? 1u : 0u;
@@ -352,33 +317,21 @@ static void ApplyStopTransition(TasSharedState* s, bool notifyObserverNow, bool 
         f5restart::Cancel();
         s->restart_state = 0;
     }
-    if (notifyObserverNow) {
-        ReleaseTasInput(s, g_cave2Addr);
-    } else {
-        DeferTasInputRelease(g_cave2Addr);
-    }
+    ReleaseTasInput(s, g_cave2Addr);
     s->continue_from_frame = 0;
     g_cave2_contArmed = 0;
     ClearGateAlign(s);
     g_cave2_pendingLog = 3;
 }
 
-// Atomically claim and acknowledge a pending STOP. Returning command to IDLE
-// is the completion publication and therefore happens only after every status
-// and cleanup write. Compare-exchange on the final step avoids erasing a newer
-// command if a misbehaving writer ignored the non-idle slot while cleanup ran.
-static bool TryProcessStopCommand(TasSharedState* s, bool notifyObserverNow) {
-    CycleStopGuard guard(g_cycleStopGate, !notifyObserverNow);
-    if (!guard) return false;
-    LONG expected = InterlockedCompareExchange((volatile LONG*)&s->command, CMD_IDLE, CMD_IDLE);
-    if (expected != CMD_STOP && expected != CMD_STOP_FOR_RESTART) return false;
-    LONG previous = InterlockedCompareExchange(
-        (volatile LONG*)&s->command, CAVE2_CMD_CLAIMED_STOP, expected);
-    if (previous != expected) return false;
-
-    ApplyStopTransition(s, notifyObserverNow, expected == CMD_STOP_FOR_RESTART);
-    InterlockedCompareExchange(
-        (volatile LONG*)&s->command, CMD_IDLE, CAVE2_CMD_CLAIMED_STOP);
+// Consume a pending STOP. Returning the command to IDLE is the completion
+// publication, so it happens after every status and cleanup write, and as a
+// compare-exchange so a newer command written meanwhile is not erased.
+static bool TryProcessStopCommand(TasSharedState* s) {
+    const LONG cmd = InterlockedCompareExchange((volatile LONG*)&s->command, CMD_IDLE, CMD_IDLE);
+    if (cmd != CMD_STOP && cmd != CMD_STOP_FOR_RESTART) return false;
+    ApplyStopTransition(s, cmd == CMD_STOP_FOR_RESTART);
+    InterlockedCompareExchange((volatile LONG*)&s->command, CMD_IDLE, cmd);
     return true;
 }
 
@@ -400,7 +353,6 @@ static void ArmRec(TasSharedState* s) {
     memset(s->segment_boundaries, 0, sizeof(s->segment_boundaries));
     s->segment_boundaries[0].frame = 0;
     s->mode = MODE_REC;
-    g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
     g_cave2_contArmed = 0;
     // REC never replays; make sure it cannot inherit alignment.
     ClearGateAlign(s);
@@ -421,7 +373,6 @@ static void ArmPlay(TasSharedState* s) {
     // the mismatch drifts once steering starts.
 
     s->mode = MODE_PLAY;
-    g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
     g_cave2_pendingLog = 2;
 }
 
@@ -455,7 +406,6 @@ static void ArmContinue(TasSharedState* s) {
     ResetArmCounters(s);
     // Segment tracking: keep existing segment_count, we'll add one at splice
     s->mode = MODE_PLAY;  // Start as PLAY, will auto-switch in PLAY handler
-    g_armedRoot = SafeReadPtr((uint32_t)g_cave2Addr->player_base);
     g_cave2_contArmed = 1;  // the ONLY place the splice gate opens
     s->cont_splice_approved = 0;  // aligned attempts start unapproved (splice interlock)
     // Keep gate_align_rec: the controller staged it right before this
@@ -477,17 +427,15 @@ static void BeginRestart(TasSharedState* s) {
 
 // Handle command transitions
 // WARNING: NO Log/format/float calls — runs inside SafetyHookMid (x87 FPU not saved).
-// Returns false when the out-of-cycle worker currently owns STOP cleanup. The
-// caller must skip REC/PLAY work for that cycle rather than race the cleanup.
-static bool ProcessCommand(TasSharedState* s) {
+static void ProcessCommand(TasSharedState* s) {
     // Cross-process acquire for the command publication word. The Rust writer
     // stages every payload field first and stores command with Release.
     uint32_t cmd = (uint32_t)InterlockedCompareExchange(
         (volatile LONG*)&s->command, CMD_IDLE, CMD_IDLE);
-    if (cmd == CMD_IDLE) return true;
-    if ((LONG)cmd == CAVE2_CMD_CLAIMED_STOP) return false;
+    if (cmd == CMD_IDLE) return;
     if (cmd == CMD_STOP || cmd == CMD_STOP_FOR_RESTART) {
-        return TryProcessStopCommand(s, true);
+        TryProcessStopCommand(s);
+        return;
     }
 
     switch (cmd) {
@@ -513,10 +461,9 @@ static bool ProcessCommand(TasSharedState* s) {
 
     // Publish command completion after all resulting mode/status writes.
     InterlockedExchange((volatile LONG*)&s->command, CMD_IDLE);
-    return true;
 }
 
-// Flush deferred log (call from OUTSIDE the SafetyHookMid callback)
+// Flush deferred log (called from the message pump, outside Supreme::Cycle)
 static void FlushPendingLog() {
     uint32_t log = g_cave2_pendingLog;
     if (!log) return;
@@ -604,27 +551,16 @@ static void StepInProcessRestart(TasSharedState* s) {
     }
 }
 
-// Auto-stop when the level is swapped out under an armed mode (see
-// g_armedRoot). root==0 is not a trigger: restarts pass through it.
-// Returns true when it stopped the session.
-static bool AutoStopIfLevelChanged(TasSharedState* s, GameAddresses* addr) {
-    uint32_t curRoot = SafeReadPtr((uint32_t)addr->player_base);
-    if (curRoot && g_armedRoot && curRoot != g_armedRoot) {
-        s->mode = MODE_OFF;
-        ReleaseTasInput(s, addr);  // clears the NEW level's input state
-        s->continue_from_frame = 0;
-        g_cave2_contArmed = 0;
-        ClearGateAlign(s);
-        // The level is gone, so no restart is in flight: release the
-        // live-input block.
-        s->cont_suppress_input = 0;
-        g_armedRoot = 0;
-        LogRing(s, LOG_WARN,
-            "TAS auto-stopped: level context changed (left the race / menu demo loaded)");
-        g_cave2_pendingLog = 3;  // "stopped"
-        return true;
+// The race is being left (lifecycle.hpp's Supreme::Stop hook, while the level
+// still exists). A mode left armed across that would record the menu, run the
+// menu video fast and eat native keys, so it stops here. No restart can be in
+// flight any more, so the live-input block goes too.
+static void StopForLeftRace(TasSharedState* s) {
+    if (s->mode != MODE_OFF) {
+        ApplyStopTransition(s, false);
+        LogRing(s, LOG_WARN, "TAS stopped: the race was left");
     }
-    return false;
+    s->cont_suppress_input = 0;
 }
 
 static void RecTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
@@ -726,36 +662,27 @@ static void __declspec(noinline) Cave2_Logic() {
     auto* addr = g_cave2Addr;
     if (!s || !addr) return;
 
-    // Finish any observer notifications deferred by a frozen-cycle STOP. Raw
-    // buffers were already cleared out-of-cycle; this only publishes key-up
-    // transitions from the game thread once it exists again.
-    FlushDeferredTasInputRelease(s, addr);
-
     s->frame_count++;
     g_lastCycleMs = GetTickCount();  // pause detector heartbeat (see cave1c)
-
-    // Game-state awareness: publish exe+0x8895C (0=menu, 1=in-game) so the UI
-    // knows the state. Integer read — FPU-safe.
-    if (addr->is_in_game) {
-        s->game_in_game = *(volatile uint32_t*)addr->is_in_game;
-    }
 
     if (s->replay_ptr) {
         s->player_ptr = SafeReadPtr(s->replay_ptr + GameAddresses::REPLAY_PLAYER_OFFSET);
     }
 
+    // First tick of a launched race: the player exists now.
+    if (g_refreshStamps && s->player_ptr) {
+        g_refreshStamps = 0;
+        rider::Refresh(s);
+        renderer::Refresh(s);
+    }
+
     PublishLivePosition(s);
 
-    if (!ProcessCommand(s)) return;
+    ProcessCommand(s);
 
     StepInProcessRestart(s);
 
-    // The level-context epoch is bumped by level_scan.hpp's worker, not here:
-    // Supreme::Cycle is frozen during the menus and loads it must detect.
-
     if (s->mode == MODE_OFF) return;
-
-    if (AutoStopIfLevelChanged(s, addr)) return;
 
     uint32_t kbobj = GetKeyboardObject(addr);
     if (!kbobj) return;
@@ -787,10 +714,7 @@ static void Cave2_MidCallback(SafetyHookContext& ctx) {
         memcpy(&cw, fpu_buf, sizeof(cw));
         s->fpu_control_word = cw;
     }
-    {
-        CycleStopGuard guard(g_cycleStopGate);
-        if (guard) Cave2_Logic();
-    }
+    Cave2_Logic();
     __asm { frstor [fpu_buf] }
 }
 
