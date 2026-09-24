@@ -588,9 +588,14 @@ splice.
   allocation.** Check offsets against the allocation size in the decompiled
   source (the keyboard object is 0x38 bytes); a stray write corrupts
   whatever follows it and crashes much later, somewhere else.
-- **SafetyHook mid-hooks don't save the x87 state.** A hook that can touch the
-  FPU (floats, formatting) wraps its body in FSAVE/FRSTOR, as Caves 2 and 5
-  and the lifecycle hooks do.
+- **SafetyHook mid-hooks don't save the x87 state.** A hook can sit in the
+  middle of the game's physics with live values on the FPU stack, so every
+  mid-hook body runs between FSAVE and FRSTOR (`fpu_safe_hook.hpp`). FSAVE
+  also re-initialises the FPU, so code inside a hook runs at 64-bit
+  precision; FRSTOR puts the game's own precision back before its physics
+  continues. The game's control word is read from the saved image, not with
+  `fnstcw` inside the hook. Injected input was checked against native keys on
+  a precision-sensitive fence hit on Village Medium: bit-identical.
 - **`Supreme::Cycle` doesn't run at the menus, the pause menu or dialogs.**
   Anything that must work there belongs in the message-pump hook.
 - **The decompiled source mislabels arguments and control flow.** Ghidra

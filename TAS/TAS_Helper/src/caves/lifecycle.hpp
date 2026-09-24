@@ -6,7 +6,7 @@
 #include "../level_context.hpp"
 #include "cave2.hpp"
 #include "menu_state.hpp"
-#include <safetyhook.hpp>
+#include "../fpu_safe_hook.hpp"
 
 // The game's race lifecycle, observed at its own transition points instead of
 // inferred from a polling thread:
@@ -23,7 +23,7 @@
 //           does the DLL's housekeeping.
 //
 // All three run on the game thread, like Cave 2, so no DLL state is shared
-// with another thread.
+// with another thread, and inside CreateMidHook's FSAVE/FRSTOR.
 namespace lifecycle {
 
 inline TasSharedState* g_state = nullptr;
@@ -46,31 +46,23 @@ static constexpr uint32_t STALE_SUPPRESS_MS = 5000;
 static void OnLaunch(SafetyHookContext&) {
     auto* s = g_state;
     if (!s) return;
-    uint8_t fpu[108];
-    __asm { fsave [fpu] }
     g_sawLaunch = true;
     levelcontext::PublishRunning(s);
     s->game_in_game = 1;
     g_refreshStamps = REFRESH_STAMP_TICKS;   // rider and renderer, over the race's first ticks (cave2)
-    __asm { frstor [fpu] }
 }
 
 static void OnStop(SafetyHookContext&) {
     auto* s = g_state;
     if (!s) return;
-    uint8_t fpu[108];
-    __asm { fsave [fpu] }
     StopForLeftRace(s);
     levelcontext::PublishLeft(s);
     s->game_in_game = 0;
-    __asm { frstor [fpu] }
 }
 
 static void OnPump(SafetyHookContext&) {
     auto* s = g_state;
     if (!s) return;
-    uint8_t fpu[108];
-    __asm { fsave [fpu] }
     TryProcessStopCommand(s);
     if (!g_sawLaunch && s->frame_count != g_frameAtInstall) {
         g_sawLaunch = true;
@@ -90,7 +82,6 @@ static void OnPump(SafetyHookContext&) {
     }
     menustate::Housekeeping();
     FlushPendingLog();
-    __asm { frstor [fpu] }
 }
 
 inline bool Install(GameAddresses& addr, TasSharedState* s) {
@@ -98,9 +89,9 @@ inline bool Install(GameAddresses& addr, TasSharedState* s) {
     g_frameAtInstall = s->frame_count;
     levelcontext::Init(s, (uint32_t)(uintptr_t)addr.level_path_ptr, &SafeReadPtr);
     s->game_in_game = 0;
-    g_launchHook = safetyhook::create_mid(addr.launch_site, OnLaunch);
-    g_stopHook = safetyhook::create_mid(addr.stop_site, OnStop);
-    g_pumpHook = safetyhook::create_mid(addr.pump_site, OnPump);
+    g_launchHook = CreateMidHook<OnLaunch>(addr.launch_site);
+    g_stopHook = CreateMidHook<OnStop>(addr.stop_site);
+    g_pumpHook = CreateMidHook<OnPump>(addr.pump_site);
     const bool ok = g_launchHook && g_stopHook && g_pumpHook;
     Log(ok ? std::format("Lifecycle: hooked launch {:p} (EXE+0x25BD7), stop {:p} (SG+0x1408F0), pump {:p} (EXE+0x55920)",
                          (void*)addr.launch_site, (void*)addr.stop_site, (void*)addr.pump_site)

@@ -8,18 +8,16 @@
 #include "../renderer_info.hpp"
 #include "../rider_identity.hpp"
 #include "f5_restart.hpp"
-#include <safetyhook.hpp>
+#include "../fpu_safe_hook.hpp"
 #include "cave5.hpp"
 
 // Cave 2: Supreme::Cycle hook (SG+0x13FE40)
 // Main REC/PLAY engine. Fires once per physics tick during gameplay (Cave 5
 // can run several ticks per rendered frame).
 //
-// FPU PRESERVATION:
-// SafetyHookMid does NOT save x87 FPU state. The game does fld/fmul
-// immediately after the hook site. Cave2_MidCallback wraps the logic in
-// FSAVE/FRSTOR; the command/capture helpers below still avoid float ops and
-// copy coordinates as integers so they stay safe wherever they are called.
+// FPU PRESERVATION: the game does fld/fmul immediately after the hook site,
+// so the body runs inside CreateMidHook's FSAVE/FRSTOR (fpu_safe_hook.hpp).
+// The helpers below still copy coordinates as integers.
 //
 // REC: sample the keyboard, write the DI buffer, notify the
 //      observer (BB3B10) on transitions, log the mask, capture coordinates.
@@ -705,26 +703,15 @@ static void __declspec(noinline) Cave2_Logic() {
     }
 }
 
-// SafetyHookMid callback with explicit x87 FPU preservation.
-// FSAVE saves all 8 ST registers + control/status (108 bytes) and reinits FPU.
-// FRSTOR restores everything before returning to game code.
-static void Cave2_MidCallback(SafetyHookContext& ctx) {
-    uint8_t fpu_buf[108];
-    __asm { fsave [fpu_buf] }
-    auto* s = g_cave2State;
-    if (s) {
+// Installed through CreateMidHook (FSAVE/FRSTOR around the body).
+static void Cave2_MidCallback(SafetyHookContext&) {
+    if (auto* s = g_cave2State) {
         // The game thread's x87 control word = the precision the renderer left
-        // the physics running at (0x007F DirectX 6/7 = 24-bit, OpenGL = 53/64).
-        // It is per-thread state, and FSAVE above re-initialises the FPU
-        // (an fnstcw inside Cave2_Logic reads the post-init 0x037F), so take
-        // it from the saved image: the FSAVE protected-mode layout starts
-        // with the control word.
-        uint16_t cw;
-        memcpy(&cw, fpu_buf, sizeof(cw));
-        s->fpu_control_word = cw;
+        // the physics running at (0x007F DirectX 6/7 = 24-bit, OpenGL = 53/64),
+        // taken from the saved image: inside the hook the FPU is re-initialised.
+        s->fpu_control_word = g_hookFpuControlWord;
     }
     Cave2_Logic();
-    __asm { frstor [fpu_buf] }
 }
 
 bool InstallCave2(GameAddresses& addr, TasSharedState* state) {
@@ -737,7 +724,7 @@ bool InstallCave2(GameAddresses& addr, TasSharedState* state) {
     g_cave2Addr = &addr;
     Log(std::format("Cave 2: hooking Supreme::Cycle at {:p}", (void*)addr.cave2_site));
 
-    cave2Hook = safetyhook::create_mid(addr.cave2_site, Cave2_MidCallback);
+    cave2Hook = CreateMidHook<Cave2_MidCallback>(addr.cave2_site);
 
     if (!cave2Hook) {
         Log("Cave 2: SafetyHook create_mid FAILED");

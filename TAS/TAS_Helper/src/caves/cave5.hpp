@@ -4,7 +4,7 @@
 #include "../shared_state.hpp"
 #include "../gate_alignment.hpp"
 #include "../game_addresses.hpp"
-#include <safetyhook.hpp>
+#include "../fpu_safe_hook.hpp"
 
 // Cave 5: Fixed tick override with variable speed via time-advance scaling.
 // Hook at Supreme.exe+25C81 (after __ftol call and mov esi, eax).
@@ -155,7 +155,7 @@ static constexpr int32_t CAVE5_PER_FRAME_TICK_CAP = 64;
 // scripted fast-forward (playback_speed > 1) or the catchup-drain path.
 static constexpr int32_t NATIVE_GAME_CLAMP_AT_1X = 20;
 
-// The helpers below run between Cave5_MidCallback's FSAVE and FRSTOR.
+// The helpers below run inside Cave5_MidCallback, between CreateMidHook's FSAVE and FRSTOR.
 
 // Was the engine frozen (dialog, menu, load) since the last call? A
 // backlog after a freeze is wall-clock debt and is dropped at ANY
@@ -270,10 +270,8 @@ static void PublishTickCount(SafetyHookContext& ctx) {
     }
 }
 
+// Installed through CreateMidHook (FSAVE/FRSTOR around the body).
 static void Cave5_MidCallback(SafetyHookContext& ctx) {
-    uint8_t fpu_buf[108];
-    __asm { fsave [fpu_buf] }
-
     auto* s = g_cave5State;
     if (s) {
         int32_t realTick = (int32_t)ctx.esi;
@@ -304,8 +302,6 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
     }
 
     PublishTickCount(ctx);
-
-    __asm { frstor [fpu_buf] }
 }
 
 inline void UninstallCave5();
@@ -446,7 +442,7 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
 
     Log(std::format("Cave 5: hooking tick override at {:p} (EXE+0x25C81)", (void*)addr.cave5_site));
 
-    cave5Hook = safetyhook::create_mid(addr.cave5_site, Cave5_MidCallback);
+    cave5Hook = CreateMidHook<Cave5_MidCallback>(addr.cave5_site);
 
     if (!cave5Hook) {
         Log("Cave 5: SafetyHook create_mid FAILED");

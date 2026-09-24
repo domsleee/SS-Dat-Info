@@ -2,7 +2,7 @@
 #include "../stdafx.h"
 #include "../log.hpp"
 #include "../game_addresses.hpp"
-#include <safetyhook.hpp>
+#include "../fpu_safe_hook.hpp"
 #include "../shared_state.hpp"
 #include "../race_timer_table.hpp"
 #include "menu_state.hpp"
@@ -201,8 +201,8 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
     if (g_state->race_seq & 1) InterlockedIncrement((volatile LONG*)&g_state->race_seq);
     ResetEpoch();
     g_clock = sg + 0x1D5334;
-    g_tickHook = safetyhook::create_mid(sg + 0xB4B80, TickCb);  // clock tick (100/sec)
-    g_aptHook = safetyhook::create_mid((uint8_t*)uit + 0xED40, AptCb);
+    g_tickHook = CreateMidHook<TickCb>(sg + 0xB4B80);  // clock tick (100/sec)
+    g_aptHook = CreateMidHook<AptCb>((uint8_t*)uit + 0xED40);
     if (!g_tickHook || !g_aptHook) {
         // Installation is all-or-none: a failed UI hook must not leave the
         // per-tick callback running against a feature reported as unavailable.

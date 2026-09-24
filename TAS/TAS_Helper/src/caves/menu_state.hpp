@@ -5,7 +5,7 @@
 #include "../game_addresses.hpp"
 #include "../menu_model.hpp"
 #include "../rider_identity_parse.hpp"
-#include <safetyhook.hpp>
+#include "../fpu_safe_hook.hpp"
 #include <format>
 #include "menu_page.hpp"
 
@@ -525,7 +525,7 @@ static void InstallCommands(uint8_t* base) {
     g_right = (MenuAction)(uintptr_t)(base + 0x19F30);
     g_requestFocus = (RequestFocusFn)(uintptr_t)(uit + 0x196D0);
     g_getModal = (GetModalFn)getModal;
-    g_executeHook = safetyhook::create_mid(base + 0x1A680, ExecuteCb);
+    g_executeHook = CreateMidHook<ExecuteCb>(base + 0x1A680);
     g_cmdInstalled = (bool)g_executeHook;
     Log(g_cmdInstalled
             ? std::format("Menu cmd: hooked UI_Menu::Execute at {:p} (Request_Focus {:p})",
@@ -560,7 +560,7 @@ static DWORD WINAPI InstallThread(LPVOID) {
     Log(std::format("Menu state: images Main_Menu {:#x}-{:#x} UIT {:#x}-{:#x} SR_UIT {:#x}-{:#x}{}",
                     g_imgMainMenu.lo, g_imgMainMenu.hi, g_imgUit.lo, g_imgUit.hi, g_imgSrUit.lo, g_imgSrUit.hi,
                     g_menuDiag ? " (diag on)" : ""));
-    g_changePageHook = safetyhook::create_mid(base + 0x1A7C0, ChangePageCb);
+    g_changePageHook = CreateMidHook<ChangePageCb>(base + 0x1A7C0);
     Log(g_changePageHook
             ? std::format("Menu state: hooked UI_Menu::Change_Page at {:p} (Main_Menu.dll {:p})",
                           (void*)(base + 0x1A7C0), (void*)base)

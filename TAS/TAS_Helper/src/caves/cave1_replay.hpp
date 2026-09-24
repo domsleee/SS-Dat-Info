@@ -5,7 +5,7 @@
 #include "../game_addresses.hpp"
 #include "../replay_capture_policy.hpp"
 #include "../replay_identity.hpp"
-#include <safetyhook.hpp>
+#include "../fpu_safe_hook.hpp"
 
 // Replay object capture hook at SG+0x9E8F0.
 // Original instruction: sub esp, 00000080 (6 bytes).
@@ -55,6 +55,67 @@ static char* ReplayPut(char* p, const char* s) {
 // instead of trusting a pointer from a previous process life.
 static ReplayCaptureState g_capture;
 
+// Runs on every recorder push (every rider, every tick), inside the player
+// update, so it is installed through CreateMidHook like every mid-hook.
+static void ReplayCaptureCb(SafetyHookContext& ctx) {
+    auto* s = g_replayState;
+    auto* addr = g_replayAddr;
+    if (!s || !addr) return;
+
+    // ECX holds the recorder object at this hook site.
+    auto newPtr = (uint32_t)ctx.ecx;
+
+    static uint32_t s_logged = 0;
+    ReplayIdentityEnv env{};
+    env.player_vtable = addr->player_vtable;
+    env.ghost_vtable = addr->ghost_vtable;
+    if (newPtr != 0 && newPtr == g_capture.cached) {
+        // Same address as the recorder we follow: prove it is STILL the
+        // human's on every push (three guarded reads). An F5 can free it
+        // and the allocator can hand the address to a ghost.
+        const ReplayOwnerKind kind = ClassifyRecorderOwner(newPtr, env, ReplaySafeReadU32, nullptr);
+        if (ReplayCaptureRevalidate(kind == OWNER_HUMAN, g_capture)) {
+            s->replay_ptr = 0;
+            s->player_ptr = 0;
+            if (++s_logged <= 60) {
+                char msg[96];
+                char* p = ReplayPut(msg, "replay-capture ecx=");
+                ReplayHexU32(p, newPtr);
+                p = ReplayPut(p + 8, " now ");
+                p = ReplayPut(p, ReplayOwnerKindName(kind));
+                p = ReplayPut(p, " - DROPPED (address reused)");
+                *p = 0;
+                LogRing(s, LOG_DEBUG, msg);
+            }
+        }
+    } else if (newPtr != g_capture.cached) {
+        ReplayIdentityTrace trace{};
+        const ReplayOwnerKind kind = ClassifyRecorderOwner(newPtr, env, ReplaySafeReadU32, &trace);
+        const bool human = kind == OWNER_HUMAN;
+        const uint32_t rejectedBefore = g_capture.rejected;
+        const bool adopted = ReplayCaptureAdopt(s->mode == MODE_OFF, newPtr, human, g_capture);
+        if (adopted) s->replay_ptr = newPtr;
+        // Ring-log adoptions and rejections (rate-limited) with the owner
+        // and its class.
+        if ((adopted || g_capture.rejected != rejectedBefore) && ++s_logged <= 60) {
+            char msg[128];
+            char* p = ReplayPut(msg, "replay-capture ecx=");
+            ReplayHexU32(p, newPtr);
+            p = ReplayPut(p + 8, " owner=");
+            ReplayHexU32(p, trace.owner);
+            p = ReplayPut(p + 8, " vt=");
+            ReplayHexU32(p, trace.owner_vtable);
+            p = ReplayPut(p + 8, " ");
+            p = ReplayPut(p, ReplayOwnerKindName(kind));
+            p = ReplayPut(p, adopted
+                ? ((s->mode == MODE_OFF) ? " adopted (idle)" : " adopted (MID-RUN re-creation)")
+                : " ignored");
+            *p = 0;
+            LogRing(s, LOG_DEBUG, msg);
+        }
+    }
+}
+
 bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
     if (!addr.replay_capture_site) {
         Log("Replay capture: hook site not resolved");
@@ -73,65 +134,7 @@ bool InstallReplayCapture(GameAddresses& addr, TasSharedState* state) {
     Log(std::format("Replay capture: hooking at {:p} (SG+0x9E8F0), human = Player vtable {:#010x}",
                     (void*)addr.replay_capture_site, addr.player_vtable));
 
-    replayCaptureHook = safetyhook::create_mid(addr.replay_capture_site, [](SafetyHookContext& ctx) {
-        auto* s = g_replayState;
-        auto* addr = g_replayAddr;
-        if (!s || !addr) return;
-
-        // ECX holds the recorder object at this hook site.
-        auto newPtr = (uint32_t)ctx.ecx;
-
-        static uint32_t s_logged = 0;
-        ReplayIdentityEnv env{};
-        env.player_vtable = addr->player_vtable;
-        env.ghost_vtable = addr->ghost_vtable;
-        if (newPtr != 0 && newPtr == g_capture.cached) {
-            // Same address as the recorder we follow: prove it is STILL the
-            // human's on every push (three guarded reads). An F5 can free it
-            // and the allocator can hand the address to a ghost.
-            const ReplayOwnerKind kind = ClassifyRecorderOwner(newPtr, env, ReplaySafeReadU32, nullptr);
-            if (ReplayCaptureRevalidate(kind == OWNER_HUMAN, g_capture)) {
-                s->replay_ptr = 0;
-                s->player_ptr = 0;
-                if (++s_logged <= 60) {
-                    char msg[96];
-                    char* p = ReplayPut(msg, "replay-capture ecx=");
-                    ReplayHexU32(p, newPtr);
-                    p = ReplayPut(p + 8, " now ");
-                    p = ReplayPut(p, ReplayOwnerKindName(kind));
-                    p = ReplayPut(p, " - DROPPED (address reused)");
-                    *p = 0;
-                    LogRing(s, LOG_DEBUG, msg);
-                }
-            }
-        } else if (newPtr != g_capture.cached) {
-            ReplayIdentityTrace trace{};
-            const ReplayOwnerKind kind = ClassifyRecorderOwner(newPtr, env, ReplaySafeReadU32, &trace);
-            const bool human = kind == OWNER_HUMAN;
-            const uint32_t rejectedBefore = g_capture.rejected;
-            const bool adopted = ReplayCaptureAdopt(s->mode == MODE_OFF, newPtr, human, g_capture);
-            if (adopted) s->replay_ptr = newPtr;
-            // Ring-log adoptions and rejections (rate-limited) with the owner
-            // and its class.
-            if ((adopted || g_capture.rejected != rejectedBefore) && ++s_logged <= 60) {
-                char msg[128];
-                char* p = ReplayPut(msg, "replay-capture ecx=");
-                ReplayHexU32(p, newPtr);
-                p = ReplayPut(p + 8, " owner=");
-                ReplayHexU32(p, trace.owner);
-                p = ReplayPut(p + 8, " vt=");
-                ReplayHexU32(p, trace.owner_vtable);
-                p = ReplayPut(p + 8, " ");
-                p = ReplayPut(p, ReplayOwnerKindName(kind));
-                p = ReplayPut(p, adopted
-                    ? ((s->mode == MODE_OFF) ? " adopted (idle)" : " adopted (MID-RUN re-creation)")
-                    : " ignored");
-                *p = 0;
-                LogRing(s, LOG_DEBUG, msg);
-            }
-        }
-
-    });
+    replayCaptureHook = CreateMidHook<ReplayCaptureCb>(addr.replay_capture_site);
 
     if (!replayCaptureHook) {
         Log("Replay capture: SafetyHook create_mid FAILED");

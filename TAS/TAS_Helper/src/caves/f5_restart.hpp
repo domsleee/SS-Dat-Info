@@ -2,7 +2,7 @@
 #include "../stdafx.h"
 #include "../log.hpp"
 #include "../game_addresses.hpp"
-#include <safetyhook.hpp>
+#include "../fpu_safe_hook.hpp"
 
 // In-process F5 restart, driven by the game's own F5 handling.
 //
@@ -100,8 +100,8 @@ inline void Cancel() {
 
 inline bool Install(GameAddresses& addr) {
     g_addr = &addr;
-    g_acceptHook = safetyhook::create_mid(addr.f5_accept_site, OnAccept);
-    g_doneHook = safetyhook::create_mid(addr.f5_done_site, OnDone);
+    g_acceptHook = CreateMidHook<OnAccept>(addr.f5_accept_site);
+    g_doneHook = CreateMidHook<OnDone>(addr.f5_done_site);
     const bool ok = g_acceptHook && g_doneHook;
     Log(ok ? std::format("F5 restart: hooked accept {:p} (EXE+0x25C3F), done {:p} (SG+0x14199F)",
                          (void*)addr.f5_accept_site, (void*)addr.f5_done_site)
