@@ -2,14 +2,14 @@
 #include "log.hpp"
 #include "shared_state.hpp"
 #include "game_addresses.hpp"
-#include "caves/cave1_replay.hpp"
-#include "caves/cave2.hpp"
-#include "caves/cave1c.hpp"
-#include "caves/cave1d.hpp"
-#include "caves/cave5.hpp"
-#include "caves/race_timer.hpp"
-#include "caves/menu_state.hpp"
-#include "caves/lifecycle.hpp"
+#include "caves/replay_capture_cave.hpp"
+#include "caves/cycle_cave.hpp"
+#include "caves/key_handler_cave.hpp"
+#include "caves/observer_cave.hpp"
+#include "caves/tick_cave.hpp"
+#include "caves/race_timer_cave.hpp"
+#include "caves/menu_cave.hpp"
+#include "caves/lifecycle_cave.hpp"
 
 static TasSharedMemory g_sharedMem;
 static GameAddresses g_addr;
@@ -35,13 +35,13 @@ bool run() {
 
     auto* state = g_sharedMem.state;
 
-    // Order matters: Cave 1D (BB3B10 gate) and Cave 1C (handler gate) must be
-    // installed before Cave 2, which calls BB3B10 directly.
+    // Order matters: the observer cave (BB3B10 gate) and the key-handler cave (handler gate) must be
+    // installed before the cycle cave, which calls BB3B10 directly.
     bool replay_ok = InstallReplayCapture(g_addr, state);
-    bool cave1d_ok = InstallCave1D(g_addr, state);
-    bool cave1c_ok = InstallCave1C(g_addr, state);
-    bool cave2_ok = InstallCave2(g_addr, state);
-    bool cave5_ok = InstallCave5(g_addr, state);
+    bool observer_ok = InstallObserverCave(g_addr, state);
+    bool key_handler_ok = InstallKeyHandlerCave(g_addr, state);
+    bool cycle_ok = InstallCycleCave(g_addr, state);
+    bool tick_ok = InstallTickCave(g_addr, state);
     bool f5_ok = f5restart::Install(g_addr);
     // Level identity, leaving a race, and STOP while Supreme::Cycle is frozen
     // (menus, pause, dialogs) all hang off the game's own lifecycle points.
@@ -51,14 +51,14 @@ bool run() {
     // failed leaves a partially intercepted input/game loop in production and
     // makes Injector.exe's explicit initialization result meaningless. Roll
     // back in reverse dependency order while shared state is still mapped.
-    if (!(replay_ok && cave1d_ok && cave1c_ok && cave2_ok && cave5_ok && f5_ok && lifecycle_ok)) {
+    if (!(replay_ok && observer_ok && key_handler_ok && cycle_ok && tick_ok && f5_ok && lifecycle_ok)) {
         Log("FATAL: required TAS hook installation failed; rolling back all core hooks");
         lifecycle::Uninstall();
         f5restart::Uninstall();
-        UninstallCave5();
-        UninstallCave2();
-        UninstallCave1C();
-        UninstallCave1D();
+        UninstallTickCave();
+        UninstallCycleCave();
+        UninstallKeyHandlerCave();
+        UninstallObserverCave();
         UninstallReplayCapture();
         g_sharedMem.Destroy();
         return false;
@@ -66,10 +66,10 @@ bool run() {
 
     Log("=== Hook installation summary ===");
     Log(std::format("  Replay capture (SG+9E8F0):  {}", replay_ok ? "OK" : "FAILED"));
-    Log(std::format("  Cave 1D (BB3B10 gate):      {}", cave1d_ok ? "OK" : "FAILED"));
-    Log(std::format("  Cave 1C (handler gate):      {}", cave1c_ok ? "OK" : "FAILED"));
-    Log(std::format("  Cave 2  (Supreme::Cycle):    {}", cave2_ok ? "OK" : "FAILED"));
-    Log(std::format("  Cave 5  (fixed tick):        {}", cave5_ok ? "OK" : "FAILED"));
+    Log(std::format("  the observer cave (BB3B10 gate):      {}", observer_ok ? "OK" : "FAILED"));
+    Log(std::format("  the key-handler cave (handler gate):      {}", key_handler_ok ? "OK" : "FAILED"));
+    Log(std::format("  the cycle cave  (Supreme::Cycle):    {}", cycle_ok ? "OK" : "FAILED"));
+    Log(std::format("  the tick cave  (fixed tick):        {}", tick_ok ? "OK" : "FAILED"));
     Log(std::format("  F5 restart (accept/done):    {}", f5_ok ? "OK" : "FAILED"));
     Log(std::format("  Lifecycle (launch/stop/pump): {}", lifecycle_ok ? "OK" : "FAILED"));
 

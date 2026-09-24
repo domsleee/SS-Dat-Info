@@ -1,6 +1,6 @@
 // Standalone unit tests for the menu model (no game, no Windows APIs): the JSON
 // document an agent reads and the target matching a command uses. The live
-// path (menu_state.hpp) only fills the snapshot; everything an agent depends
+// path (menu_cave.hpp) only fills the snapshot; everything an agent depends
 // on - the document's shape, escaping, and which item "activate X" picks - is
 // decided here and pinned here.
 #include "../menu_model.hpp"

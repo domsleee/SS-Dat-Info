@@ -19,7 +19,7 @@ use crate::replay;
 
 const RECORDING: &str = "FE-tremendous.tasrec";
 const SPLICE_FRAME: u32 = 2200;
-/// Stop timing just below SPLICE_FRAME: at the splice cave2 flips PLAY→REC and
+/// Stop timing just below SPLICE_FRAME: at the splice the cycle cave flips PLAY→REC and
 /// playback_pos stops advancing, so waiting for it to reach SPLICE_FRAME hangs.
 const VERIFY_FRAMES: u32 = 2199;
 /// Trials per speed; the median rejects the occasional slow restart. The 1x
@@ -44,7 +44,7 @@ fn time_to_splice(client: &mut tas_shared::TasSharedMemoryClient) -> Option<(f64
     let start = Instant::now();
     client.send_command(TasCommand::ArmContinue);
 
-    // Wait for cave2 to actually enter PLAY before polling progress.
+    // Wait for the cycle cave to actually enter PLAY before polling progress.
     let mode_wait = Instant::now();
     while client.mode_volatile() != TasMode::Play as u32 {
         if mode_wait.elapsed() > Duration::from_secs(2) {

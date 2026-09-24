@@ -133,16 +133,16 @@ struct TasSharedState {
     float    player_x, player_y, player_z;
 
     // -- Diagnostics --
-    uint32_t bb3b10_call_count;     // BB3B10 observer calls (Cave 2 direct)
-    uint32_t handler_block_count;   // Cave 1C: external handler blocks during PLAY
-    uint32_t frame_count;           // Cave 2: total frames processed
-    uint32_t bb3b10_block_count;    // Cave 1D: BB3B10 blocks during REC
+    uint32_t bb3b10_call_count;     // BB3B10 observer calls (cycle cave, direct)
+    uint32_t handler_block_count;   // the key-handler cave: external handler blocks during PLAY
+    uint32_t frame_count;           // the cycle cave: total frames processed
+    uint32_t bb3b10_block_count;    // the observer cave: BB3B10 blocks during REC
 
     // -- Hook status (DLL writes, UI reads) --
-    uint32_t cave2_hooked;          // 1 if Supreme::Cycle hook installed
-    uint32_t cave1c_hooked;         // 1 if handler gate hooks installed
-    uint32_t cave1d_hooked;         // 1 if BB3B10 observer hook installed
-    uint32_t cave5_hooked;          // 1 if fixed tick hook installed
+    uint32_t cycle_cave_hooked;          // 1 if Supreme::Cycle hook installed
+    uint32_t key_handler_cave_hooked;         // 1 if handler gate hooks installed
+    uint32_t observer_cave_hooked;         // 1 if BB3B10 observer hook installed
+    uint32_t tick_cave_hooked;          // 1 if fixed tick hook installed
     uint32_t replay_capture_hooked; // 1 if replay object capture hook installed
 
     // -- Runtime pointers (DLL internal, exposed for diagnostics) --
@@ -150,14 +150,14 @@ struct TasSharedState {
     uint32_t player_ptr;            // Current player pointer ([replayObj+0x84])
 
     // Variable speed playback (1.0 = normal, 0.5 = half, 2.0 = double)
-    float    playback_speed;            // UI writes, Cave 5 reads
+    float    playback_speed;            // UI writes, the tick cave reads
 
     // In-process restart: 0=idle, 1=F5 held, 2=done (the game rebuilt the level)
     volatile uint32_t restart_state;
 
     // -- Telemetry (DLL writes, UI reads) --
     float    velocity_x, velocity_y, velocity_z;            // Per-frame velocity (pos - prev_pos)
-    uint32_t tick_count;                                    // Ticks emitted by Cave 5
+    uint32_t tick_count;                                    // Ticks emitted by the tick cave
 
     // -- Segment fields (DLL writes, UI reads) --
     uint32_t segment_start_frame;    // Frame offset where the current segment begins
@@ -215,7 +215,7 @@ struct TasSharedState {
     // -- Live-input suppression across a restart (UI and DLL write, DLL reads) --
     // 1 while a restart-then-replay cycle is in flight, from before the F5
     // restart until the controller finishes or abandons the cycle.
-    // cave1c/cave1d block the real key handler whenever it is set, covering
+    // The key-handler cave/the observer cave block the real key handler whenever it is set, covering
     // the OFF-mode spawn countdown the mode-based block misses. The
     // message-pump hook retires a flag left set for >5 s of frozen cycle, which
     // would otherwise leave the keyboard dead; leaving the race clears it too.
@@ -247,7 +247,7 @@ struct TasSharedState {
     volatile uint32_t level_ctx_seq;
 
     // -- Gate-aligned PLAY / CONT --
-    // Bumped by cave2 as the LAST store of every replay-starting arm
+    // Bumped by the cycle cave as the LAST store of every replay-starting arm
     // (ARM_PLAY / ARM_CONTINUE), refusals included. The controller uses it to
     // tell this attempt's mode/position from the previous replay's.
     volatile uint32_t arm_generation;
@@ -263,8 +263,8 @@ struct TasSharedState {
     // capture still advances the index, leaving a stale hole in the prefix.
     volatile uint32_t capture_ok;
     // CONT splice interlock. Written 1 by the controller when its watcher has
-    // validated the prefix. Until then cave5 parks playback at the aligned
-    // splice (0 ticks/frame) and cave2 refuses to splice. Cleared by
+    // validated the prefix. Until then the tick cave parks playback at the aligned
+    // splice (0 ticks/frame) and the cycle cave refuses to splice. Cleared by
     // ARM_CONTINUE and ClearGateAlign; ignored when gate_align_rec == 0.
     volatile uint32_t cont_splice_approved;
 
@@ -290,7 +290,7 @@ struct TasSharedState {
 
     // -- Menu screen title ("Main Menu", "Select Character", ...); empty while
     // a level runs. Published by the menu reader together with the menu
-    // document, under menu_seq (caves/menu_state.hpp).
+    // document, under menu_seq (caves/menu_cave.hpp).
     char menu_screen[TAS_MENU_SCREEN_MAX];
 
     // The MENU DOCUMENT: the current page's items with visible labels and

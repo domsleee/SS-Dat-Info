@@ -122,7 +122,7 @@ pub fn run() -> bool {
     if ta.is_empty() || tb.is_empty() {
         println!(
             "*** REC-REPRO FAILED: a pass recorded NO input transitions — keys \
-             never reached the recorder (Pico/driver/cave1c gate problem) ***"
+             never reached the recorder (Pico/driver/the key-handler cave gate problem) ***"
         );
         return false;
     }

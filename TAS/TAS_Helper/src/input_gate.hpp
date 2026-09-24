@@ -1,9 +1,9 @@
 #pragma once
 #include <cstdint>
 
-// Pure decision logic for the keyboard-handler gate (cave1c), extracted from
+// Pure decision logic for the keyboard-handler gate (key-handler cave), extracted from
 // the SafetyHook detours so it can be unit-tested WITHOUT the Windows / hook
-// context (see src/tests/test_input_gate.cpp). cave1c's detours build an
+// context (see src/tests/test_input_gate.cpp). The key-handler cave's detours build an
 // InputGateInputs from the live call and act on ShouldBlockRealInput.
 //
 // "Block" = swallow the real key event so it never reaches the game's handler
@@ -29,7 +29,7 @@ inline bool IsTasInjectionThread() {
 inline constexpr uint32_t INPUT_GATE_MODE_OFF = 0;
 
 inline bool ShouldBlockRealInput(const InputGateInputs& in) {
-    // Our own injected calls always pass (cave2 owns the DI buffer + observer).
+    // Our own injected calls always pass (the cycle cave owns the DI buffer + observer).
     if (in.injecting) return false;
     // ESC always passes: it's the abort hatch and drives pause-menu nav.
     if (in.is_escape) return false;

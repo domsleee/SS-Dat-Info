@@ -5,7 +5,7 @@
 // tests/test_replay_capture.cpp).
 //
 // The replay-capture hook (SG+0x9E8F0, the recorder's per-frame "push 112-byte
-// frame") hands us ECX = the recorder object; cave2 derives the player from
+// frame") hands us ECX = the recorder object; the cycle cave derives the player from
 // [recorder+0x84] every cycle and reads the position from there.
 //
 // What the site sees (ring-logged in-game):

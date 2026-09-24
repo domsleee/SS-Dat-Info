@@ -147,17 +147,17 @@ pub struct TasSharedState {
     pub bb3b10_block_count: u32,
 
     // Hook status (DLL writes, UI reads)
-    pub cave2_hooked: u32,
-    pub cave1c_hooked: u32,
-    pub cave1d_hooked: u32,
-    pub cave5_hooked: u32,
+    pub cycle_cave_hooked: u32,
+    pub key_handler_cave_hooked: u32,
+    pub observer_cave_hooked: u32,
+    pub tick_cave_hooked: u32,
     pub replay_capture_hooked: u32,
 
     // Runtime pointers (DLL internal, exposed for diagnostics)
     pub replay_ptr: u32,
     pub player_ptr: u32,
 
-    /// Variable speed playback (1.0 = normal). UI writes, cave5 reads.
+    /// Variable speed playback (1.0 = normal). UI writes, the tick cave reads.
     pub playback_speed: f32,
 
     /// In-process restart: 0 = idle, 1 = F5 held, 2 = done (the game rebuilt the level).
@@ -167,7 +167,7 @@ pub struct TasSharedState {
     pub velocity_x: f32,
     pub velocity_y: f32,
     pub velocity_z: f32,
-    /// Ticks emitted by cave5 (the simulation rate, not the render rate).
+    /// Ticks emitted by the tick cave (the simulation rate, not the render rate).
     pub tick_count: u32,
 
     // Segment fields (DLL writes, UI reads)
@@ -215,7 +215,7 @@ pub struct TasSharedState {
     pub arg4_source: u32,
 
     /// 1 while a Continue cycle is in flight, from before the F5 restart until
-    /// the cycle ends. The UI sets and clears it (cave2 also sets it on
+    /// the cycle ends. The UI sets and clears it (the cycle cave also sets it on
     /// StopForRestart). While set, the DLL blocks the real key handler, ESC
     /// excepted; the DLL clears a flag left set through more than 5 s of
     /// frozen cycle, and when the race is left.
@@ -239,7 +239,7 @@ pub struct TasSharedState {
     /// through [`level_context`]; `with_seqlock` documents the memory model.
     pub level_ctx_seq: AtomicU32,
 
-    /// Bumped by cave2 every time it PROCESSES an arm that starts a replay
+    /// Bumped by the cycle cave every time it PROCESSES an arm that starts a replay
     /// (ARM_PLAY / ARM_CONTINUE), refusals included. The transport controller
     /// uses it to tell this attempt's mode/position from the previous
     /// replay's: mode is transient and position holds the previous replay's
@@ -259,8 +259,8 @@ pub struct TasSharedState {
     /// that gate detection or the watcher could misread.
     pub capture_ok: u32,
     /// CONT splice interlock. The controller writes 1 once the watcher has
-    /// validated the prefix; until then cave5 parks playback at the splice and
-    /// cave2 refuses to splice. Cleared by ARM_CONTINUE and ClearGateAlign in
+    /// validated the prefix; until then the tick cave parks playback at the splice and
+    /// The cycle cave refuses to splice. Cleared by ARM_CONTINUE and ClearGateAlign in
     /// the DLL. A CONT with `gate_align_rec == 0` ignores it.
     pub cont_splice_approved: u32,
 
@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(mem::size_of::<TasSegmentBoundary>(), 4);
     }
 
-    /// The command words are the wire protocol cave2 switches on, and they
+    /// The command words are the wire protocol the cycle cave switches on, and they
     /// are not contiguous.
     #[test]
     fn tas_command_round_trip() {

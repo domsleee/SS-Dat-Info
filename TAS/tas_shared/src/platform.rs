@@ -279,7 +279,7 @@ impl transport::TransportPort for TasSharedMemoryClient {
         unsafe { std::ptr::read_volatile(&self.state().capture_ok as *const u32) != 0 }
     }
     fn approve_cont_splice(&mut self) {
-        // Volatile: the reader is cave5 in another process, which Rust's
+        // Volatile: the reader is the tick cave in another process, which Rust's
         // memory model cannot see, so a plain store may be elided.
         let s = self.state_mut();
         unsafe {

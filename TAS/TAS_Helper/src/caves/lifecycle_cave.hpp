@@ -4,8 +4,8 @@
 #include "../game_addresses.hpp"
 #include "../shared_state.hpp"
 #include "../level_context.hpp"
-#include "cave2.hpp"
-#include "menu_state.hpp"
+#include "cycle_cave.hpp"
+#include "menu_cave.hpp"
 #include "../fpu_safe_hook.hpp"
 
 // The game's race lifecycle, observed at its own transition points instead of
@@ -22,7 +22,7 @@
 //           dialogs, where Supreme::Cycle does not run. Consumes STOP there and
 //           does the DLL's housekeeping.
 //
-// All three run on the game thread, like Cave 2, so no DLL state is shared
+// All three run on the game thread, like the cycle cave, so no DLL state is shared
 // with another thread, and inside CreateMidHook's FSAVE/FRSTOR.
 namespace lifecycle {
 
@@ -49,7 +49,7 @@ static void OnLaunch(SafetyHookContext&) {
     g_sawLaunch = true;
     levelcontext::PublishRunning(s);
     s->game_in_game = 1;
-    g_refreshStamps = REFRESH_STAMP_TICKS;   // rider and renderer, over the race's first ticks (cave2)
+    g_refreshStamps = REFRESH_STAMP_TICKS;   // rider and renderer, over the race's first ticks (cycle cave)
 }
 
 static void OnStop(SafetyHookContext&) {

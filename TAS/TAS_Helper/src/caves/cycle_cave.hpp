@@ -7,12 +7,12 @@
 #include "../game_addresses.hpp"
 #include "../renderer_info.hpp"
 #include "../rider_identity.hpp"
-#include "f5_restart.hpp"
+#include "f5_restart_cave.hpp"
 #include "../fpu_safe_hook.hpp"
-#include "cave5.hpp"
+#include "tick_cave.hpp"
 
-// Cave 2: Supreme::Cycle hook (SG+0x13FE40)
-// Main REC/PLAY engine. Fires once per physics tick during gameplay (Cave 5
+// The cycle cave: Supreme::Cycle hook (SG+0x13FE40)
+// Main REC/PLAY engine. Fires once per physics tick during gameplay (the tick cave
 // can run several ticks per rendered frame).
 //
 // FPU PRESERVATION: the game does fld/fmul immediately after the hook site,
@@ -25,15 +25,15 @@
 //      game the same way, capture coordinates, splice to REC at the CONT
 //      point.
 
-inline TasSharedState* g_cave2State = nullptr;
-inline GameAddresses* g_cave2Addr = nullptr;
-static SafetyHookMid cave2Hook{};
+inline TasSharedState* g_cycleCaveState = nullptr;
+inline GameAddresses* g_cycleCaveAddr = nullptr;
+static SafetyHookMid cycleCaveHook{};
 
-inline void UninstallCave2() {
-    cave2Hook = {};
-    if (g_cave2State) g_cave2State->cave2_hooked = 0;
-    g_cave2State = nullptr;
-    g_cave2Addr = nullptr;
+inline void UninstallCycleCave() {
+    cycleCaveHook = {};
+    if (g_cycleCaveState) g_cycleCaveState->cycle_cave_hooked = 0;
+    g_cycleCaveState = nullptr;
+    g_cycleCaveAddr = nullptr;
 }
 
 typedef void(__thiscall* BB3B10Fn)(void* thisPtr, uint32_t keyIndex, uint32_t pressed,
@@ -101,11 +101,11 @@ static void WriteDIBuffer(uint32_t buffer, uint8_t mask) {
 // events whose Time predates the current race context. Injections are stamped
 // with the game's own Kernel::Time::Current() (see CallBB3B10OnTransitions);
 // this calibrated fallback value (Time.hi observed from real keypresses via
-// cave1c/cave1d) only matters if the Kernel export ever fails to resolve.
+// The key-handler cave/the observer cave) only matters if the Kernel export ever fails to resolve.
 inline volatile uint32_t g_bb3b10Arg4 = GameAddresses::BB3B10_ARG4;
 
 // GetTickCount() stamped on every Supreme::Cycle tick. The message-pump-driven
-// hooks (cave1c) use it to detect "the game is PAUSED / at a non-ticking
+// hooks (key-handler cave) use it to detect "the game is PAUSED / at a non-ticking
 // screen" (pause menu, dialogs, static main menu): when the cycle hasn't
 // ticked recently, the input gate passes ALL keys through so the user can
 // operate the pause menu / dialogs even while a TAS mode is armed.
@@ -287,10 +287,10 @@ static inline void ClearGateAlign(TasSharedState* s) {
     s->cont_splice_approved = 0;  // no alignment, nothing to approve
 }
 
-static volatile uint32_t g_cave2_pendingLog = 0;  // 0=none, 1=REC, 2=PLAY, 3=STOP, 4=playback_done
-static volatile uint32_t g_cave2_logParam = 0;
+static volatile uint32_t g_cyclePendingLog = 0;  // 0=none, 1=REC, 2=PLAY, 3=STOP, 4=playback_done
+static volatile uint32_t g_cycleLogParam = 0;
 
-// Set by the lifecycle hook when a race launches: Cave 2 refreshes the rider
+// Set by the lifecycle hook when a race launches: the cycle cave refreshes the rider
 // and renderer stamps over the race's first ticks. Not just the first: the new
 // race's recorder (and so player_ptr) is adopted during the player update,
 // after this hook, so the first tick can still see the previous race's player.
@@ -302,11 +302,11 @@ static constexpr LONG REFRESH_STAMP_TICKS = 100;
 // (or any stop/re-arm). The PLAY handler's splice check requires this flag,
 // so a `continue_from_frame` that appears in shared memory by any other
 // route (UI bug, stray writer, stale value) can NEVER convert a plain
-// replay into REC. Deliberately a cave2-private static, not a shared-state
+// replay into REC. Deliberately a private static in the cycle cave, not a shared-state
 // field — external processes must not be able to set it.
-static volatile uint32_t g_cave2_contArmed = 0;
+static volatile uint32_t g_contArmed = 0;
 
-// Apply the complete TAS -> OFF transition. Game thread only (Cave 2, or the
+// Apply the complete TAS -> OFF transition. Game thread only (the cycle cave, or the
 // message pump while Supreme::Cycle is frozen). No logging/formatting/float
 // arithmetic: it runs inside hooks.
 static void ApplyStopTransition(TasSharedState* s, bool protectRestart) {
@@ -319,11 +319,11 @@ static void ApplyStopTransition(TasSharedState* s, bool protectRestart) {
         f5restart::Cancel();
         s->restart_state = 0;
     }
-    ReleaseTasInput(s, g_cave2Addr);
+    ReleaseTasInput(s, g_cycleCaveAddr);
     s->continue_from_frame = 0;
-    g_cave2_contArmed = 0;
+    g_contArmed = 0;
     ClearGateAlign(s);
-    g_cave2_pendingLog = 3;
+    g_cyclePendingLog = 3;
 }
 
 // Consume a pending STOP. Returning the command to IDLE is the completion
@@ -355,27 +355,27 @@ static void ArmRec(TasSharedState* s) {
     memset(s->segment_boundaries, 0, sizeof(s->segment_boundaries));
     s->segment_boundaries[0].frame = 0;
     s->mode = MODE_REC;
-    g_cave2_contArmed = 0;
+    g_contArmed = 0;
     // REC never replays; make sure it cannot inherit alignment.
     ClearGateAlign(s);
-    g_cave2_pendingLog = 1;
+    g_cyclePendingLog = 1;
 }
 
 static void ArmPlay(TasSharedState* s) {
-    g_cave2_logParam = s->recorded_count;
+    g_cycleLogParam = s->recorded_count;
     ResetArmCounters(s);
 
     // A plain PLAY never splices: clear any splice marker a refused or
     // stopped CONT left in shared memory.
     s->continue_from_frame = 0;
-    g_cave2_contArmed = 0;
+    g_contArmed = 0;
 
     // Do not force the spawn position: the rest of the physics state
     // (rotation, terrain contact) would still be the real spawn's, and
     // the mismatch drifts once steering starts.
 
     s->mode = MODE_PLAY;
-    g_cave2_pendingLog = 2;
+    g_cyclePendingLog = 2;
 }
 
 // Refuse an ARM_CONTINUE: log why and leave the mode OFF.
@@ -383,9 +383,9 @@ static void RefuseArmContinue(TasSharedState* s, const char* reason) {
     LogRing(s, LOG_ERROR, reason);
     s->mode = MODE_OFF;
     s->continue_from_frame = 0;  // refused — don't leave a stale marker armed
-    g_cave2_contArmed = 0;
+    g_contArmed = 0;
     ClearGateAlign(s);  // refusal must not leave alignment armed for a later replay
-    g_cave2_pendingLog = 3;  // "stopped"
+    g_cyclePendingLog = 3;  // "stopped"
 }
 
 static void ArmContinue(TasSharedState* s) {
@@ -404,16 +404,16 @@ static void ArmContinue(TasSharedState* s) {
             "ARM_CONTINUE: refused — game is REC/PLAY; CONT requires a fresh restart first");
         return;
     }
-    g_cave2_logParam = s->continue_from_frame;
+    g_cycleLogParam = s->continue_from_frame;
     ResetArmCounters(s);
     // Segment tracking: keep existing segment_count, we'll add one at splice
     s->mode = MODE_PLAY;  // Start as PLAY, will auto-switch in PLAY handler
-    g_cave2_contArmed = 1;  // the ONLY place the splice gate opens
+    g_contArmed = 1;  // the ONLY place the splice gate opens
     s->cont_splice_approved = 0;  // aligned attempts start unapproved (splice interlock)
     // Keep gate_align_rec: the controller staged it right before this
     // arm. The splice fires at the aligned play-index while the
     // recording stays in rec-index space (CompleteContinueSplice).
-    g_cave2_pendingLog = 5;
+    g_cyclePendingLog = 5;
 }
 
 // Begin in-process F5 restart sequence
@@ -424,7 +424,7 @@ static void BeginRestart(TasSharedState* s) {
     // The controller stages alignment AFTER the restart; anything
     // older is stale.
     ClearGateAlign(s);
-    g_cave2_pendingLog = 7;  // "restart initiated"
+    g_cyclePendingLog = 7;  // "restart initiated"
 }
 
 // Handle command transitions
@@ -467,31 +467,31 @@ static void ProcessCommand(TasSharedState* s) {
 
 // Flush deferred log (called from the message pump, outside Supreme::Cycle)
 static void FlushPendingLog() {
-    uint32_t log = g_cave2_pendingLog;
+    uint32_t log = g_cyclePendingLog;
     if (!log) return;
-    g_cave2_pendingLog = 0;
-    uint32_t param = g_cave2_logParam;
+    g_cyclePendingLog = 0;
+    uint32_t param = g_cycleLogParam;
     switch (log) {
-        case 1: Log("Cave 2: entering REC mode"); break;
-        case 2: Log(std::format("Cave 2: entering PLAY mode ({} ticks recorded)", param)); break;
-        case 3: Log("Cave 2: stopped"); break;
-        case 4: Log(std::format("Cave 2: playback complete at frame {}", param)); break;
-        case 5: Log(std::format("Cave 2: continue record (PLAY until frame {})", param)); break;
-        case 6: Log(std::format("Cave 2: spliced to REC at frame {}", param)); break;
-        case 7: Log("Cave 2: in-process F5 restart initiated"); break;
-        case 8: Log("Cave 2: restart complete (the game rebuilt the level)"); break;
+        case 1: Log("Cycle cave: entering REC mode"); break;
+        case 2: Log(std::format("Cycle cave: entering PLAY mode ({} ticks recorded)", param)); break;
+        case 3: Log("Cycle cave: stopped"); break;
+        case 4: Log(std::format("Cycle cave: playback complete at frame {}", param)); break;
+        case 5: Log(std::format("Cycle cave: continue record (PLAY until frame {})", param)); break;
+        case 6: Log(std::format("Cycle cave: spliced to REC at frame {}", param)); break;
+        case 7: Log("Cycle cave: in-process F5 restart initiated"); break;
+        case 8: Log("Cycle cave: restart complete (the game rebuilt the level)"); break;
     }
 }
 
 // Complete before processing a cycle as well as after the last prefix tick.
-// The controller may only approve after cave5 has parked at the splice;
+// The controller may only approve after the tick cave has parked at the splice;
 // processing another PLAY tick on resume duplicates that tick in the saved run.
 static void CompleteContinueSplice(TasSharedState* s) {
     uint32_t aligned_splice = GateAlignedSplicePos(
         s->continue_from_frame, s->gate_index, s->gate_align_rec);
     // Aligned splice interlock: only a watcher-approved prefix may be
-    // spliced. cave5 parks playback AT the splice while unapproved.
-    if (g_cave2_contArmed && s->continue_from_frame > 0
+    // spliced. The tick cave parks playback AT the splice while unapproved.
+    if (g_contArmed && s->continue_from_frame > 0
             && s->playback_pos >= aligned_splice
             && (s->gate_align_rec == 0 || s->cont_splice_approved != 0)) {
         uint32_t rec_splice = s->continue_from_frame;
@@ -502,7 +502,7 @@ static void CompleteContinueSplice(TasSharedState* s) {
         if (s->cont_resume_speed > 0.0f) {
             s->playback_speed = s->cont_resume_speed;
         }
-        // The catch-up leaves the game clock owing ~70 ticks; at 1x cave5's
+        // The catch-up leaves the game clock owing ~70 ticks; at 1x the tick cave's
         // catch-up drain runs them as a single tick, so REC starts without a
         // burst.
 
@@ -515,9 +515,9 @@ static void CompleteContinueSplice(TasSharedState* s) {
 
         s->mode = MODE_REC;
         s->continue_from_frame = 0;  // Clear splice marker
-        g_cave2_contArmed = 0;       // splice consumed — close the gate
-        g_cave2_logParam = rec_splice;
-        g_cave2_pendingLog = 6;
+        g_contArmed = 0;       // splice consumed — close the gate
+        g_cycleLogParam = rec_splice;
+        g_cyclePendingLog = 6;
     }
 }
 
@@ -544,16 +544,16 @@ static void PublishLivePosition(TasSharedState* s) {
     }
 }
 
-// In-process F5 restart (runs regardless of mode): f5_restart.hpp holds the
+// In-process F5 restart (runs regardless of mode): f5_restart_cave.hpp holds the
 // key until the game has rebuilt the level; then the restart is done.
 static void StepInProcessRestart(TasSharedState* s) {
     if (s->restart_state == 1 && f5restart::Step()) {
         s->restart_state = 2;
-        g_cave2_pendingLog = 8;
+        g_cyclePendingLog = 8;
     }
 }
 
-// The race is being left (lifecycle.hpp's Supreme::Stop hook, while the level
+// The race is being left (lifecycle_cave.hpp's Supreme::Stop hook, while the level
 // still exists). A mode left armed across that would record the menu, run the
 // menu video fast and eat native keys, so it stops here. A restart still
 // holding F5 (the game doesn't take it while paused) is abandoned too, or the
@@ -578,11 +578,11 @@ static void RecTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
         LogRing(s, LOG_WARN, "REC stopped: recording buffer full (TAS_MAX_TICKS)");
         s->mode = MODE_OFF;
         ReleaseTasInput(s, addr);
-        g_cave2_pendingLog = 3;
+        g_cyclePendingLog = 3;
         return;
     }
 
-    // Sample input via GAKS (Cave 1C blocks +3940, so game buffer is empty).
+    // Sample input via GAKS (the key-handler cave blocks +3940, so game buffer is empty).
     // This makes REC symmetric with PLAY: both write the buffer and call
     // BB3B10 at the same point in Supreme::Cycle.
     uint8_t mask = SampleGAKS();
@@ -620,9 +620,9 @@ static void PlayTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
         s->mode = MODE_OFF;
         ClearGateAlign(s);  // aligned PLAY finished — don't leave it armed
         ReleaseTasInput(s, addr);  // replay done — un-stick its held keys
-        g_cave2_contArmed = 0;  // hygiene — an armed CONT always splices before here
-        g_cave2_logParam = pos;
-        g_cave2_pendingLog = 4;
+        g_contArmed = 0;  // hygiene — an armed CONT always splices before here
+        g_cycleLogParam = pos;
+        g_cyclePendingLog = 4;
         return;
     }
 
@@ -662,15 +662,15 @@ static void PlayTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
     CompleteContinueSplice(s);
 }
 
-// Cave 2 callback logic — called with FPU state saved/restored.
+// The cycle cave callback logic — called with FPU state saved/restored.
 // Separated from the FSAVE wrapper because MSVC forbids __asm in functions with SEH.
-static void __declspec(noinline) Cave2_Logic() {
-    auto* s = g_cave2State;
-    auto* addr = g_cave2Addr;
+static void __declspec(noinline) CycleCave_Logic() {
+    auto* s = g_cycleCaveState;
+    auto* addr = g_cycleCaveAddr;
     if (!s || !addr) return;
 
     s->frame_count++;
-    g_lastCycleMs = GetTickCount();  // pause detector heartbeat (see cave1c)
+    g_lastCycleMs = GetTickCount();  // pause detector heartbeat (see the key-handler cave)
 
     if (s->replay_ptr) {
         s->player_ptr = SafeReadPtr(s->replay_ptr + GameAddresses::REPLAY_PLAYER_OFFSET);
@@ -704,36 +704,36 @@ static void __declspec(noinline) Cave2_Logic() {
 }
 
 // Installed through CreateMidHook (FSAVE/FRSTOR around the body).
-static void Cave2_MidCallback(SafetyHookContext&) {
-    if (auto* s = g_cave2State) {
+static void CycleCave_Callback(SafetyHookContext&) {
+    if (auto* s = g_cycleCaveState) {
         // The game thread's x87 control word = the precision the renderer left
         // the physics running at (0x007F DirectX 6/7 = 24-bit, OpenGL = 53/64),
         // taken from the saved image: inside the hook the FPU is re-initialised.
         s->fpu_control_word = g_hookFpuControlWord;
     }
-    Cave2_Logic();
+    CycleCave_Logic();
 }
 
-bool InstallCave2(GameAddresses& addr, TasSharedState* state) {
-    if (!addr.cave2_site) {
-        Log("Cave 2: hook site not resolved");
+bool InstallCycleCave(GameAddresses& addr, TasSharedState* state) {
+    if (!addr.cycle_cave_site) {
+        Log("Cycle cave: hook site not resolved");
         return false;
     }
 
-    g_cave2State = state;
-    g_cave2Addr = &addr;
-    Log(std::format("Cave 2: hooking Supreme::Cycle at {:p}", (void*)addr.cave2_site));
+    g_cycleCaveState = state;
+    g_cycleCaveAddr = &addr;
+    Log(std::format("Cycle cave: hooking Supreme::Cycle at {:p}", (void*)addr.cycle_cave_site));
 
-    cave2Hook = CreateMidHook<Cave2_MidCallback>(addr.cave2_site);
+    cycleCaveHook = CreateMidHook<CycleCave_Callback>(addr.cycle_cave_site);
 
-    if (!cave2Hook) {
-        Log("Cave 2: SafetyHook create_mid FAILED");
-        g_cave2State = nullptr;
-        g_cave2Addr = nullptr;
+    if (!cycleCaveHook) {
+        Log("Cycle cave: SafetyHook create_mid FAILED");
+        g_cycleCaveState = nullptr;
+        g_cycleCaveAddr = nullptr;
         return false;
     }
 
-    state->cave2_hooked = 1;
-    Log("Cave 2: hook installed successfully");
+    state->cycle_cave_hooked = 1;
+    Log("Cycle cave: hook installed successfully");
     return true;
 }

@@ -1,5 +1,5 @@
 //! Speed reset verification: after 2x speed and STOP, the game's time advance
-//! constant is back at its base value (0.01). Without the Cave 5 restore the
+//! constant is back at its base value (0.01). Without the tick cave restore the
 //! constant stays at 0.005 in OFF mode, so ESC menus, F5 and all non-TAS
 //! gameplay run at 2x.
 //!
@@ -33,7 +33,7 @@ const RESET_RATIO_MAX: f64 = 1.3;
 const FAST_RATIO_MIN: f64 = 1.6;
 const FAST_RATIO_MAX: f64 = 2.4;
 
-/// Cave 2 frame_count delta over MEASURE_SECS: the game's actual tick
+/// The cycle cave frame_count delta over MEASURE_SECS: the game's actual tick
 /// processing rate, which the time advance constant governs.
 fn measure_tick_rate(client: &tas_shared::TasSharedMemoryClient) -> u32 {
     let start_fc = client.frame_count_volatile();
@@ -77,7 +77,7 @@ pub fn run() -> bool {
 
     println!("\n--- Phase 3: STOP (verify time constant resets) ---");
     harness::stop(&mut client);
-    // Give Cave 5 a few frames to write the reset.
+    // Give the tick cave a few frames to write the reset.
     thread::sleep(Duration::from_millis(200));
 
     // playback_speed stays at 2.0 in shared state on purpose: the DLL must

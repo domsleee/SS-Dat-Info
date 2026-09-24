@@ -14,7 +14,7 @@
 // FSAVE re-initialises the FPU (control word 0x037F, 64-bit precision), so code
 // inside a hook runs at that precision; FRSTOR puts the game's own state back.
 // The game's control word at the hook is kept in g_hookFpuControlWord for the
-// one reader that needs it (Cave 2 publishes the physics precision from inside
+// one reader that needs it (the cycle cave publishes the physics precision from inside
 // its body, so the value is always the current call's).
 inline volatile uint16_t g_hookFpuControlWord = 0;
 

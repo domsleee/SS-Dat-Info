@@ -9,7 +9,7 @@
 #include "level_path_parse.hpp"
 
 // The level context: which track is running, published when the game launches
-// a race and cleared when it leaves one (caves/lifecycle.hpp calls these from
+// a race and cleared when it leaves one (caves/lifecycle_cave.hpp calls these from
 // the game's own launch and stop points).
 //
 // level_id: 0..9 = area*3 + difficulty (area 0=Forest, 1=Alpine, 2=Village,
@@ -133,7 +133,7 @@ inline void PublishLeft(TasSharedState* s) {
 }
 
 // At install: no race. Injected into a running race, the first Supreme::Cycle
-// tick corrects this (lifecycle.hpp).
+// tick corrects this (lifecycle_cave.hpp).
 inline void Init(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readPtr)(uint32_t)) {
     g_levelPathPtrAddr = levelPathPtrAddr;
     g_readPtr = readPtr;

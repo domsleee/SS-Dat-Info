@@ -6,11 +6,11 @@
 #include "../input_gate.hpp"
 #include <safetyhook.hpp>
 
-// Cave 1C: Handler gate hooks at HMG+3940 (keyDown) and HMG+3980 (keyUp).
+// The key-handler cave: Handler gate hooks at HMG+3940 (keyDown) and HMG+3980 (keyUp).
 //
 // During REC (mode=1) and PLAY (mode=2): blocks external handler calls
-//   unless the current thread is inside a Cave 2 injection scope.
-//   Symmetric blocking ensures +3940 never writes the buffer outside Cave 2,
+//   unless the current thread is inside the cycle cave's injection scope.
+//   Symmetric blocking ensures +3940 never writes the buffer outside the cycle cave,
 //   eliminating the one-frame timing difference between REC and PLAY.
 // During IDLE (mode=0): passes through.
 //
@@ -18,26 +18,26 @@
 // The handlers are __thiscall with 3 stack args (ret 000C).
 // Detours use __fastcall with dummy EDX to emulate thiscall calling convention.
 
-inline TasSharedState* g_cave1cState = nullptr;
+inline TasSharedState* g_keyHandlerCaveState = nullptr;
 
 // Inline hooks for keyDown (+3940) and keyUp (+3980)
-static SafetyHookInline cave1cDownInline{};
-static SafetyHookInline cave1cUpInline{};
+static SafetyHookInline keyDownHook{};
+static SafetyHookInline keyUpHook{};
 
-inline void UninstallCave1C() {
-    cave1cUpInline = {};
-    cave1cDownInline = {};
-    if (g_cave1cState) g_cave1cState->cave1c_hooked = 0;
-    g_cave1cState = nullptr;
+inline void UninstallKeyHandlerCave() {
+    keyUpHook = {};
+    keyDownHook = {};
+    if (g_keyHandlerCaveState) g_keyHandlerCaveState->key_handler_cave_hooked = 0;
+    g_keyHandlerCaveState = nullptr;
 }
 
 // Handler signature emulated via __fastcall:
 //   ecx = this, edx = unused, stack: arg1, arg2, arg3
-void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
-    auto* s = g_cave1cState;
+void __fastcall KeyDown_Detour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
+    auto* s = g_keyHandlerCaveState;
     // Block external handler during REC and PLAY (symmetric).
-    // Cave 2 writes the buffer and calls BB3B10 directly in both modes.
-    // Only pass through on Cave 2's injection thread or when mode is IDLE.
+    // The cycle cave writes the buffer and calls BB3B10 directly in both modes.
+    // Only pass through on the cycle cave's injection thread or when mode is IDLE.
     // Fallback calibration: a3 is the hi dword of the Kernel::Time the event
     // was stamped with (the handler forwards its Time args verbatim to
     // BB3B10). Injection normally stamps with Kernel::Time::Current() and
@@ -59,11 +59,11 @@ void __fastcall Cave1C_DownDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2
         s->handler_block_count++;
         return;
     }
-    cave1cDownInline.thiscall<void>(ecx, a1, a2, a3);
+    keyDownHook.thiscall<void>(ecx, a1, a2, a3);
 }
 
-void __fastcall Cave1C_UpDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
-    auto* s = g_cave1cState;
+void __fastcall KeyUp_Detour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
+    auto* s = g_keyHandlerCaveState;
     // Keep the fallback arg4 fresh from real keyUp calls too (see DownDetour).
     if (s && !IsTasInjectionThread() && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
         g_bb3b10Arg4 = a3;
@@ -80,36 +80,36 @@ void __fastcall Cave1C_UpDetour(void* ecx, void* edx, uint32_t a1, uint32_t a2, 
         s->handler_block_count++;
         return;
     }
-    cave1cUpInline.thiscall<void>(ecx, a1, a2, a3);
+    keyUpHook.thiscall<void>(ecx, a1, a2, a3);
 }
 
-bool InstallCave1C(GameAddresses& addr, TasSharedState* state) {
-    if (!addr.cave1c_down || !addr.cave1c_up) {
-        Log("Cave 1C: hook sites not resolved");
+bool InstallKeyHandlerCave(GameAddresses& addr, TasSharedState* state) {
+    if (!addr.key_down_site || !addr.key_up_site) {
+        Log("Key-handler cave: hook sites not resolved");
         return false;
     }
 
-    g_cave1cState = state;
-    Log(std::format("Cave 1C: hooking keyDown at {:p} (HMG+3940)", (void*)addr.cave1c_down));
-    Log(std::format("Cave 1C: hooking keyUp at {:p} (HMG+3980)", (void*)addr.cave1c_up));
+    g_keyHandlerCaveState = state;
+    Log(std::format("Key-handler cave: hooking keyDown at {:p} (HMG+3940)", (void*)addr.key_down_site));
+    Log(std::format("Key-handler cave: hooking keyUp at {:p} (HMG+3980)", (void*)addr.key_up_site));
 
-    cave1cDownInline = safetyhook::create_inline(addr.cave1c_down, Cave1C_DownDetour);
-    if (!cave1cDownInline) {
-        Log("Cave 1C: SafetyHook create_inline FAILED on keyDown (+3940)");
-        g_cave1cState = nullptr;
+    keyDownHook = safetyhook::create_inline(addr.key_down_site, KeyDown_Detour);
+    if (!keyDownHook) {
+        Log("Key-handler cave: SafetyHook create_inline FAILED on keyDown (+3940)");
+        g_keyHandlerCaveState = nullptr;
         return false;
     }
 
-    cave1cUpInline = safetyhook::create_inline(addr.cave1c_up, Cave1C_UpDetour);
-    if (!cave1cUpInline) {
-        Log("Cave 1C: SafetyHook create_inline FAILED on keyUp (+3980)");
+    keyUpHook = safetyhook::create_inline(addr.key_up_site, KeyUp_Detour);
+    if (!keyUpHook) {
+        Log("Key-handler cave: SafetyHook create_inline FAILED on keyUp (+3980)");
         // All-or-none: leaving keyDown intercepted without the matching keyUp
-        // path creates stuck/asymmetric input while cave1c_hooked still says no.
-        UninstallCave1C();
+        // path creates stuck/asymmetric input while key_handler_cave_hooked still says no.
+        UninstallKeyHandlerCave();
         return false;
     }
 
-    state->cave1c_hooked = 1;
-    Log("Cave 1C: both inline hooks installed successfully");
+    state->key_handler_cave_hooked = 1;
+    Log("Key-handler cave: both inline hooks installed successfully");
     return true;
 }

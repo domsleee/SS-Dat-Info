@@ -198,7 +198,7 @@ fn send_pico_key(command: u8, label: &str, hold_ms: u64) -> bool {
     true
 }
 
-/// Wait for N frames to pass (based on Cave 2 frame_count).
+/// Wait for N frames to pass (based on the cycle cave frame_count).
 pub fn wait_frames(client: &TasSharedMemoryClient, count: u32) {
     let start_fc = client.frame_count_volatile();
     let timeout = Instant::now();
@@ -211,7 +211,7 @@ pub fn wait_frames(client: &TasSharedMemoryClient, count: u32) {
     }
 }
 
-/// Check that Cave 2 is firing (game is alive and hooks are active).
+/// Check that the cycle cave is firing (game is alive and hooks are active).
 pub fn check_liveness(client: &TasSharedMemoryClient) -> bool {
     let fc1 = client.frame_count_volatile();
     thread::sleep(Duration::from_millis(500));
@@ -245,7 +245,7 @@ pub fn restart_and_stabilize(client: &TasSharedMemoryClient) -> bool {
     check_liveness(client)
 }
 
-/// Send CMD_RESTART and wait for cave2's restart machine to report done.
+/// Send CMD_RESTART and wait for the cycle cave's restart machine to report done.
 pub fn restart_inprocess(client: &mut TasSharedMemoryClient) -> bool {
     client.reset_restart_state();
     client.send_command(TasCommand::Restart);
@@ -278,7 +278,7 @@ pub fn restart_and_stabilize_inprocess(client: &mut TasSharedMemoryClient) -> bo
         "  In-process restart stabilized at frame {}",
         client.frame_count_volatile()
     );
-    // restart_state==2 is written by cave2 inside the Supreme::Cycle hook, so
+    // restart_state==2 is written by the cycle cave inside the Supreme::Cycle hook, so
     // reaching it already proves the game is alive. Do NOT add a liveness sleep
     // here: tas_ui arms immediately after the restart, and tests should arm
     // at the same point in the spawn countdown.
@@ -689,8 +689,8 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
         if check_liveness(&c) {
             let s = c.state();
             println!(
-                "Game already live (version {}). Hooks: cave2={} cave1c={} cave1d={} cave5={}",
-                s.version, s.cave2_hooked, s.cave1c_hooked, s.cave1d_hooked, s.cave5_hooked
+                "Game already live (version {}). Hooks: cycle={} key_handler={} observer={} tick={}",
+                s.version, s.cycle_cave_hooked, s.key_handler_cave_hooked, s.observer_cave_hooked, s.tick_cave_hooked
             );
             // A reused session is exactly where the track and playback_speed
             // can have drifted since the last run.
@@ -743,8 +743,8 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
         Ok(c) if check_liveness(&c) => {
             let s = c.state();
             println!(
-                "Connected after revive (version {}). Hooks: cave2={} cave1c={} cave1d={} cave5={}",
-                s.version, s.cave2_hooked, s.cave1c_hooked, s.cave1d_hooked, s.cave5_hooked
+                "Connected after revive (version {}). Hooks: cycle={} key_handler={} observer={} tick={}",
+                s.version, s.cycle_cave_hooked, s.key_handler_cave_hooked, s.observer_cave_hooked, s.tick_cave_hooked
             );
             verify_expected_level(&c);
             let mut c = c;
@@ -768,8 +768,12 @@ pub fn connect() -> TasSharedMemoryClient {
         Ok(c) => {
             let s = c.state();
             println!(
-                "Connected (version {}). Hooks: cave2={} cave1c={} cave1d={} cave5={}",
-                s.version, s.cave2_hooked, s.cave1c_hooked, s.cave1d_hooked, s.cave5_hooked
+                "Connected (version {}). Hooks: cycle={} key_handler={} observer={} tick={}",
+                s.version,
+                s.cycle_cave_hooked,
+                s.key_handler_cave_hooked,
+                s.observer_cave_hooked,
+                s.tick_cave_hooked
             );
             c
         }
@@ -853,8 +857,11 @@ pub fn print_results(client: &TasSharedMemoryClient) {
         drift.max_drift_z, drift.max_drift_frame_z
     );
     println!("BB3B10 calls: {}", s.bb3b10_call_count);
-    println!("Handler blocks (Cave 1C): {}", s.handler_block_count);
-    println!("BB3B10 blocks (Cave 1D): {}", s.bb3b10_block_count);
+    println!(
+        "Handler blocks (key-handler cave): {}",
+        s.handler_block_count
+    );
+    println!("BB3B10 blocks (observer cave): {}", s.bb3b10_block_count);
 }
 
 /// Wait for the PLAY->REC transition of an ARM_CONTINUE splice.
@@ -994,9 +1001,9 @@ pub fn assert_proven_config(client: &TasSharedMemoryClient) {
         std::process::exit(1);
     }
     println!(
-        "Config OK: speed={} (Cave5={})",
+        "Config OK: speed={} (tick cave={})",
         s.playback_speed,
-        if s.cave5_hooked == 1 {
+        if s.tick_cave_hooked == 1 {
             "hooked"
         } else {
             "missing"
@@ -1004,11 +1011,11 @@ pub fn assert_proven_config(client: &TasSharedMemoryClient) {
     );
 }
 
-/// Speed modes need Cave 5 (the tick-rate hook). Prints FAIL and returns false
+/// Speed modes need the tick cave (the tick-rate hook). Prints FAIL and returns false
 /// instead of panicking.
 pub fn require_speed_preconditions(client: &TasSharedMemoryClient) -> bool {
-    if client.state().cave5_hooked != 1 {
-        eprintln!("FAIL: Cave 5 is not hooked — speed scaling cannot be measured");
+    if client.state().tick_cave_hooked != 1 {
+        eprintln!("FAIL: the tick cave is not hooked — speed scaling cannot be measured");
         return false;
     }
     true

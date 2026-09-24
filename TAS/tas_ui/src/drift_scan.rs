@@ -117,7 +117,7 @@ impl DriftTracker {
         }
         if state.mode != TasMode::Play as u32 {
             if state.mode == TasMode::Rec as u32 {
-                // cave2 freezes playback_pos at the splice and starts writing
+                // The cycle cave freezes playback_pos at the splice and starts writing
                 // REC at `splice`, so the last untouched reference pair is
                 // `splice - 1`. REC can publish this verdict even when the
                 // whole catch-up PLAY happened between two UI polls.
@@ -228,7 +228,7 @@ pub fn coordinate_delta(play: f32, rec: f32) -> f32 {
 }
 
 /// The splice a CONT verdicts at: the requested one during the catch-up PLAY,
-/// the one cave2 actually spliced at once REC has started.
+/// the one the cycle cave actually spliced at once REC has started.
 pub fn cont_verdict_boundary(state: &TasSharedState) -> usize {
     if state.mode == TasMode::Rec as u32 {
         state.segment_start_frame as usize

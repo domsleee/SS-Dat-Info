@@ -5,7 +5,7 @@
 #include "../fpu_safe_hook.hpp"
 #include "../shared_state.hpp"
 #include "../race_timer_table.hpp"
-#include "menu_state.hpp"
+#include "menu_cave.hpp"
 
 // ============================================================================
 // Race timer — reads the EXACT on-screen player race time, map-agnostically.

@@ -10,7 +10,7 @@
 // Replay object capture hook at SG+0x9E8F0.
 // Original instruction: sub esp, 00000080 (6 bytes).
 // At this site, ECX holds the replay recorder object (the function is the
-// recorder's per-frame "push 112-byte frame"). We capture it so Cave 2 can
+// recorder's per-frame "push 112-byte frame"). We capture it so the cycle cave can
 // derive the player pointer from [recorder+0x84] every cycle.
 //
 // Only the HUMAN's recorder is followed (see replay_identity.hpp /

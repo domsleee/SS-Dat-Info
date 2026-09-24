@@ -167,7 +167,7 @@ pub fn run() -> bool {
     println!("  Now in REC mode. Sending Stop, waiting for OFF, then Restart...");
     let serialised_ok = serialised_stop_then_restart(&mut client);
     if serialised_ok {
-        println!("  Serialised path accepted by cave2 (mode → PLAY)");
+        println!("  Serialised path accepted by the cycle cave (mode → PLAY)");
     } else {
         println!("  Serialised path FAILED");
     }
@@ -178,9 +178,9 @@ pub fn run() -> bool {
     println!("  serialised_accepted = {} (expected true)", serialised_ok);
     let pass = serialised_ok;
     if pass {
-        println!("\n*** PASS: serialised Stop→Restart is accepted by cave2 ***");
+        println!("\n*** PASS: serialised Stop→Restart is accepted by the cycle cave ***");
     } else {
-        println!("\n*** FAIL: Stop→Restart contract broken — investigate cave2 ***");
+        println!("\n*** FAIL: Stop→Restart contract broken — investigate the cycle cave ***");
     }
     pass
 }

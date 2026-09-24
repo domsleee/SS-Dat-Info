@@ -38,7 +38,7 @@ inline uint32_t GateAlignedSplicePos(uint32_t continue_from_frame,
     return live_gate + (continue_from_frame - rec_gate);
 }
 
-// Ticks cave5 may run this frame toward a CONT splice.
+// Ticks the tick cave may run this frame toward a CONT splice.
 //
 // Approval can arrive while parked exactly at the splice. That next cycle
 // belongs to REC, not an additional PLAY tick; cap its batch to one so the

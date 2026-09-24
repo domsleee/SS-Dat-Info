@@ -114,7 +114,7 @@ safety release, so a hold lasts as long as the pattern says.
 | `fe-cont-reliability [--iterations N]` | no | `*** FE-CONT-RELIABILITY PASSED ***` | FE-tremendous, splices at 2200 at 12x. Default five cycles, functional suite two. |
 | `fe10065-cont [--iterations N]` | no | `*** FE-10065 CONT PASSED ***` | FE-10065, splices at 6200 at each of 64x and 256x, resume overshoot at most one frame and every resume at most 3000 ms. Default eight cycles per speed, functional suite two. |
 | `cont-hijack` | no | `*** BUG #2 PASSED: replay crossed frame N still in PLAY — no REC hijack ***` | A `continue_from_frame` written during a plain PLAY leaves it in PLAY. |
-| `cont-restart-race` | no | `*** PASS: serialised Stop→Restart is accepted by cave2 ***` | The product controller serializes STOP/restart/arm and the DLL acknowledges CONT. Command-overwrite behavior is tested deterministically offline. |
+| `cont-restart-race` | no | `*** PASS: serialised Stop→Restart is accepted by the cycle cave ***` | The product controller serializes STOP/restart/arm and the DLL acknowledges CONT. Command-overwrite behavior is tested deterministically offline. |
 | `cont-input-protection` | no | every `PASS:` line, ending `PASS: ordinary STOP releases input protection (cont_suppress_input=0)` | Live input stays blocked through the CONT restart and STOP releases it, driven through the real transport controller. |
 
 ### Diagnostics
@@ -260,7 +260,7 @@ three successful finite measurements, not a median of surviving trials.
 
 ## Troubleshooting
 
-- **Cave 2 not firing:** confirm the current DLL is injected and the game is
+- **Cycle cave not firing:** confirm the current DLL is injected and the game is
   in a race; `tas_test shm` shows the hook flags and the frame counter.
 - **Wrong track or no level:** the guard names the track it saw. Navigate with
   `tas_test menu` and `tas_test menu activate <id>`, or set `TAS_TEST_LEVEL`.

@@ -1,9 +1,9 @@
 #pragma once
-// The MENU MODEL - pure logic shared by the DLL (caves/menu_state.hpp) and the
+// The MENU MODEL - pure logic shared by the DLL (caves/menu_cave.hpp) and the
 // unit tests (tests/test_menu_model.cpp): the item snapshot, the JSON document
 // an agent reads, and the target matching a command uses. No Windows headers
 // and no allocation (the DLL builds the document inside a hook); no game
-// pointer is dereferenced here (menu_state.hpp fills the snapshot).
+// pointer is dereferenced here (menu_cave.hpp fills the snapshot).
 #include <cstdint>
 
 namespace menumodel {

@@ -22,7 +22,7 @@ fn cont_splice_verdict_survives_real_dll_mode_transition() {
         if !skip_play_poll {
             assert!(!scan_and_banner(&mut tracker, &state));
         }
-        // cave2 captures live tick 9 (recording tick 7), increments pos,
+        // The cycle cave captures live tick 9 (recording tick 7), increments pos,
         // then switches to REC and clears the requested splice marker.
         state.playback_pos = 10;
         state.mode = TasMode::Rec as u32;

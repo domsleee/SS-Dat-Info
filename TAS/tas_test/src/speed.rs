@@ -1,4 +1,4 @@
-//! Playback speed verification: variable-speed playback (Cave 5) scales the
+//! Playback speed verification: variable-speed playback (tick cave) scales the
 //! tick rate proportionally, measured as ticks recorded over a fixed wall
 //! clock at 0.25x, 1x and 2x.
 //!

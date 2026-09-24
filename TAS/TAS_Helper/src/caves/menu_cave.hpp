@@ -27,7 +27,7 @@
 //     the menu's own Execute: a traversal from anywhere else can race page
 //     teardown, and a vtable inside a UI image proves nothing about liveness.
 //
-// Housekeeping runs from the message-pump hook (lifecycle.hpp): it clears the
+// Housekeeping runs from the message-pump hook (lifecycle_cave.hpp): it clears the
 // document when Execute stops heartbeating (a level, a load, the in-game pause
 // menu - none of which run UI_Menu::Execute) and expires commands nobody can
 // consume. Both writers share a lock, so the odd/even seqlock always has one
@@ -456,7 +456,7 @@ static void ExecuteCb(SafetyHookContext& ctx) {
     Snapshot(uiMenu, ran);
 }
 
-// Message-pump hook (lifecycle.hpp), game thread: housekeeping only - no UI
+// Message-pump hook (lifecycle_cave.hpp), game thread: housekeeping only - no UI
 // object is touched here. Clears the document once Execute stops (a level, a
 // load, the in-game pause menu), and answers EXPIRED for a command nobody can
 // consume, so it never lingers to fire on a later page.

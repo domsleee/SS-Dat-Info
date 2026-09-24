@@ -13,17 +13,17 @@
 // recreates the human player and its recorder, and its mode initialisation
 // returns at Supreme_Game+0x14199F.
 //
-// So a restart is: Cave 2 holds F5 down; the ACCEPT hook takes it back up the
+// So a restart is: the cycle cave holds F5 down; the ACCEPT hook takes it back up the
 // moment the game acts on it (any F5, a real key too, so one press is one
 // restart - the game restarts again on every poll that still sees the key);
-// the DONE hook marks the rebuilt level. Until DONE, Cave 2 keeps the key down,
+// the DONE hook marks the rebuilt level. Until DONE, the cycle cave keeps the key down,
 // so a restart the game refused is simply taken on its next poll. A STOP lets go.
 namespace f5restart {
 
 inline GameAddresses* g_addr = nullptr;
 
 // One request at a time; generations keep a stale DONE from answering a newer
-// request. Written by Cave 2 and STOP (request/cancel) and by the two hooks,
+// request. Written by the cycle cave and STOP (request/cancel) and by the two hooks,
 // all on the game thread except a STOP consumed while the loop is frozen.
 inline volatile LONG g_request = 0;   // current request's generation, 0 = none
 inline volatile LONG g_accepted = 0;  // generation whose F5 the game acted on
@@ -73,13 +73,13 @@ static void OnDone(SafetyHookContext&) {
     if (request && g_accepted == request) InterlockedExchange(&g_done, request);
 }
 
-// Cave 2 (game thread): start a restart.
+// The cycle cave (game thread): start a restart.
 inline void Request() {
     InterlockedExchange(&g_request, ++g_nextGeneration);
     WriteF5(true);
 }
 
-// Cave 2, every cycle of a request: true once the level has rebuilt; until
+// The cycle cave, every cycle of a request: true once the level has rebuilt; until
 // then the key stays down (a real key-up could have cleared it).
 inline bool Step() {
     const LONG request = g_request;

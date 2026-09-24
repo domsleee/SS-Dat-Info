@@ -658,7 +658,7 @@ impl TasApp {
                 // Stage the splice frame UI-side only; the TransportController
                 // writes it to shared memory when a cycle starts and on each
                 // reroll, and the DLL clears it. Writing it here mid-replay is
-                // harmless for plain PLAY (cave2 splices only an armed CONT)
+                // harmless for plain PLAY (the cycle cave splices only an armed CONT)
                 // but would move a running CONT's splice.
                 self.continue_from_frame = frame;
                 self.continue_from_text = frame.to_string();

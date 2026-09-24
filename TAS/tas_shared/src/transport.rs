@@ -51,7 +51,7 @@ pub struct ArmConfig {
 /// raw `u32` for mode/restart_state to match the live client's accessors.
 pub trait TransportPort {
     fn send_command(&mut self, cmd: TasCommand);
-    /// True only after Cave2 consumed and cleared the single command slot.
+    /// True only after the cycle cave consumed and cleared the single command slot.
     fn command_idle(&self) -> bool;
     fn mode(&self) -> u32;
     fn restart_state(&self) -> u32;
@@ -96,7 +96,7 @@ pub const ARM_SETTLE_MS: u64 = 10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Start,
-    /// Stop sent; wait until Cave2 has consumed it and published MODE_OFF.
+    /// Stop sent; wait until the cycle cave has consumed it and published MODE_OFF.
     StopWaitAck,
     /// Stop acknowledged; the caller is honouring the deterministic delay.
     StopSettle,
@@ -176,7 +176,7 @@ impl TransportController {
     pub fn phase_name(&self) -> &'static str {
         match self.phase {
             Phase::Start => "Start",
-            Phase::StopWaitAck => "StopWaitAck (waiting for Cave2 to consume Stop)",
+            Phase::StopWaitAck => "StopWaitAck (waiting for the cycle cave to consume Stop)",
             Phase::StopSettle => "StopSettle (waiting out the fixed Stop->Restart delay)",
             Phase::RestartWaitDone => "RestartWaitDone (waiting for the F5 restart)",
             Phase::ArmSettle => "ArmSettle",
@@ -247,7 +247,7 @@ impl TransportController {
                 }
             }
             Phase::StopSettle => {
-                // The caller honoured the Wait and cave2 is OFF: restart.
+                // The caller honoured the Wait and the cycle cave is OFF: restart.
                 port.reset_restart_state();
                 port.send_command(TasCommand::Restart);
                 self.phase = Phase::RestartWaitDone;
@@ -263,7 +263,7 @@ impl TransportController {
                 }
             }
             Phase::ArmSettle => {
-                // cave2 reads these at ARM time — re-assert post-restart.
+                // The cycle cave reads these at ARM time — re-assert post-restart.
                 port.set_continue_from_frame(self.cfg.continue_from_frame);
                 port.set_gate_align_rec(self.cfg.gate_align_rec);
                 // Snapshot the arm counter before the command goes out, so
@@ -464,7 +464,7 @@ mod tests {
         arm_generation: u32,
         capture_ok_flag: bool,
         commands: Vec<TasCommand>,
-        /// False by default: existing unit tests model immediate Cave2
+        /// False by default: existing unit tests model an immediate cycle cave
         /// consumption. Set true to exercise a delayed acknowledgement.
         command_busy: bool,
         /// Invariant tracker: Restart must NEVER be sent while mode != OFF.
@@ -477,7 +477,7 @@ mod tests {
             if cmd == TasCommand::Restart && self.mode != TasMode::Off as u32 {
                 self.restart_while_not_off = true;
             }
-            // Stand in for cave2 processing the arm.
+            // Stand in for the cycle cave processing the arm.
             if matches!(cmd, TasCommand::ArmPlay | TasCommand::ArmContinue) {
                 self.arm_generation = self.arm_generation.wrapping_add(1);
             }
@@ -549,7 +549,7 @@ mod tests {
         };
         let mut c = TransportController::new(cfg(Arm::Rec, 0));
 
-        // Start publishes Stop but cannot start the settle until Cave2 acks.
+        // Start publishes Stop but cannot start the settle until the cycle cave acks.
         assert_eq!(c.step(&mut p), StepOutcome::InProgress);
         assert_eq!(p.commands, vec![TasCommand::Stop]);
         // Even MODE_OFF is insufficient while the command slot still holds
@@ -711,7 +711,7 @@ mod tests {
     /// Drive the controller through the restart until it has sent the arm
     /// command and entered Watch.
     fn drive_to_judge(c: &mut TransportController, p: &mut FakePort) {
-        // Start publishes Stop. Tests may begin in REC/PLAY, so model Cave2
+        // Start publishes Stop. Tests may begin in REC/PLAY, so model the cycle cave
         // consuming it before the deterministic settle begins.
         let first = c.step(p);
         p.mode = TasMode::Off as u32;
@@ -849,7 +849,7 @@ mod tests {
         assert!(!p.splice_approved);
     }
 
-    /// A reroll must re-assert the splice frame, or cave2 splices at the
+    /// A reroll must re-assert the splice frame, or the cycle cave splices at the
     /// wrong tick; and with no retries left the mismatch aborts.
     #[test]
     fn aligned_cont_reroll_restores_the_splice_then_aborts_when_out_of_retries() {

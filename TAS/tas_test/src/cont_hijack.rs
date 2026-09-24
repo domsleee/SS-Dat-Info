@@ -2,7 +2,7 @@
 //! NOT hijack the replay into REC.
 //!
 //! Arm a normal PLAY, then (as a stray writer would) set the splice marker to
-//! a frame ahead of the playhead. cave2's `g_cave2_contArmed` gate only lets a
+//! a frame ahead of the playhead. The cycle cave's `g_contArmed` gate only lets a
 //! splice fire for a PLAY entered via ARM_CONTINUE, so the plain replay must
 //! run to completion (PLAY→OFF) and never enter REC.
 

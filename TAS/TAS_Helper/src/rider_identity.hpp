@@ -27,7 +27,7 @@
 //               Read-only: the stance cannot be switched in-process, so a
 //               mismatch is reported, never "fixed".
 //
-// Refreshed by Cave 2 on the first tick of each race (the stance only changes
+// Refreshed by the cycle cave on the first tick of each race (the stance only changes
 // in the menus). All reads are SEH-guarded: a failed or implausible read keeps
 // the last published value.
 namespace rider {

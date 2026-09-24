@@ -16,7 +16,7 @@
 //
 // The DLL publishes both facts so tas_ui can show them, stamp them into
 // recordings and history entries, and warn on a mismatch:
-//   - fpu_control_word: sampled on the game thread by cave2 every cycle.
+//   - fpu_control_word: sampled on the game thread by the cycle cave every cycle.
 //   - renderer_id: which srDD_*.dll sr.dll loaded, refreshed here.
 namespace renderer {
 
@@ -53,7 +53,7 @@ inline const char* Name(uint32_t id) {
 }
 
 // Publish renderer_id; log whenever the renderer or the game thread's control
-// word changes. Called by Cave 2 on the first tick of each race, inside its
+// word changes. Called by the cycle cave on the first tick of each race, inside its
 // FSAVE/FRSTOR.
 inline void Refresh(TasSharedState* s) {
     static uint32_t lastRenderer = 0xFFFFFFFFu;

@@ -6,7 +6,7 @@
 #include "../game_addresses.hpp"
 #include "../fpu_safe_hook.hpp"
 
-// Cave 5: Fixed tick override with variable speed via time-advance scaling.
+// The tick cave: Fixed tick override with variable speed via time-advance scaling.
 // Hook at Supreme.exe+25C81 (after __ftol call and mov esi, eax).
 //
 // At this point:
@@ -27,8 +27,8 @@
 //   1. playback_speed != 1.0: write 0.01/speed to the per-tick advance
 //   2. Otherwise: clamp to [0, 20] (fix __ftol garbage)
 
-inline TasSharedState* g_cave5State = nullptr;
-static SafetyHookMid cave5Hook{};
+inline TasSharedState* g_tickCaveState = nullptr;
+static SafetyHookMid tickCaveHook{};
 
 // Pointer to the game's per-tick time advance constant (EXE + 0x46DB08).
 // VirtualProtect'd to PAGE_READWRITE during init so we can write it.
@@ -37,7 +37,7 @@ static float* g_tickAdvancePtr = nullptr;
 // The per-tick time advance is ONE read-only float at EXE+0x46DB08, read by
 // sixteen `fmul dword ptr [0x46db08]` instructions: four in the game cycle
 // this cave hooks, twelve in the menu (Menu::Paint derives its animation dt
-// from it). cave5 is not called while the menu is up, so a scaled value left
+// from it). The tick cave is not called while the menu is up, so a scaled value left
 // in the shared constant would run the menu video fast.
 //
 // So the four in-game readers are pointed at this private copy and the game's
@@ -45,7 +45,7 @@ static float* g_tickAdvancePtr = nullptr;
 // a 6-byte instruction, so this is a same-length rewrite: no relocation, no
 // trampoline.
 // inline, NOT static: the patched instructions hold ONE fixed address, so a
-// per-translation-unit copy would make cave5 update a different object.
+// per-translation-unit copy would make the tick cave update a different object.
 inline float g_privateTickAdvance = 0.01f;
 
 // RVAs of the 4-byte operand inside each in-game `fmul dword ptr [0x46db08]`
@@ -55,14 +55,14 @@ inline float g_privateTickAdvance = 0.01f;
 //   +0x25DB2  fmul -> Time::Add(clock2, ticks_demanded * advance)
 //   +0x25E2B  fmul -> game-object time [ebp+0x0C] += ticks_demanded * advance
 //                     (not the clock tick demand is computed from)
-static constexpr uint32_t CAVE5_TICK_ADVANCE_OPERANDS[] = {
+static constexpr uint32_t TICK_ADVANCE_OPERANDS[] = {
     0x25CE2, 0x25D8B, 0x25DB4, 0x25E2D,
 };
 
-// Tracks the ORIGINAL protection of every .text page InstallCave5 opens, so it
+// Tracks the ORIGINAL protection of every .text page InstallTickCave opens, so it
 // can hand each one back exactly as it found it.
 //
-// One shared record for ALL of cave5's code patches, because they overlap:
+// One shared record for ALL of the tick cave's code patches, because they overlap:
 // three of the four fmul operands and the `cmp esi,14h` clamp byte all live on
 // page 0x425000. VirtualProtect reports the protection AT THE TIME OF THE CALL,
 // so the second call on a page reports back the PAGE_EXECUTE_READWRITE the first
@@ -71,7 +71,7 @@ static constexpr uint32_t CAVE5_TICK_ADVANCE_OPERANDS[] = {
 // Restoring properly matters: PAGE_READWRITE drops EXECUTE, and a code page
 // left that way only survives because a 1999 binary has no /NXCOMPAT bit and
 // so runs with DEP off.
-struct Cave5CodePages {
+struct TickCaveCodePages {
     static constexpr size_t kMax = 8;
     uintptr_t base[kMax] = {};
     DWORD original[kMax] = {};
@@ -122,16 +122,16 @@ struct Cave5CodePages {
     }
 };
 
-inline Cave5CodePages g_cave5CodePages{};
+inline TickCaveCodePages g_tickCaveCodePages{};
 
-// Set once the operand redirect is actually live, so UninstallCave5 knows
+// Set once the operand redirect is actually live, so UninstallTickCave knows
 // whether there is anything to undo. The patched instructions hold the absolute
 // address of a float inside THIS DLL: if the DLL were ever unloaded without
 // putting the original operand back, four instructions in the game's hot loop
 // would dereference freed memory on the very next frame.
-inline bool g_cave5RedirectApplied = false;
-inline uint8_t* g_cave5ExeBase = nullptr;
-inline bool g_cave5ClampApplied = false;
+inline bool g_tickCaveRedirectApplied = false;
+inline uint8_t* g_tickCaveExeBase = nullptr;
+inline bool g_tickCaveClampApplied = false;
 inline bool g_tickAdvanceProtectionChanged = false;
 inline DWORD g_tickAdvanceOriginalProtect = 0;
 
@@ -147,19 +147,19 @@ static float g_nativeTickAdvance = TICK_ADVANCE_DEFAULT;
 // Per-frame tick ceiling after raising the game's clamp (native: esi capped
 // at 0x14 = 20; the bytes are patched at install time). Above 64 the per-frame
 // game overhead dominates, and higher values made 64x playback less reliable.
-static constexpr int32_t CAVE5_PER_FRAME_TICK_CAP = 64;
+static constexpr int32_t TICK_CAVE_PER_FRAME_CAP = 64;
 
-// Original game clamp value (cmp esi, 14h). Cave5 enforces this in software
+// Original game clamp value (cmp esi, 14h). The tick cave enforces this in software
 // during normal 1× gameplay so the game's defensive smooth-catchup behaviour
-// is preserved — the larger CAVE5_PER_FRAME_TICK_CAP only kicks in for
+// is preserved — the larger TICK_CAVE_PER_FRAME_CAP only kicks in for
 // scripted fast-forward (playback_speed > 1) or the catchup-drain path.
 static constexpr int32_t NATIVE_GAME_CLAMP_AT_1X = 20;
 
-// The helpers below run inside Cave5_MidCallback, between CreateMidHook's FSAVE and FRSTOR.
+// The helpers below run inside TickCave_Callback, between CreateMidHook's FSAVE and FRSTOR.
 
 // Was the engine frozen (dialog, menu, load) since the last call? A
 // backlog after a freeze is wall-clock debt and is dropped at ANY
-// speed. CONT catch-up is not a freeze: cave5 runs every frame there,
+// speed. CONT catch-up is not a freeze: the tick cave runs every frame there,
 // so the gap stays ~7-16 ms.
 static bool ResumedFromFreeze() {
     static uint32_t s_lastRunMs = 0;
@@ -223,7 +223,7 @@ static void ChooseTickCount(SafetyHookContext& ctx, TasSharedState* s, int32_t r
         // clamp (cmp esi, 14h / mov ebx, 14h) is patched at install
         // time to use 40h instead, so we match that here.
         if (realTick < 0) realTick = 0;
-        if (realTick > CAVE5_PER_FRAME_TICK_CAP) realTick = CAVE5_PER_FRAME_TICK_CAP;
+        if (realTick > TICK_CAVE_PER_FRAME_CAP) realTick = TICK_CAVE_PER_FRAME_CAP;
 
         // At 1x and below keep the game's native 20-tick clamp, so normal
         // play behaves like the unpatched game when it stutters; only
@@ -257,22 +257,22 @@ static void ApplyPlaybackSpeed(TasSharedState* s, bool catchup_drain) {
 // fast-forward regression changes and a frame counter cannot see.
 //
 // Count what the game will actually RUN, not what we asked for: the tick
-// loop bounds itself with ebx, which the clamp caps at CAVE5_PER_FRAME_TICK_CAP.
+// loop bounds itself with ebx, which the clamp caps at TICK_CAVE_PER_FRAME_CAP.
 // esi above that is demand the game discards, and counting it would
 // overstate the rate.
 static void PublishTickCount(SafetyHookContext& ctx) {
-    if (auto* sp = g_cave5State) {
+    if (auto* sp = g_tickCaveState) {
         uint32_t emitted = (uint32_t)ctx.esi;
-        if (emitted > (uint32_t)CAVE5_PER_FRAME_TICK_CAP) {
-            emitted = (uint32_t)CAVE5_PER_FRAME_TICK_CAP;
+        if (emitted > (uint32_t)TICK_CAVE_PER_FRAME_CAP) {
+            emitted = (uint32_t)TICK_CAVE_PER_FRAME_CAP;
         }
         sp->tick_count += emitted;
     }
 }
 
 // Installed through CreateMidHook (FSAVE/FRSTOR around the body).
-static void Cave5_MidCallback(SafetyHookContext& ctx) {
-    auto* s = g_cave5State;
+static void TickCave_Callback(SafetyHookContext& ctx) {
+    auto* s = g_tickCaveState;
     if (s) {
         int32_t realTick = (int32_t)ctx.esi;
 
@@ -304,28 +304,28 @@ static void Cave5_MidCallback(SafetyHookContext& ctx) {
     PublishTickCount(ctx);
 }
 
-inline void UninstallCave5();
+inline void UninstallTickCave();
 
-bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
-    if (!addr.cave5_site) {
-        Log("Cave 5: hook site not resolved");
+bool InstallTickCave(GameAddresses& addr, TasSharedState* state) {
+    if (!addr.tick_cave_site) {
+        Log("Tick cave: hook site not resolved");
         return false;
     }
 
-    g_cave5State = state;
+    g_tickCaveState = state;
 
     // Resolve the per-tick time advance constant at EXE+0x46DB08. This float
     // controls how much game-time each physics tick consumes from the
     // accumulator; scaling it gives variable speed playback.
     auto* exeBase = (uint8_t*)addr.exe;
-    g_cave5ExeBase = exeBase;
+    g_tickCaveExeBase = exeBase;
     g_tickAdvancePtr = (float*)(exeBase + 0x6DB08);
 
     // Capture the native value before we ever modify the constant. The page
     // is readable even before VirtualProtect (it's part of the loaded image),
     // so this read is safe regardless of whether VirtualProtect succeeds.
     g_nativeTickAdvance = *g_tickAdvancePtr;
-    Log(std::format("Cave 5: native tick advance constant = {}", g_nativeTickAdvance));
+    Log(std::format("Tick cave: native tick advance constant = {}", g_nativeTickAdvance));
 
     // Point the four in-game readers at our own float so that scaling it can
     // never reach the menu.
@@ -339,18 +339,18 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     static const uint8_t kFmulTickAdvance[6] = { 0xD8, 0x0D, 0x08, 0xDB, 0x46, 0x00 };
     bool redirected = true;
 
-    const size_t kSiteCount = sizeof(CAVE5_TICK_ADVANCE_OPERANDS) / sizeof(uint32_t);
+    const size_t kSiteCount = sizeof(TICK_ADVANCE_OPERANDS) / sizeof(uint32_t);
     for (size_t i = 0; i < kSiteCount && redirected; ++i) {
-        uint32_t rva = CAVE5_TICK_ADVANCE_OPERANDS[i];
+        uint32_t rva = TICK_ADVANCE_OPERANDS[i];
         uint8_t* insn = exeBase + rva - 2;
-        if (!g_cave5CodePages.Open(insn, sizeof(kFmulTickAdvance))) {
-            Log(std::format("Cave 5: VirtualProtect on fmul at EXE+0x{:X} FAILED (err={})",
+        if (!g_tickCaveCodePages.Open(insn, sizeof(kFmulTickAdvance))) {
+            Log(std::format("Tick cave: VirtualProtect on fmul at EXE+0x{:X} FAILED (err={})",
                             rva - 2, GetLastError()));
             redirected = false;
             break;
         }
         if (memcmp(insn, kFmulTickAdvance, sizeof(kFmulTickAdvance)) != 0) {
-            Log(std::format("Cave 5: fmul at EXE+0x{:X} is not the expected instruction; not redirecting",
+            Log(std::format("Tick cave: fmul at EXE+0x{:X} is not the expected instruction; not redirecting",
                             rva - 2));
             redirected = false;
             break;
@@ -368,22 +368,22 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     // 0.01, because g_privateTickAdvance was seeded from the game's own value.
     if (redirected) {
         LONG target = (LONG)(uintptr_t)&g_privateTickAdvance;
-        for (uint32_t rva : CAVE5_TICK_ADVANCE_OPERANDS) {
+        for (uint32_t rva : TICK_ADVANCE_OPERANDS) {
             InterlockedExchange((volatile LONG*)(exeBase + rva), target);
         }
-        g_cave5RedirectApplied = true;
+        g_tickCaveRedirectApplied = true;
     }
 
     if (redirected) {
         g_tickAdvancePtr = &g_privateTickAdvance;
-        Log(std::format("Cave 5: {} in-game tick-advance readers redirected to DLL float at {:p} "
+        Log(std::format("Tick cave: {} in-game tick-advance readers redirected to DLL float at {:p} "
                         "(game constant at EXE+0x6DB08 left untouched for the menu)",
-                        (int)(sizeof(CAVE5_TICK_ADVANCE_OPERANDS) / sizeof(uint32_t)),
+                        (int)(sizeof(TICK_ADVANCE_OPERANDS) / sizeof(uint32_t)),
                         (void*)&g_privateTickAdvance));
     } else {
         DWORD oldProtect = 0;
         if (!VirtualProtect(g_tickAdvancePtr, sizeof(float), PAGE_READWRITE, &oldProtect)) {
-            Log(std::format("Cave 5: VirtualProtect on tick advance constant FAILED (err={})", GetLastError()));
+            Log(std::format("Tick cave: VirtualProtect on tick advance constant FAILED (err={})", GetLastError()));
             // Non-fatal: speed scaling won't work but fixed tick still does.
             // Drop the pointer, or the per-frame callback would write to the
             // read-only page and fault on the game thread.
@@ -391,7 +391,7 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
         } else {
             g_tickAdvanceOriginalProtect = oldProtect;
             g_tickAdvanceProtectionChanged = true;
-            Log(std::format("Cave 5: FALLBACK - writing the game's shared constant at {:p} (was 0x{:X}); "
+            Log(std::format("Tick cave: FALLBACK - writing the game's shared constant at {:p} (was 0x{:X}); "
                             "the menu video will speed up after a level", (void*)g_tickAdvancePtr, oldProtect));
         }
     }
@@ -410,27 +410,27 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
         // Same page record as the operand redirect above: cmp_imm shares page
         // 0x425000 with three of the four fmuls, so its own VirtualProtect would
         // report back OUR RWX rather than the game's original protection.
-        bool cmp_ok = g_cave5CodePages.Open(cmp_imm, 1);
-        bool mov_ok = g_cave5CodePages.Open(mov_imm, 1);
+        bool cmp_ok = g_tickCaveCodePages.Open(cmp_imm, 1);
+        bool mov_ok = g_tickCaveCodePages.Open(mov_imm, 1);
         if (cmp_ok && mov_ok) {
             // Sanity-check current values before clobbering — refuse to patch
             // if the game's bytes drifted from what we expect (defends against
             // wrong-build EXEs).
             if (*cmp_imm == 0x14 && *mov_imm == 0x14) {
-                *cmp_imm = (uint8_t)CAVE5_PER_FRAME_TICK_CAP;
-                *mov_imm = (uint8_t)CAVE5_PER_FRAME_TICK_CAP;
-                g_cave5ClampApplied = true;
+                *cmp_imm = (uint8_t)TICK_CAVE_PER_FRAME_CAP;
+                *mov_imm = (uint8_t)TICK_CAVE_PER_FRAME_CAP;
+                g_tickCaveClampApplied = true;
                 Log(std::format(
-                    "Cave 5: raised tick clamp 0x14 -> 0x{:02X} at EXE+0x25C83 and EXE+0x26001",
-                    CAVE5_PER_FRAME_TICK_CAP));
+                    "Tick cave: raised tick clamp 0x14 -> 0x{:02X} at EXE+0x25C83 and EXE+0x26001",
+                    TICK_CAVE_PER_FRAME_CAP));
             } else {
                 Log(std::format(
-                    "Cave 5: tick clamp bytes unexpected (cmp_imm=0x{:02X} mov_imm=0x{:02X}); not patching",
+                    "Tick cave: tick clamp bytes unexpected (cmp_imm=0x{:02X} mov_imm=0x{:02X}); not patching",
                     *cmp_imm, *mov_imm));
             }
         } else {
             Log(std::format(
-                "Cave 5: VirtualProtect on tick clamp bytes FAILED (cmp_ok={} mov_ok={} err={})",
+                "Tick cave: VirtualProtect on tick clamp bytes FAILED (cmp_ok={} mov_ok={} err={})",
                 cmp_ok, mov_ok, GetLastError()));
         }
     }
@@ -438,56 +438,56 @@ bool InstallCave5(GameAddresses& addr, TasSharedState* state) {
     // Every code patch is written; hand all touched pages back exactly as we
     // found them, icache flushed. Done BEFORE create_mid so SafetyHook does its
     // own protect/patch/restore on normally-protected pages, as it expects to.
-    g_cave5CodePages.CloseAll();
+    g_tickCaveCodePages.CloseAll();
 
-    Log(std::format("Cave 5: hooking tick override at {:p} (EXE+0x25C81)", (void*)addr.cave5_site));
+    Log(std::format("Tick cave: hooking tick override at {:p} (EXE+0x25C81)", (void*)addr.tick_cave_site));
 
-    cave5Hook = CreateMidHook<Cave5_MidCallback>(addr.cave5_site);
+    tickCaveHook = CreateMidHook<TickCave_Callback>(addr.tick_cave_site);
 
-    if (!cave5Hook) {
-        Log("Cave 5: SafetyHook create_mid FAILED");
-        UninstallCave5();
+    if (!tickCaveHook) {
+        Log("Tick cave: SafetyHook create_mid FAILED");
+        UninstallTickCave();
         return false;
     }
 
-    state->cave5_hooked = 1;
-    Log("Cave 5: hook installed successfully");
+    state->tick_cave_hooked = 1;
+    Log("Tick cave: hook installed successfully");
     return true;
 }
 
 // Put the game's own operands back, so the redirect cannot outlive this DLL
-// (see g_cave5RedirectApplied). Successful initialization pins the DLL; failed
+// (see g_tickCaveRedirectApplied). Successful initialization pins the DLL; failed
 // initialization uses this rollback before reporting failure.
-inline void UninstallCave5() {
+inline void UninstallTickCave() {
     // Stop callbacks before restoring anything they read or write.
-    cave5Hook = {};
-    if (!g_cave5ExeBase) return;
+    tickCaveHook = {};
+    if (!g_tickCaveExeBase) return;
 
-    auto* gameTickAdvance = (float*)(g_cave5ExeBase + 0x6DB08);
+    auto* gameTickAdvance = (float*)(g_tickCaveExeBase + 0x6DB08);
     g_tickAdvancePtr = gameTickAdvance;
 
-    if (g_cave5RedirectApplied) {
+    if (g_tickCaveRedirectApplied) {
         const LONG original = (LONG)(uintptr_t)gameTickAdvance;
-        for (uint32_t rva : CAVE5_TICK_ADVANCE_OPERANDS) {
-            uint8_t* operand = g_cave5ExeBase + rva;
-            if (!g_cave5CodePages.Open(operand, sizeof(LONG))) continue;
+        for (uint32_t rva : TICK_ADVANCE_OPERANDS) {
+            uint8_t* operand = g_tickCaveExeBase + rva;
+            if (!g_tickCaveCodePages.Open(operand, sizeof(LONG))) continue;
             InterlockedExchange((volatile LONG*)operand, original);
         }
-        g_cave5RedirectApplied = false;
+        g_tickCaveRedirectApplied = false;
     }
 
-    if (g_cave5ClampApplied) {
-        uint8_t* cmp_imm = g_cave5ExeBase + 0x25C83;
-        uint8_t* mov_imm = g_cave5ExeBase + 0x26001;
-        if (g_cave5CodePages.Open(cmp_imm, 1) &&
-            g_cave5CodePages.Open(mov_imm, 1)) {
-            if (*cmp_imm == (uint8_t)CAVE5_PER_FRAME_TICK_CAP) *cmp_imm = 0x14;
-            if (*mov_imm == (uint8_t)CAVE5_PER_FRAME_TICK_CAP) *mov_imm = 0x14;
+    if (g_tickCaveClampApplied) {
+        uint8_t* cmp_imm = g_tickCaveExeBase + 0x25C83;
+        uint8_t* mov_imm = g_tickCaveExeBase + 0x26001;
+        if (g_tickCaveCodePages.Open(cmp_imm, 1) &&
+            g_tickCaveCodePages.Open(mov_imm, 1)) {
+            if (*cmp_imm == (uint8_t)TICK_CAVE_PER_FRAME_CAP) *cmp_imm = 0x14;
+            if (*mov_imm == (uint8_t)TICK_CAVE_PER_FRAME_CAP) *mov_imm = 0x14;
         }
-        g_cave5ClampApplied = false;
+        g_tickCaveClampApplied = false;
     }
 
-    g_cave5CodePages.CloseAll();
+    g_tickCaveCodePages.CloseAll();
 
     if (g_tickAdvanceProtectionChanged) {
         *gameTickAdvance = g_nativeTickAdvance;
@@ -496,7 +496,7 @@ inline void UninstallCave5() {
                        g_tickAdvanceOriginalProtect, &ignored);
         g_tickAdvanceProtectionChanged = false;
     }
-    if (g_cave5State) g_cave5State->cave5_hooked = 0;
-    g_cave5State = nullptr;
-    Log("Cave 5: hook and all supporting patches removed");
+    if (g_tickCaveState) g_tickCaveState->tick_cave_hooked = 0;
+    g_tickCaveState = nullptr;
+    Log("Tick cave: hook and all supporting patches removed");
 }

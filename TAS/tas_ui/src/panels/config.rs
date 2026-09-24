@@ -7,10 +7,10 @@ pub fn show(ui: &mut egui::Ui, state: &TasSharedState) {
         .num_columns(2)
         .spacing([8.0, 2.0])
         .show(ui, |ui| {
-            hook_row(ui, "Cave 2", state.cave2_hooked);
-            hook_row(ui, "Cave 1C", state.cave1c_hooked);
-            hook_row(ui, "Cave 1D", state.cave1d_hooked);
-            hook_row(ui, "Cave 5", state.cave5_hooked);
+            hook_row(ui, "the cycle cave", state.cycle_cave_hooked);
+            hook_row(ui, "the key-handler cave", state.key_handler_cave_hooked);
+            hook_row(ui, "the observer cave", state.observer_cave_hooked);
+            hook_row(ui, "the tick cave", state.tick_cave_hooked);
             hook_row(ui, "Replay Cap", state.replay_capture_hooked);
         });
 

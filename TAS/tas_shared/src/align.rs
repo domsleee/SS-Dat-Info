@@ -72,7 +72,7 @@ pub enum AlignVerdict {
 }
 
 /// Compare an aligned replay with its recording, frame for frame from each
-/// side's own gate. Cave2 feeds the same recorded input from the same gate, so
+/// side's own gate. The cycle cave feeds the same recorded input from the same gate, so
 /// the coordinates must be bit-exact; a hidden difference in the spawn state
 /// shows up here and is rerolled rather than becoming the run.
 ///

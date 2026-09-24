@@ -126,13 +126,13 @@ struct GameAddresses {
     KernelTimeCurrentFn time_current = nullptr;
 
     // Supreme.exe offsets
-    std::uint8_t* cave5_site = nullptr;     // exe+0x25C81: after ftol+mov esi,eax (tick override)
+    std::uint8_t* tick_cave_site = nullptr;     // exe+0x25C81: after ftol+mov esi,eax (tick override)
     std::uint8_t* f5_accept_site = nullptr; // exe+0x25C3F: F5 down and accepted, restart call next
     std::uint8_t* launch_site = nullptr;    // exe+0x25BD7: race loop entered the level, game mode set
     std::uint8_t* pump_site = nullptr;      // exe+0x55920: the game's message pump (runs in every state)
 
     // Supreme_Game.dll offsets
-    std::uint8_t* cave2_site = nullptr;     // SG+0x13FE40: Supreme::Cycle
+    std::uint8_t* cycle_cave_site = nullptr;     // SG+0x13FE40: Supreme::Cycle
     std::uint8_t* replay_capture_site = nullptr; // SG+0x9E8F0: replay object capture
     std::uint8_t* f5_done_site = nullptr;   // SG+0x14199F: Set_Game_Mode's mode init returned
     std::uint8_t* stop_site = nullptr;      // SG+0x1408F0: Supreme::Stop (the race is being left)
@@ -149,8 +149,8 @@ struct GameAddresses {
     std::uint8_t* level_path_ptr = nullptr;
 
     // HMG_Cetsup_Win32.dll offsets
-    std::uint8_t* cave1c_down = nullptr;    // HMG+0x3940: key handler (down)
-    std::uint8_t* cave1c_up = nullptr;      // HMG+0x3980: key handler (up)
+    std::uint8_t* key_down_site = nullptr;    // HMG+0x3940: key handler (down)
+    std::uint8_t* key_up_site = nullptr;      // HMG+0x3980: key handler (up)
     std::uint8_t* bb3b10 = nullptr;         // HMG+0x3B10: BB3B10 observer
 
     // Game key codes: the DI-buffer index and the keyIndex BB3B10 broadcasts
@@ -265,13 +265,13 @@ struct GameAddresses {
         auto hmgBase = (std::uint8_t*)hmg;
 
         // Supreme.exe offsets
-        cave5_site = exeBase + 0x25C81;
+        tick_cave_site = exeBase + 0x25C81;
         f5_accept_site = exeBase + 0x25C3F;
         launch_site = exeBase + 0x25BD7;
         pump_site = exeBase + 0x55920;
 
         // Supreme_Game.dll offsets
-        cave2_site = sgBase + 0x13FE40;
+        cycle_cave_site = sgBase + 0x13FE40;
         replay_capture_site = sgBase + 0x9E8F0;
         f5_done_site = sgBase + 0x14199F;
         stop_site = sgBase + 0x1408F0;
@@ -279,8 +279,8 @@ struct GameAddresses {
         level_path_ptr = sgBase + GameAddresses::LEVEL_PATH_PTR_OFFSET;
 
         // HMG_Cetsup_Win32.dll offsets
-        cave1c_down = hmgBase + 0x3940;
-        cave1c_up = hmgBase + 0x3980;
+        key_down_site = hmgBase + 0x3940;
+        key_up_site = hmgBase + 0x3980;
         bb3b10 = hmgBase + 0x3B10;
 
         // Verify every REQUIRED code target before installing ANY hook. Module
@@ -288,9 +288,9 @@ struct GameAddresses {
         // locally-modified image of the supported release. Optional features
         // (race timer) validate their own sites and degrade instead of failing
         // initialization. All bytes are the on-disk form.
-        static constexpr uint8_t kCave5[] =                       // cmp esi,0x14; mov [esp+0x3C],esi
+        static constexpr uint8_t kTickCave[] =                       // cmp esi,0x14; mov [esp+0x3C],esi
             { 0x83, 0xFE, 0x14, 0x89, 0x74, 0x24, 0x3C };
-        static constexpr uint8_t kCave2[] =                       // push ebp; mov ebp,esp; push -1; push (SEH)
+        static constexpr uint8_t kCycleCave[] =                       // push ebp; mov ebp,esp; push -1; push (SEH)
             { 0x55, 0x8B, 0xEC, 0x6A, 0xFF, 0x68 };
         static constexpr uint8_t kReplay[] =                      // sub esp,0x80
             { 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00 };
@@ -326,17 +326,17 @@ struct GameAddresses {
         // Supreme::Stop entry: push esi; mov esi,ecx; call rel32; call rel32; mov ecx,[eax+0x40].
         static constexpr uint8_t kStop[] =
             { 0x56, 0x8B, 0xF1, 0xE8, 0xA8, 0x6C, 0xFC, 0xFF, 0xE8, 0x13, 0xDB, 0xFF, 0xFF, 0x8B, 0x48, 0x40 };
-        if (!ValidateCode("Supreme.exe+0x25C81", cave5_site, kCave5) ||
+        if (!ValidateCode("Supreme.exe+0x25C81", tick_cave_site, kTickCave) ||
             !ValidateCode("Supreme.exe+0x25BD7 (race launched)", launch_site, kLaunch) ||
             !ValidateCode("Supreme.exe+0x55920 (message pump)", pump_site, kPump) ||
             !ValidateCode("Supreme_Game.dll+0x1408F0 (Supreme::Stop)", stop_site, kStop) ||
             !ValidateCode("Supreme.exe+0x25C0F (F5 poll)", exeBase + 0x25C0F, kF5Poll) ||
             !ValidateCode("Supreme.exe+0x25C3F (F5 accept)", f5_accept_site, kF5Accept) ||
             !ValidateCode("Supreme_Game.dll+0x14199F (Set_Game_Mode done)", f5_done_site, kF5Done) ||
-            !ValidateCode("Supreme_Game.dll+0x13FE40", cave2_site, kCave2) ||
+            !ValidateCode("Supreme_Game.dll+0x13FE40", cycle_cave_site, kCycleCave) ||
             !ValidateCode("Supreme_Game.dll+0x9E8F0", replay_capture_site, kReplay) ||
-            !ValidateCodeOrHooked("HMG_Cetsup_Win32.dll+0x3940", cave1c_down, kKeyDown) ||
-            !ValidateCodeOrHooked("HMG_Cetsup_Win32.dll+0x3980", cave1c_up, kKeyUp) ||
+            !ValidateCodeOrHooked("HMG_Cetsup_Win32.dll+0x3940", key_down_site, kKeyDown) ||
+            !ValidateCodeOrHooked("HMG_Cetsup_Win32.dll+0x3980", key_up_site, kKeyUp) ||
             !ValidateCodeAbs<3>("HMG_Cetsup_Win32.dll+0x3B10", bb3b10, kBb3b10, hmgBase, 0x583A) ||
             !ValidateCodeAbs<8>("Supreme_Game.dll+0x83E4F (Player ctor)", sgBase + 0x83E4F, kPlayerCtor,
                                 sgBase, PLAYER_VTABLE_RVA) ||
@@ -351,11 +351,11 @@ struct GameAddresses {
         Log(std::format("EXE base: {:p}", (void*)exeBase));
         Log(std::format("SG base: {:p}", (void*)sgBase));
         Log(std::format("HMG base: {:p}", (void*)hmgBase));
-        Log(std::format("Cave 2 site (Supreme::Cycle): {:p} (SG+0x13FE40)", (void*)cave2_site));
-        Log(std::format("Cave 5 site (tick override): {:p} (EXE+0x25C81)", (void*)cave5_site));
+        Log(std::format("the cycle cave site (Supreme::Cycle): {:p} (SG+0x13FE40)", (void*)cycle_cave_site));
+        Log(std::format("the tick cave site (tick override): {:p} (EXE+0x25C81)", (void*)tick_cave_site));
         Log(std::format("Replay capture site: {:p} (SG+0x9E8F0)", (void*)replay_capture_site));
-        Log(std::format("Cave 1C down (+3940): {:p}", (void*)cave1c_down));
-        Log(std::format("Cave 1C up (+3980): {:p}", (void*)cave1c_up));
+        Log(std::format("the key-handler cave down (+3940): {:p}", (void*)key_down_site));
+        Log(std::format("the key-handler cave up (+3980): {:p}", (void*)key_up_site));
         Log(std::format("BB3B10 (+3B10): {:p}", (void*)bb3b10));
         Log(std::format("Player base ptr: {:p}", (void*)player_base));
         Log(std::format("Kernel::Time::Current: {:p}", (void*)time_current));

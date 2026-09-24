@@ -1,4 +1,4 @@
-// Unit tests for the cave1c keyboard-gate policy (input_gate.hpp).
+// Unit tests for the key-handler cave's keyboard-gate policy (input_gate.hpp).
 // Pure logic, no Windows/hook deps — compile + run standalone:
 //   just test_dll      (from repo root)
 // or:
@@ -29,7 +29,7 @@ int main() {
     check(ShouldBlockRealInput(G{OFF, true, false, false, false}) == true,
           "cont_block_when_running");
 
-    // CONT in flight but it's our OWN injection: must pass (cave2 owns input).
+    // CONT in flight but it's our OWN injection: must pass (the cycle cave owns input).
     check(ShouldBlockRealInput(G{OFF, true, /*inj*/ true, false, false}) == false,
           "cont_lets_injection_through");
 

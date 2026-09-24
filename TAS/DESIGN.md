@@ -197,7 +197,7 @@ the splice. For a recording with a gate:
    recording keeps the original's tick numbering: the new take is the old
    prefix followed by new input.
 6. The game clock still owes the ticks the catch-up skipped (about 70). At a
-   1x resume Cave 5's catch-up drain runs them as a single tick, so recording
+   1x resume the tick cave's catch-up drain runs them as a single tick, so recording
    starts in real time with no burst.
 7. The UI sees REC, starts a new session, and the player carries on live.
 
@@ -251,13 +251,13 @@ half).
 
 | Hook | Where | Job |
 | --- | --- | --- |
-| **Cave 2** | `Supreme::Cycle` | Runs once per tick. Applies commands and records or replays that tick's input. |
-| **Cave 1C** | key handlers | Blocks real key events during REC and PLAY, so input only enters through Cave 2, and whenever a CONT is in flight (`cont_suppress_input`), even with the mode OFF. |
-| **Cave 1D** | observer `BB3B10` | Blocks real observer calls during REC and while a CONT is in flight. |
-| **Cave 5** | tick loop in `Supreme.exe` | Decides how many ticks run each rendered frame: speed control, pause catch-up, parking at a splice. |
-| **Replay capture** | the game's replay recorder | Finds the human player's object so Cave 2 can read its position. Ignores AI and ghost riders. |
+| **Cycle cave** | `Supreme::Cycle` | Runs once per tick. Applies commands and records or replays that tick's input. |
+| **Key-handler cave** | key handlers | Blocks real key events during REC and PLAY, so input only enters through the cycle cave, and whenever a CONT is in flight (`cont_suppress_input`), even with the mode OFF. |
+| **Observer cave** | observer `BB3B10` | Blocks real observer calls during REC and while a CONT is in flight. |
+| **Tick cave** | tick loop in `Supreme.exe` | Decides how many ticks run each rendered frame: speed control, pause catch-up, parking at a splice. |
+| **Replay capture** | the game's replay recorder | Finds the human player's object so the cycle cave can read its position. Ignores AI and ghost riders. |
 
-Each tick, Cave 2:
+Each tick, the cycle cave:
 
 1. Applies a pending command (arm, stop, restart), steps an in-progress F5
    restart, and stops an armed mode if the level has been replaced.
@@ -270,10 +270,10 @@ Each tick, Cave 2:
 6. After a PLAY tick, checks again whether a CONT splice can complete.
 
 (`tas_test`'s `play-pace` check confirms playback advances 100 ticks per
-second at 1x, i.e. one Cave 2 call per tick.)
+second at 1x, i.e. one cycle-cave call per tick.)
 
 **REC injects too.** You might expect REC to just watch the game. It
-doesn't: real key events are blocked during REC as well, and Cave 2 reads the
+doesn't: real key events are blocked during REC as well, and the cycle cave reads the
 keyboard itself (`GetAsyncKeyState`) and injects the result exactly as PLAY
 would. REC and PLAY then deliver input at the same point in the same tick,
 so there's no one-tick difference between recording and replaying.
@@ -283,16 +283,16 @@ The REC/PLAY block lifts after the game loop has been still for 250 ms
 (paused, or in a dialog) so menus stay usable. The CONT block
 (`cont_suppress_input`) doesn't lift when paused.
 
-**Position capture.** Each tick Cave 2 copies the boarder's X/Y/Z into
+**Position capture.** Each tick the cycle cave copies the boarder's X/Y/Z into
 `rec_coords` (REC) or `play_coords` (PLAY). If a read fails, the tick still
 counts and `capture_ok` drops to 0 for the rest of that arm; the watcher
 treats that as a failed check. The flag isn't saved with the recording.
 
-### Speed control (Cave 5)
+### Speed control (tick cave)
 
 Each rendered frame the game works out how many ticks are owed (time since
 its clock was last advanced, times 100), runs them, and advances its clock by
-0.01 s per tick. Cave 5 changes speed by changing only that 0.01. At 0.005,
+0.01 s per tick. The tick cave changes speed by changing only that 0.01. At 0.005,
 each tick pays back half the time it should, so twice as many are owed and
 the game runs at 2x; at 0.04 it runs at 0.25x.
 
@@ -302,13 +302,13 @@ the game runs at 2x; at 0.04 it runs at 0.25x.
 - The game's limit of 20 ticks per frame is raised to 64 for fast-forward.
   At 1x and slower the original 20 still applies.
 - After a pause the game would run the whole paused time as a burst of
-  ticks. Cave 5 runs one tick that absorbs the gap instead (this path
+  ticks. The tick cave runs one tick that absorbs the gap instead (this path
   bypasses the 20-tick limit).
 
 ### F5 restart
 
 A replay must start from a freshly restarted level, so the DLL restarts it
-with the game's own F5 handling (`RESTART`, `caves/f5_restart.hpp`); no real
+with the game's own F5 handling (`RESTART`, `caves/f5_restart_cave.hpp`); no real
 key press or window focus is needed. Once per loop iteration, before the tick
 batch, the game reads F5 from the key buffer and, if the race accepts a
 restart, rebuilds the level on the spot. Two hooks follow it:
@@ -320,7 +320,7 @@ restart, rebuilds the level on the spot. Two hooks follow it:
   player and its recorder) marks the restart complete. `restart_state`
   becomes 2 on the next tick.
 
-Until Done, Cave 2 keeps F5 down, so a restart the game refused is taken on
+Until Done, the cycle cave keeps F5 down, so a restart the game refused is taken on
 its next poll. A STOP lets go of the key. `tas_test restart-stress` runs
 hundreds of restarts in one session.
 
@@ -334,7 +334,7 @@ stop anything.
 
 ### The race lifecycle
 
-`caves/lifecycle.hpp` follows the game's own transition points, all on the
+`caves/lifecycle_cave.hpp` follows the game's own transition points, all on the
 game thread:
 
 | Hook | Where | Job |
@@ -351,14 +351,14 @@ like any other. A DLL injected into a race already running identifies it on
 the race's first tick.
 
 - **Rider**: character and stance.
-- **Renderer**: which renderer plugin loaded. (Cave 2 separately publishes
+- **Renderer**: which renderer plugin loaded. (The cycle cave separately publishes
   the game thread's x87 control word, which gives the precision.)
 
 Two more readers:
 
-- **Race timer** (`race_timer.hpp`): hooks the HUD text renderer and reads the
+- **Race timer** (`race_timer_cave.hpp`): hooks the HUD text renderer and reads the
   on-screen race time, so the UI shows exactly what the game shows.
-- **Menu reader** (`menu_state.hpp`): publishes the current menu page as a
+- **Menu reader** (`menu_cave.hpp`): publishes the current menu page as a
   small JSON document (items, labels, ids) and carries out commands (focus,
   activate, up/down) through the game's own menu code, on the menu's own
   thread. A command names the page it was read from and is refused if the
@@ -417,7 +417,7 @@ Two processes share this memory without locks, so it relies on conventions:
 - `arm_generation` is bumped as the last write of every PLAY or CONT arm,
   even a refused one. Until it changes, `mode` and `playback_pos` still
   describe the *previous* replay, so the watcher waits for it.
-- STOP must work while the game loop is frozen. Cave 2 consumes it while a
+- STOP must work while the game loop is frozen. The cycle cave consumes it while a
   race ticks and the message-pump hook everywhere else; both run on the game
   thread, so all DLL-side state has a single writer thread.
 
@@ -580,7 +580,7 @@ splice.
 - **An injected key with the wrong timestamp is silently ignored**, and one
   stamped in the future makes later keys look out of order and get dropped.
 - **Holding F5 restarts the level on every input poll.** Only
-  `f5_restart.hpp` writes F5, and its accept hook takes the key up the
+  `f5_restart_cave.hpp` writes F5, and its accept hook takes the key up the
   moment the game acts on it.
 - **The game's DLLs are always relocated**, so a byte signature must stop
   before any absolute address inside the instruction it checks.

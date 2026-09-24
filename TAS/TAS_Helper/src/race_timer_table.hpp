@@ -2,7 +2,7 @@
 #include <cstdint>
 
 // The race timer's HUD-line table (pure logic, unit-tested in
-// tests/test_race_timer.cpp; race_timer.hpp owns the hooks and publishing).
+// tests/test_race_timer.cpp; race_timer_cave.hpp owns the hooks and publishing).
 //
 // Every time-like string ("MM:SS:CC") that SR_UIT appends is keyed by the
 // text-LINE object it was appended to. The PLAYER's line is the one whose
