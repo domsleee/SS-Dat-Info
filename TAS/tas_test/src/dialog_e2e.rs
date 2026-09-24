@@ -37,6 +37,64 @@ const DIALOG_IDLE_SECS: u64 = 12;
 /// an order of magnitude out, so a generous ceiling still separates them.
 const MAX_TICKS_PER_SEC: f64 = 140.0;
 
+/// The game asks to save only when a finish makes the Forest Easy high-times
+/// table, which a well-used table never lets the ~48 s fixture do. The test
+/// runs against a short, slow table instead and puts the player's back after.
+const HIGH_TIMES: &str = r"Saved_Data\Forest_Tracks_Easy_high_times.txt";
+const HIGH_TIMES_BACKUP: &str = r"Saved_Data\Forest_Tracks_Easy_high_times.txt.tas-test-backup";
+const SLOW_HIGH_TIMES: &str = "{\r\n\t\"penguy\",40.0,80.0,120.0,\"Cloudy\",\"1999/10/17\",1 \r\n}\r\n";
+
+/// Swaps in `SLOW_HIGH_TIMES` with the game closed (the game reads the table at
+/// launch and rewrites it at a finish) and restores the player's table, again
+/// with the game closed, when dropped. The backup stays on disk until then: a
+/// run that dies without dropping this (a harness `process::exit`) leaves it,
+/// and the next run restores it before anything else.
+struct TestHighTimes {
+    table: std::path::PathBuf,
+    backup: std::path::PathBuf,
+}
+
+impl TestHighTimes {
+    fn install() -> Result<Self, String> {
+        let folder = harness::required_env("SUPREME_FOLDER")?;
+        let folder = std::path::Path::new(&folder);
+        let guard = Self {
+            table: folder.join(HIGH_TIMES),
+            backup: folder.join(HIGH_TIMES_BACKUP),
+        };
+        harness::kill_game();
+        if guard.backup.exists() {
+            println!("  Restoring the high-times table left by an interrupted run");
+            guard.restore()?;
+        }
+        if guard.table.exists() {
+            std::fs::copy(&guard.table, &guard.backup)
+                .map_err(|e| format!("backing up {}: {e}", guard.table.display()))?;
+        }
+        std::fs::write(&guard.table, SLOW_HIGH_TIMES)
+            .map_err(|e| format!("writing the test high-times table: {e}"))?;
+        Ok(guard)
+    }
+
+    fn restore(&self) -> Result<(), String> {
+        std::fs::copy(&self.backup, &self.table)
+            .and_then(|_| std::fs::remove_file(&self.backup))
+            .map_err(|e| format!("restoring {} from {}: {e}", self.table.display(), self.backup.display()))
+    }
+}
+
+impl Drop for TestHighTimes {
+    fn drop(&mut self) {
+        harness::kill_game();
+        if !self.backup.exists() {
+            // There was no table before the test: remove the test's.
+            let _ = std::fs::remove_file(&self.table);
+        } else if let Err(error) = self.restore() {
+            eprintln!("ERROR: {error}; your table is still in the backup file");
+        }
+    }
+}
+
 fn unfinished_quit_modal(client: &mut tas_shared::TasSharedMemoryClient) -> bool {
     const SCREEN: &str = "ID_ARCADE_IN_GAME_MENU";
     fn command(
@@ -116,7 +174,7 @@ fn wait_engine_frozen(client: &tas_shared::TasSharedMemoryClient, deadline_secs:
             && state.recorded_count > CONT_SPLICE_FRAME
             && state.playback_pos >= state.recorded_count
         {
-            eprintln!("FAIL: fixture finished without the save prompt; use an isolated game copy with fresh Forest Easy scores, not your personal score table");
+            eprintln!("FAIL: fixture finished without the save prompt, although the test's slow high-times table should guarantee one");
             return false;
         }
         let fc = client.state().frame_count;
@@ -227,6 +285,13 @@ pub fn run() -> bool {
         path.display()
     );
 
+    let _high_times = match TestHighTimes::install() {
+        Ok(guard) => guard,
+        Err(error) => {
+            eprintln!("ERROR: {error}");
+            return false;
+        }
+    };
     let mut client = harness::ensure_game_running();
     harness::stop_competing_tas_ui_writer();
     harness::stop(&mut client);

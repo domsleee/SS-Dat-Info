@@ -272,8 +272,8 @@ static uint32_t ReadPage(uint32_t uiMenu) {
 // [this+0x10C]; the pointer never moves), so the screen id is keyed on the
 // Change_Page EVENT: its name is adopted by the next Execute on the same
 // thread, after the swap completed, so screen and items always describe the
-// same page. Injected after the last Change_Page? The page's own name (if it
-// carries one) bootstraps it; otherwise the id arrives with the next change.
+// same page. Injected after the last Change_Page? The items' container name,
+// or else the page's own name, bootstraps it.
 
 static void Snapshot(uint32_t uiMenu, bool force) {
     const uint64_t now = GetTickCount64();
@@ -292,25 +292,32 @@ static void Snapshot(uint32_t uiMenu, bool force) {
             if (g_menuDiag) Log(std::format("Menu diag: bootstrapped screen '{}' from the page object", g_screen));
         }
     }
-    if (!page || !g_screen[0]) {
+    if (!page) {
         Clear();
         return;
     }
     MenuSnapshot snap;
-    if (!ReadMenu(uiMenu, snap)) {
+    const bool haveItems = ReadMenu(uiMenu, snap);
+    // The items' parent container carries the PAGE ID as its name (verified
+    // live: 'ID_ARCADE_CHOOSE_BOARD', 'ID_ARCADE_IN_GAME_MENU', ...) - the very
+    // object the items came from, so screen and items agree by construction
+    // and no Change_Page is needed to know the page. That also names the page
+    // a DLL injected at the main menu has never seen change. The announced
+    // name stays the fallback for a layout whose items sit in an unnamed
+    // sub-container.
+    char cname[TAS_MENU_SCREEN_MAX];
+    if (haveItems && ReadMenuString(snap.container + 0x10, cname, sizeof cname) && IsIdLike(cname)) memcpy(g_screen, cname, sizeof cname);
+    if (!g_screen[0]) {
+        Clear();
+        return;
+    }
+    if (!haveItems) {
         // The page is known but its items are not capturable right now (a
         // transition, nothing focused): publish the screen and NO document -
         // never a valid-looking empty page.
         Publish(g_screen, 0xFFFFFFFFu, "");
         return;
     }
-    // The items' parent container carries the PAGE ID as its name (verified
-    // live: 'ID_ARCADE_CHOOSE_BOARD', 'ID_ARCADE_IN_GAME_MENU', ...) - the very
-    // object the items came from, so screen and items agree by construction
-    // and no Change_Page is needed to know the page. The announced name stays
-    // the fallback for a layout whose items sit in an unnamed sub-container.
-    char cname[TAS_MENU_SCREEN_MAX];
-    if (ReadMenuString(snap.container + 0x10, cname, sizeof cname) && IsIdLike(cname)) memcpy(g_screen, cname, sizeof cname);
     // Menu thread only, so one static buffer serves every snapshot. A document
     // that does not fit is published as "screen, no document", like a
     // transition.
