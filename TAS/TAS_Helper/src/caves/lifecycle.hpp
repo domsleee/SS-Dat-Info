@@ -35,6 +35,7 @@ inline SafetyHookMid g_pumpHook{};
 // first Supreme::Cycle tick after install identifies it once.
 inline bool g_sawLaunch = false;
 inline uint32_t g_frameAtInstall = 0;
+inline uint32_t g_frameAtLastIdentify = 0;
 
 // A Continue whose controller died leaves the live-input block set, and the
 // input gate then swallows every key but Escape. A restart's reload freezes
@@ -50,7 +51,7 @@ static void OnLaunch(SafetyHookContext&) {
     g_sawLaunch = true;
     levelcontext::PublishRunning(s);
     s->game_in_game = 1;
-    g_refreshStamps = 1;   // rider and renderer, on the race's first tick (cave2)
+    g_refreshStamps = REFRESH_STAMP_TICKS;   // rider and renderer, over the race's first ticks (cave2)
     __asm { frstor [fpu] }
 }
 
@@ -75,7 +76,13 @@ static void OnPump(SafetyHookContext&) {
         g_sawLaunch = true;
         levelcontext::PublishRunning(s);
         s->game_in_game = 1;
-        g_refreshStamps = 1;
+        g_refreshStamps = REFRESH_STAMP_TICKS;
+    }
+    // A race whose track could not be identified at launch stays unresolved;
+    // try again once it has ticked (the setup object may lag the launch).
+    if (s->game_in_game && s->frame_count != g_frameAtLastIdentify) {
+        g_frameAtLastIdentify = s->frame_count;
+        levelcontext::RetryIfUnresolved(s);
     }
     if (s->cont_suppress_input && GetTickCount() - g_lastCycleMs > STALE_SUPPRESS_MS) {
         s->cont_suppress_input = 0;

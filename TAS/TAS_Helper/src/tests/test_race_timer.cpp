@@ -3,8 +3,8 @@
 //   just test_dll      (from repo root)
 //
 // stale_line_from_the_previous_level_does_not_make_the_next_race_ambiguous:
-//   a menu trip rebuilds the HUD without dropping game_in_game, so the old
-//   player line must be evicted, or Classify sees two advancing lines and
+//   a new race rebuilds the HUD, so the old player line must be evicted, or
+//   Classify sees two advancing lines and
 //   publishes nothing for every later race.
 
 #include "../race_timer_table.hpp"
@@ -30,8 +30,8 @@ int main() {
     std::printf("race_timer tests:\n");
     {
         // A finished race's line stays latched when the HUD is torn down;
-        // nothing samples any more and game_in_game stays 1 at the menu,
-        // so eviction is driven by the clock tick, not the next sample.
+        // nothing samples any more, so eviction is driven by the clock tick,
+        // not the next sample.
         Table t;
         uint32_t clk = 100, tick = STALE_TICKS + 1;
         Verdict v = RunLine(t, 0x1000, clk, tick, LOCK_FRAMES + 2);

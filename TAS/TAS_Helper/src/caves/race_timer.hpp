@@ -22,9 +22,9 @@
 // keyed by the LINE object, and classifies/publishes RIGHT THERE (on the same
 // fresh sample) - the table logic lives in race_timer_table.hpp (pure,
 // unit-tested): the PLAYER line is the one whose parsed cs ADVANCES, it is
-// LATCHED once locked, and lines that stop being sampled are evicted (a menu
-// trip rebuilds the HUD without dropping game_in_game, so dead lines cannot
-// be cleared on that flag).
+// LATCHED once locked, and lines that stop being sampled are evicted (a
+// finished race's HUD is torn down while the race is still launched, so dead
+// lines cannot be cleared on game_in_game alone).
 // We publish:
 //   race_time_cs  = exact on-screen race time, centiseconds (u32::MAX = idle)
 //   race_start_ts = 16-bit game clock value at the gate cross
@@ -143,9 +143,9 @@ static void TickCb(SafetyHookContext&) {
 
     // Staleness is tick-driven, not sample-driven: the HUD line of a finished
     // race keeps its frozen time published for as long as the line is still
-    // appended, but once the HUD is torn down nothing samples any more - and
-    // game_in_game does NOT drop at the menu, so without this the last time
-    // would stay published forever. Eight compares per tick; eviction
+    // appended, but once the HUD is torn down nothing samples any more, so
+    // without this the last time would stay published until the race is left.
+    // Eight compares per tick; eviction
     // unlatches the player line, which blanks the feed.
     if (inGame && g_table.Evict(g_tickNow) > 0 && g_table.playerLine == 0 && g_lastPub != MAXU) {
         Publish(MAXU, MAXU, "stale");

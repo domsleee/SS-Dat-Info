@@ -415,7 +415,7 @@ static bool ConsumeCommand(uint32_t uiMenu) {
     if (seq == g_state->menu_cmd_ack) return false;   // nothing pending: one compare per frame
     AcquireSRWLockExclusive(&g_cmdLock);
     bool ran = false;
-    if (seq != g_state->menu_cmd_ack) {   // the worker did not expire it meanwhile
+    if (seq != g_state->menu_cmd_ack) {   // housekeeping did not expire it meanwhile
         char target[TAS_MENU_CMD_TARGET_MAX], screen[TAS_MENU_SCREEN_MAX];
         for (uint32_t i = 0; i < TAS_MENU_CMD_TARGET_MAX; i++) target[i] = g_state->menu_cmd_target[i];
         for (uint32_t i = 0; i < TAS_MENU_SCREEN_MAX; i++) screen[i] = g_state->menu_cmd_screen[i];
@@ -456,10 +456,10 @@ static void ExecuteCb(SafetyHookContext& ctx) {
     Snapshot(uiMenu, ran);
 }
 
-// Worker thread (level scan, ~10 Hz): housekeeping only - no UI object is
-// touched here. Clears the document once Execute stops (a level, a load, the
-// in-game pause menu), and answers EXPIRED for a command nobody can consume,
-// so it never lingers to fire on a later page.
+// Message-pump hook (lifecycle.hpp), game thread: housekeeping only - no UI
+// object is touched here. Clears the document once Execute stops (a level, a
+// load, the in-game pause menu), and answers EXPIRED for a command nobody can
+// consume, so it never lingers to fire on a later page.
 inline void Housekeeping() {
     if (!g_state) return;
     const uint64_t now = GetTickCount64();
@@ -477,7 +477,10 @@ inline void Housekeeping() {
         return;
     }
     if (executing || now - g_pendingSinceMs < kExpireMs) return;
-    AcquireSRWLockExclusive(&g_cmdLock);
+    // ConsumeCommand holds this lock across a call into the game's menu code;
+    // on the same thread a blocking acquire could deadlock, so a busy lock
+    // just means "try on the next pump".
+    if (!TryAcquireSRWLockExclusive(&g_cmdLock)) return;
     if (seq != g_state->menu_cmd_ack) {
         Answer(seq, TAS_MENU_RESULT_EXPIRED);
         Log(std::format("Menu cmd #{}: expired - no menu executing for {} ms", seq, now - last));

@@ -398,10 +398,11 @@ impl TasApp {
         ));
     }
 
-    /// The menu gate: connected, in a level, and that level's cycle ticked
-    /// within the last 400 ms. Arming drives an F5 restart, and at a menu or
-    /// dialog the cycle is frozen (`game_in_game` alone is stale there), so an
-    /// arm would fire into a stopped engine and leave a half-armed cycle.
+    /// The menu gate: connected, in a race, and that race's cycle ticked
+    /// within the last 400 ms. Arming drives an F5 restart, and in the pause
+    /// menu or a dialog the race is still launched (`game_in_game` = 1) but the
+    /// cycle is frozen and the game won't take F5, so an arm would leave a
+    /// half-armed cycle.
     ///
     /// The button greying, the F9/F10/F12 refusals and `queue_restart_then`
     /// all read it here so they cannot drift apart.

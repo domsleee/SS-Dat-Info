@@ -774,9 +774,9 @@ impl TasApp {
     /// Check if the game process is still alive by monitoring frame_count advancement.
     /// If frame_count hasn't changed for ~3 seconds, assume the game crashed.
     fn check_game_health(&mut self) {
-        // Sample cycle activity every frame (cheap): game_in_game freezes when
-        // the Supreme::Cycle hook stops, so a fresh frame_count advance is the
-        // real "ticking a level" signal.
+        // Sample cycle activity every frame (cheap): game_in_game stays 1 in
+        // the pause menu, so a fresh frame_count advance is the "race is
+        // ticking" signal.
         if let Some(fc) = self
             .shared
             .as_ref()
@@ -1332,8 +1332,8 @@ impl TasApp {
                         }
                     });
 
-                    // Same menu signal as the status chip (game_in_game is
-                    // stale at menus, so also require the cycle ticking). The
+                    // Same menu signal as the status chip (game_in_game stays
+                    // 1 while paused, so also require the cycle ticking). The
                     // panel shows "In Menu" rather than "resolving…", since
                     // nothing is resolved at a menu.
                     let in_menu = !(self

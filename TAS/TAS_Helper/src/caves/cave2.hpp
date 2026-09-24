@@ -293,8 +293,12 @@ static volatile uint32_t g_cave2_pendingLog = 0;  // 0=none, 1=REC, 2=PLAY, 3=ST
 static volatile uint32_t g_cave2_logParam = 0;
 
 // Set by the lifecycle hook when a race launches: Cave 2 refreshes the rider
-// and renderer stamps on the race's first tick, once the player exists.
+// and renderer stamps over the race's first ticks. Not just the first: the new
+// race's recorder (and so player_ptr) is adopted during the player update,
+// after this hook, so the first tick can still see the previous race's player.
+// Refreshing is change-detected and cheap.
 inline volatile LONG g_refreshStamps = 0;
+static constexpr LONG REFRESH_STAMP_TICKS = 100;
 
 // Splice gate: 1 only between a SUCCESSFUL CMD_ARM_CONTINUE and its splice
 // (or any stop/re-arm). The PLAY handler's splice check requires this flag,
@@ -553,12 +557,17 @@ static void StepInProcessRestart(TasSharedState* s) {
 
 // The race is being left (lifecycle.hpp's Supreme::Stop hook, while the level
 // still exists). A mode left armed across that would record the menu, run the
-// menu video fast and eat native keys, so it stops here. No restart can be in
-// flight any more, so the live-input block goes too.
+// menu video fast and eat native keys, so it stops here. A restart still
+// holding F5 (the game doesn't take it while paused) is abandoned too, or the
+// next race would restart itself; with it goes the live-input block.
 static void StopForLeftRace(TasSharedState* s) {
     if (s->mode != MODE_OFF) {
         ApplyStopTransition(s, false);
         LogRing(s, LOG_WARN, "TAS stopped: the race was left");
+    }
+    if (s->restart_state == 1) {
+        f5restart::Cancel();
+        s->restart_state = 0;
     }
     s->cont_suppress_input = 0;
 }
@@ -669,9 +678,9 @@ static void __declspec(noinline) Cave2_Logic() {
         s->player_ptr = SafeReadPtr(s->replay_ptr + GameAddresses::REPLAY_PLAYER_OFFSET);
     }
 
-    // First tick of a launched race: the player exists now.
-    if (g_refreshStamps && s->player_ptr) {
-        g_refreshStamps = 0;
+    // First ticks of a launched race (see g_refreshStamps).
+    if (g_refreshStamps > 0 && s->player_ptr) {
+        g_refreshStamps--;
         rider::Refresh(s);
         renderer::Refresh(s);
     }

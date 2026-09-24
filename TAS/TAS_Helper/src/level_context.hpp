@@ -90,7 +90,8 @@ static int32_t identify(const char* path) {
     return levelpath::LevelIdFrom(area, setup.area, setup.difficulty);
 }
 
-// A race is running: identify it and publish it as one resolved context.
+// A race is running: identify it and publish it as a new context, resolved
+// when the track was identified and unresolved otherwise (never as "no race").
 inline void PublishRunning(TasSharedState* s) {
     char path[TAS_LEVEL_PATH_MAX] = {};
     const bool havePath = readLevelPath(path, sizeof(path));
@@ -100,9 +101,24 @@ inline void PublishRunning(TasSharedState* s) {
         s->level_path_gen++;
         s->level_epoch++;
         s->level_id = id >= 0 ? (uint32_t)id : 0xFFFFFFFFu;
-        s->level_scan_epoch = s->level_epoch;   // resolved
+        s->level_scan_epoch = id >= 0 ? s->level_epoch : s->level_epoch - 1u;
     });
     Log(std::format("Level: racing '{}' (id {})", path, id));
+}
+
+// While a running race is unresolved, identify it again (same context, so no
+// epoch bump). Returns at once when it is resolved.
+inline void RetryIfUnresolved(TasSharedState* s) {
+    if (s->level_scan_epoch == s->level_epoch) return;
+    char path[TAS_LEVEL_PATH_MAX] = {};
+    if (!readLevelPath(path, sizeof(path))) return;
+    const int32_t id = identify(path);
+    if (id < 0) return;
+    publishContext(s, [&] {
+        s->level_id = (uint32_t)id;
+        s->level_scan_epoch = s->level_epoch;
+    });
+    Log(std::format("Level: identified '{}' (id {}) after launch", path, id));
 }
 
 // The race was left (quit to the menu, a track switch): resolved, no level.
