@@ -133,7 +133,7 @@ pub fn dismiss_save_dialog() {
 /// Kill any `tas_ui`: two writers on the single-slot command channel cause
 /// intermittent ARM_CONTINUE mode=0 failures. Returns how many were stopped.
 pub fn stop_competing_tas_ui_writer() -> u32 {
-    let stopped = kill_image("tas_ui.exe", None);
+    let stopped = kill_images(&["tas_ui.exe"], None);
     if stopped > 0 {
         println!("  Stopped competing tas_ui writer(s): {stopped}");
     }
@@ -504,14 +504,14 @@ fn hide_console(command: &mut Command) {
     }
 }
 
-/// `taskkill` one image name; returns how many processes it terminated.
-/// Matches exact image names, and never `supreme-service.exe`.
-fn kill_image(image: &str, exclude_pid: Option<u32>) -> u32 {
+/// One `taskkill` for these image names; returns how many processes it
+/// terminated. Matches exact image names, and never `supreme-service.exe`.
+fn kill_images(images: &[&str], exclude_pid: Option<u32>) -> u32 {
     let mut command = Command::new("taskkill");
     let suite_pid = std::env::var("TAS_SUITE_PID")
         .ok()
         .and_then(|s| s.parse().ok());
-    command.args(kill_arguments(image, exclude_pid, suite_pid));
+    command.args(kill_arguments(images, exclude_pid, suite_pid));
     hide_console(&mut command);
     match command.output() {
         Ok(out) => String::from_utf8_lossy(&out.stdout)
@@ -522,17 +522,12 @@ fn kill_image(image: &str, exclude_pid: Option<u32>) -> u32 {
     }
 }
 
-fn kill_arguments(image: &str, me: Option<u32>, suite: Option<u32>) -> Vec<String> {
-    let mut args: Vec<String> = [
-        "/F",
-        "/IM",
-        image,
-        "/FI",
-        "IMAGENAME ne supreme-service.exe",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect();
+fn kill_arguments(images: &[&str], me: Option<u32>, suite: Option<u32>) -> Vec<String> {
+    let mut args = vec!["/F".to_string()];
+    for image in images {
+        args.extend(["/IM".into(), image.to_string()]);
+    }
+    args.extend(["/FI".into(), "IMAGENAME ne supreme-service.exe".into()]);
     for pid in me.into_iter().chain(suite) {
         args.extend(["/FI".into(), format!("PID ne {pid}")]);
     }
@@ -542,18 +537,24 @@ fn kill_arguments(image: &str, me: Option<u32>, suite: Option<u32>) -> Vec<Strin
 /// Kill every game, launcher and TAS process except ourselves and our suite (the same list
 /// and `supreme-service` exclusion as the justfile's `stop_game`).
 pub fn kill_game() {
-    let me = std::process::id();
-    for image in [
+    let images = [
         "Supreme.exe",
         "Supreme_v1.035.exe",
         "display-config.exe",
         "Display_Config.exe",
         "tas_ui.exe",
         "tas_test.exe",
-    ] {
-        kill_image(image, Some(me));
+    ];
+    kill_images(&images, Some(std::process::id()));
+    // Termination is asynchronous. The shared-memory section outlives the
+    // window until the last process holding it has exited, so wait for both
+    // rather than a fixed delay; a new game would otherwise reuse the old one.
+    let start = Instant::now();
+    while (win32::find_game_window().is_some() || TasSharedMemoryClient::open().is_ok())
+        && start.elapsed() < Duration::from_secs(3)
+    {
+        thread::sleep(Duration::from_millis(20));
     }
-    thread::sleep(Duration::from_millis(500));
 }
 
 /// Inject a DLL into the running Supreme.exe process via Injector.exe.
@@ -739,7 +740,7 @@ fn wait_for_cycle(client: &TasSharedMemoryClient, timeout: Duration) -> bool {
     let start = Instant::now();
     let base = client.frame_count_volatile();
     while start.elapsed() < timeout {
-        thread::sleep(Duration::from_millis(250));
+        thread::sleep(Duration::from_millis(20));
         if client.frame_count_volatile() != base {
             return true;
         }
@@ -818,13 +819,9 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
         eprintln!("ERROR: menu navigation to {} failed: {}", level, error);
         std::process::exit(1);
     }
+    // A ticking cycle is the liveness proof: the hooks are in and the race runs.
     if !wait_for_cycle(&client, Duration::from_secs(30)) {
         eprintln!("ERROR: the race never started ticking after the menu proceeded");
-        std::process::exit(1);
-    }
-
-    if !check_liveness(&client) {
-        eprintln!("ERROR: Game not live after launch");
         std::process::exit(1);
     }
     let s = client.state();
@@ -1149,7 +1146,9 @@ mod tests {
 
     #[test]
     fn game_reset_excludes_both_child_and_suite_parent() {
-        let args = super::kill_arguments("tas_test.exe", Some(123), Some(456));
+        let args = super::kill_arguments(&["Supreme.exe", "tas_test.exe"], Some(123), Some(456));
+        assert!(args.windows(2).any(|pair| pair == ["/IM", "Supreme.exe"]));
+        assert!(args.windows(2).any(|pair| pair == ["/IM", "tas_test.exe"]));
         for filter in [
             "PID ne 123",
             "PID ne 456",
