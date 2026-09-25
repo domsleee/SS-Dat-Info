@@ -5,13 +5,9 @@
 #include <cstring>
 #include <limits>
 
-// Pure, testable reader for the game's selected track/rider configuration.
-//
-// The stock executable uses this exact chain itself (Supreme_v1.035.c around
-// FUN_0042f4d0): config = *(DAT_004889c4 + 0x14), then accesses the fields
-// below. Keeping the chain and field offsets in this dependency-free header
-// lets the unit suite exercise the same pointer arithmetic and string-header
-// validation as the injected DLL, without needing a live game process.
+// Pure, unit-tested reader for the game's selected track/rider configuration.
+// The stock executable uses the same chain (FUN_0042f4d0):
+// config = *(DAT_004889c4 + 0x14).
 namespace setupconfig {
 
 constexpr uint32_t MAIN_STATE_PTR_RVA = 0x889C4;
@@ -20,7 +16,7 @@ constexpr uint32_t CONFIG_PTR_OFFSET = 0x14;
 constexpr uint32_t AREA_STRING = 0xB0;
 constexpr uint32_t DIFFICULTY_STRING = 0xD0;
 constexpr uint32_t CHARACTER_STRING = 0xF0;
-constexpr uint32_t STANCE = 0x140;
+constexpr uint32_t STANCE = 0x140;               // dword: 0 = regular, 1 = goofy
 constexpr uint32_t CONTROLLER_STRING = 0x1B0;
 
 constexpr uint32_t STANCE_UNKNOWN = 0xFFFFFFFFu;

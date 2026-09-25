@@ -3,19 +3,16 @@
 #include "log.hpp"
 
 // Game module bases and resolved addresses. Every offset is a fixed RVA of the
-// stock v1.035 images; ValidateModule / ValidateCode* in Resolve are the pin.
+// stock v1.035 images, pinned by the checks in Resolve.
 
-// Housemarque Kernel::Time — a 64-bit timestamp ({lo, hi} dwords; ~QPC-derived
-// machine-uptime units). The input pipeline stamps every key event with the
-// Time at message-pump dispatch: Win32_Driver::Translate(tagMSG&, Kernel::Time)
+// Housemarque Kernel::Time: 64-bit timestamp ({lo, hi}; QPC-derived uptime units).
+// Key events are stamped at message-pump dispatch: Win32_Driver::Translate
 // → keyDown/keyUp (+3940/+3980) → BB3B10(keyIndex, pressed, Time.lo, Time.hi).
-// The observer silently discards events whose Time predates the current race
-// context, so injected events must carry a current stamp.
+// The observer drops events stamped before the current race context.
 struct KernelTime { uint32_t lo; uint32_t hi; };
 
-// ?Current@Time@Kernel@Housemarque@@SI?AV123@XZ — static __fastcall, returns
-// the Time by value through a hidden return slot passed in ecx (verified by
-// disasm: `mov esi, ecx; ... mov [esi], eax; mov [esi+4], edx; mov eax, esi`).
+// ?Current@Time@Kernel@Housemarque@@SI?AV123@XZ: static __fastcall, returns
+// the Time through a hidden return slot in ecx.
 using KernelTimeCurrentFn = KernelTime*(__fastcall*)(KernelTime* out, void* edx_unused);
 
 struct GameAddresses {
@@ -70,20 +67,15 @@ struct GameAddresses {
     }
 
     // Patterns must not contain absolute-address immediates: Supreme_Game,
-    // HMG_Cetsup_Win32 and SR_UIT all prefer ImageBase 0x10000000 and are
-    // always relocated, so any imm32 the loader fixes up differs from the
-    // on-disk bytes. Use ValidateCodeAbs for those.
+    // HMG_Cetsup_Win32 and SR_UIT are always relocated. Use ValidateCodeAbs for those.
     template <size_t N>
     static bool ValidateCode(const char* label, const std::uint8_t* address,
                              const std::uint8_t (&expected)[N]) {
         return ValidateCodeBytes(label, address, expected, N);
     }
 
-    // Compare live code whose imm32 at `AbsOffset` is an absolute address the
-    // loader rebases. `expected` holds the on-disk bytes; the immediate is
-    // rewritten to `moduleBase + absRva` before comparing, so the check holds
-    // wherever the module landed. (Verified against the .reloc tables: each of
-    // these sites carries a HIGHLOW fixup at +3.)
+    // Compare live code whose imm32 at `AbsOffset` is a relocated absolute
+    // address: it is rewritten to `moduleBase + absRva` before comparing.
     template <size_t AbsOffset, size_t N>
     static bool ValidateCodeAbs(const char* label, const std::uint8_t* address,
                                 const std::uint8_t (&expected)[N],
@@ -96,12 +88,9 @@ struct GameAddresses {
         return ValidateCodeBytes(label, address, rebased, N);
     }
 
-    // Like ValidateCode, but also accepts a relative JMP (E9) at the site.
-    // Display_Config_Helper is injected BEFORE this DLL (handlePlay.ts) and
-    // inline-hooks the two HMG key handlers for its F5 debounce, so on a normal
-    // launch those sites already start with a JMP. The module identity check
-    // still proves which image this is, and SafetyHook chains onto the
-    // existing hook.
+    // Like ValidateCode, but also accepts a JMP (E9): Display_Config_Helper is
+    // injected first and inline-hooks the two HMG key handlers for its F5
+    // debounce. SafetyHook chains onto that hook.
     template <size_t N>
     static bool ValidateCodeOrHooked(const char* label, const std::uint8_t* address,
                                      const std::uint8_t (&expected)[N]) {
@@ -113,48 +102,38 @@ struct GameAddresses {
         return ValidateCodeBytes(label, address, expected, N);
     }
 
-    // Module bases
     HMODULE exe = nullptr;   // Supreme.exe
     HMODULE sg = nullptr;    // Supreme_Game.dll
     HMODULE hmg = nullptr;   // HMG_Cetsup_Win32.dll
     HMODULE kernel = nullptr; // HMG_Kernel.dll
 
-    // HMG_Kernel.dll: Kernel::Time::Current() — the game's own clock. Used to
-    // stamp injected BB3B10 input events with a genuinely-current timestamp
-    // (exactly what a real keypress carries), so injection is never discarded
-    // as stale. nullptr = export missing (fall back to calibrated arg4).
+    // Stamps injected BB3B10 events like a real keypress. nullptr = export
+    // missing (fall back to calibrated arg4).
     KernelTimeCurrentFn time_current = nullptr;
 
-    // Supreme.exe offsets
     std::uint8_t* tick_cave_site = nullptr;     // exe+0x25C81: after ftol+mov esi,eax (tick override)
     std::uint8_t* f5_accept_site = nullptr; // exe+0x25C3F: F5 down and accepted, restart call next
     std::uint8_t* launch_site = nullptr;    // exe+0x25BD7: race loop entered the level, game mode set
     std::uint8_t* pump_site = nullptr;      // exe+0x55920: the game's message pump (runs in every state)
 
-    // Supreme_Game.dll offsets
     std::uint8_t* cycle_cave_site = nullptr;     // SG+0x13FE40: Supreme::Cycle
     std::uint8_t* replay_capture_site = nullptr; // SG+0x9E8F0: replay object capture
     std::uint8_t* f5_done_site = nullptr;   // SG+0x14199F: Set_Game_Mode's mode init returned
     std::uint8_t* stop_site = nullptr;      // SG+0x1408F0: Supreme::Stop (the race is being left)
     std::uint8_t* player_base = nullptr;    // SG+0x1D5450: root pointer
-    // Live vtable addresses (SG base + RVA) the replay-capture hook classifies
-    // recorder owners with; 0 until Resolve validated the constructor sites.
+    // Live vtables the replay-capture hook classifies recorder owners with;
+    // 0 until Resolve validated the constructor sites.
     std::uint32_t player_vtable = 0;
     std::uint32_t ghost_vtable = 0;
-    // SG+0x1D3304: pointer to the CURRENT level's resource path string. The
-    // string changes the instant a level loads, which is the level-change
-    // event. Reliable for area, not difficulty: some tracks share the easy/
-    // asset, so Village Hard reads ".../Tracks/easy/...". Difficulty comes from
-    // the selected-track config object (setup_config_parse.hpp).
+    // SG+0x1D3304: pointer to the current level's resource path. Reliable for
+    // area, not difficulty: Village Hard reads ".../Tracks/easy/...".
     std::uint8_t* level_path_ptr = nullptr;
 
-    // HMG_Cetsup_Win32.dll offsets
     std::uint8_t* key_down_site = nullptr;    // HMG+0x3940: key handler (down)
     std::uint8_t* key_up_site = nullptr;      // HMG+0x3980: key handler (up)
     std::uint8_t* bb3b10 = nullptr;         // HMG+0x3B10: BB3B10 observer
 
-    // Game key codes: the DI-buffer index and the keyIndex BB3B10 broadcasts
-    // to the observers are the same value.
+    // Game key codes: both the DI-buffer index and BB3B10's keyIndex.
     static constexpr uint32_t KEY_UP     = 0x38;
     static constexpr uint32_t KEY_DOWN   = 0x39;
     static constexpr uint32_t KEY_LEFT   = 0x3A;
@@ -164,65 +143,49 @@ struct GameAddresses {
     static constexpr uint32_t KEY_SHIFT  = 0x24;  // SHIFT
     static constexpr uint32_t KEY_SHIFT2 = 0x25;  // LSHIFT (duplicate)
     static constexpr uint32_t KEY_F5     = 0x58;  // restart race
-    // ESC (VK 0x1B). The pause menu listens for it through the BB3B10 observer
-    // broadcast, so the REC-mode observer block must exempt it.
+    // The pause menu hears ESC through the BB3B10 broadcast, so the REC-mode
+    // observer block must exempt it.
     static constexpr uint32_t KEY_ESC    = 0x48;
 
-    // Pointer chain: root = [SG+1D5450], kbobj = [root+530], buffer = [kbobj+30]
+    // root = [SG+1D5450], kbobj = [root+530], buffer = [kbobj+30]
     static constexpr uint32_t ROOT_PTR_OFFSET = 0x1D5450;
     static constexpr uint32_t LEVEL_PATH_PTR_OFFSET = 0x1D3304;
     static constexpr uint32_t KEYBOARD_OBJ_OFFSET = 0x530;
     static constexpr uint32_t DI_BUFFER_PTR_OFFSET = 0x30;
-    // kbobj is a 0x38-byte Win32_Keyboard (HMG_Cetsup_Win32 operator_new(0x38)).
-    // The 256-byte buffer at +0x30 is the only key state the DLL writes; it is
-    // what the game's key polls read (Win32_Keyboard::State).
+    // kbobj is a 0x38-byte Win32_Keyboard. The 256-byte buffer at +0x30 is the
+    // only key state the DLL writes; Win32_Keyboard::State reads it.
 
-    // Replay object: player ptr at [replayObj+0x84]
     static constexpr uint32_t REPLAY_PLAYER_OFFSET = 0x84;
-    // Human-player identity (RTTI): the rider the keyboard drives in a race is
-    // a plain `Player` (the base class, vtable below); Time Attack ghosts / the
-    // guide are `Ghost_Player`, computer riders `AI_Player`, network riders
-    // `Net_Player` - each with its own vtable. The player links back to its
-    // recorder at +0x14C (decompile param_1[0x53]); the replay-capture hook
-    // adopts a recorder only if its owner is a Player that still points at it
-    // (see replay_identity.hpp). Both vtable RVAs are validated against the
-    // constructors' `mov [this], offset vtable` immediates in Resolve.
-    // Rider identity (live object-graph dump). The Player's
-    // loadout object ([player+0x20], no RTTI) holds MSVC6 std::strings
-    // ({allocator, char* ptr, size, capacity} = 16 bytes each): the character
-    // folder at +0x10 ("vincent"), the character config path at +0x30
-    // ("data/characters/vincent/plrcnf.txt"), the board config path at +0x60
-    // ("data/boards/board_1/boardcnf.txt" - the board does not affect the
-    // physics, not published), plus a word at +0x20 whose low half flips
-    // with the stance (published raw). The Player_Config ([player+0x48],
-    // RTTI Player_Config) carries the display name as a std::string at +0x48
-    // ("Vincent").
+    // The human rider is a plain `Player`; ghosts are `Ghost_Player`, others
+    // `AI_Player` / `Net_Player`. A Player links back to its recorder at +0x14C
+    // (see replay_identity.hpp). Resolve validates both vtable RVAs against the
+    // constructors' `mov [this], offset vtable`.
+    // Loadout object [player+0x20] (no RTTI) holds MSVC6 std::strings
+    // ({allocator, ptr, size, capacity}, 16 bytes): character folder at +0x10
+    // ("vincent"), character config path at +0x30, board config path at +0x60
+    // (no effect on physics). Player_Config [player+0x48] has the display name
+    // at +0x48 ("Vincent").
     static constexpr uint32_t PLAYER_LOADOUT_OFFSET = 0x20;
     static constexpr uint32_t PLAYER_CONFIG_OFFSET = 0x48;
     static constexpr uint32_t LOADOUT_FOLDER_STRING = 0x10;
     static constexpr uint32_t PLAYER_CONFIG_NAME_STRING = 0x48;
     static constexpr uint32_t MSVC6_STRING_PTR = 0x4;
     static constexpr uint32_t MSVC6_STRING_SIZE = 0x8;
-    // Stance and the authoritative selected area/difficulty live in the game
-    // config object read by setup_object.hpp. Its independently testable chain
-    // and field offsets are kept in setup_config_parse.hpp.
+    // Stance, area and difficulty come from the setup object (setup_object.hpp).
     static constexpr uint32_t PLAYER_VTABLE_RVA = 0x169E10;        // .?AVPlayer@Supreme_Snowboarding@Housemarque@@
     static constexpr uint32_t GHOST_PLAYER_VTABLE_RVA = 0x169B74;  // .?AVGhost_Player@...
-    // Player position offsets
     static constexpr uint32_t PLAYER_X = 0xF8;
     static constexpr uint32_t PLAYER_Y = 0xFC;
     static constexpr uint32_t PLAYER_Z = 0x100;
 
-    // Fallback Time.hi for injected BB3B10 calls when Kernel::Time::Current is
-    // unavailable: what the real key handler passes for a steering key (live
-    // capture). A stale stamp is discarded by the observer, which turns the
-    // injected call into a silent no-op.
+    // Fallback Time.hi when Kernel::Time::Current is unavailable: what a real
+    // steering keypress passed in a live capture.
     static constexpr uint32_t BB3B10_ARG4 = 0x96;
-    // BB3B10 this pointer offset from keyboard object
+    // BB3B10's this = kbobj + 0x18.
     static constexpr uint32_t BB3B10_THIS_OFFSET = 0x18;
 
     bool Resolve() {
-        exe = GetModuleHandleA(nullptr);  // Supreme.exe (main executable)
+        exe = GetModuleHandleA(nullptr);
         sg = GetModuleHandleA("Supreme_Game.dll");
         hmg = GetModuleHandleA("HMG_Cetsup_Win32.dll");
         kernel = GetModuleHandleA("HMG_Kernel.dll");
@@ -231,9 +194,7 @@ struct GameAddresses {
         if (!sg) { Log("ERROR: Supreme_Game.dll not loaded"); return false; }
         if (!hmg) { Log("ERROR: HMG_Cetsup_Win32.dll not loaded"); return false; }
 
-        // Every address below is a fixed RVA for the stock v1.035 image. Refuse
-        // to patch a merely-similar process: a different executable or DLL build
-        // can put unrelated instructions at the same offsets.
+        // Refuse any other build: the RVAs below are for v1.035 only.
         static constexpr ModuleIdentity kExeIdentity{
             "Supreme.exe v1.035", 0x381DA4A3u, 0x0008A000u
         };
@@ -249,8 +210,7 @@ struct GameAddresses {
             return false;
         }
 
-        // Kernel::Time::Current — non-fatal if missing (injection falls back
-        // to the keypress-calibrated arg4), but it should always resolve.
+        // Non-fatal if missing: injection falls back to the calibrated arg4.
         if (kernel) {
             time_current = (KernelTimeCurrentFn)GetProcAddress(
                 kernel, "?Current@Time@Kernel@Housemarque@@SI?AV123@XZ");
@@ -264,13 +224,11 @@ struct GameAddresses {
         auto sgBase = (std::uint8_t*)sg;
         auto hmgBase = (std::uint8_t*)hmg;
 
-        // Supreme.exe offsets
         tick_cave_site = exeBase + 0x25C81;
         f5_accept_site = exeBase + 0x25C3F;
         launch_site = exeBase + 0x25BD7;
         pump_site = exeBase + 0x55920;
 
-        // Supreme_Game.dll offsets
         cycle_cave_site = sgBase + 0x13FE40;
         replay_capture_site = sgBase + 0x9E8F0;
         f5_done_site = sgBase + 0x14199F;
@@ -278,16 +236,13 @@ struct GameAddresses {
         player_base = sgBase + ROOT_PTR_OFFSET;
         level_path_ptr = sgBase + GameAddresses::LEVEL_PATH_PTR_OFFSET;
 
-        // HMG_Cetsup_Win32.dll offsets
         key_down_site = hmgBase + 0x3940;
         key_up_site = hmgBase + 0x3980;
         bb3b10 = hmgBase + 0x3B10;
 
-        // Verify every REQUIRED code target before installing ANY hook. Module
-        // metadata catches different releases; these signatures also catch a
-        // locally-modified image of the supported release. Optional features
-        // (race timer) validate their own sites and degrade instead of failing
-        // initialization. All bytes are the on-disk form.
+        // Verify every required hook site before installing any hook; this also
+        // catches a locally modified v1.035 image. Optional features validate
+        // their own sites. All bytes are the on-disk form.
         static constexpr uint8_t kTickCave[] =                       // cmp esi,0x14; mov [esp+0x3C],esi
             { 0x83, 0xFE, 0x14, 0x89, 0x74, 0x24, 0x3C };
         static constexpr uint8_t kCycleCave[] =                       // push ebp; mov ebp,esp; push -1; push (SEH)

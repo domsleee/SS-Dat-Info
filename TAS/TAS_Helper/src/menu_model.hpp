@@ -1,9 +1,7 @@
 #pragma once
-// The MENU MODEL - pure logic shared by the DLL (caves/menu_cave.hpp) and the
-// unit tests (tests/test_menu_model.cpp): the item snapshot, the JSON document
-// an agent reads, and the target matching a command uses. No Windows headers
-// and no allocation (the DLL builds the document inside a hook); no game
-// pointer is dereferenced here (menu_cave.hpp fills the snapshot).
+// Menu model: pure logic shared by caves/menu_cave.hpp and
+// tests/test_menu_model.cpp. No allocation: the DLL builds the document
+// inside a hook.
 #include <cstdint>
 
 namespace menumodel {
@@ -19,7 +17,7 @@ bool UnobscuredMenu(uint32_t page, uint32_t container, GetModal get_modal) {
 }
 
 struct MenuItem {
-    uint32_t comp = 0;              // the UI_Component - valid for THIS visit of the page only
+    uint32_t comp = 0;              // the UI_Component; valid for this visit of the page only
     char name[kNameMax] = {};       // UI_Component name (+0x10): the stable id; may be empty
     char label[kLabelMax] = {};     // the button's text line text (what the screen shows)
     uint8_t enabled = 0, visible = 0, focused = 0;
@@ -83,9 +81,8 @@ struct TextWriter {
 };
 
 // {"screen":..,"sel":N|null,"items":[{"label":..,"id":..,"en":b,"vis":b},..]}
-// written into out[cap]. Returns the length: 0 (and an empty out) when there
-// is no menu (empty screen) or the document does not fit - never a cut-off
-// document.
+// Returns the length, or 0 with an empty out when there is no screen or the
+// document does not fit.
 inline uint32_t BuildDoc(const MenuSnapshot& s, const char* screen, char* out, uint32_t cap) {
     if (cap == 0) return 0;
     out[0] = 0;
@@ -119,10 +116,8 @@ inline uint32_t BuildDoc(const MenuSnapshot& s, const char* screen, char* out, u
     return w.len;
 }
 
-// Which item a command names. The stable id wins (case-insensitively); then
-// the visible label, case-insensitively. A target shaped like an id ("ID_...")
-// never falls back to a label, an empty target matches nothing (some buttons
-// have no id), and there is no prefix matching. Returns the index or -1.
+// Index of the item a command names, or -1. Matches the id, then the label,
+// case-insensitively; an "ID_..." target never falls back to a label.
 inline int FindTarget(const MenuSnapshot& s, const char* target) {
     if (!target || !target[0]) return -1;
     for (uint32_t i = 0; i < s.count; i++)

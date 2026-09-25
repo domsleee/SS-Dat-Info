@@ -3,19 +3,13 @@
 #include <cstring>
 #include <safetyhook.hpp>
 
-// Every mid-hook body runs between FSAVE and FRSTOR.
+// Every mid-hook body runs between FSAVE and FRSTOR, because SafetyHook saves
+// the general registers but not the x87 state (DESIGN.md "Pitfalls"). Always
+// install through CreateMidHook.
 //
-// SafetyHook mid-hooks save the general registers but not the x87 state, and a
-// mid-hook can sit in the middle of the game's physics with live values on the
-// FPU stack. A float, a formatted log line or a CRT conversion inside the hook
-// would silently change them, and replays would stop matching with nothing
-// crashing. So no hook installs its callback directly: CreateMidHook wraps it.
-//
-// FSAVE re-initialises the FPU (control word 0x037F, 64-bit precision), so code
-// inside a hook runs at that precision; FRSTOR puts the game's own state back.
-// The game's control word at the hook is kept in g_hookFpuControlWord for the
-// one reader that needs it (the cycle cave publishes the physics precision from inside
-// its body, so the value is always the current call's).
+// FSAVE re-initialises the FPU (control word 0x037F, 64-bit precision), so hook
+// bodies run at that precision. g_hookFpuControlWord holds the game's control
+// word for the current call.
 inline volatile uint16_t g_hookFpuControlWord = 0;
 
 template <void (*Body)(SafetyHookContext&)>

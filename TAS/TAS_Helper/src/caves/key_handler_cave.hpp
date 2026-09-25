@@ -6,21 +6,14 @@
 #include "../input_gate.hpp"
 #include <safetyhook.hpp>
 
-// The key-handler cave: Handler gate hooks at HMG+3940 (keyDown) and HMG+3980 (keyUp).
-//
-// During REC (mode=1) and PLAY (mode=2): blocks external handler calls
-//   unless the current thread is inside the cycle cave's injection scope.
-//   Symmetric blocking ensures +3940 never writes the buffer outside the cycle cave,
-//   eliminating the one-frame timing difference between REC and PLAY.
-// During IDLE (mode=0): passes through.
-//
-// Uses SafetyHookInline so we can skip the original function entirely when blocking.
-// The handlers are __thiscall with 3 stack args (ret 000C).
-// Detours use __fastcall with dummy EDX to emulate thiscall calling convention.
+// The key-handler cave: inline hooks on HMG+3940 (keyDown) and HMG+3980 (keyUp).
+// During REC and PLAY, real key events are blocked (input_gate.hpp) so only the
+// cycle cave writes the buffer, and REC and PLAY see input on the same tick.
+// The handlers are __thiscall with 3 stack args (ret 000C); the __fastcall
+// detours take a dummy EDX.
 
 inline TasSharedState* g_keyHandlerCaveState = nullptr;
 
-// Inline hooks for keyDown (+3940) and keyUp (+3980)
 static SafetyHookInline keyDownHook{};
 static SafetyHookInline keyUpHook{};
 
@@ -31,24 +24,13 @@ inline void UninstallKeyHandlerCave() {
     g_keyHandlerCaveState = nullptr;
 }
 
-// Handler signature emulated via __fastcall:
-//   ecx = this, edx = unused, stack: arg1, arg2, arg3
+// a1 = Win32 VK (wParam), a3 = Kernel::Time.hi of the event stamp.
 void __fastcall KeyDown_Detour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
     auto* s = g_keyHandlerCaveState;
-    // Block external handler during REC and PLAY (symmetric).
-    // The cycle cave writes the buffer and calls BB3B10 directly in both modes.
-    // Only pass through on the cycle cave's injection thread or when mode is IDLE.
-    // Fallback calibration: a3 is the hi dword of the Kernel::Time the event
-    // was stamped with (the handler forwards its Time args verbatim to
-    // BB3B10). Injection normally stamps with Kernel::Time::Current() and
-    // never reads this; the observed value only backs up injection if that
-    // export ever fails to resolve.
+    // Calibrate the fallback stamp (see g_bb3b10Arg4).
     if (s && !IsTasInjectionThread() && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
         g_bb3b10Arg4 = a3;
     }
-    // Gate the real key event (policy in input_gate.hpp, unit-tested). ESC
-    // always passes: it is not a gameplay key, and the pause menu needs it
-    // during REC. a1 is the Win32 VK (the dispatcher forwards wParam).
     if (s && ShouldBlockRealInput({
             s->mode,
             s->cont_suppress_input != 0,
@@ -64,12 +46,10 @@ void __fastcall KeyDown_Detour(void* ecx, void* edx, uint32_t a1, uint32_t a2, u
 
 void __fastcall KeyUp_Detour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
     auto* s = g_keyHandlerCaveState;
-    // Keep the fallback arg4 fresh from real keyUp calls too (see DownDetour).
     if (s && !IsTasInjectionThread() && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
         g_bb3b10Arg4 = a3;
     }
-    // Same gate policy as DownDetour. A release during a CONT is blocked too,
-    // or a press blocked on the way down would land an unbalanced up event.
+    // Releases are gated too, so a blocked press never gets an unbalanced up.
     if (s && ShouldBlockRealInput({
             s->mode,
             s->cont_suppress_input != 0,
@@ -103,8 +83,7 @@ bool InstallKeyHandlerCave(GameAddresses& addr, TasSharedState* state) {
     keyUpHook = safetyhook::create_inline(addr.key_up_site, KeyUp_Detour);
     if (!keyUpHook) {
         Log("Key-handler cave: SafetyHook create_inline FAILED on keyUp (+3980)");
-        // All-or-none: leaving keyDown intercepted without the matching keyUp
-        // path creates stuck/asymmetric input while key_handler_cave_hooked still says no.
+        // All or none: keyDown hooked without keyUp would leave keys stuck.
         UninstallKeyHandlerCave();
         return false;
     }

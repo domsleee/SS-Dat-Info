@@ -6,50 +6,34 @@
 #include "../game_addresses.hpp"
 #include "../fpu_safe_hook.hpp"
 
-// The tick cave: Fixed tick override with variable speed via time-advance scaling.
-// Hook at Supreme.exe+25C81 (after __ftol call and mov esi, eax).
+// The tick cave: per-frame tick count and playback speed.
+// Hook at Supreme.exe+25C81, after the __ftol call and `mov esi, eax`.
+// ESI = ticks owed this frame (garbage for large floats); the game's next
+// instruction is `cmp esi, 14h` (clamp to 20).
 //
-// At this point:
-//   ESI = tick count from __ftol (may be garbage for large floats)
-//   Game's next instruction: cmp esi, 14h; ja -> mov esi, 14h (clamp to 20)
-//
-// Speed scaling:
-//   Each frame the game owes (now - its clock) * 100 ticks and advances its
-//   clock by ticks * per-tick advance, where the advance (EXE+0x46DB08) is
-//   normally 0.01 (= 1/100 s). Scaling it by
-//   1/speed changes how fast the game consumes wall time:
-//     - 0.25x speed: per_tick = 0.04 → 25 ticks/s
-//     - 2.0x speed:  per_tick = 0.005 → 200 ticks/s
-//   Scaling ESI directly does nothing: the game recomputes ticks from the
-//   accumulated wall time on the next frame.
-//
-// Priority:
-//   1. playback_speed != 1.0: write 0.01/speed to the per-tick advance
-//   2. Otherwise: clamp to [0, 20] (fix __ftol garbage)
+// Each frame the game owes (now - its clock) * 100 ticks and advances its
+// clock by ticks * per-tick advance (EXE+0x46DB08, normally 0.01 s). Scaling
+// the advance by 1/speed sets the speed (0.005 = 2x). Scaling ESI does
+// nothing: the next frame recomputes it from wall time. See DESIGN.md
+// "Speed control".
 
 inline TasSharedState* g_tickCaveState = nullptr;
 static SafetyHookMid tickCaveHook{};
 
-// Pointer to the game's per-tick time advance constant (EXE + 0x46DB08).
-// VirtualProtect'd to PAGE_READWRITE during init so we can write it.
+// The advance the tick cave writes: g_privateTickAdvance, or the game's
+// constant in the fallback.
 static float* g_tickAdvancePtr = nullptr;
 
-// The per-tick time advance is ONE read-only float at EXE+0x46DB08, read by
-// sixteen `fmul dword ptr [0x46db08]` instructions: four in the game cycle
-// this cave hooks, twelve in the menu (Menu::Paint derives its animation dt
-// from it). The tick cave is not called while the menu is up, so a scaled value left
-// in the shared constant would run the menu video fast.
-//
-// So the four in-game readers are pointed at this private copy and the game's
-// constant is never written. The operand is a 4-byte absolute address inside
-// a 6-byte instruction, so this is a same-length rewrite: no relocation, no
-// trampoline.
-// inline, NOT static: the patched instructions hold ONE fixed address, so a
-// per-translation-unit copy would make the tick cave update a different object.
+// EXE+0x46DB08 is read by sixteen `fmul dword ptr [0x46db08]`: four in the
+// game cycle, twelve in the menu (Menu::Paint's animation dt). The tick cave
+// doesn't run in the menu, so a scaled shared value would run the menu video
+// fast. The four in-game operands are pointed here instead (same-length
+// rewrite of a 4-byte absolute address).
+// inline, not static: the patched instructions hold one fixed address.
 inline float g_privateTickAdvance = 0.01f;
 
-// RVAs of the 4-byte operand inside each in-game `fmul dword ptr [0x46db08]`
-// (the instruction itself starts 2 bytes earlier):
+// RVAs of the operand in each in-game fmul (the instruction starts 2 bytes
+// earlier):
 //   +0x25CE0  fmul -> per-tick timestamp offset   (i * advance)
 //   +0x25D89  fmul -> Time::Add(clock,  ticks_run * advance)
 //   +0x25DB2  fmul -> Time::Add(clock2, ticks_demanded * advance)
@@ -59,18 +43,10 @@ static constexpr uint32_t TICK_ADVANCE_OPERANDS[] = {
     0x25CE2, 0x25D8B, 0x25DB4, 0x25E2D,
 };
 
-// Tracks the ORIGINAL protection of every .text page InstallTickCave opens, so it
-// can hand each one back exactly as it found it.
-//
-// One shared record for ALL of the tick cave's code patches, because they overlap:
-// three of the four fmul operands and the `cmp esi,14h` clamp byte all live on
-// page 0x425000. VirtualProtect reports the protection AT THE TIME OF THE CALL,
-// so the second call on a page reports back the PAGE_EXECUTE_READWRITE the first
-// one installed — only the first observation of a page is the truth.
-//
-// Restoring properly matters: PAGE_READWRITE drops EXECUTE, and a code page
-// left that way only survives because a 1999 binary has no /NXCOMPAT bit and
-// so runs with DEP off.
+// Original protection of every .text page the tick cave patches, recorded on
+// first sight. Shared by all patches because they overlap: three fmul operands
+// and the clamp byte are on page 0x425000, and a second VirtualProtect there
+// would report our own RWX as the "old" protection.
 struct TickCaveCodePages {
     static constexpr size_t kMax = 8;
     uintptr_t base[kMax] = {};
@@ -87,8 +63,7 @@ struct TickCaveCodePages {
         return pageSize;
     }
 
-    // Make [addr, addr+len) writable+executable, remembering each page's
-    // protection the first time we see it.
+    // Make [addr, addr+len) RWX.
     bool Open(void* addr, size_t len) {
         const size_t ps = PageSize();
         uintptr_t first = (uintptr_t)addr & ~(uintptr_t)(ps - 1);
@@ -124,43 +99,29 @@ struct TickCaveCodePages {
 
 inline TickCaveCodePages g_tickCaveCodePages{};
 
-// Set once the operand redirect is actually live, so UninstallTickCave knows
-// whether there is anything to undo. The patched instructions hold the absolute
-// address of a float inside THIS DLL: if the DLL were ever unloaded without
-// putting the original operand back, four instructions in the game's hot loop
-// would dereference freed memory on the very next frame.
+// The redirected operands point into this DLL, so they must be restored
+// before it could unload.
 inline bool g_tickCaveRedirectApplied = false;
 inline uint8_t* g_tickCaveExeBase = nullptr;
 inline bool g_tickCaveClampApplied = false;
 inline bool g_tickAdvanceProtectionChanged = false;
 inline DWORD g_tickAdvanceOriginalProtect = 0;
 
-// Documented default per-tick time advance — used only as a fallback if we
-// somehow can't read the live value during init.
 static constexpr float TICK_ADVANCE_DEFAULT = 0.01f;
 
-// The game's own time advance, read at install before anything writes it. 1x
-// and OFF restore this value rather than a hardcoded 0.01, so a build with a
-// different advance keeps its native speed.
+// The game's own advance, read at install. 1x and OFF restore this.
 static float g_nativeTickAdvance = TICK_ADVANCE_DEFAULT;
 
-// Per-frame tick ceiling after raising the game's clamp (native: esi capped
-// at 0x14 = 20; the bytes are patched at install time). Above 64 the per-frame
-// game overhead dominates, and higher values made 64x playback less reliable.
+// Per-frame tick ceiling after raising the game's clamp from 20. Above 64 the
+// per-frame overhead dominates.
 static constexpr int32_t TICK_CAVE_PER_FRAME_CAP = 64;
 
-// Original game clamp value (cmp esi, 14h). The tick cave enforces this in software
-// during normal 1× gameplay so the game's defensive smooth-catchup behaviour
-// is preserved — the larger TICK_CAVE_PER_FRAME_CAP only kicks in for
-// scripted fast-forward (playback_speed > 1) or the catchup-drain path.
+// The game's own clamp (cmp esi, 14h), still enforced at 1x and below so
+// normal play behaves like the unpatched game.
 static constexpr int32_t NATIVE_GAME_CLAMP_AT_1X = 20;
 
-// The helpers below run inside TickCave_Callback, between CreateMidHook's FSAVE and FRSTOR.
-
-// Was the engine frozen (dialog, menu, load) since the last call? A
-// backlog after a freeze is wall-clock debt and is dropped at ANY
-// speed. CONT catch-up is not a freeze: the tick cave runs every frame there,
-// so the gap stays ~7-16 ms.
+// Was the engine frozen (dialog, menu, load) since the last call? The backlog
+// after a freeze is dropped at any speed. CONT catch-up is not a freeze.
 static bool ResumedFromFreeze() {
     static uint32_t s_lastRunMs = 0;
     uint32_t nowMs = GetTickCount();
@@ -170,15 +131,9 @@ static bool ResumedFromFreeze() {
     return resumed_from_freeze;
 }
 
-// PARK: the aligned-CONT splice interlock (an unaligned CONT,
-// gate_align_rec == 0, never waits for approval). The splice is destructive
-// (truncates recorded_count, flips PLAY to REC) and the watcher that
-// validates the prefix runs in the controller process, which can lag.
-// So from the moment playback reaches its splice, emit ZERO ticks
-// until the controller writes cont_splice_approved. The sim and
-// playback_pos freeze while the renderer keeps presenting. If the
-// controller dies while parked, STOP or RESTART clears the alignment
-// and lifts the park.
+// Aligned-CONT splice interlock: once playback reaches the splice, emit zero
+// ticks until the controller's watcher sets cont_splice_approved. The splice
+// is destructive and the watcher can lag. STOP or RESTART lifts the park.
 static bool IsSpliceParked(TasSharedState* s) {
     bool splice_parked = false;
     if (s->continue_from_frame > 0 && s->mode == MODE_PLAY
@@ -190,10 +145,8 @@ static bool IsSpliceParked(TasSharedState* s) {
     return splice_parked;
 }
 
-// Land the catch-up batch EXACTLY on the splice, so the PLAY→REC
-// switch happens on the batch's last tick and no catch-up tick spills
-// into REC. While the splice is still pending on the live gate, step
-// one tick per frame near the gate (ContinueSpliceTickLimit).
+// End the catch-up batch exactly on the splice so no catch-up tick spills
+// into REC.
 static int32_t LimitTicksToSplice(TasSharedState* s, int32_t realTick) {
     uint32_t aligned_splice = GateAlignedSplicePos(
         s->continue_from_frame, s->gate_index, s->gate_align_rec);
@@ -207,41 +160,31 @@ static int32_t LimitTicksToSplice(TasSharedState* s, int32_t realTick) {
     return realTick;
 }
 
-// Choose this frame's tick count (esi).
 static void ChooseTickCount(SafetyHookContext& ctx, TasSharedState* s, int32_t realTick,
                             bool catchup_drain, bool splice_parked) {
     if (catchup_drain) {
-        // Set tick_advance large enough that 1 tick drains the whole
-        // wall-time gap (gap ≈ realTick * native because __ftol used
-        // tick_advance = native last frame).
+        // One tick drains the whole wall-time gap.
         if (g_tickAdvancePtr) {
             *g_tickAdvancePtr = (float)realTick * g_nativeTickAdvance;
         }
         ctx.esi = 1;
     } else {
-        // Clamp raw tick first (fix __ftol garbage). The game's own
-        // clamp (cmp esi, 14h / mov ebx, 14h) is patched at install
-        // time to use 40h instead, so we match that here.
+        // Clamp __ftol garbage to the patched cap.
         if (realTick < 0) realTick = 0;
         if (realTick > TICK_CAVE_PER_FRAME_CAP) realTick = TICK_CAVE_PER_FRAME_CAP;
 
-        // At 1x and below keep the game's native 20-tick clamp, so normal
-        // play behaves like the unpatched game when it stutters; only
-        // fast-forward gets the raised cap.
         if (s->playback_speed <= 1.0f && realTick > NATIVE_GAME_CLAMP_AT_1X) {
             realTick = NATIVE_GAME_CLAMP_AT_1X;
         }
 
-        if (splice_parked) realTick = 0;  // hold AT the splice until approved
+        if (splice_parked) realTick = 0;
 
         ctx.esi = (uintptr_t)realTick;
     }
 }
 
-// Variable speed: scale the time advance only during REC/PLAY at a
-// non-1x speed; otherwise write the native value back every frame.
-// Skipped during catchup_drain, whose large value the game must read
-// this frame.
+// Scale the advance during REC/PLAY at a non-1x speed, otherwise restore the
+// native value. Skipped on a catch-up drain frame, which set its own value.
 static void ApplyPlaybackSpeed(TasSharedState* s, bool catchup_drain) {
     if (g_tickAdvancePtr && !catchup_drain) {
         if (s->mode != MODE_OFF && s->playback_speed > 0.0f && s->playback_speed != 1.0f) {
@@ -252,14 +195,8 @@ static void ApplyPlaybackSpeed(TasSharedState* s, bool catchup_drain) {
     }
 }
 
-// Publish the per-frame tick count: the only external signal of how fast
-// the game is SIMULATING rather than rendering, which is exactly what a
-// fast-forward regression changes and a frame counter cannot see.
-//
-// Count what the game will actually RUN, not what we asked for: the tick
-// loop bounds itself with ebx, which the clamp caps at TICK_CAVE_PER_FRAME_CAP.
-// esi above that is demand the game discards, and counting it would
-// overstate the rate.
+// Publish the ticks simulated (not rendered frames). Counts what the game
+// runs: its loop is bounded by ebx, capped at TICK_CAVE_PER_FRAME_CAP.
 static void PublishTickCount(SafetyHookContext& ctx) {
     if (auto* sp = g_tickCaveState) {
         uint32_t emitted = (uint32_t)ctx.esi;
@@ -270,18 +207,14 @@ static void PublishTickCount(SafetyHookContext& ctx) {
     }
 }
 
-// Installed through CreateMidHook (FSAVE/FRSTOR around the body).
 static void TickCave_Callback(SafetyHookContext& ctx) {
     auto* s = g_tickCaveState;
     if (s) {
         int32_t realTick = (int32_t)ctx.esi;
 
-        // Pause-resume catch-up: after a pause (Escape, the end-of-run "save
-        // replay" dialog) __ftol hands the physics loop the whole wall-time
-        // gap as ticks (a 20 s pause = 2000). The native clamp only spreads
-        // that burst over many frames, a visible ~2x speedup. Instead, set
-        // this frame's tick_advance to realTick * native so ONE physics tick
-        // consumes the whole gap. Fires in any mode at 1x, and at any speed
+        // After a pause, __ftol hands over the whole gap as ticks (20 s =
+        // 2000), which the native clamp spreads into a visible speedup.
+        // Drain it in one tick instead: at 1x in any mode, or at any speed
         // after an engine freeze.
         const int32_t CATCHUP_THRESHOLD = 50;
 
@@ -291,7 +224,7 @@ static void TickCave_Callback(SafetyHookContext& ctx) {
 
         bool catchup_drain =
             realTick > CATCHUP_THRESHOLD
-            && !splice_parked  // a parked splice must not leak a drain tick
+            && !splice_parked
             && (s->playback_speed == 1.0f || resumed_from_freeze);
 
         realTick = LimitTicksToSplice(s, realTick);
@@ -314,27 +247,16 @@ bool InstallTickCave(GameAddresses& addr, TasSharedState* state) {
 
     g_tickCaveState = state;
 
-    // Resolve the per-tick time advance constant at EXE+0x46DB08. This float
-    // controls how much game-time each physics tick consumes from the
-    // accumulator; scaling it gives variable speed playback.
     auto* exeBase = (uint8_t*)addr.exe;
     g_tickCaveExeBase = exeBase;
     g_tickAdvancePtr = (float*)(exeBase + 0x6DB08);
 
-    // Capture the native value before we ever modify the constant. The page
-    // is readable even before VirtualProtect (it's part of the loaded image),
-    // so this read is safe regardless of whether VirtualProtect succeeds.
     g_nativeTickAdvance = *g_tickAdvancePtr;
     Log(std::format("Tick cave: native tick advance constant = {}", g_nativeTickAdvance));
 
-    // Point the four in-game readers at our own float so that scaling it can
-    // never reach the menu.
-    //
-    // Verify EVERY site before writing ANY of them. A half-applied redirect is
-    // worse than none: the fallback below goes back to writing the game's shared
-    // constant, and any site already redirected would then be stuck reading a
-    // private float that nothing updates again - a frozen tick advance for part
-    // of the tick loop. All four or none.
+    // Redirect the four in-game readers, all or none: after a partial
+    // redirect the fallback would leave some sites reading a float nothing
+    // updates. kFmulTickAdvance = fmul dword ptr [0x46DB08].
     g_privateTickAdvance = g_nativeTickAdvance;
     static const uint8_t kFmulTickAdvance[6] = { 0xD8, 0x0D, 0x08, 0xDB, 0x46, 0x00 };
     bool redirected = true;
@@ -357,15 +279,9 @@ bool InstallTickCave(GameAddresses& addr, TasSharedState* state) {
         }
     }
 
-    // The game loop runs on another thread and may be executing these very
-    // instructions right now. The operands are unaligned (2/3/0/1 mod 4), so a
-    // plain store is not guaranteed to be observed as one write — and a torn
-    // value here is half of one address and half of another, i.e. a garbage
-    // pointer the fmul would dereference. A lock-prefixed exchange removes the
-    // question: MSVC emits `lock xchg`, which x86 performs atomically at any
-    // alignment (none of the four crosses a cache line). Every reader sees
-    // either the old address or the new one, and at this instant both hold
-    // 0.01, because g_privateTickAdvance was seeded from the game's own value.
+    // The game thread may be running these instructions. The operands are
+    // unaligned, so use a locked exchange, which is atomic at any alignment
+    // (none crosses a cache line). Old and new addresses hold the same value.
     if (redirected) {
         LONG target = (LONG)(uintptr_t)&g_privateTickAdvance;
         for (uint32_t rva : TICK_ADVANCE_OPERANDS) {
@@ -384,9 +300,8 @@ bool InstallTickCave(GameAddresses& addr, TasSharedState* state) {
         DWORD oldProtect = 0;
         if (!VirtualProtect(g_tickAdvancePtr, sizeof(float), PAGE_READWRITE, &oldProtect)) {
             Log(std::format("Tick cave: VirtualProtect on tick advance constant FAILED (err={})", GetLastError()));
-            // Non-fatal: speed scaling won't work but fixed tick still does.
-            // Drop the pointer, or the per-frame callback would write to the
-            // read-only page and fault on the game thread.
+            // Non-fatal: no speed scaling. Drop the pointer so the callback
+            // doesn't write to a read-only page.
             g_tickAdvancePtr = nullptr;
         } else {
             g_tickAdvanceOriginalProtect = oldProtect;
@@ -396,26 +311,17 @@ bool InstallTickCave(GameAddresses& addr, TasSharedState* state) {
         }
     }
 
-    // Raise the game's per-frame tick clamp from 14h (20) to 40h (64) so
-    // playback_speed > 12× actually delivers higher catch-up rates instead
-    // of being bottlenecked by the game's own cmp/clamp pair. Two bytes:
-    //   EXE+0x25C83: immediate of `cmp esi, 14h` (the comparison)
-    //   EXE+0x26001: immediate of `mov ebx, 14h`  (the clamp value)
-    // Patches must happen BEFORE installing the SafetyHook mid-hook —
-    // SafetyHook captures the bytes at the hook site into its trampoline,
-    // and we want that trampoline copy to use the bumped immediate.
+    // Raise the game's per-frame tick clamp from 14h (20) to 40h (64) so fast
+    // speeds aren't capped by it:
+    //   EXE+0x25C83: immediate of `cmp esi, 14h`
+    //   EXE+0x26001: immediate of `mov ebx, 14h`
+    // Before the mid-hook, so SafetyHook's trampoline copies the new cmp.
     {
         uint8_t* cmp_imm = exeBase + 0x25C83;
         uint8_t* mov_imm = exeBase + 0x26001;
-        // Same page record as the operand redirect above: cmp_imm shares page
-        // 0x425000 with three of the four fmuls, so its own VirtualProtect would
-        // report back OUR RWX rather than the game's original protection.
         bool cmp_ok = g_tickCaveCodePages.Open(cmp_imm, 1);
         bool mov_ok = g_tickCaveCodePages.Open(mov_imm, 1);
         if (cmp_ok && mov_ok) {
-            // Sanity-check current values before clobbering — refuse to patch
-            // if the game's bytes drifted from what we expect (defends against
-            // wrong-build EXEs).
             if (*cmp_imm == 0x14 && *mov_imm == 0x14) {
                 *cmp_imm = (uint8_t)TICK_CAVE_PER_FRAME_CAP;
                 *mov_imm = (uint8_t)TICK_CAVE_PER_FRAME_CAP;
@@ -435,9 +341,7 @@ bool InstallTickCave(GameAddresses& addr, TasSharedState* state) {
         }
     }
 
-    // Every code patch is written; hand all touched pages back exactly as we
-    // found them, icache flushed. Done BEFORE create_mid so SafetyHook does its
-    // own protect/patch/restore on normally-protected pages, as it expects to.
+    // Restore page protection before SafetyHook does its own patching.
     g_tickCaveCodePages.CloseAll();
 
     Log(std::format("Tick cave: hooking tick override at {:p} (EXE+0x25C81)", (void*)addr.tick_cave_site));
@@ -455,11 +359,9 @@ bool InstallTickCave(GameAddresses& addr, TasSharedState* state) {
     return true;
 }
 
-// Put the game's own operands back, so the redirect cannot outlive this DLL
-// (see g_tickCaveRedirectApplied). Successful initialization pins the DLL; failed
-// initialization uses this rollback before reporting failure.
+// Undo every patch. Used to roll back a failed initialization; a successful
+// one pins the DLL.
 inline void UninstallTickCave() {
-    // Stop callbacks before restoring anything they read or write.
     tickCaveHook = {};
     if (!g_tickCaveExeBase) return;
 

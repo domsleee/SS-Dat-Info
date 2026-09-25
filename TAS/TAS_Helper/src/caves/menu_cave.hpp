@@ -9,29 +9,13 @@
 #include <format>
 #include "menu_page.hpp"
 
-// Menu state, read from the MENU OBJECTS - and ONLY on the menu thread.
-//
-// The menus are a UI toolkit (UIT) driven by Main_Menu.dll. Two hooks:
-//
+// Menu reader for the UI toolkit (UIT) driven by Main_Menu.dll. Two hooks:
 //   UI_Menu::Change_Page(name)  RVA 0x1A7C0, __fastcall(ECX = UI_Menu, EDX =
-//     the page-name std::string). Records the page id the game is switching to
-//     (menu thread). Nothing is published from here: at entry the OLD page is
-//     still installed, so a snapshot taken now would pair the new name with
-//     the old items.
-//   UI_Menu::Execute(float)     RVA 0x1A680, called every frame from Menu::Paint
-//     while a menu is shown, ECX = UI_Menu. THE producer: it walks the current
-//     page's items (field reads + the game's own Get_Active_Component /
-//     Want_Focus), publishes screen + selector + document together under
-//     menu_seq, and executes pending agent commands through the game's own
-//     entry points. Everything that touches a UI object happens here, inside
-//     the menu's own Execute: a traversal from anywhere else can race page
-//     teardown, and a vtable inside a UI image proves nothing about liveness.
-//
-// Housekeeping runs from the message-pump hook (lifecycle_cave.hpp): it clears the
-// document when Execute stops heartbeating (a level, a load, the in-game pause
-// menu - none of which run UI_Menu::Execute) and expires commands nobody can
-// consume. Both writers share a lock, so the odd/even seqlock always has one
-// writer.
+//     page-name std::string). Records the new page id; the old page is still
+//     installed at entry.
+//   UI_Menu::Execute(float)     RVA 0x1A680, every frame from Menu::Paint,
+//     ECX = UI_Menu. Publishes the page and runs agent commands. All UI object
+//     access happens here, on the menu thread, so it cannot race page teardown.
 namespace menustate {
 
 inline TasSharedState* g_state = nullptr;
@@ -66,12 +50,9 @@ using menumodel::MenuItem;
 using menumodel::MenuSnapshot;
 using menumodel::kMaxItems;
 
-// An MSVC6 std::string object at `obj` ({allocator, char* ptr, size,
-// capacity}). The whole header is read first and bounds-checked WITHOUT
-// arithmetic on the length (riderparse::StringHeaderUsable: len < cap and
-// capacity >= len): a torn header with size 0xFFFFFFFF passes a
-// `len + 1 > cap` test by wrapping and runs off the output buffer.
-// Printable ASCII only.
+// Reads an MSVC6 std::string at `obj` ({allocator, char* ptr, size, capacity}).
+// The header is bounds-checked without arithmetic on the length, so a torn
+// size of 0xFFFFFFFF cannot wrap past the check. Printable ASCII only.
 static bool ReadMenuString(uint32_t obj, char* out, uint32_t cap) {
     if (obj < 0x10000 || cap == 0) return false;
     __try {
@@ -94,12 +75,8 @@ static bool ReadMenuString(uint32_t obj, char* out, uint32_t cap) {
 
 static bool IsIdLike(const char* s) { return s[0] == 'I' && s[1] == 'D' && s[2] == '_'; }
 
-// ---------------------------------------------------------------------------
-// PUBLISHING: screen + selector + document go out TOGETHER under menu_seq.
-// Two writers exist (the Execute snapshot, the housekeeping clear), so the
-// section is serialized by g_pubLock and the seqlock never sees two writers.
-// Runs inside the Execute hook: fixed buffers, no allocation, no file log.
-// ---------------------------------------------------------------------------
+// g_pubLock serializes the two menu_seq writers (Execute snapshot,
+// housekeeping clear). Runs inside the Execute hook: no allocation, no file log.
 inline SRWLOCK g_pubLock = SRWLOCK_INIT;
 inline char g_lastDoc[TAS_MENU_DOC_MAX] = {};   // what shm holds (under g_pubLock)
 inline uint32_t g_lastSelector = 0xFFFFFFFFu;   // last published selector (under g_pubLock)
@@ -125,12 +102,9 @@ static void Publish(const char* screen, uint32_t selector, const char* doc) {
     ReleaseSRWLockExclusive(&g_pubLock);
 }
 
-// No menu on screen: nothing published at all.
 inline void Clear() { Publish("", 0xFFFFFFFFu, ""); }
 
-// ---------------------------------------------------------------------------
-// The MENU MODEL - field reads of the UIT objects (UIT.c / main_menu.c /
-// SR_UIT.c), menu thread only:
+// UIT object layout (UIT.c / main_menu.c / SR_UIT.c):
 //   UI_Menu +0x10C = the current Menu_Page.
 //   UI_Menu::Get_Active_Component (RVA 0x1A6B0, __fastcall(ECX)) -> the
 //     focused UI_Component.
@@ -139,8 +113,7 @@ inline void Clear() { Publish("", 0xFFFFFFFFu, ""); }
 //   UIT::Button (Menu_Button / Action_Button): +0x44 Text_Line*; Labels keep
 //     theirs at +0x28 and refuse focus.
 //   SR_UIT::Sr_Plane_Text_Line: +4 std::string text (Get_Text = this+4).
-//   Want_Focus: vtable slot 0x2C - the test Request_Focus itself makes.
-// ---------------------------------------------------------------------------
+//   Want_Focus: vtable slot 0x2C, the test Request_Focus itself makes.
 using GetActiveComponent = uint32_t(__fastcall*)(uint32_t);
 using WantFocusFn = uint8_t(__fastcall*)(uint32_t);
 
@@ -149,20 +122,16 @@ static bool ReadItem(uint32_t child, uint32_t focusedComp, MenuItem& it) {
         if (child < 0x10000) return false;
         const uint32_t vt = *(uint32_t*)child;
         if (!g_imgMainMenu.Has(vt) && !g_imgUit.Has(vt)) return false;   // not a UIT component
-        // The label: a Button-family component's text line. Image buttons (the
-        // page arrows) have none, and a non-Button's +0x44 is off its end, so
-        // the line is trusted only if its vtable is SR_UIT's.
+        // A non-Button's +0x44 is off its end, so the text line is trusted
+        // only if its vtable is SR_UIT's.
         const uint32_t tl = *(uint32_t*)(child + 0x44);
         const bool hasLabel = tl >= 0x10000 && g_imgSrUit.Has(*(uint32_t*)tl) &&
                               ReadMenuString(tl + 4, it.label, sizeof it.label);
         if (!hasLabel) it.label[0] = 0;
         if (!ReadMenuString(child + 0x10, it.name, sizeof it.name)) it.name[0] = 0;
-        // An item is a control with visible text, or an id-bearing control
-        // without any (the image arrows carry an ID_* name and no text line).
+        // An item has visible text or an ID_* name (the image arrows have no text).
         if (!hasLabel && !IsIdLike(it.name)) return false;
-        // ...and only if the cursor can land on it: Want_Focus (a Label
-        // overrides it to false; headline labels carry ID_* names too, and
-        // activating one would fire Enter on whatever was focused before).
+        // It must also accept focus: headline Labels carry ID_* names too.
         // The slot must point into the UI images before it is called.
         const uint32_t wantFocus = *(uint32_t*)(vt + 0x2C);
         if (!g_imgMainMenu.Has(wantFocus) && !g_imgUit.Has(wantFocus)) return false;
@@ -177,8 +146,8 @@ static bool ReadItem(uint32_t child, uint32_t focusedComp, MenuItem& it) {
     }
 }
 
-// The focused item's container, enumerated. False = nothing capturable now
-// (no focused component - a transition - or an unreadable container).
+// Enumerates the focused item's container. False when nothing is focused
+// (a transition) or the container is unreadable.
 static bool ReadMenu(uint32_t uiMenu, MenuSnapshot& out) {
     out = MenuSnapshot{};
     if (!uiMenu || !g_mainMenuBase) return false;
@@ -190,8 +159,8 @@ static bool ReadMenu(uint32_t uiMenu, MenuSnapshot& out) {
         const uint32_t parent = *(uint32_t*)(comp + 0xC);
         if (parent < 0x10000) return false;
         const uint32_t page = *(uint32_t*)(uiMenu + 0x10C);
-        // GetActiveComponent still returns the underlying pause-menu item
-        // while an "Are you sure?" modal is on top. Never expose or activate it.
+        // Get_Active_Component still returns the pause-menu item under an
+        // "Are you sure?" modal; never expose or activate it.
         if (!g_getModal || !menumodel::UnobscuredMenu(page, parent, g_getModal)) return false;
         begin = *(uint32_t*)(parent + 0x2C);
         end = *(uint32_t*)(parent + 0x30);
@@ -212,9 +181,6 @@ static bool ReadMenu(uint32_t uiMenu, MenuSnapshot& out) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// The SNAPSHOT (menu thread, from the Execute hook).
-// ---------------------------------------------------------------------------
 inline volatile uint64_t g_lastExecuteMs = 0;           // heartbeat: a menu is executing
 inline uint64_t g_lastSnapMs = 0;
 inline uint32_t g_lastDumpHash = 0;
@@ -256,8 +222,8 @@ static void DumpIfChanged(const MenuSnapshot& s) {
     }
 }
 
-// [UI_Menu+0x10C] = the current Menu_Page (0 during a swap). Its own SEH
-// scope: the caller builds std::strings, which cannot share a frame with __try.
+// [UI_Menu+0x10C] = the current Menu_Page (0 during a swap). Separate function
+// because the caller's std::strings cannot share a frame with __try.
 static uint32_t ReadPage(uint32_t uiMenu) {
     __try {
         return *(uint32_t*)(uiMenu + 0x10C);
@@ -266,15 +232,8 @@ static uint32_t ReadPage(uint32_t uiMenu) {
     }
 }
 
-// Every ~50 ms (or at once after a page swap / a command): read the page and
-// publish. The game keeps ONE Menu_Page object and reconfigures it on every
-// Change_Page (UI_Menu::Change_Page calls Menu_Page::Change_Page on
-// [this+0x10C]; the pointer never moves), so the screen id is keyed on the
-// Change_Page EVENT: its name is adopted by the next Execute on the same
-// thread, after the swap completed, so screen and items always describe the
-// same page. Injected after the last Change_Page? The items' container name,
-// or else the page's own name, bootstraps it.
-
+// Every ~50 ms, or at once after a command. The game reuses one Menu_Page
+// object for every page, so the screen id comes from the Change_Page event.
 static void Snapshot(uint32_t uiMenu, bool force) {
     const uint64_t now = GetTickCount64();
     if (!force && now - g_lastSnapMs < 50) return;
@@ -284,8 +243,7 @@ static void Snapshot(uint32_t uiMenu, bool force) {
         if (g_menuDiag) Log(std::format("Menu diag: page change #{} -> screen '{}' (page {:#x})", g_snapGen, g_screen, page));
     } else if (!g_screen[0] && page) {
 
-        // No Change_Page seen since injection: take the page's own name if it
-        // reads as an id (bootstrap), else wait for the next page change.
+        // No Change_Page seen since injection: bootstrap from the page's own name.
         char own[TAS_MENU_SCREEN_MAX];
         if (ReadMenuString(page + 0x10, own, sizeof own) && IsIdLike(own)) {
             memcpy(g_screen, own, sizeof own);
@@ -298,13 +256,9 @@ static void Snapshot(uint32_t uiMenu, bool force) {
     }
     MenuSnapshot snap;
     const bool haveItems = ReadMenu(uiMenu, snap);
-    // The items' parent container carries the PAGE ID as its name (verified
-    // live: 'ID_ARCADE_CHOOSE_BOARD', 'ID_ARCADE_IN_GAME_MENU', ...) - the very
-    // object the items came from, so screen and items agree by construction
-    // and no Change_Page is needed to know the page. That also names the page
-    // a DLL injected at the main menu has never seen change. The announced
-    // name stays the fallback for a layout whose items sit in an unnamed
-    // sub-container.
+    // The items' container is named with the page id (e.g.
+    // 'ID_ARCADE_CHOOSE_BOARD'), so prefer it; the Change_Page name is the
+    // fallback for items in an unnamed sub-container.
     char cname[TAS_MENU_SCREEN_MAX];
     if (haveItems && ReadMenuString(snap.container + 0x10, cname, sizeof cname) && IsIdLike(cname)) memcpy(g_screen, cname, sizeof cname);
     if (!g_screen[0]) {
@@ -312,36 +266,27 @@ static void Snapshot(uint32_t uiMenu, bool force) {
         return;
     }
     if (!haveItems) {
-        // The page is known but its items are not capturable right now (a
-        // transition, nothing focused): publish the screen and NO document -
-        // never a valid-looking empty page.
+        // Items not capturable (a transition): publish the screen with no
+        // document rather than a valid-looking empty page.
         Publish(g_screen, 0xFFFFFFFFu, "");
         return;
     }
-    // Menu thread only, so one static buffer serves every snapshot. A document
-    // that does not fit is published as "screen, no document", like a
-    // transition.
+    // Static buffer: menu thread only. A document that does not fit is
+    // published as screen with no document.
     static char doc[TAS_MENU_DOC_MAX];
     const uint32_t n = menumodel::BuildDoc(snap, g_screen, doc, sizeof doc);
     Publish(g_screen, n ? snap.selector : 0xFFFFFFFFu, doc);
     DumpIfChanged(snap);
 }
 
-// ---------------------------------------------------------------------------
-// The COMMAND channel: the agent writes kind + target + the page
-// id it read, and bumps menu_cmd_seq; the menu thread executes it from the
-// Execute hook through the game's own entry points:
+// Command channel: the agent writes kind, target and the page id it read, then
+// bumps menu_cmd_seq. The Execute hook runs it through the game's own code:
 //   UIT::UI_Component::Request_Focus(bool)       UIT.dll+0x196D0, ECX=comp, DL=1
 //   UI_Menu::Trigger / Up / Down / Left / Right  Main_Menu.dll+0x19F50 / 0x19ED0 /
-//     0x19EF0 / 0x19F10 / 0x19F30, ECX=UI_Menu - exactly what KB_Action calls
-//     for Enter and the arrow keys (main_menu.c).
-// "activate X" = Request_Focus(X, true), verify the focus landed, Trigger.
-// A command names the page it was read from and is refused (STALE_PAGE) if
-// the page moved on; one command is outstanding at a time (the agent side
-// refuses to submit while seq != ack); a command nobody can consume - no
-// menu executing - is EXPIRED by the housekeeping after 3 s, so nothing stays armed
-// to fire on a later page.
-// ---------------------------------------------------------------------------
+//     0x19EF0 / 0x19F10 / 0x19F30, ECX=UI_Menu (what KB_Action calls for Enter
+//     and the arrow keys).
+// A command for a page that moved on is refused (STALE_PAGE); one nobody
+// consumes is expired by housekeeping after 3 s so it cannot fire on a later page.
 using MenuAction = void(__fastcall*)(uint32_t);
 using RequestFocusFn = void(__fastcall*)(uint32_t, uint32_t);
 inline MenuAction g_trigger = nullptr, g_up = nullptr, g_down = nullptr, g_left = nullptr, g_right = nullptr;
@@ -354,15 +299,14 @@ static constexpr uint64_t kExecuteIdleMs = 1500;   // no Execute for this long =
 
 // UI_Menu::Execute: push esi; push edi; mov edi,[esp+0xC]; push edi; mov esi,ecx
 static constexpr uint8_t kExecuteSig[] = { 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C, 0x57, 0x8B, 0xF1 };
-// UI_Menu::Trigger/Up/Down/Left/Right all open identically: mov eax,[ecx+0x10C]
-// (the page); test eax,eax; jz; lea edx,[eax+4] (its listener) / xor edx,edx;
-// add ecx,0x18 (the Input_Event_Generator) - then a jmp through an import
-// thunk, an absolute address the pattern stops before.
+// UI_Menu::Trigger/Up/Down/Left/Right share this prologue: mov eax,[ecx+0x10C];
+// test eax,eax; jz; lea edx,[eax+4] / xor edx,edx; add ecx,0x18. Stops before
+// the import-thunk jmp's absolute address.
 static constexpr uint8_t kMenuActionSig[] = { 0x8B, 0x81, 0x0C, 0x01, 0x00, 0x00, 0x85, 0xC0, 0x74, 0x05,
                                               0x8D, 0x50, 0x04, 0xEB, 0x02, 0x33, 0xD2, 0x83, 0xC1, 0x18 };
-// UI_Component::Request_Focus: push ebx; push esi; mov esi,ecx; mov ecx,[esi+0xC]
-// (the parent); test ecx,ecx; mov ebx,edx; jz; test bl,bl; jz; mov eax,[esi];
-// mov ecx,esi; call [eax+0x2C] (Want_Focus)
+// UI_Component::Request_Focus: push ebx; push esi; mov esi,ecx; mov ecx,[esi+0xC];
+// test ecx,ecx; mov ebx,edx; jz; test bl,bl; jz; mov eax,[esi]; mov ecx,esi;
+// call [eax+0x2C] (Want_Focus)
 static constexpr uint8_t kRequestFocusSig[] = { 0x53, 0x56, 0x8B, 0xF1, 0x8B, 0x4E, 0x0C, 0x85, 0xC9, 0x8B, 0xDA, 0x74, 0x24,
                                                 0x84, 0xDB, 0x74, 0x18, 0x8B, 0x06, 0x8B, 0xCE, 0xFF, 0x50, 0x2C };
 static uint32_t RunCommand(uint32_t uiMenu, uint32_t kind, const char* target, const char* screen) {
@@ -382,8 +326,7 @@ static uint32_t RunCommand(uint32_t uiMenu, uint32_t kind, const char* target, c
         if (i < 0) return TAS_MENU_RESULT_NOT_FOUND;
         if (!snap.items[i].enabled) return TAS_MENU_RESULT_DISABLED;
         g_requestFocus(snap.items[i].comp, 1);
-        // Never press Enter blind: if the focus did not land on the target
-        // (a control that refuses it), Trigger would fire on the PREVIOUS item.
+        // If focus did not land, Trigger would fire on the previous item.
         auto active = (GetActiveComponent)(uintptr_t)(g_mainMenuBase + 0x1A6B0);
         if (active(uiMenu) != snap.items[i].comp) return TAS_MENU_RESULT_NOT_FOCUSABLE;
         if (kind == TAS_MENU_CMD_ACTIVATE) g_trigger(uiMenu);
@@ -394,8 +337,7 @@ static uint32_t RunCommand(uint32_t uiMenu, uint32_t kind, const char* target, c
     }
 }
 
-// SEH around the whole execution: a page torn down between the agent's read
-// and this frame faults here, and the agent gets FAULT instead of a crash.
+// A page torn down since the agent's read faults here and answers FAULT.
 static uint32_t RunCommandGuarded(uint32_t uiMenu, uint32_t kind, const char* target, const char* screen) {
     __try {
         return RunCommand(uiMenu, kind, target, screen);
@@ -422,9 +364,8 @@ static bool ConsumeCommand(uint32_t uiMenu) {
         target[TAS_MENU_CMD_TARGET_MAX - 1] = 0;
         screen[TAS_MENU_SCREEN_MAX - 1] = 0;
         const uint32_t kind = g_state->menu_cmd_kind;
-        // Validate against the page the agent could have seen, not the one
-        // cached before the last Change_Page: adopt first, bypassing the
-        // 50 ms snapshot throttle for this command.
+        // Validate against the current page, not the one cached before the
+        // last Change_Page.
         AdoptPendingPage();
         const uint32_t result = RunCommandGuarded(uiMenu, kind, target, screen);
         Answer(seq, result);
@@ -456,10 +397,8 @@ static void ExecuteCb(SafetyHookContext& ctx) {
     Snapshot(uiMenu, ran);
 }
 
-// Message-pump hook (lifecycle_cave.hpp), game thread: housekeeping only - no UI
-// object is touched here. Clears the document once Execute stops (a level, a
-// load, the in-game pause menu), and answers EXPIRED for a command nobody can
-// consume, so it never lingers to fire on a later page.
+// Message-pump hook; touches no UI object. Clears the document once Execute
+// stops (a level, a load, the pause menu) and expires stale commands.
 inline void Housekeeping() {
     if (!g_state) return;
     const uint64_t now = GetTickCount64();
@@ -477,9 +416,8 @@ inline void Housekeeping() {
         return;
     }
     if (executing || now - g_pendingSinceMs < kExpireMs) return;
-    // ConsumeCommand holds this lock across a call into the game's menu code;
-    // on the same thread a blocking acquire could deadlock, so a busy lock
-    // just means "try on the next pump".
+    // ConsumeCommand holds this lock across game menu code on the same
+    // thread; blocking could deadlock, so retry on the next pump.
     if (!TryAcquireSRWLockExclusive(&g_cmdLock)) return;
     if (seq != g_state->menu_cmd_ack) {
         Answer(seq, TAS_MENU_RESULT_EXPIRED);
@@ -569,9 +507,8 @@ static DWORD WINAPI InstallThread(LPVOID) {
     return 0;
 }
 
-// Spawn the deferred installer. Main_Menu.dll loads with the menu, which may be
-// after this DLL initializes, so the hook waits for the module rather than
-// assuming it is present (unlike the always-loaded SR_UIT).
+// Main_Menu.dll may load after this DLL initializes, so install from a thread
+// that waits for it.
 inline void Install(GameAddresses& /*addr*/, TasSharedState* state) {
     g_state = state;
     HANDLE t = CreateThread(nullptr, 0, InstallThread, nullptr, 0, nullptr);

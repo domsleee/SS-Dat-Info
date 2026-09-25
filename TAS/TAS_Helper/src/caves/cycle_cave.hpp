@@ -11,19 +11,12 @@
 #include "../fpu_safe_hook.hpp"
 #include "tick_cave.hpp"
 
-// The cycle cave: Supreme::Cycle hook (SG+0x13FE40)
-// Main REC/PLAY engine. Fires once per physics tick during gameplay (the tick cave
-// can run several ticks per rendered frame).
-//
-// FPU PRESERVATION: the game does fld/fmul immediately after the hook site,
-// so the body runs inside CreateMidHook's FSAVE/FRSTOR (fpu_safe_hook.hpp).
-// The helpers below still copy coordinates as integers.
-//
-// REC: sample the keyboard, write the DI buffer, notify the
-//      observer (BB3B10) on transitions, log the mask, capture coordinates.
-// PLAY: read the logged mask (gate-aligned when armed), write it into the
-//      game the same way, capture coordinates, splice to REC at the CONT
-//      point.
+// The cycle cave: Supreme::Cycle hook (SG+0x13FE40), the REC/PLAY engine.
+// Fires once per physics tick. The game does fld/fmul right after the hook
+// site, so the body runs inside CreateMidHook's FSAVE/FRSTOR (fpu_safe_hook.hpp).
+// REC samples the keyboard and injects it; PLAY injects the logged mask. Both
+// write the DI buffer, notify the observer (BB3B10) on transitions and capture
+// coordinates. See DESIGN.md "The hooks".
 
 inline TasSharedState* g_cycleCaveState = nullptr;
 inline GameAddresses* g_cycleCaveAddr = nullptr;
@@ -39,8 +32,7 @@ inline void UninstallCycleCave() {
 typedef void(__thiscall* BB3B10Fn)(void* thisPtr, uint32_t keyIndex, uint32_t pressed,
                                     uint32_t unk, uint32_t arg4);
 
-// Helper: safe pointer read with SEH protection against dangling pointers
-// Returns 0 on access violation (freed memory during F5 restart)
+// Returns 0 on an access violation (memory freed by an F5 restart).
 static inline uint32_t SafeReadPtr(uint32_t addr) {
     if (!addr) return 0;
     __try {
@@ -50,7 +42,6 @@ static inline uint32_t SafeReadPtr(uint32_t addr) {
     }
 }
 
-// Helper: read the keyboard object pointer chain
 // root = [SG+1D5450], kbobj = [root+0x530]
 static inline uint32_t GetKeyboardObject(GameAddresses* addr) {
     uint32_t root = SafeReadPtr((uint32_t)addr->player_base);
@@ -58,15 +49,13 @@ static inline uint32_t GetKeyboardObject(GameAddresses* addr) {
     return SafeReadPtr(root + GameAddresses::KEYBOARD_OBJ_OFFSET);
 }
 
-// Helper: read the DI buffer pointer: [kbobj+0x30]
+// DI buffer = [kbobj+0x30]
 static inline uint32_t GetDIBuffer(uint32_t kbobj) {
     if (!kbobj) return 0;
     return SafeReadPtr(kbobj + GameAddresses::DI_BUFFER_PTR_OFFSET);
 }
 
-// Helper: sample input via GetAsyncKeyState (for symmetric REC path)
-// Uses VK codes — works with Pico HID since it's a real USB HID device.
-// No FPU operations; safe inside FSAVE/FRSTOR wrapper.
+// REC input. The Pico is a real USB HID device, so GetAsyncKeyState sees it.
 static uint8_t SampleGAKS() {
     uint8_t mask = 0;
     if (GetAsyncKeyState(VK_LEFT) & 0x8000)    mask |= INPUT_LEFT;
@@ -82,7 +71,7 @@ static void WriteDIBuffer(uint32_t buffer, uint8_t mask) {
     if (!buffer) return;
     __try {
         auto buf = (uint8_t*)buffer;
-        // +3940 writes 0x01 for pressed, 0x00 for released — match that exactly
+        // Same values +3940 writes: 0x01 pressed, 0x00 released.
         buf[GameAddresses::KEY_LEFT]   = (mask & INPUT_LEFT)  ? 0x01 : 0x00;
         buf[GameAddresses::KEY_RIGHT]  = (mask & INPUT_RIGHT) ? 0x01 : 0x00;
         buf[GameAddresses::KEY_UP]     = (mask & INPUT_UP)    ? 0x01 : 0x00;
@@ -94,21 +83,16 @@ static void WriteDIBuffer(uint32_t buffer, uint8_t mask) {
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-// BB3B10's 3rd+4th arguments are the {lo, hi} dwords of the 64-bit
-// Kernel::Time the event was stamped with at message-pump dispatch (RE'd from
-// the exported Win32_Driver::Translate(tagMSG&, Kernel::Time) chain: +3940
-// forwards its Time args verbatim to BB3B10). The observer silently DISCARDS
-// events whose Time predates the current race context. Injections are stamped
-// with the game's own Kernel::Time::Current() (see CallBB3B10OnTransitions);
-// this calibrated fallback value (Time.hi observed from real keypresses via
-// The key-handler cave/the observer cave) only matters if the Kernel export ever fails to resolve.
+// BB3B10's 3rd and 4th arguments are the {lo, hi} dwords of the 64-bit
+// Kernel::Time stamped at message-pump dispatch (Win32_Driver::Translate
+// passes it through +3940 unchanged). The observer discards events older than
+// the current race. Injections use Kernel::Time::Current(); this calibrated
+// Time.hi is the fallback if that export fails to resolve.
 inline volatile uint32_t g_bb3b10Arg4 = GameAddresses::BB3B10_ARG4;
 
-// GetTickCount() stamped on every Supreme::Cycle tick. The message-pump-driven
-// hooks (key-handler cave) use it to detect "the game is PAUSED / at a non-ticking
-// screen" (pause menu, dialogs, static main menu): when the cycle hasn't
-// ticked recently, the input gate passes ALL keys through so the user can
-// operate the pause menu / dialogs even while a TAS mode is armed.
+// GetTickCount() of the last Supreme::Cycle tick. When the cycle has stopped
+// (pause menu, dialogs, static menus), the input gate passes every key through
+// so the user can operate them while a TAS mode is armed.
 inline volatile uint32_t g_lastCycleMs = 0;
 
 // Last injected input mask (REC and PLAY), for transition detection.
@@ -124,10 +108,8 @@ public:
     ScopedTasInjection& operator=(const ScopedTasInjection&) = delete;
 };
 
-// Helper: get the current Kernel::Time from the game's own clock.
-// SEH-protected; returns false if the export is unresolved or the call faults.
-// The callee is x87-balanced (verified by disasm) and we already run game code
-// (BB3B10 → observers) from this same hook context.
+// The game's Kernel::Time::Current(). False if unresolved or the call faults.
+// The callee is x87-balanced.
 static bool GetKernelTimeNow(GameAddresses* addr, KernelTime* out) {
     if (!addr->time_current) return false;
     __try {
@@ -136,7 +118,7 @@ static bool GetKernelTimeNow(GameAddresses* addr, KernelTime* out) {
     } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-// Helper: call BB3B10 for each changed bit (transitions only)
+// Call BB3B10 for each changed bit.
 static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
                                      uint32_t kbobj, uint8_t mask, uint8_t transitions) {
     if (!transitions || !kbobj) return;
@@ -144,20 +126,16 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
     auto bb3b10 = (BB3B10Fn)(addr->bb3b10);
     void* thisPtr = (void*)(kbobj + GameAddresses::BB3B10_THIS_OFFSET);
 
-    // Stamp the injected events with the game's own current Kernel::Time —
-    // exactly what a real keypress carries — so the observer never discards
-    // them as stale. Priority: test override (forced wrong value, steer-impact
-    // regression hook) > live Time::Current > keypress-calibrated fallback.
+    // Stamp priority: test override (steer-impact test) > Time::Current >
+    // calibrated fallback.
     KernelTime t = { 0, 0 };
     if (s->test_arg4_override) {
         t.lo = 0;
         t.hi = s->test_arg4_override;
         s->arg4_source = ARG4_SOURCE_OVERRIDE;
     } else if (GetKernelTimeNow(addr, &t)) {
-        // Floor the lo dword: the stamp stays in-window for the observer's
-        // event-time gate (hi is what the gate checks), and a FLOORED stamp is
-        // DETERMINISTIC for every event in the same ~7-min hi-window, where the
-        // live lo differs between a REC and its replay.
+        // The observer only checks hi. Flooring lo makes the stamp identical
+        // between a REC and its replay.
         t.lo = 0;
         s->arg4_source = ARG4_SOURCE_TIME_CURRENT;
     } else {
@@ -196,13 +174,10 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
     s->bb3b10_call_count++;
 }
 
-// Helper: capture player coordinates (SEH-protected, NO FLOAT OPS)
-// Uses integer-width memcpy to avoid corrupting x87 FPU state.
+// Copies coordinates as raw integer bits.
 static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
-    // A capture that writes nothing still lets the caller advance the index,
-    // leaving a STALE coordinate inside the current prefix. Anything scanning
-    // that prefix for first movement can read the hole as movement, so the
-    // failure has to be visible rather than silent.
+    // The caller advances the index even when nothing is written, leaving a
+    // stale coordinate that could read as movement, so flag the failure.
     if (!s->player_ptr) {
         s->capture_ok = 0;
         return;
@@ -219,7 +194,6 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
         return;
     }
 
-    // Update live position (integer-width copy, no float ops)
     memcpy(&s->player_x, &raw[0], 4);
     memcpy(&s->player_y, &raw[1], 4);
     memcpy(&s->player_z, &raw[2], 4);
@@ -235,11 +209,8 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
             memcpy(&s->play_coords[index][2], &raw[2], 4);
         }
 
-        // Stamp the countdown gate: the first frame of this session whose
-        // position differs from frame 0. Integer compare on the raw bits.
-        // capture_ok also means frame 0 of THIS session was really written;
-        // without it the comparison below is against the previous session's
-        // frame 0 and can stamp a gate that never happened.
+        // Gate = first frame whose position differs from frame 0. capture_ok
+        // guarantees frame 0 belongs to this session, not the previous one.
         if (s->capture_ok && s->gate_index == 0 && index > 0) {
             const uint32_t* z = isRec ? (const uint32_t*)&s->rec_coords[0][0]
                                       : (const uint32_t*)&s->play_coords[0][0];
@@ -262,13 +233,10 @@ static uint8_t ClearTasInputState(GameAddresses* addr) {
     return held;
 }
 
-// Release every input the TAS session injected: zero the DI buffer and
-// notify the observer that held keys went UP (live Time stamp).
-// MUST run on every TAS→OFF transition — without it a key held by the replay
-// at STOP stays "down" and the boarder keeps steering. Resolves the
-// kbobj fresh, so after an auto-stop (level swapped) it clears the NEW
-// level's state — release events for keys the new observer never saw pressed
-// are no-ops, same as a real keyUp without a down.
+// Release every injected key: zero the DI buffer and send the observer UP
+// events. Must run on every TAS -> OFF transition, or a held key keeps
+// steering. After a level swap it clears the new level; UP events for keys
+// that level never saw pressed are harmless.
 static void ReleaseTasInput(TasSharedState* s, GameAddresses* addr) {
     uint8_t held = ClearTasInputState(addr);
     if (!held) return;
@@ -277,11 +245,8 @@ static void ReleaseTasInput(TasSharedState* s, GameAddresses* addr) {
     CallBB3B10OnTransitions(s, addr, kbobj, 0, held);
 }
 
-// Drop any gate-relative input alignment. gate_align_rec is persistent shared
-// memory that the controller stages right before each arm, and a leftover
-// value would silently re-index a later replay and move its splice point. It
-// is cleared on STOP, a refused CONT, restart, ARM_REC, a level change and the
-// end of PLAY; the controller also clears it before every restart.
+// Drop gate alignment. The controller stages gate_align_rec right before each
+// arm; a leftover value would re-index a later replay and move its splice.
 static inline void ClearGateAlign(TasSharedState* s) {
     s->gate_align_rec = 0;
     s->cont_splice_approved = 0;  // no alignment, nothing to approve
@@ -290,28 +255,22 @@ static inline void ClearGateAlign(TasSharedState* s) {
 static volatile uint32_t g_cyclePendingLog = 0;  // 0=none, 1=REC, 2=PLAY, 3=STOP, 4=playback_done
 static volatile uint32_t g_cycleLogParam = 0;
 
-// Set by the lifecycle hook when a race launches: the cycle cave refreshes the rider
-// and renderer stamps over the race's first ticks. Not just the first: the new
-// race's recorder (and so player_ptr) is adopted during the player update,
-// after this hook, so the first tick can still see the previous race's player.
-// Refreshing is change-detected and cheap.
+// Set by the lifecycle hook when a race launches: refresh the rider and
+// renderer stamps over the race's first ticks. Several ticks, because
+// player_ptr is adopted after this hook and the first tick can still see the
+// previous race's player.
 inline volatile LONG g_refreshStamps = 0;
 static constexpr LONG REFRESH_STAMP_TICKS = 100;
 
-// Splice gate: 1 only between a SUCCESSFUL CMD_ARM_CONTINUE and its splice
-// (or any stop/re-arm). The PLAY handler's splice check requires this flag,
-// so a `continue_from_frame` that appears in shared memory by any other
-// route (UI bug, stray writer, stale value) can NEVER convert a plain
-// replay into REC. Deliberately a private static in the cycle cave, not a shared-state
-// field — external processes must not be able to set it.
+// Splice gate: 1 only between a successful CMD_ARM_CONTINUE and its splice.
+// A stray continue_from_frame can then never turn a plain replay into REC.
+// Private, not shared state, so no other process can set it.
 static volatile uint32_t g_contArmed = 0;
 
-// Apply the complete TAS -> OFF transition. Game thread only (the cycle cave, or the
-// message pump while Supreme::Cycle is frozen). No logging/formatting/float
-// arithmetic: it runs inside hooks.
+// The complete TAS -> OFF transition. Game thread only. No logging,
+// formatting or float arithmetic: it runs inside hooks.
 static void ApplyStopTransition(TasSharedState* s, bool protectRestart) {
-    // Install protection before publishing OFF so real keys cannot enter the
-    // restart window. Ordinary STOP still releases it for menu navigation.
+    // Set before publishing OFF so real keys cannot enter the restart window.
     s->cont_suppress_input = protectRestart ? 1u : 0u;
     s->mode = MODE_OFF;
     // A controller that stops mid-restart has abandoned it: let go of F5.
@@ -326,9 +285,8 @@ static void ApplyStopTransition(TasSharedState* s, bool protectRestart) {
     g_cyclePendingLog = 3;
 }
 
-// Consume a pending STOP. Returning the command to IDLE is the completion
-// publication, so it happens after every status and cleanup write, and as a
-// compare-exchange so a newer command written meanwhile is not erased.
+// Consume a pending STOP. Resetting to IDLE publishes completion, so it comes
+// last, as a compare-exchange so a newer command is not erased.
 static bool TryProcessStopCommand(TasSharedState* s) {
     const LONG cmd = InterlockedCompareExchange((volatile LONG*)&s->command, CMD_IDLE, CMD_IDLE);
     if (cmd != CMD_STOP && cmd != CMD_STOP_FOR_RESTART) return false;
@@ -337,8 +295,6 @@ static bool TryProcessStopCommand(TasSharedState* s) {
     return true;
 }
 
-// Reset the playback position, held-key mask and injection counters. Shared
-// by every arm (REC, PLAY, CONT).
 static void ResetArmCounters(TasSharedState* s) {
     s->playback_pos = 0;
     g_prevMask = 0;
@@ -356,7 +312,6 @@ static void ArmRec(TasSharedState* s) {
     s->segment_boundaries[0].frame = 0;
     s->mode = MODE_REC;
     g_contArmed = 0;
-    // REC never replays; make sure it cannot inherit alignment.
     ClearGateAlign(s);
     g_cyclePendingLog = 1;
 }
@@ -365,40 +320,34 @@ static void ArmPlay(TasSharedState* s) {
     g_cycleLogParam = s->recorded_count;
     ResetArmCounters(s);
 
-    // A plain PLAY never splices: clear any splice marker a refused or
-    // stopped CONT left in shared memory.
+    // A plain PLAY never splices.
     s->continue_from_frame = 0;
     g_contArmed = 0;
 
-    // Do not force the spawn position: the rest of the physics state
-    // (rotation, terrain contact) would still be the real spawn's, and
-    // the mismatch drifts once steering starts.
+    // Don't force the spawn position: rotation and terrain contact would
+    // still be the real spawn's, and the mismatch drifts.
 
     s->mode = MODE_PLAY;
     g_cyclePendingLog = 2;
 }
 
-// Refuse an ARM_CONTINUE: log why and leave the mode OFF.
 static void RefuseArmContinue(TasSharedState* s, const char* reason) {
     LogRing(s, LOG_ERROR, reason);
     s->mode = MODE_OFF;
-    s->continue_from_frame = 0;  // refused — don't leave a stale marker armed
+    s->continue_from_frame = 0;
     g_contArmed = 0;
-    ClearGateAlign(s);  // refusal must not leave alignment armed for a later replay
+    ClearGateAlign(s);
     g_cyclePendingLog = 3;  // "stopped"
 }
 
+// CONT: PLAY frames 0..continue_from_frame, then switch to REC.
 static void ArmContinue(TasSharedState* s) {
-    // Continue Record: PLAY frames 0..continue_from_frame, then auto-switch to REC
-    // Validate splice point is within recorded range
     if (s->continue_from_frame == 0 || s->continue_from_frame > s->recorded_count) {
         RefuseArmContinue(s, "ARM_CONTINUE: invalid splice point");
         return;
     }
-    // Refuse ARM_CONTINUE while REC/PLAY is running: the prefix
-    // replay assumes the boarder is at rec_coords[0]'s state, which
-    // holds only right after an F5 restart. tas_ui always sends
-    // CMD_RESTART first (RestartThen(ArmContinue)).
+    // The prefix replay needs the boarder at rec_coords[0]'s state, which
+    // holds only right after an F5 restart.
     if (s->mode != MODE_OFF) {
         RefuseArmContinue(s,
             "ARM_CONTINUE: refused — game is REC/PLAY; CONT requires a fresh restart first");
@@ -406,32 +355,26 @@ static void ArmContinue(TasSharedState* s) {
     }
     g_cycleLogParam = s->continue_from_frame;
     ResetArmCounters(s);
-    // Segment tracking: keep existing segment_count, we'll add one at splice
-    s->mode = MODE_PLAY;  // Start as PLAY, will auto-switch in PLAY handler
-    g_contArmed = 1;  // the ONLY place the splice gate opens
-    s->cont_splice_approved = 0;  // aligned attempts start unapproved (splice interlock)
-    // Keep gate_align_rec: the controller staged it right before this
-    // arm. The splice fires at the aligned play-index while the
-    // recording stays in rec-index space (CompleteContinueSplice).
+    // segment_count is kept; the splice adds one.
+    s->mode = MODE_PLAY;
+    g_contArmed = 1;  // the only place the splice gate opens
+    s->cont_splice_approved = 0;
+    // gate_align_rec is kept: the controller staged it for this arm.
     g_cyclePendingLog = 5;
 }
 
-// Begin in-process F5 restart sequence
 static void BeginRestart(TasSharedState* s) {
     f5restart::Cancel();  // a new request replaces an unfinished one
     f5restart::Request();
     s->restart_state = 1;
-    // The controller stages alignment AFTER the restart; anything
-    // older is stale.
+    // Alignment is staged after the restart; anything older is stale.
     ClearGateAlign(s);
     g_cyclePendingLog = 7;  // "restart initiated"
 }
 
-// Handle command transitions
-// WARNING: NO Log/format/float calls — runs inside SafetyHookMid (x87 FPU not saved).
+// No logging or formatting here: runs inside the mid-hook.
 static void ProcessCommand(TasSharedState* s) {
-    // Cross-process acquire for the command publication word. The Rust writer
-    // stages every payload field first and stores command with Release.
+    // Acquire-read of command; the Rust writer stores it last, with Release.
     uint32_t cmd = (uint32_t)InterlockedCompareExchange(
         (volatile LONG*)&s->command, CMD_IDLE, CMD_IDLE);
     if (cmd == CMD_IDLE) return;
@@ -447,13 +390,9 @@ static void ProcessCommand(TasSharedState* s) {
         case CMD_RESTART:      BeginRestart(s); break;
     }
 
-    // arm_generation is the controller's "the arm landed" signal, so it is
-    // bumped after the switch. It must be the LAST store of the arm: x86 keeps
-    // store order, so a reader that sees it move also sees the mode and
-    // position the arm wrote. It also counts REFUSED arms (the early breaks
-    // above), which otherwise leave nothing to wait on but a mode that stays OFF.
+    // arm_generation is the controller's "arm landed" signal, so it is the
+    // arm's last store (x86 keeps store order). Refused arms bump it too.
     if (cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE || cmd == CMD_ARM_REC) {
-        // Fresh session: the gate has not fired yet, and no capture has failed.
         s->gate_index = 0;
         s->capture_ok = 1;
     }
@@ -461,11 +400,10 @@ static void ProcessCommand(TasSharedState* s) {
         s->arm_generation++;
     }
 
-    // Publish command completion after all resulting mode/status writes.
     InterlockedExchange((volatile LONG*)&s->command, CMD_IDLE);
 }
 
-// Flush deferred log (called from the message pump, outside Supreme::Cycle)
+// Called from the message pump, outside Supreme::Cycle.
 static void FlushPendingLog() {
     uint32_t log = g_cyclePendingLog;
     if (!log) return;
@@ -483,28 +421,23 @@ static void FlushPendingLog() {
     }
 }
 
-// Complete before processing a cycle as well as after the last prefix tick.
-// The controller may only approve after the tick cave has parked at the splice;
-// processing another PLAY tick on resume duplicates that tick in the saved run.
+// Called before each cycle as well as after the last prefix tick: approval
+// arrives while the tick cave is parked at the splice, and running another
+// PLAY tick on resume would duplicate it. An aligned prefix splices only once
+// the watcher approves it.
 static void CompleteContinueSplice(TasSharedState* s) {
     uint32_t aligned_splice = GateAlignedSplicePos(
         s->continue_from_frame, s->gate_index, s->gate_align_rec);
-    // Aligned splice interlock: only a watcher-approved prefix may be
-    // spliced. The tick cave parks playback AT the splice while unapproved.
     if (g_contArmed && s->continue_from_frame > 0
             && s->playback_pos >= aligned_splice
             && (s->gate_align_rec == 0 || s->cont_splice_approved != 0)) {
         uint32_t rec_splice = s->continue_from_frame;
         s->recorded_count = rec_splice;
-        // Switch to the user's resume speed at the exact splice tick; waiting
-        // for the UI to notice PLAY->REC would record the start of the take at
-        // the catch-up rate.
+        // Switch to the resume speed on the splice tick itself, not when the
+        // UI notices, or the take starts at the catch-up rate.
         if (s->cont_resume_speed > 0.0f) {
             s->playback_speed = s->cont_resume_speed;
         }
-        // The catch-up leaves the game clock owing ~70 ticks; at 1x the tick cave's
-        // catch-up drain runs them as a single tick, so REC starts without a
-        // burst.
 
         uint32_t segIdx = s->segment_count;
         if (segIdx < TAS_MAX_SEGMENTS) {
@@ -514,16 +447,15 @@ static void CompleteContinueSplice(TasSharedState* s) {
         s->segment_start_frame = rec_splice;
 
         s->mode = MODE_REC;
-        s->continue_from_frame = 0;  // Clear splice marker
-        g_contArmed = 0;       // splice consumed — close the gate
+        s->continue_from_frame = 0;
+        g_contArmed = 0;
         g_cycleLogParam = rec_splice;
         g_cyclePendingLog = 6;
     }
 }
 
-// Publish the live position, velocity and rotation in every mode.
-// Inside FSAVE/FRSTOR, so float ops are safe here. Holds the __try, so it
-// must not own any C++ object needing unwinding (C2712).
+// Publish the live position and velocity in every mode. Holds a __try, so no
+// C++ objects needing unwinding (C2712).
 static void PublishLivePosition(TasSharedState* s) {
     if (s->player_ptr) {
         __try {
@@ -544,8 +476,7 @@ static void PublishLivePosition(TasSharedState* s) {
     }
 }
 
-// In-process F5 restart (runs regardless of mode): f5_restart_cave.hpp holds the
-// key until the game has rebuilt the level; then the restart is done.
+// Runs in every mode; see f5_restart_cave.hpp.
 static void StepInProcessRestart(TasSharedState* s) {
     if (s->restart_state == 1 && f5restart::Step()) {
         s->restart_state = 2;
@@ -553,11 +484,9 @@ static void StepInProcessRestart(TasSharedState* s) {
     }
 }
 
-// The race is being left (lifecycle_cave.hpp's Supreme::Stop hook, while the level
-// still exists). A mode left armed across that would record the menu, run the
-// menu video fast and eat native keys, so it stops here. A restart still
-// holding F5 (the game doesn't take it while paused) is abandoned too, or the
-// next race would restart itself; with it goes the live-input block.
+// The race is being left (Supreme::Stop, lifecycle_cave.hpp). Stop any armed
+// mode, and abandon a restart still holding F5, or the next race would
+// restart itself.
 static void StopForLeftRace(TasSharedState* s) {
     if (s->mode != MODE_OFF) {
         ApplyStopTransition(s, false);
@@ -573,8 +502,7 @@ static void StopForLeftRace(TasSharedState* s) {
 static void RecTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
     uint32_t index = s->recorded_count;
     if (index >= TAS_MAX_TICKS) {
-        // The buffer holds 10 min 55 s at 100 ticks/s. Say so, rather than
-        // ending the take indistinguishably from a user STOP.
+        // 10 min 55 s at 100 ticks/s. Log it so it isn't mistaken for a STOP.
         LogRing(s, LOG_WARN, "REC stopped: recording buffer full (TAS_MAX_TICKS)");
         s->mode = MODE_OFF;
         ReleaseTasInput(s, addr);
@@ -582,9 +510,7 @@ static void RecTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
         return;
     }
 
-    // Sample input via GAKS (the key-handler cave blocks +3940, so game buffer is empty).
-    // This makes REC symmetric with PLAY: both write the buffer and call
-    // BB3B10 at the same point in Supreme::Cycle.
+    // The key-handler cave blocks +3940, so REC injects exactly as PLAY does.
     uint8_t mask = SampleGAKS();
     uint8_t transitions = mask ^ g_prevMask;
 
@@ -606,10 +532,8 @@ static void RecTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
 static void PlayTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
     uint32_t pos = s->playback_pos;
 
-    // With alignment the end is gate-relative too, so a replay whose gate
-    // landed early still plays every recorded input. recorded_count is
-    // written by the UI process; cap it so it can never index past
-    // input_log.
+    // With alignment the end is gate-relative too. recorded_count comes from
+    // the UI process, so cap it.
     const uint32_t rec_count =
         s->recorded_count < TAS_MAX_TICKS ? s->recorded_count : TAS_MAX_TICKS;
     uint32_t play_end = rec_count;
@@ -618,27 +542,15 @@ static void PlayTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
     }
     if (pos >= play_end) {
         s->mode = MODE_OFF;
-        ClearGateAlign(s);  // aligned PLAY finished — don't leave it armed
-        ReleaseTasInput(s, addr);  // replay done — un-stick its held keys
-        g_contArmed = 0;  // hygiene — an armed CONT always splices before here
+        ClearGateAlign(s);
+        ReleaseTasInput(s, addr);
+        g_contArmed = 0;
         g_cycleLogParam = pos;
         g_cyclePendingLog = 4;
         return;
     }
 
-    // Gate-relative input alignment (gate_alignment.hpp). Input is indexed
-    // from the gate, not the arm, so a countdown a tick longer or shorter
-    // than the recording's does not shift the run's input timing. The
-    // controller's trajectory watcher rejects a differing spawn state.
-    //
-    // Before the live gate, replay the recording's input, then HOLD its
-    // gate mask from the pre-gate lead on. gate_index is stamped at the
-    // END of the cycle whose position first differs, so that cycle's mask
-    // is chosen before the gate is known; injecting nothing there loses a
-    // cycle of input (a constant 0.389 drift). The boarder cannot move
-    // before the gate, so the held mask is inert until it is the right
-    // one. Earlier transitions are kept because the input observer sees
-    // them.
+    // Gate-relative input source; see gate_alignment.hpp.
     uint32_t src = pos;
     if (s->gate_align_rec > 0) {
         src = GateAlignedInputSource(pos, s->gate_index, s->gate_align_rec, rec_count);
@@ -662,21 +574,18 @@ static void PlayTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
     CompleteContinueSplice(s);
 }
 
-// The cycle cave callback logic — called with FPU state saved/restored.
-// Separated from the FSAVE wrapper because MSVC forbids __asm in functions with SEH.
 static void __declspec(noinline) CycleCave_Logic() {
     auto* s = g_cycleCaveState;
     auto* addr = g_cycleCaveAddr;
     if (!s || !addr) return;
 
     s->frame_count++;
-    g_lastCycleMs = GetTickCount();  // pause detector heartbeat (see the key-handler cave)
+    g_lastCycleMs = GetTickCount();
 
     if (s->replay_ptr) {
         s->player_ptr = SafeReadPtr(s->replay_ptr + GameAddresses::REPLAY_PLAYER_OFFSET);
     }
 
-    // First ticks of a launched race (see g_refreshStamps).
     if (g_refreshStamps > 0 && s->player_ptr) {
         g_refreshStamps--;
         rider::Refresh(s);
@@ -703,12 +612,10 @@ static void __declspec(noinline) CycleCave_Logic() {
     }
 }
 
-// Installed through CreateMidHook (FSAVE/FRSTOR around the body).
 static void CycleCave_Callback(SafetyHookContext&) {
     if (auto* s = g_cycleCaveState) {
-        // The game thread's x87 control word = the precision the renderer left
-        // the physics running at (0x007F DirectX 6/7 = 24-bit, OpenGL = 53/64),
-        // taken from the saved image: inside the hook the FPU is re-initialised.
+        // The physics precision the renderer set (0x007F DirectX 6/7 = 24-bit,
+        // OpenGL = 53/64), from the saved image: the hook re-initialises the FPU.
         s->fpu_control_word = g_hookFpuControlWord;
     }
     CycleCave_Logic();

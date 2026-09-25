@@ -1,23 +1,17 @@
 #pragma once
 #include <cstdint>
 
-// Who owns a replay recorder? (pure logic, unit-tested in
-// tests/test_replay_capture.cpp)
+// Who owns a replay recorder (pure logic, tested in tests/test_replay_capture.cpp).
 //
 // Rider classes in Supreme_Game.dll (RTTI):
-//   Player        - the rider the keyboard drives in a race (the base class
-//                   itself; this is the one the TAS records)
+//   Player        - the keyboard-driven rider (the base class itself)
 //   Ghost_Player  - Time Attack TOP5 ghosts and the guide rider
 //   AI_Player     - computer riders
 //   Net_Player    - network riders
-// A recorder links to its owner at +0x84 and the owner links back to its
-// recorder at +0x14C (the player update pushes [player+0x14C] every tick).
-//
-// So a recorder is the human's iff its owner's vtable is Player's AND the
-// owner's recorder slot still points at it. The second half rejects a dead
-// recorder whose owner has since been rebuilt (ghost restarts re-create the
-// player set) and any pusher with a garbage owner. A class check has no
-// offset to get wrong, and both vtables are validated at Resolve.
+// A recorder links to its owner at +0x84 and the owner links back at +0x14C
+// (the player update pushes [player+0x14C] every tick). A recorder is the
+// human's iff its owner is a Player and the back-link still points at it,
+// which rejects dead recorders and garbage owners.
 struct ReplayIdentityEnv {
     uint32_t player_vtable = 0;  // live address of the Player vtable (SG + RVA)
     uint32_t ghost_vtable = 0;   // live address of the Ghost_Player vtable (diagnostic only)

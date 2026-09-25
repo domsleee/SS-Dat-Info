@@ -8,33 +8,18 @@
 #include "setup_object.hpp"
 #include "level_path_parse.hpp"
 
-// The level context: which track is running, published when the game launches
-// a race and cleared when it leaves one (caves/lifecycle_cave.hpp calls these from
-// the game's own launch and stop points).
-//
-// level_id: 0..9 = area*3 + difficulty (area 0=Forest, 1=Alpine, 2=Village,
-// 3=Practice; difficulty 0=Easy, 1=Medium, 2=Hard; Practice has only Easy, so
-// only 9 occurs); 0xFFFFFFFF = no race / unknown.
-//
-// The area comes from the level's resource path ([SG+0x1D3304]), the
-// difficulty from the game-setup object: some tracks share a path (Village
-// Hard loads ".../Tracks/easy/..."), so the path alone cannot tell them apart.
+// Publishes which track is running (level_id, level_path; see shared_state.hpp).
+// caves/lifecycle_cave.hpp calls these from the game's launch and stop points.
+// The area comes from the level path ([SG+0x1D3304]), the difficulty from the
+// game-setup object, since tracks can share a path.
 namespace levelcontext {
 
 inline uint32_t g_levelPathPtrAddr = 0;
 inline uint32_t (*g_readPtr)(uint32_t) = nullptr;
 
-// Read the current level path into `out`. Returns false when unavailable OR not
-// a plausible level path.
-//
-// SEH only contains crashes; it does not give a coherent snapshot. Freed-but-
-// still-committed heap does not fault, and an in-place rewrite between the
-// length walk and the copy yields a hybrid string. So:
-//   * require a NUL WITHIN bounds (127 non-NUL bytes is not a valid path, it is
-//     a garbage buffer that happened to be readable);
-//   * require the path grammar we actually depend on ("levels" and "tracks"),
-//     which rejects transient garbage and unrelated strings;
-//   * sample TWICE and require the two to agree, which rejects a torn read.
+// SEH only contains faults; freed heap reads fine and can be rewritten
+// mid-copy. So require a NUL in bounds and a plausible grammar here, and
+// readLevelPath requires two agreeing samples.
 static bool readLevelPathOnce(char* out, size_t cap) {
     if (!g_levelPathPtrAddr || !g_readPtr) return false;
     uint32_t p = g_readPtr(g_levelPathPtrAddr);
@@ -49,7 +34,6 @@ static bool readLevelPathOnce(char* out, size_t cap) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
-    // Grammar check — see levelpath::IsPlausible, unit-tested standalone.
     return levelpath::IsPlausible(out);
 }
 
@@ -65,12 +49,8 @@ static bool readLevelPath(char* out, size_t cap) {
     return true;
 }
 
-// Seqlock writer. Marks the group as being mutated, applies `fn`, then commits.
-//
-// InterlockedIncrement rather than `++` so the sequence transitions are full
-// barriers that neither the compiler nor the CPU can reorder around the
-// payload. MUST NOT NEST: an inner pair would drive the sequence back to EVEN
-// halfway through the outer write, publishing a torn group as if it were stable.
+// Seqlock writer. Interlocked increments are full barriers. Must not nest: an
+// inner pair would make the sequence even mid-write.
 template <typename F>
 static void publishContext(TasSharedState* s, F&& fn) {
     InterlockedIncrement((volatile LONG*)&s->level_ctx_seq);   // -> odd: writing
@@ -78,10 +58,7 @@ static void publishContext(TasSharedState* s, F&& fn) {
     InterlockedIncrement((volatile LONG*)&s->level_ctx_seq);   // -> even: stable
 }
 
-// Area from the path, difficulty from the setup object. Practice resolves from
-// the path alone: it skips the menu screen that writes the setup object, so the
-// object holds a stale Arcade selection there (levelpath::LevelIdFrom).
-// Returns area*3+diff (Practice = 9) or -1.
+// Returns area*3+diff (Practice = 9) or -1; see levelpath::LevelIdFrom.
 static int32_t identify(const char* path) {
     const int area = levelpath::AreaFrom(path);
     if (area < 0) return -1;
@@ -90,8 +67,8 @@ static int32_t identify(const char* path) {
     return levelpath::LevelIdFrom(area, setup.area, setup.difficulty);
 }
 
-// A race is running: identify it and publish it as a new context, resolved
-// when the track was identified and unresolved otherwise (never as "no race").
+// A race is running: publish a new context, unresolved if the track was not
+// identified (never as "no race").
 inline void PublishRunning(TasSharedState* s) {
     char path[TAS_LEVEL_PATH_MAX] = {};
     const bool havePath = readLevelPath(path, sizeof(path));
@@ -106,8 +83,7 @@ inline void PublishRunning(TasSharedState* s) {
     Log(std::format("Level: racing '{}' (id {})", path, id));
 }
 
-// While a running race is unresolved, identify it again (same context, so no
-// epoch bump). Returns at once when it is resolved.
+// Retry identifying an unresolved race, in the same context (no epoch bump).
 inline void RetryIfUnresolved(TasSharedState* s) {
     if (s->level_scan_epoch == s->level_epoch) return;
     char path[TAS_LEVEL_PATH_MAX] = {};
@@ -121,25 +97,24 @@ inline void RetryIfUnresolved(TasSharedState* s) {
     Log(std::format("Level: identified '{}' (id {}) after launch", path, id));
 }
 
-// The race was left (quit to the menu, a track switch): resolved, no level.
+// The race was left (menu, track switch): resolved, no level.
 inline void PublishLeft(TasSharedState* s) {
     publishContext(s, [&] {
         s->level_path[0] = '\0';
         s->level_path_gen++;
         s->level_epoch++;
         s->level_id = 0xFFFFFFFFu;
-        s->level_scan_epoch = s->level_epoch;   // resolved: no race
+        s->level_scan_epoch = s->level_epoch;
     });
 }
 
-// At install: no race. Injected into a running race, the first Supreme::Cycle
-// tick corrects this (lifecycle_cave.hpp).
+// Starts as "no race"; if injected mid-race, the first Supreme::Cycle tick
+// corrects it (lifecycle_cave.hpp).
 inline void Init(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readPtr)(uint32_t)) {
     g_levelPathPtrAddr = levelPathPtrAddr;
     g_readPtr = readPtr;
-    // Shared memory survives reinjection, so a previous DLL instance killed
-    // mid-write can leave the sequence ODD, which rejects every read forever.
-    // Nothing is in flight here, so re-establish an even sequence.
+    // Shared memory survives reinjection; a killed instance can leave the
+    // sequence odd, which would reject every read.
     if (InterlockedOr((volatile LONG*)&s->level_ctx_seq, 0) & 1) {
         InterlockedIncrement((volatile LONG*)&s->level_ctx_seq);
     }

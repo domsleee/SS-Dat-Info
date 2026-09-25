@@ -8,22 +8,15 @@
 #include "menu_cave.hpp"
 #include "../fpu_safe_hook.hpp"
 
-// The game's race lifecycle, observed at its own transition points instead of
-// inferred from a polling thread:
+// The race lifecycle hooks (DESIGN.md "The race lifecycle"), all on the game
+// thread:
 //
-//   LAUNCH  Supreme.exe+0x25BD7 - the race loop has entered the level (a new
-//           load or the same track re-entered) and set the game mode; the race
-//           is about to run. Publishes the level and game_in_game = 1.
-//   STOP    Supreme_Game+0x1408F0 (Supreme::Stop) - the race is being left
-//           (quit to the menu, before a track switch). Stops an armed TAS mode
-//           while the level still exists, publishes "no race", game_in_game = 0.
-//   PUMP    Supreme.exe+0x55920 - the game's message pump. It runs on the game
-//           thread in every state: racing, the menus, the pause menu and
-//           dialogs, where Supreme::Cycle does not run. Consumes STOP there and
-//           does the DLL's housekeeping.
-//
-// All three run on the game thread, like the cycle cave, so no DLL state is shared
-// with another thread, and inside CreateMidHook's FSAVE/FRSTOR.
+//   LAUNCH  Supreme.exe+0x25BD7 - the race loop has entered the level and set
+//           the game mode; the race is about to run.
+//   STOP    Supreme_Game+0x1408F0 (Supreme::Stop) - the race is being left,
+//           while the level still exists.
+//   PUMP    Supreme.exe+0x55920 - the message pump. Runs in every state,
+//           including menus and dialogs where Supreme::Cycle does not.
 namespace lifecycle {
 
 inline TasSharedState* g_state = nullptr;
@@ -37,10 +30,9 @@ inline bool g_sawLaunch = false;
 inline uint32_t g_frameAtInstall = 0;
 inline uint32_t g_frameAtLastIdentify = 0;
 
-// A Continue whose controller died leaves the live-input block set, and the
-// input gate then swallows every key but Escape. A restart's reload freezes
-// the cycle for a second or two; frozen this long with the block still set,
-// nothing is going to clear it.
+// A CONT whose controller died leaves the live-input block set. A restart
+// freezes the cycle for a second or two; longer than this, nothing will
+// clear it.
 static constexpr uint32_t STALE_SUPPRESS_MS = 5000;
 
 static void OnLaunch(SafetyHookContext&) {
@@ -49,7 +41,7 @@ static void OnLaunch(SafetyHookContext&) {
     g_sawLaunch = true;
     levelcontext::PublishRunning(s);
     s->game_in_game = 1;
-    g_refreshStamps = REFRESH_STAMP_TICKS;   // rider and renderer, over the race's first ticks (cycle cave)
+    g_refreshStamps = REFRESH_STAMP_TICKS;
 }
 
 static void OnStop(SafetyHookContext&) {
@@ -70,8 +62,7 @@ static void OnPump(SafetyHookContext&) {
         s->game_in_game = 1;
         g_refreshStamps = REFRESH_STAMP_TICKS;
     }
-    // A race whose track could not be identified at launch stays unresolved;
-    // try again once it has ticked (the setup object may lag the launch).
+    // The setup object may lag the launch, so retry identification.
     if (s->game_in_game && s->frame_count != g_frameAtLastIdentify) {
         g_frameAtLastIdentify = s->frame_count;
         levelcontext::RetryIfUnresolved(s);

@@ -7,17 +7,10 @@
 #include "../replay_identity.hpp"
 #include "../fpu_safe_hook.hpp"
 
-// Replay object capture hook at SG+0x9E8F0.
-// Original instruction: sub esp, 00000080 (6 bytes).
-// At this site, ECX holds the replay recorder object (the function is the
-// recorder's per-frame "push 112-byte frame"). We capture it so the cycle cave can
-// derive the player pointer from [recorder+0x84] every cycle.
-//
-// Only the HUMAN's recorder is followed (see replay_identity.hpp /
-// replay_capture_policy.hpp): the one whose owner is a plain `Player` that still links
-// back to it. Ghost / AI recorders that reach this site around a restart are
-// ignored, and a re-created human recorder is adopted immediately, even
-// mid-run.
+// Replay recorder capture hook at SG+0x9E8F0 (sub esp, 0x80; 6 bytes), the
+// recorder's per-frame "push 112-byte frame". ECX = the recorder; the cycle
+// cave derives the player from [recorder+0x84]. Only the human's recorder is
+// followed (replay_capture_policy.hpp).
 
 inline TasSharedState* g_replayState = nullptr;
 inline GameAddresses* g_replayAddr = nullptr;
@@ -51,18 +44,14 @@ static char* ReplayPut(char* p, const char* s) {
     return p;
 }
 
-// The recorder the DLL follows. File scope so a reinstall starts clean
-// instead of trusting a pointer from a previous process life.
 static ReplayCaptureState g_capture;
 
-// Runs on every recorder push (every rider, every tick), inside the player
-// update, so it is installed through CreateMidHook like every mid-hook.
+// Runs on every recorder push (every rider, every tick).
 static void ReplayCaptureCb(SafetyHookContext& ctx) {
     auto* s = g_replayState;
     auto* addr = g_replayAddr;
     if (!s || !addr) return;
 
-    // ECX holds the recorder object at this hook site.
     auto newPtr = (uint32_t)ctx.ecx;
 
     static uint32_t s_logged = 0;
@@ -70,9 +59,7 @@ static void ReplayCaptureCb(SafetyHookContext& ctx) {
     env.player_vtable = addr->player_vtable;
     env.ghost_vtable = addr->ghost_vtable;
     if (newPtr != 0 && newPtr == g_capture.cached) {
-        // Same address as the recorder we follow: prove it is STILL the
-        // human's on every push (three guarded reads). An F5 can free it
-        // and the allocator can hand the address to a ghost.
+        // Recheck every push: after F5 the address can be reused by a ghost.
         const ReplayOwnerKind kind = ClassifyRecorderOwner(newPtr, env, ReplaySafeReadU32, nullptr);
         if (ReplayCaptureRevalidate(kind == OWNER_HUMAN, g_capture)) {
             s->replay_ptr = 0;
@@ -95,8 +82,6 @@ static void ReplayCaptureCb(SafetyHookContext& ctx) {
         const uint32_t rejectedBefore = g_capture.rejected;
         const bool adopted = ReplayCaptureAdopt(s->mode == MODE_OFF, newPtr, human, g_capture);
         if (adopted) s->replay_ptr = newPtr;
-        // Ring-log adoptions and rejections (rate-limited) with the owner
-        // and its class.
         if ((adopted || g_capture.rejected != rejectedBefore) && ++s_logged <= 60) {
             char msg[128];
             char* p = ReplayPut(msg, "replay-capture ecx=");

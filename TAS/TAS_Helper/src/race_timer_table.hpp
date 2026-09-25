@@ -1,22 +1,11 @@
 #pragma once
 #include <cstdint>
 
-// The race timer's HUD-line table (pure logic, unit-tested in
-// tests/test_race_timer.cpp; race_timer_cave.hpp owns the hooks and publishing).
-//
-// Every time-like string ("MM:SS:CC") that SR_UIT appends is keyed by the
-// text-LINE object it was appended to. The PLAYER's line is the one whose
-// parsed centiseconds ADVANCE (a running timer); an opponent par / record
-// line has a constant value. Once a line locks as the player it is LATCHED
-// and its live value is published through the +/-1 (clock-cs) wobble and the
-// finish freeze.
-//
-// STALENESS: every race rebuilds the HUD, so the previous race's line objects
-// would keep their "advancing" history and make
-// the next race's pick ambiguous. A line that has not been sampled for
-// STALE_TICKS clock ticks is gone from the HUD, so it is evicted (and
-// unlatched) before every classification, and a full table evicts its
-// stalest slot.
+// The race timer's HUD-line table (pure logic, tested in
+// tests/test_race_timer.cpp). Time strings are keyed by their text-line
+// object; the player's line is the one whose value advances (a par line is
+// constant). Every race rebuilds the HUD, so lines not sampled for
+// STALE_TICKS are evicted, or old lines would make the next pick ambiguous.
 namespace racetimer {
 
 constexpr int      SLOTS = 8;
@@ -65,9 +54,8 @@ struct Table {
         return n;
     }
 
-    // Drop every line not sampled within STALE_TICKS of `tick`; a latched
-    // player line that vanished is unlatched (re-locks in LOCK_FRAMES samples).
-    // Returns how many slots were freed.
+    // Drops lines not sampled within STALE_TICKS, unlatching the player line
+    // if it went. Returns the number freed.
     int Evict(uint32_t tick) {
         int freed = 0;
         for (int i = 0; i < SLOTS; i++) {
@@ -84,8 +72,7 @@ struct Table {
         return freed;
     }
 
-    // Slot holding `l`, or a fresh one (the stalest slot is recycled when the
-    // table is full). -1 only if every slot was sampled within STALE_TICKS.
+    // Slot holding `l`, or a free or stale one; -1 if none.
     int Slot(uint32_t l, uint32_t tick) {
         for (int i = 0; i < SLOTS; i++)
             if (line[i] == l) return i;
@@ -117,9 +104,8 @@ struct Table {
 
         int prevCs = cs[i];
         bool first = (lastClk[i] == MAXU);
-        // Player signal: cs advances (a running timer). A small forward step
-        // bumps the counter; a backward jump (F5 / new race) resets it; an
-        // equal cs (opponent par, or a frozen finish) leaves it unchanged.
+        // A backward jump (F5 / new race) resets the counter; an equal cs
+        // (par, or a frozen finish) leaves it unchanged.
         if (!first) {
             int d = csNow - prevCs;
             if (d > 0 && d < 30000) { if (adv[i] < 1000000) adv[i]++; }
@@ -141,13 +127,10 @@ struct Table {
         return Classify();
     }
 
-    // The player line is the one whose cs ADVANCES (adv >= LOCK_FRAMES) -
-    // clock-independent, so it works in a replay too. Latch model: once
-    // locked we keep publishing its live cs even when (clock-cs) wobbles
-    // +/-1 or freezes at the finish - blanking only when no advancing line
-    // is locked yet, a 2nd advancing line (ghost/racer) makes the pick
-    // ambiguous, or the epoch resets. start_ts is published only when
-    // (clock-cs) has settled (live race); in a replay it stays unknown.
+    // Once locked, the player line stays latched through the +/-1 (clock-cs)
+    // wobble and the finish freeze; a second advancing line blanks it as
+    // ambiguous. start_ts is published only once (clock-cs) settles, so it
+    // stays unknown in a replay.
     Verdict Classify() {
         int advCount = 0, best = -1, bestAdv = 0;
         for (int i = 0; i < SLOTS; i++) {

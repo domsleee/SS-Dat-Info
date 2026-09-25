@@ -19,8 +19,7 @@ bool run() {
     Log("=== TAS_Helper.dll loading ===");
     Log(std::format("  sizeof(TasSharedState) = {}", sizeof(TasSharedState)));
 
-    // Resolve and validate the exact game build before creating the readiness
-    // signal or changing any game code.
+    // Validate the game build before touching shared memory or game code.
     if (!g_addr.Resolve()) {
         Log("FATAL: Failed to resolve/validate game addresses");
         return false;
@@ -35,22 +34,17 @@ bool run() {
 
     auto* state = g_sharedMem.state;
 
-    // Order matters: the observer cave (BB3B10 gate) and the key-handler cave (handler gate) must be
-    // installed before the cycle cave, which calls BB3B10 directly.
+    // The observer and key-handler caves must precede the cycle cave, which calls BB3B10.
     bool replay_ok = InstallReplayCapture(g_addr, state);
     bool observer_ok = InstallObserverCave(g_addr, state);
     bool key_handler_ok = InstallKeyHandlerCave(g_addr, state);
     bool cycle_ok = InstallCycleCave(g_addr, state);
     bool tick_ok = InstallTickCave(g_addr, state);
     bool f5_ok = f5restart::Install(g_addr);
-    // Level identity, leaving a race, and STOP while Supreme::Cycle is frozen
-    // (menus, pause, dialogs) all hang off the game's own lifecycle points.
     bool lifecycle_ok = lifecycle::Install(g_addr, state);
 
-    // These hooks are one functional unit. Reporting ready after any of them
-    // failed leaves a partially intercepted input/game loop in production and
-    // makes Injector.exe's explicit initialization result meaningless. Roll
-    // back in reverse dependency order while shared state is still mapped.
+    // These hooks work only as a unit: on any failure, roll all back in
+    // reverse order while shared state is still mapped.
     if (!(replay_ok && observer_ok && key_handler_ok && cycle_ok && tick_ok && f5_ok && lifecycle_ok)) {
         Log("FATAL: required TAS hook installation failed; rolling back all core hooks");
         lifecycle::Uninstall();
@@ -73,15 +67,13 @@ bool run() {
     Log(std::format("  F5 restart (accept/done):    {}", f5_ok ? "OK" : "FAILED"));
     Log(std::format("  Lifecycle (launch/stop/pump): {}", lifecycle_ok ? "OK" : "FAILED"));
 
-    // Race timer: read the exact on-screen race time (HUD/SR_UIT) -> shared state.
     if (racetimer::Install(g_addr, state)) {
         Log("  Race timer: started");
     } else {
         Log("  Race timer: unavailable");
     }
 
-    // Menu state (which screen the game is on) - reads the Main_Menu.dll menu
-    // object via a Change_Page hook, deferred until that DLL loads.
+    // Deferred until Main_Menu.dll loads.
     menustate::Install(g_addr, state);
 
     Log(std::format("  Renderer plugin at init: {} (the x87 precision is logged when a race starts)",
@@ -90,9 +82,8 @@ bool run() {
     return true;
 }
 
-// Injector.exe calls this only after its LoadLibrary remote thread has returned,
-// so none of the CRT, file I/O, hook installation or worker startup below runs
-// under the Windows loader lock.
+// Injector.exe calls this after LoadLibrary returns, so none of this runs under
+// the loader lock.
 extern "C" __declspec(dllexport) DWORD WINAPI TAS_Initialize(LPVOID) {
     LONG previous = InterlockedCompareExchange(&g_initState, 1, 0);
     if (previous == 2) return 1;
@@ -109,10 +100,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI TAS_Initialize(LPVOID) {
         return 0;
     }
 
-    // This DLL installs callbacks whose code and data are referenced directly by
-    // the game. Pin it after successful initialization so an accidental
-    // FreeLibrary cannot unload those callbacks and turn the next game tick into
-    // a jump through freed memory. Process termination needs no explicit teardown.
+    // Pin the DLL: the game jumps into our hooks, so it must never be unloaded.
     HMODULE pinned = nullptr;
     if (!GetModuleHandleExA(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,

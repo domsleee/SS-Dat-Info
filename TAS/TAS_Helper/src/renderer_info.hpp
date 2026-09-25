@@ -4,33 +4,23 @@
 #include "shared_state.hpp"
 #include <format>
 
-// Renderer / x87-precision awareness.
-//
-// The physics are not renderer-independent: Supreme.exe sets 24-bit x87
-// precision at startup (_controlfp(_PC_24, _MCW_PC)), DirectX 6/7 leave it
-// there (control word 0x007F), but the OpenGL/Software2 path runs the game
-// thread at 53-bit (0x027F). Every x87 multiply in the sim then rounds
-// differently, so a recording made under one renderer does not replay
-// bit-exact under the other (see the wiki page "Why are replays sometimes
-// 0.01s shorter than expected?").
-//
-// The DLL publishes both facts so tas_ui can show them, stamp them into
-// recordings and history entries, and warn on a mismatch:
-//   - fpu_control_word: sampled on the game thread by the cycle cave every cycle.
-//   - renderer_id: which srDD_*.dll sr.dll loaded, refreshed here.
+// Renderer / x87 precision. Supreme.exe sets 24-bit precision at startup and
+// DirectX 6/7 keep it (CW 0x007F), but OpenGL/Software2 run the game thread at
+// 53-bit (0x027F), so recordings do not replay bit-exact across them. tas_ui
+// stamps both into recordings and warns on a mismatch. The cycle cave samples
+// fpu_control_word; renderer_id (which srDD_*.dll sr.dll loaded) is set here.
 namespace renderer {
 
 inline uint32_t Detect() {
-    // The plugin cannot change at runtime: resolve it once instead of taking
-    // the loader lock on every refresh.
+    // The plugin cannot change at runtime; cache it to avoid the loader lock.
     static uint32_t s_cached = TAS_RENDERER_UNKNOWN;
     if (s_cached != TAS_RENDERER_UNKNOWN) return s_cached;
     static const char* const kModules[] = {
-        "srDD_DirectX6.dll",  // TAS_RENDERER_DIRECTX6
-        "srDD_DirectX7.dll",  // TAS_RENDERER_DIRECTX7
-        "srDD_OpenGL.dll",    // TAS_RENDERER_OPENGL
-        "srDD_Glide3x.dll",   // TAS_RENDERER_GLIDE3X
-        "srDD_Software2.dll", // TAS_RENDERER_SOFTWARE2
+        "srDD_DirectX6.dll",  // index + 1 = TasRendererId
+        "srDD_DirectX7.dll",
+        "srDD_OpenGL.dll",
+        "srDD_Glide3x.dll",
+        "srDD_Software2.dll",
     };
     for (uint32_t i = 0; i < 5; i++) {
         if (GetModuleHandleA(kModules[i])) {
@@ -52,16 +42,15 @@ inline const char* Name(uint32_t id) {
     }
 }
 
-// Publish renderer_id; log whenever the renderer or the game thread's control
-// word changes. Called by the cycle cave on the first tick of each race, inside its
-// FSAVE/FRSTOR.
+// Publish renderer_id; log when it or the control word changes. Called by the
+// cycle cave on each race's first tick, inside its FSAVE/FRSTOR.
 inline void Refresh(TasSharedState* s) {
     static uint32_t lastRenderer = 0xFFFFFFFFu;
     static uint32_t lastCw = 0xFFFFFFFFu;
     const uint32_t id = Detect();
     s->renderer_id = id;
     const uint32_t cw = s->fpu_control_word;
-    if (cw == 0) return;  // no Supreme::Cycle yet: nothing sampled
+    if (cw == 0) return;  // not sampled yet
     if (id == lastRenderer && cw == lastCw) return;
     lastRenderer = id;
     lastCw = cw;

@@ -7,33 +7,20 @@
 #include "../race_timer_table.hpp"
 #include "menu_cave.hpp"
 
-// ============================================================================
-// Race timer — reads the EXACT on-screen player race time, map-agnostically.
+// Race timer: reads the on-screen player race time from the HUD string, since
+// the game computes it each frame (clock - start_ts) rather than storing it.
 //
-// start_ts is not a plain stored value (the displayed time is computed each
-// frame as clock - start_ts and formatted), so we read the value the game
-// already produced: the HUD time string.
-//
-// HUD times render through SR_UIT.dll (HMG UI-text, exported symbols):
+// HUD times render through SR_UIT.dll (exported symbols):
 //   Housemarque::SR_UIT::Sr_Plane_Text_Line::Append_Text   (SR_UIT + 0xED40)
-//   fastcall: ecx = the text-LINE object, edx = textObj (+0x04 char* data,
+//   fastcall: ecx = the text-line object, edx = textObj (+0x04 char* data,
 //             +0x08 int length).
-// SafetyHook (all threads) intercepts every time-like ("MM:SS:CC") append,
-// keyed by the LINE object, and classifies/publishes RIGHT THERE (on the same
-// fresh sample) - the table logic lives in race_timer_table.hpp (pure,
-// unit-tested): the PLAYER line is the one whose parsed cs ADVANCES, it is
-// LATCHED once locked, and lines that stop being sampled are evicted (a
-// finished race's HUD is torn down while the race is still launched, so dead
-// lines cannot be cleared on game_in_game alone).
-// We publish:
-//   race_time_cs  = exact on-screen race time, centiseconds (u32::MAX = idle)
+// Each "MM:SS:CC" append is classified by race_timer_table.hpp, keyed by line.
+// Publishes:
+//   race_time_cs  = on-screen race time, centiseconds (u32::MAX = idle)
 //   race_start_ts = 16-bit game clock value at the gate cross
 //   clock         = SG + 0x1D5334 (16-bit centiseconds, wraps at 65536)
 //
-// DIAGNOSTICS: set the env var TAS_RACE_DIAG=1 before launch to log every
-// blank<->show transition, slot claims and a periodic line dump to
-// TAS_Helper.log.
-// ============================================================================
+// TAS_RACE_DIAG=1 logs transitions, slot claims and a periodic line dump.
 
 namespace racetimer {
 
@@ -56,11 +43,9 @@ static inline uint16_t ReadClk() {
     return g_clock ? *(volatile uint16_t*)g_clock : 0;
 }
 
-// Publish, recording blank<->show transitions for diagnosis.
+// Publishes the pair under race_seq. Game thread only.
 static void Publish(uint32_t cs, uint32_t start, const char* reason) {
     if (!g_state) return;
-    // The pair goes out under race_seq so a reader never sees a new time with
-    // the previous start stamp. Game thread only.
     if (g_state->race_time_cs != cs || g_state->race_start_ts != start) {
         InterlockedIncrement((volatile LONG*)&g_state->race_seq);   // odd: writing
         g_state->race_time_cs = cs;
@@ -80,8 +65,7 @@ static void ResetEpoch() {
     Publish(MAXU, MAXU, "epoch-reset");
 }
 
-// "MM:SS:CC" -> centiseconds, or -1 if not a valid time. Tight: exact 8-char
-// shape, digit-only, seconds < 60, centis < 100 (rejects scores / clock-of-day).
+// "MM:SS:CC" -> centiseconds, or -1. Strict, to reject scores and clock-of-day.
 static int ParseCs(const char* s, int len) {
     if (len < 8 || s[2] != ':' || s[5] != ':') return -1;
     for (int i : {0, 1, 3, 4, 6, 7})
@@ -93,7 +77,7 @@ static int ParseCs(const char* s, int len) {
     return mm * 6000 + ss * 100 + cc;
 }
 
-// SEH-only: read the appended text (textObj+0x04 = char*, +0x08 = int len).
+// textObj+0x04 = char*, +0x08 = int len.
 static bool ReadText(uint32_t textObj, char out[24], int& len) {
     out[0] = 0; len = 0;
     __try {
@@ -108,7 +92,6 @@ static bool ReadText(uint32_t textObj, char out[24], int& len) {
     }
 }
 
-// Hook of SR_UIT Append_Text: classify on each fresh time-like sample.
 static void AptCb(SafetyHookContext& ctx) {
     char buf[24]; int len;
     if (!ReadText((uint32_t)ctx.edx, buf, len)) return;
@@ -126,13 +109,11 @@ static void AptCb(SafetyHookContext& ctx) {
     Publish(v.cs, v.start, v.reason);
 }
 
-// Once per clock tick: staleness clock, epoch reset on a game_in_game 1 -> 0
-// edge (a level torn down while the clock still ticks) + periodic diag.
+// Once per clock tick: staleness clock, epoch reset when game_in_game drops.
 static void TickCb(SafetyHookContext&) {
     if (!g_state) return;
     g_tickNow++;
-    // A ticking clock means a level is running and no menu is on screen (the
-    // engine cycle - and this clock tick with it - is frozen at menus).
+    // The clock only ticks while a level runs, so no menu is on screen.
     if (g_state->game_in_game) menustate::ClearForLevel();
     int inGame = g_state->game_in_game ? 1 : 0;
     if (inGame == 0) {
@@ -141,12 +122,8 @@ static void TickCb(SafetyHookContext&) {
     }
     g_wasInGame = inGame;
 
-    // Staleness is tick-driven, not sample-driven: the HUD line of a finished
-    // race keeps its frozen time published for as long as the line is still
-    // appended, but once the HUD is torn down nothing samples any more, so
-    // without this the last time would stay published until the race is left.
-    // Eight compares per tick; eviction
-    // unlatches the player line, which blanks the feed.
+    // Evict here too: once the HUD is torn down nothing samples, and the last
+    // time would otherwise stay published until the race is left.
     if (inGame && g_table.Evict(g_tickNow) > 0 && g_table.playerLine == 0 && g_lastPub != MAXU) {
         Publish(MAXU, MAXU, "stale");
     }
@@ -172,15 +149,12 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
     static constexpr GameAddresses::ModuleIdentity kUitIdentity{
         "SR_UIT.dll v1.035", 0x381DA317u, 0x00022000u
     };
-    // On-disk bytes. Both sites embed an absolute address the loader rebases
-    // (these DLLs never load at their preferred 0x10000000), so the imm32 at +3
-    // is compared after rebasing - see GameAddresses::ValidateCodeAbs.
+    // On-disk bytes; the imm32 at +3 is compared after rebasing (ValidateCodeAbs).
     static constexpr uint8_t kRaceTick[] =                    // inc word [SG+0x1D5334]; ret
         { 0x66, 0xFF, 0x05, 0x34, 0x53, 0x1D, 0x10, 0xC3 };
     static constexpr uint8_t kAppendText[] =                  // push -1; push UIT+0x12E87
         { 0x6A, 0xFF, 0x68, 0x87, 0x2E, 0x01, 0x10 };
-    // Validate every site BEFORE installing anything. The race timer is optional,
-    // so a mismatch here makes it unavailable rather than failing TAS_Initialize.
+    // Optional feature: a mismatch disables it rather than failing TAS_Initialize.
     bool sitesOk =
         GameAddresses::ValidateCodeAbs<3>("Supreme_Game.dll+0xB4B80", sg + 0xB4B80,
                                           kRaceTick, sg, 0x1D5334) &&
@@ -196,16 +170,15 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
     char buf[8] = {};
     g_diag = (GetEnvironmentVariableA("TAS_RACE_DIAG", buf, sizeof(buf)) > 0 && buf[0] == '1');
     g_tickNow = STALE_TICKS + 1;  // so a brand-new table never looks "just sampled"
-    // Shared memory survives reinjection: an ODD race_seq from a DLL killed
-    // mid-publish would make every reader reject the pair forever.
+    // Shared memory survives reinjection: an odd race_seq left by a DLL killed
+    // mid-publish would block readers forever.
     if (g_state->race_seq & 1) InterlockedIncrement((volatile LONG*)&g_state->race_seq);
     ResetEpoch();
     g_clock = sg + 0x1D5334;
     g_tickHook = CreateMidHook<TickCb>(sg + 0xB4B80);  // clock tick (100/sec)
     g_aptHook = CreateMidHook<AptCb>((uint8_t*)uit + 0xED40);
     if (!g_tickHook || !g_aptHook) {
-        // Installation is all-or-none: a failed UI hook must not leave the
-        // per-tick callback running against a feature reported as unavailable.
+        // All or none.
         g_tickHook = {};
         g_aptHook = {};
         g_state = nullptr;

@@ -7,28 +7,13 @@
 #include "setup_object.hpp"
 #include <format>
 
-// Rider awareness: who is on the board, and in which stance.
-//
-// The physics depend on the character (a Keith recording does not line up
-// when Vincent rides it) and on the stance, so the DLL publishes both and
-// tas_ui stamps recordings / history entries with them and warns when a
-// replay's stamp differs from the live one - the same shape as the renderer /
-// x87-precision stamp. (The board does not affect the physics.)
-//
-// Sources (no heap scan):
-//   character - the human Player's Player_Config name ([player+0x48] ->
-//               std::string at +0x48, "Vincent"; the loadout folder at
-//               [[player+0x20]+0x10] as the fallback).
-//   stance    - the game-setup object read through the stable executable
-//               config pointer chain (setup_object.hpp), the value the game
-//               builds every rider from when a level is entered. Validated by
-//               comparing the setup's character string to the live rider, so a
-//               stale or mid-menu object is rejected rather than believed.
-//               Read-only: the stance cannot be switched in-process, so a
-//               mismatch is reported, never "fixed".
-//
-// Refreshed by the cycle cave on the first tick of each race (the stance only changes
-// in the menus). All reads are SEH-guarded: a failed or implausible read keeps
+// Publishes the rider's character and stance, which both affect the physics;
+// tas_ui stamps recordings with them and warns on a mismatch.
+//   character: the Player_Config name ([player+0x48] -> std::string at +0x48),
+//              falling back to the loadout folder [[player+0x20]+0x10].
+//   stance:    the game-setup object (setup_object.hpp), trusted only when its
+//              character matches the live rider. Read-only; cannot be switched in-process.
+// The cycle cave calls Refresh on each race's first tick. A failed read keeps
 // the last published value.
 namespace rider {
 
@@ -47,9 +32,7 @@ static uint32_t SafeU32(uint32_t addr) {
     return SafeCopy(addr, &v, sizeof v) ? v : 0;
 }
 
-// MSVC6 std::string at `obj`: {allocator, char* ptr, size, capacity}. Header
-// read in one guarded copy and bounds-checked without arithmetic on the length
-// (riderparse::StringHeaderUsable): a dead object can report any size.
+// MSVC6 std::string at `obj`: {allocator, char* ptr, size, capacity}.
 static bool ReadStdString(uint32_t obj, char* out, uint32_t cap) {
     uint32_t hdr[4] = {};
     if (!SafeCopy(obj, hdr, sizeof hdr)) return false;
@@ -72,7 +55,6 @@ inline void Refresh(TasSharedState* s) {
     const uint32_t loadout = SafeU32(player + GameAddresses::PLAYER_LOADOUT_OFFSET);
     if (!loadout) return;
 
-    // Character from the LIVE Player (the truth on the board right now).
     char name[32];
     const uint32_t config = SafeU32(player + GameAddresses::PLAYER_CONFIG_OFFSET);
     if (!(config && ReadStdString(config + GameAddresses::PLAYER_CONFIG_NAME_STRING, name, sizeof name)) &&
@@ -81,25 +63,18 @@ inline void Refresh(TasSharedState* s) {
     }
     const uint32_t character = riderparse::CharacterFromName(name);
 
-    // Stance from the game-setup object via the stable chain. Trust it only
-    // when its own character string matches the live rider - otherwise it is
-    // stale or mid-menu-change, and the stance is unknown (never assumed
-    // regular).
     uint32_t stance = riderparse::STANCE_UNKNOWN;
     gamesetup::Setup setup;
     if (gamesetup::Read(&setup)) {
         stance = riderparse::StanceForRider(setup.stance, setup.character, name);
     }
 
-    // The pair is published under rider_seq so a reader never pairs a new
-    // character with the previous stance (a REC armed in that window would
-    // stamp the mixed identity into the file). Bumped only when the value
-    // changes, so steady state costs readers nothing.
+    // Published under rider_seq so a reader never pairs a new character with
+    // the old stance. Bumped only on change.
     static bool s_seqChecked = false;
     if (!s_seqChecked) {
         s_seqChecked = true;
-        // Shared memory survives reinjection: a previous DLL killed mid-write
-        // leaves the sequence ODD and every reader rejecting forever.
+        // A previous instance killed mid-write can leave the sequence odd.
         if (s->rider_seq & 1) InterlockedIncrement((volatile LONG*)&s->rider_seq);
     }
     if (s->rider_character != character || s->rider_stance != stance) {

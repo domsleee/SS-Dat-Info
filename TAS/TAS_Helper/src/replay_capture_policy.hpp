@@ -1,29 +1,15 @@
 #pragma once
 #include <cstdint>
 
-// Which replay-recorder object the DLL follows (pure logic, unit-tested in
+// Which replay recorder the DLL follows (pure logic, tested in
 // tests/test_replay_capture.cpp).
 //
-// The replay-capture hook (SG+0x9E8F0, the recorder's per-frame "push 112-byte
-// frame") hands us ECX = the recorder object; the cycle cave derives the player from
-// [recorder+0x84] every cycle and reads the position from there.
-//
-// What the site sees (ring-logged in-game):
-//   - Steady state: exactly ONE recorder pushes, once per Supreme::Cycle - the
-//     human's. This holds with Time Attack ghosts enabled too.
-//   - Around an F5 restart (reload window and countdown) OTHER recorder
-//     objects push on some frames - ghosts / AI riders / the guide being
-//     (re)built - some with a garbage owner (+0x84 == 2). With ghosts the
-//     human's own recorder and player are re-created at new addresses as well.
-//
-// No timing rule survives both: a pointer frozen for the run reads a dead
-// object after a ghost restart, and following the last pusher lets a countdown transient hijack the position
-// source mid-run. So the hook decides by IDENTITY: a recorder is adopted iff
-// its owner is the keyboard-driven rider - a plain `Player`, still linking
-// back to this recorder (replay_identity.hpp). That is true for the human's
-// recorder whether it was just re-created (adopt, even mid-run) and false for
-// ghosts (Ghost_Player), AI riders and garbage owners (ignore, however often
-// they push).
+// In a steady race only the human's recorder pushes, once per Supreme::Cycle.
+// Around an F5 restart other recorders (ghosts, AI, the guide) push too, some
+// with a garbage owner (+0x84 == 2), and with ghosts the human's recorder is
+// re-created at a new address. So the choice is by identity, not timing: a
+// recorder is adopted, even mid-run, iff its owner is a plain `Player` that
+// links back to it (replay_identity.hpp).
 struct ReplayCaptureState {
     uint32_t cached = 0;                 // recorder the DLL currently follows
     uint32_t changes_while_active = 0;   // re-creations adopted during REC/PLAY (diagnostic)
@@ -31,12 +17,8 @@ struct ReplayCaptureState {
     uint32_t dropped = 0;                // cached recorder that stopped being the human's (diagnostic)
 };
 
-// The cached recorder pushed again: is it STILL the human's? Checked on every
-// push of the cached address, not only when the pushing address changes: an
-// F5 can free the human's recorder and the allocator can hand the same
-// address to a ghost. Returns true when the cached recorder was dropped; the
-// caller clears the published pointers and the next human push re-adopts
-// through ReplayCaptureAdopt.
+// The cached recorder pushed again; drop it if it is no longer the human's
+// (after F5 its address can be reused by a ghost). Returns true when dropped.
 inline bool ReplayCaptureRevalidate(bool still_human, ReplayCaptureState& st) {
     if (st.cached == 0 || still_human) return false;
     st.cached = 0;
@@ -44,7 +26,6 @@ inline bool ReplayCaptureRevalidate(bool still_human, ReplayCaptureState& st) {
     return true;
 }
 
-// Feed one hook invocation. `incoming_is_human` is the identity check above.
 // Returns true when `incoming` replaced the cached recorder.
 inline bool ReplayCaptureAdopt(bool mode_off, uint32_t incoming, bool incoming_is_human,
                                ReplayCaptureState& st) {
