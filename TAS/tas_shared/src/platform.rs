@@ -176,6 +176,14 @@ impl TasSharedMemoryClient {
         }
     }
 
+    /// Volatile read of game_in_game (1 from a race's launch until it is left).
+    pub fn game_in_game_volatile(&self) -> u32 {
+        unsafe {
+            let ptr = std::ptr::addr_of!((*self.ptr).game_in_game);
+            std::ptr::read_volatile(ptr)
+        }
+    }
+
     /// Volatile read of playback_pos (poll-hot field written by DLL).
     pub fn playback_pos_volatile(&self) -> u32 {
         unsafe {

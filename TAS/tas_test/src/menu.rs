@@ -31,7 +31,7 @@ pub fn wait_for_ack(client: &TasSharedMemoryClient, seq: u32) -> Option<u32> {
 /// The page id named by a menu document (`{"screen":"ID_...","sel":..}`).
 /// Screen ids are C identifiers (no quotes or escapes), so a prefix scan is
 /// exact — no JSON parser needed for this one field.
-fn screen_in_doc(doc: &str) -> Option<String> {
+pub fn screen_in_doc(doc: &str) -> Option<String> {
     let rest = doc.split_once("\"screen\":\"")?.1;
     let id = rest.split_once('"')?.0;
     if id.is_empty() {
@@ -55,10 +55,9 @@ fn read_doc(client: &TasSharedMemoryClient) -> Option<String> {
     }
 }
 
-/// Whether any menu document is published. It is cleared once no menu has run
-/// for 1.5 s, so after a proceed this going false means a level is loading.
-pub fn has_doc(client: &TasSharedMemoryClient) -> bool {
-    tas_shared::menu_doc(client.state()).is_some()
+/// The page the published document names, if any.
+pub fn current_screen(client: &TasSharedMemoryClient) -> Option<String> {
+    tas_shared::menu_doc(client.state()).and_then(|doc| screen_in_doc(&doc))
 }
 
 /// Wait until the published document names `screen`.
@@ -76,7 +75,7 @@ pub fn wait_for_screen(
                 return Ok(());
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(20));
     }
     Err(format!(
         "the menu never reached {screen} (last page: {})",
@@ -190,17 +189,13 @@ struct MenuDocItemLite {
     label: String,
 }
 
-/// Navigate one step through the menu protocol: wait for the live document,
-/// find an id or label (case-insensitive, trimmed), activate its published id
-/// (falling back to the label when the item has none — the DLL matches
-/// either), wait for the ack, and verify the destination page. Returns the
-/// destination screen id. `expect_screen` pins it; `None` accepts any page
-/// change. Entering a menu still needs a physical key — everything after
-/// goes through here instead of blind cursor counting.
-pub fn activate_and_wait(
+/// Find an id or label on the live page (case-insensitive, trimmed), activate
+/// its published id (falling back to the label when the item has none — the
+/// DLL matches either) and wait for the ack. Returns the document the command
+/// was issued against.
+pub fn activate(
     client: &mut TasSharedMemoryClient,
     target: &str,
-    expect_screen: Option<&str>,
     timeout: Duration,
 ) -> Result<String, String> {
     let start = Instant::now();
@@ -243,22 +238,36 @@ pub fn activate_and_wait(
         }
         None => return Err("menu command timed out waiting for the ack".to_string()),
     }
-    wait_for_settle(client, &Some(before));
-    let after =
-        read_doc(client).ok_or_else(|| "menu document gone after navigation".to_string())?;
-    let dest =
-        screen_in_doc(&after).ok_or_else(|| "navigated-to document names no page".to_string())?;
-    if let Some(expected) = expect_screen {
-        if dest != expected {
-            return Err(format!(
-                "navigation landed on {} (expected {})",
-                dest, expected
-            ));
+    Ok(before)
+}
+
+/// Activate `target` and wait until the menu publishes `expect_screen`. The
+/// DLL republishes the page in the same menu frame that runs the command, so
+/// this returns as soon as the result is visible. A command that leaves the
+/// document unchanged (the item already had focus) is accepted after 300 ms.
+pub fn activate_and_wait(
+    client: &mut TasSharedMemoryClient,
+    target: &str,
+    expect_screen: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let before = activate(client, target, timeout)?;
+    let start = Instant::now();
+    let mut last = None;
+    while start.elapsed() < timeout {
+        if let Some(doc) = tas_shared::menu_doc(client.state()) {
+            let on_page = screen_in_doc(&doc).as_deref() == Some(expect_screen);
+            if on_page && (doc != before || start.elapsed() >= Duration::from_millis(300)) {
+                return Ok(());
+            }
+            last = screen_in_doc(&doc);
         }
-    } else if dest == doc.screen {
-        return Err(format!("navigation did not leave {}", doc.screen));
+        std::thread::sleep(Duration::from_millis(10));
     }
-    Ok(dest)
+    Err(format!(
+        "{target} did not reach {expect_screen} (last page: {})",
+        last.as_deref().unwrap_or("none")
+    ))
 }
 
 fn find_item<'a>(items: &'a [MenuDocItemLite], target: &str) -> Option<&'a MenuDocItemLite> {

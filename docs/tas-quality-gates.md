@@ -55,8 +55,8 @@ play manually during a test. Prerequisites:
 - A Pico HID board running the firmware in `TAS/pico/` for the modes marked
   Pico below. The firmware releases every key 500 ms after the last byte, so
   the harness resends held keys every 200 ms to keep long holds going.
-- `SUPREME_FOLDER` and `REVIVE_SUPREME_SCRIPT` in the environment so the
-  harness can launch the game, or a game already running with `NO_REVIVE=1`.
+- `SUPREME_FOLDER` in the environment so the harness can launch the game, or a
+  game already running with `NO_REVIVE=1`.
 - The game on Forest Easy, unless `TAS_TEST_LEVEL` says otherwise.
 
 Every mode requires exit code `0` in addition to its pass signature. Run a mode
@@ -155,8 +155,7 @@ not classify.
 
 | Variable | Read by | Meaning |
 |---|---|---|
-| `SUPREME_FOLDER` | `tas_test` | Game folder; the harness injects `Display_Config_Resources\TAS\TAS_Helper.dll` from it after launching. Required whenever the harness has to launch the game, with no default. The root `justfile` reads it from the environment (`--set supreme_folder` overrides it), refuses deploy recipes until it is set, and exports it to the harness. |
-| `REVIVE_SUPREME_SCRIPT` | `tas_test` | Path to `revive-supreme.nu`, the launcher the harness runs when no game is live. The script comes from the separate `cheatengine-mcp-bridge` repository and needs Nushell (`nu`) on PATH. Required, with no default. |
+| `SUPREME_FOLDER` | `tas_test` | Game folder; when no game is live the harness starts its `Supreme.exe`, injects `Display_Config_Resources\TAS\TAS_Helper.dll` and drives the menu into the race through the DLL's menu channel. Required whenever the harness has to launch the game, with no default. The root `justfile` reads it from the environment (`--set supreme_folder` overrides it), refuses deploy recipes until it is set, and exports it to the harness. |
 | `NO_REVIVE` | `tas_test` | `1` or `true`: never launch the game; fail when none is live. |
 | `TAS_TEST_LEVEL` | `tas_test` | Expected track code (default `FE`); `any` disables the track guard. |
 | `TAS_TEST_OUTPUT` | `tas_test` | Artifact directory; default is next to `tas_test.exe`. |
@@ -227,7 +226,7 @@ The functional lane uses two repeated STOP/CONT/reliability cycles per
 configuration; timing medians still require three samples. Both full lanes include a fresh-game
 save/reload and end at the main menu after dialog navigation, so save your work
 first and do not run them alongside another controller. They require a Pico, all
-three committed FE fixtures, Nushell and `REVIVE_SUPREME_SCRIPT`, the deployed
+three committed FE fixtures, the deployed
 game/injector/DLL, and a `tas_ui.exe` beside the harness. `NO_REVIVE=1` and
 `TAS_TEST_CASE_FILTER` are refused for this lane. Preflight checks the on-disk
 DLL against the local build; this cannot identify an older DLL already injected

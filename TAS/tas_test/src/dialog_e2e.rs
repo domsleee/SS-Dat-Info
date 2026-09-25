@@ -391,28 +391,25 @@ pub fn run() -> bool {
         eprintln!("ERROR: opening the pause menu failed; Phase C would measure the wrong screen");
         return false;
     }
-    let arcade = match crate::menu::activate_and_wait(
+    if let Err(e) = crate::menu::activate_and_wait(
         &mut client,
         "Return To Menu",
-        Some("ID_ARCADE_MENU"),
+        "ID_ARCADE_MENU",
         Duration::from_secs(10),
     ) {
-        Ok(screen) => screen,
-        Err(e) => {
-            eprintln!("ERROR: pause-menu navigation failed: {}", e);
-            return false;
-        }
-    };
-    println!("  pause menu -> {}", arcade);
+        eprintln!("ERROR: pause-menu navigation failed: {}", e);
+        return false;
+    }
+    println!("  pause menu -> ID_ARCADE_MENU");
     // Finish-menu Return To Menu goes directly to Arcade. Its back button
     // has no label, so select the published id rather than inventing a Yes.
     match crate::menu::activate_and_wait(
         &mut client,
         "ID_BACK",
-        Some("ID_MAIN_MENU"),
+        "ID_MAIN_MENU",
         Duration::from_secs(10),
     ) {
-        Ok(screen) => println!("  arcade menu -> {}", screen),
+        Ok(()) => println!("  arcade menu -> ID_MAIN_MENU"),
         Err(e) => {
             eprintln!("ERROR: arcade back navigation failed: {}", e);
             return false;

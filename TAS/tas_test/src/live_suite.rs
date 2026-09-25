@@ -180,18 +180,6 @@ fn preflight(stages: &mut [Stage], full: bool, executable: &Path) -> Result<(), 
         if std::env::var("NO_REVIVE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")) {
             return Err("live-full includes save-reload and cannot use NO_REVIVE=1".into());
         }
-        let script = std::env::var("REVIVE_SUPREME_SCRIPT")
-            .map_err(|_| "Set REVIVE_SUPREME_SCRIPT for save-reload")?;
-        if !Path::new(&script).is_file() {
-            return Err("REVIVE_SUPREME_SCRIPT does not exist".into());
-        }
-        if !Command::new("nu")
-            .arg("--version")
-            .output()
-            .is_ok_and(|o| o.status.success())
-        {
-            return Err("Nushell (nu) is required for save-reload revival".into());
-        }
         // The root justfile exports SUPREME_FOLDER even when unset (as ""), so
         // treat blank as missing rather than reporting a missing Supreme.exe.
         let folder = crate::harness::required_env("SUPREME_FOLDER")?;

@@ -75,6 +75,42 @@ unsafe extern "system" {
     pub fn GetCurrentThreadId() -> u32;
 }
 
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn ShellExecuteW(
+        hwnd: Hwnd,
+        operation: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show: i32,
+    ) -> isize;
+}
+
+/// Start `exe` in `dir` through the shell. Unlike `Command::spawn`, the new
+/// process inherits none of our handles, so a long-lived child cannot hold
+/// this process's output pipes open.
+pub fn shell_open(exe: &str, dir: &str) -> bool {
+    let wide = |s: &str| {
+        s.encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    };
+    let (op, file, dir) = (wide("open"), wide(exe), wide(dir));
+    const SW_SHOWNORMAL: i32 = 1;
+    // Values above 32 mean success.
+    unsafe {
+        ShellExecuteW(
+            0,
+            op.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            dir.as_ptr(),
+            SW_SHOWNORMAL,
+        ) > 32
+    }
+}
+
 #[link(name = "gdi32")]
 unsafe extern "system" {
     pub fn CreateCompatibleDC(hdc: Handle) -> Handle;

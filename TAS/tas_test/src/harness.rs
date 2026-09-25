@@ -474,34 +474,26 @@ pub(crate) fn required_env(name: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{name} is not set (needed to launch the game)"))
 }
 
-/// Launch Supreme Snowboarding to its main menu via `revive-supreme.nu` with
-/// `NO_CE=1 STOP_AT_MENU=1`. The race is reached afterwards through the DLL's
-/// menu channel (`navigate_to_race`), never by the script's blind keystrokes.
-/// Sets `TAS_TEST_PID` so the script can skip killing us.
-fn run_revive(script: &str) -> bool {
-    println!("Launching game to the main menu via revive-supreme (NO_CE=1, STOP_AT_MENU=1)...");
-    println!("  Script: {}", script);
-    match Command::new("nu")
-        .arg(script)
-        .env("NO_CE", "1")
-        .env("STOP_AT_MENU", "1")
-        .env("TAS_TEST_PID", std::process::id().to_string())
-        .status()
-    {
-        Ok(s) if s.success() => {
-            println!("  revive-supreme finished successfully");
-            true
-        }
-        Ok(s) => {
-            eprintln!("  revive-supreme exited with {}", s);
-            false
-        }
-        Err(e) => {
-            eprintln!("  Failed to run revive-supreme: {}", e);
-            eprintln!("  Is `nu` on PATH? Script at: {}", script);
-            false
-        }
+/// Start `Supreme.exe` and wait for its window. The game's DLLs are static
+/// imports, loaded before the window exists, so TAS_Helper can be injected at
+/// once; the race is then reached through the menu channel
+/// (`navigate_to_race`).
+fn launch_game(supreme_folder: &str) -> bool {
+    let exe = format!(r"{}\Supreme.exe", supreme_folder);
+    println!("Launching {}...", exe);
+    if !win32::shell_open(&exe, supreme_folder) {
+        eprintln!("  Failed to start Supreme.exe");
+        return false;
     }
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(15) {
+        if win32::find_game_window().is_some() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    eprintln!("  The game window never appeared");
+    false
 }
 
 fn hide_console(command: &mut Command) {
@@ -609,7 +601,7 @@ fn normalize_playback_speed(client: &mut TasSharedMemoryClient) {
     }
 }
 
-/// The track every mode assumes: `revive-supreme` navigates to Forest Easy and
+/// The track every mode assumes: a fresh launch navigates to Forest Easy and
 /// the committed `.tasrec` baselines are all FE.
 const DEFAULT_EXPECTED_LEVEL: &str = "FE";
 
@@ -714,25 +706,28 @@ fn navigate_to_race(client: &mut TasSharedMemoryClient, code: &str) -> Result<()
         .ok_or_else(|| format!("{code} is not a Time Attack track the menu can select"))?;
     let step = Duration::from_secs(10);
     menu::wait_for_screen(client, "ID_MAIN_MENU", Duration::from_secs(30))?;
-    menu::activate_and_wait(client, "Arcade", Some("ID_ARCADE_MENU"), step)?;
-    menu::activate_and_wait(client, "Time Attack", Some("ID_ARCADE_CHOOSE_TRACK"), step)?;
-    menu::activate_and_wait(client, area, Some("ID_ARCADE_CHOOSE_TRACK"), step)?;
-    menu::activate_and_wait(client, difficulty, Some("ID_ARCADE_CHOOSE_TRACK"), step)?;
+    menu::activate_and_wait(client, "Arcade", "ID_ARCADE_MENU", step)?;
+    menu::activate_and_wait(client, "Time Attack", "ID_ARCADE_CHOOSE_TRACK", step)?;
+    menu::activate_and_wait(client, area, "ID_ARCADE_CHOOSE_TRACK", step)?;
+    menu::activate_and_wait(client, difficulty, "ID_ARCADE_CHOOSE_TRACK", step)?;
     println!("  Menu: {area} {difficulty} selected; proceeding to the race");
-    // Proceed (>>) through the character, board and settings pages. The last
-    // proceed starts the load and has no page to land on: the document is
-    // cleared 1.5 s after the menu stops running, so give it that long.
+    // Proceed (>>) through the character, board and settings pages until the
+    // launch hook reports the race (game_in_game, 0 at the menu).
     for _ in 0..6 {
-        if let Err(error) = menu::activate_and_wait(client, "ID_OK", None, step) {
-            let start = Instant::now();
-            while menu::has_doc(client) && start.elapsed() < Duration::from_secs(3) {
-                thread::sleep(Duration::from_millis(100));
+        let from = menu::screen_in_doc(&menu::activate(client, "ID_OK", step)?);
+        let start = Instant::now();
+        loop {
+            if client.game_in_game_volatile() != 0 {
+                return Ok(());
             }
-            return if menu::has_doc(client) {
-                Err(error)
-            } else {
-                Ok(())
-            };
+            let now = menu::current_screen(client);
+            if now.is_some() && now != from {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(30) {
+                return Err("a proceed neither changed the page nor started the race".into());
+            }
+            thread::sleep(Duration::from_millis(10));
         }
     }
     Err("still in the menu after six proceeds".into())
@@ -755,8 +750,8 @@ fn wait_for_cycle(client: &TasSharedMemoryClient, timeout: Duration) -> bool {
 /// Ensure the game is running with hooks active.
 ///
 /// If the game is already live, reuse it. Otherwise kill stale instances and
-/// launch a clean session through `REVIVE_SUPREME_SCRIPT`, then inject
-/// `TAS_Helper.dll` from `SUPREME_FOLDER`. `NO_REVIVE=1` refuses to launch and
+/// launch `Supreme.exe` from `SUPREME_FOLDER`, inject its `TAS_Helper.dll`
+/// and drive the menu into the race. `NO_REVIVE=1` refuses to launch and
 /// exits instead.
 pub fn ensure_game_running() -> TasSharedMemoryClient {
     if pico_release_all() {
@@ -784,27 +779,18 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
         std::process::exit(1);
     }
 
-    println!("Game not live — launching fresh via revive-supreme...");
-    let (script, supreme_folder) = match (
-        required_env("REVIVE_SUPREME_SCRIPT"),
-        required_env("SUPREME_FOLDER"),
-    ) {
-        (Ok(script), Ok(folder)) => (script, folder),
-        (Err(error), _) | (_, Err(error)) => {
+    println!("Game not live — launching fresh...");
+    let supreme_folder = match required_env("SUPREME_FOLDER") {
+        Ok(folder) => folder,
+        Err(error) => {
             eprintln!("ERROR: {error}");
             std::process::exit(1);
         }
     };
     kill_game();
-
-    if !run_revive(&script) {
-        eprintln!("ERROR: revive-supreme failed");
+    if !launch_game(&supreme_folder) {
         std::process::exit(1);
     }
-
-    // The launcher flow injects Display_Config_Helper.dll itself; TAS_Helper.dll
-    // is ours to inject.
-    thread::sleep(Duration::from_secs(2));
 
     let tas_helper = format!(
         r"{}\Display_Config_Resources\TAS\TAS_Helper.dll",
@@ -814,9 +800,11 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
         eprintln!("ERROR: TAS_Helper.dll injection failed");
         std::process::exit(1);
     }
+    // Pico keys reach only the foreground window.
+    focus_game();
 
-    // Injected at the main menu, so the menu channel is live: navigate by
-    // observed page, then wait out the level load before sampling liveness.
+    // The menu channel is live once the main menu runs: navigate by observed
+    // page, then wait out the level load before sampling liveness.
     let mut client = match TasSharedMemoryClient::open() {
         Ok(c) => c,
         Err(e) => {
@@ -836,12 +824,12 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
     }
 
     if !check_liveness(&client) {
-        eprintln!("ERROR: Game not live after revive-supreme");
+        eprintln!("ERROR: Game not live after launch");
         std::process::exit(1);
     }
     let s = client.state();
     println!(
-        "Connected after revive (version {}). Hooks: cycle={} key_handler={} observer={} tick={}",
+        "Connected after launch (version {}). Hooks: cycle={} key_handler={} observer={} tick={}",
         s.version,
         s.cycle_cave_hooked,
         s.key_handler_cave_hooked,
