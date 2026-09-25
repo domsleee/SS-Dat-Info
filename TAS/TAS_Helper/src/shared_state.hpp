@@ -214,8 +214,8 @@ struct TasSharedState {
     volatile uint32_t level_ctx_seq;
 
     // -- Gate-aligned PLAY / CONT (DESIGN.md "Replaying from the gate") --
-    // Bumped by the cycle cave as the last store of every ARM_PLAY/ARM_CONTINUE,
-    // refusals included.
+    // Bumped by the cycle cave as the last store of every ARM_REC/ARM_PLAY/
+    // ARM_CONTINUE, refusals included.
     volatile uint32_t arm_generation;
     // DLL writes: index of the first captured frame whose position differs
     // from frame 0. 0 until it fires; the arm resets it.

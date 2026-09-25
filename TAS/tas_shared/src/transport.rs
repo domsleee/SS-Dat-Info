@@ -81,30 +81,15 @@ pub trait TransportPort {
     fn approve_cont_splice(&mut self);
 }
 
-/// Fixed delay (ms) between an acknowledged Stop and the Restart. Ordering
-/// comes from the idle/OFF acknowledgement, not from this delay; it only
-/// keeps the restart timing consistent. 50 ms matches
-/// `restart_and_stabilize_inprocess` in tas_test, which lands hard recordings
-/// like FE-10065 reliably.
-pub const STOP_SETTLE_MS: u64 = 50;
-
-/// Fixed delay (ms) between restart_state == 2 and the Arm command.
-/// Alignment makes the exact arm point irrelevant; this only keeps it
-/// consistent.
-pub const ARM_SETTLE_MS: u64 = 10;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Start,
     /// Stop sent; wait until the cycle cave has consumed it and published MODE_OFF.
     StopWaitAck,
-    /// Stop acknowledged; the caller is honouring the deterministic delay.
-    StopSettle,
     /// Restart sent; waiting for restart_state == 2.
     RestartWaitDone,
-    /// restart_state==2 seen; honouring a fixed ARM_SETTLE_MS wait before the
-    /// Arm command.
-    ArmSettle,
+    /// Unjudged arm sent; waiting for the DLL to bump arm_generation.
+    ArmWaitAck,
     /// Replaying: watch the gate-aligned trajectory.
     Watch,
     Done,
@@ -115,9 +100,6 @@ enum Phase {
 pub enum StepOutcome {
     /// Mid-cycle; call `step()` again (after a short poll delay).
     InProgress,
-    /// Wait `ms` (wall-clock) before the next `step()`: the fixed
-    /// STOP_SETTLE_MS and ARM_SETTLE_MS delays.
-    Wait { ms: u64 },
     /// The aligned trajectory did not match, so the cycle restarts.
     /// `observed` is the first gate-relative mismatch, if there was one.
     Reroll { attempt: u32, observed: Option<u32> },
@@ -177,9 +159,8 @@ impl TransportController {
         match self.phase {
             Phase::Start => "Start",
             Phase::StopWaitAck => "StopWaitAck (waiting for the cycle cave to consume Stop)",
-            Phase::StopSettle => "StopSettle (waiting out the fixed Stop->Restart delay)",
             Phase::RestartWaitDone => "RestartWaitDone (waiting for the F5 restart)",
-            Phase::ArmSettle => "ArmSettle",
+            Phase::ArmWaitAck => "ArmWaitAck (waiting for the DLL to take the arm)",
             Phase::Watch => "Watch (waiting on the replay)",
             Phase::Done => "Done",
             Phase::Aborted => "Aborted",
@@ -191,17 +172,13 @@ impl TransportController {
     }
 
     /// True during the short restart handshake (Stop acknowledgement,
-    /// restart-done detection, arm settle), which a driver should poll
-    /// without waiting for vsync. The multi-second `Watch` replay gains
+    /// restart-done detection, arm acknowledgement), which a driver should
+    /// poll without waiting for vsync. The multi-second `Watch` replay gains
     /// nothing from that, so a UI driver can poll it once per frame.
     pub fn needs_tight_polling(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Start
-                | Phase::StopWaitAck
-                | Phase::StopSettle
-                | Phase::RestartWaitDone
-                | Phase::ArmSettle
+            Phase::Start | Phase::StopWaitAck | Phase::RestartWaitDone | Phase::ArmWaitAck
         )
     }
 
@@ -224,57 +201,44 @@ impl TransportController {
                 // the controller contract so even a delayed STOP cannot let
                 // the previous PLAY's alignment leak into another arm.
                 port.set_gate_align_rec(0);
-                // Always Stop, then wait the fixed STOP_SETTLE_MS before
-                // Restart, even from OFF.
+                // Always Stop, even from OFF.
                 port.send_command(self.restart_stop_command());
-                if port.command_idle() && port.mode() == TasMode::Off as u32 {
-                    self.phase = Phase::StopSettle;
-                    StepOutcome::Wait { ms: STOP_SETTLE_MS }
-                } else {
-                    self.phase = Phase::StopWaitAck;
-                    StepOutcome::InProgress
-                }
+                self.phase = Phase::StopWaitAck;
+                StepOutcome::InProgress
             }
             Phase::StopWaitAck => {
-                // A wall-clock delay cannot serialize the command slot when
-                // the game can hitch for longer, so the settle starts only
-                // after Stop is acknowledged.
+                // Restart only once Stop is consumed, or it would overwrite
+                // the single command slot.
                 if port.command_idle() && port.mode() == TasMode::Off as u32 {
-                    self.phase = Phase::StopSettle;
-                    StepOutcome::Wait { ms: STOP_SETTLE_MS }
-                } else {
-                    StepOutcome::InProgress
+                    port.reset_restart_state();
+                    port.send_command(TasCommand::Restart);
+                    self.phase = Phase::RestartWaitDone;
                 }
-            }
-            Phase::StopSettle => {
-                // The caller honoured the Wait and the cycle cave is OFF: restart.
-                port.reset_restart_state();
-                port.send_command(TasCommand::Restart);
-                self.phase = Phase::RestartWaitDone;
                 StepOutcome::InProgress
             }
             Phase::RestartWaitDone => {
-                if port.restart_state() == 2 {
-                    port.reset_restart_state();
-                    self.phase = Phase::ArmSettle;
-                    StepOutcome::Wait { ms: ARM_SETTLE_MS }
-                } else {
-                    StepOutcome::InProgress
+                if port.restart_state() != 2 {
+                    return StepOutcome::InProgress;
                 }
-            }
-            Phase::ArmSettle => {
+                port.reset_restart_state();
                 // The cycle cave reads these at ARM time — re-assert post-restart.
                 port.set_continue_from_frame(self.cfg.continue_from_frame);
                 port.set_gate_align_rec(self.cfg.gate_align_rec);
                 // Snapshot the arm counter before the command goes out, so
-                // Watch can tell this attempt's replay state from the
-                // previous one's however the polling lands.
+                // this attempt's arm is recognised however the polling lands.
                 self.arm_generation_at_arm = port.arm_generation();
                 port.send_command(self.cfg.arm.command());
                 // The gate fixes input indexing, but it does not fully identify
                 // hidden spawn state, so the resulting trajectory is watched.
-                if self.cfg.gate_align_rec > 0 {
-                    self.phase = Phase::Watch;
+                self.phase = if self.cfg.gate_align_rec > 0 {
+                    Phase::Watch
+                } else {
+                    Phase::ArmWaitAck
+                };
+                StepOutcome::InProgress
+            }
+            Phase::ArmWaitAck => {
+                if port.arm_generation() == self.arm_generation_at_arm {
                     StepOutcome::InProgress
                 } else {
                     self.finish(CompletedVia::Unjudged)
@@ -478,7 +442,10 @@ mod tests {
                 self.restart_while_not_off = true;
             }
             // Stand in for the cycle cave processing the arm.
-            if matches!(cmd, TasCommand::ArmPlay | TasCommand::ArmContinue) {
+            if matches!(
+                cmd,
+                TasCommand::ArmRec | TasCommand::ArmPlay | TasCommand::ArmContinue
+            ) {
                 self.arm_generation = self.arm_generation.wrapping_add(1);
             }
             self.commands.push(cmd);
@@ -549,7 +516,7 @@ mod tests {
         };
         let mut c = TransportController::new(cfg(Arm::Rec, 0));
 
-        // Start publishes Stop but cannot start the settle until the cycle cave acks.
+        // Start publishes Stop; Restart waits for the cycle cave to ack it.
         assert_eq!(c.step(&mut p), StepOutcome::InProgress);
         assert_eq!(p.commands, vec![TasCommand::Stop]);
         // Even MODE_OFF is insufficient while the command slot still holds
@@ -558,14 +525,18 @@ mod tests {
         assert_eq!(c.step(&mut p), StepOutcome::InProgress);
         assert_eq!(p.commands, vec![TasCommand::Stop]);
         p.command_busy = false;
-        assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: STOP_SETTLE_MS });
-        // Only after acknowledgement + the fixed settle does Restart fire.
         assert_eq!(c.step(&mut p), StepOutcome::InProgress);
         assert_eq!(p.commands.last(), Some(&TasCommand::Restart));
 
+        // Not done until the DLL has taken the arm.
         p.restart_state = 2;
-        // RestartWaitDone → arm settle wait, then ArmSettle → ArmRec.
-        assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: ARM_SETTLE_MS });
+        let generation = p.arm_generation;
+        p.command_busy = true;
+        assert_eq!(c.step(&mut p), StepOutcome::InProgress);
+        assert_eq!(p.commands.last(), Some(&TasCommand::ArmRec));
+        p.arm_generation = generation;
+        assert_eq!(c.step(&mut p), StepOutcome::InProgress);
+        p.arm_generation = generation + 1;
         assert_eq!(
             c.step(&mut p),
             StepOutcome::Done {
@@ -600,8 +571,8 @@ mod tests {
         let mut config = cfg(Arm::Play, 1);
         config.gate_align_rec = 299;
         let mut c = TransportController::new(config);
-        // Even from OFF, always Stop + settle.
-        assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: STOP_SETTLE_MS });
+        // Even from OFF, always Stop first.
+        assert_eq!(c.step(&mut p), StepOutcome::InProgress);
         assert_eq!(p.commands, vec![TasCommand::StopForRestart]);
         assert_eq!(
             p.gate_align_rec, 0,
@@ -612,12 +583,11 @@ mod tests {
             p.commands,
             vec![TasCommand::StopForRestart, TasCommand::Restart]
         );
-        p.restart_state = 2;
-        assert_eq!(c.step(&mut p), StepOutcome::Wait { ms: ARM_SETTLE_MS });
         assert_eq!(
             p.gate_align_rec, 0,
             "restart must happen with alignment clear"
         );
+        p.restart_state = 2;
         assert_eq!(c.step(&mut p), StepOutcome::InProgress);
         assert_eq!(
             p.commands,
@@ -711,18 +681,14 @@ mod tests {
     /// Drive the controller through the restart until it has sent the arm
     /// command and entered Watch.
     fn drive_to_judge(c: &mut TransportController, p: &mut FakePort) {
-        // Start publishes Stop. Tests may begin in REC/PLAY, so model the cycle cave
-        // consuming it before the deterministic settle begins.
-        let first = c.step(p);
+        // Start publishes Stop. Tests may begin in REC/PLAY, so model the
+        // cycle cave consuming it.
+        c.step(p);
         p.mode = TasMode::Off as u32;
         p.command_busy = false;
-        if first == StepOutcome::InProgress {
-            assert_eq!(c.step(p), StepOutcome::Wait { ms: STOP_SETTLE_MS });
-        }
-        c.step(p);
+        c.step(p); // StopWaitAck -> Restart
         p.restart_state = 2;
-        c.step(p); // RestartWaitDone -> ArmSettle (Wait)
-        c.step(p); // ArmSettle -> arm command, phase -> Watch
+        c.step(p); // RestartWaitDone -> arm command, phase -> Watch
         assert_eq!(p.commands.last(), Some(&c.cfg.arm.command()));
         // game enters PLAY for the replay
         p.mode = TasMode::Play as u32;
@@ -732,11 +698,9 @@ mod tests {
     fn drive_reroll_to_judge(c: &mut TransportController, p: &mut FakePort) {
         p.mode = TasMode::Off as u32;
         p.command_busy = false;
-        c.step(p); // StopWaitAck -> fixed settle wait
-        c.step(p); // StopSettle -> Restart
+        c.step(p); // StopWaitAck -> Restart
         p.restart_state = 2;
-        c.step(p); // RestartWaitDone -> ArmSettle (Wait)
-        c.step(p); // ArmSettle -> arm command
+        c.step(p); // RestartWaitDone -> arm command
         p.mode = TasMode::Play as u32;
     }
 
@@ -751,9 +715,8 @@ mod tests {
         c.step(&mut p); // Stop
         p.mode = TasMode::Off as u32;
         c.step(&mut p); // -> Restart
-        c.step(&mut p);
         p.restart_state = 2;
-        c.step(&mut p); // -> ArmSettle (Wait)
+        c.step(&mut p); // -> ArmPlay
         assert_eq!(
             c.step(&mut p),
             StepOutcome::Done {

@@ -155,9 +155,9 @@ directly instead):
 
 ```
 STOP (STOP_FOR_RESTART for an aligned replay)
-  → wait until the DLL is OFF and has taken the command → 50 ms
-  → RESTART → wait until the restart has finished → 10 ms
-  → write the splice tick and gate → ARM
+  → wait until the DLL is OFF and has taken the command
+  → RESTART → wait until the restart has finished
+  → write the splice tick and gate → ARM → wait for arm_generation to move
   → REC, or no gate: done
   → otherwise watch: compare positions → done | reroll (back to STOP) | give up
 ```
@@ -414,9 +414,10 @@ Two processes share this memory without locks, so it relies on conventions:
   and after, and reports "unknown" after 64 failed tries. The level id is
   trusted only when its scan matches the currently loaded level, not the one
   before.
-- `arm_generation` is bumped as the last write of every PLAY or CONT arm,
-  even a refused one. Until it changes, `mode` and `playback_pos` still
-  describe the *previous* replay, so the watcher waits for it.
+- `arm_generation` is bumped as the last write of every arm (REC, PLAY or
+  CONT), even a refused one. Until it changes, `mode` and `playback_pos` still
+  describe the *previous* session, so the controller waits for it before it
+  reports an arm done or judges a replay.
 - STOP must work while the game loop is frozen. The cycle cave consumes it while a
   race ticks and the message-pump hook everywhere else; both run on the game
   thread, so all DLL-side state has a single writer thread.

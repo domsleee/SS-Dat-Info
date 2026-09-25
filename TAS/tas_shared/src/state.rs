@@ -239,11 +239,11 @@ pub struct TasSharedState {
     /// through [`level_context`]; `with_seqlock` documents the memory model.
     pub level_ctx_seq: AtomicU32,
 
-    /// Bumped by the cycle cave every time it PROCESSES an arm that starts a replay
-    /// (ARM_PLAY / ARM_CONTINUE), refusals included. The transport controller
-    /// uses it to tell this attempt's mode/position from the previous
-    /// replay's: mode is transient and position holds the previous replay's
-    /// final value until the arm resets it.
+    /// Bumped by the cycle cave as the last store of every arm it processes
+    /// (ARM_REC / ARM_PLAY / ARM_CONTINUE), refusals included. The transport
+    /// controller waits for it, and uses it to tell this attempt's
+    /// mode/position from the previous replay's: position holds the previous
+    /// replay's final value until the arm resets it.
     pub arm_generation: u32,
     /// REC/PLAY index of the first captured frame whose position differs from
     /// the session's frame 0: the live gate. 0 until it fires.

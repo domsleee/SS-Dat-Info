@@ -395,8 +395,6 @@ static void ProcessCommand(TasSharedState* s) {
     if (cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE || cmd == CMD_ARM_REC) {
         s->gate_index = 0;
         s->capture_ok = 1;
-    }
-    if (cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE) {
         s->arm_generation++;
     }
 

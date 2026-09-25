@@ -51,16 +51,9 @@ fn serialised_stop_then_restart(client: &mut TasSharedMemoryClient) -> bool {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         match controller.step(client) {
-            StepOutcome::Done { .. } => {
-                // With `gate_align_rec: 0` nothing watches the replay, so Done
-                // only means ARM was submitted. Wait for the DLL to consume it.
-                if client.command_idle() {
-                    return client.mode_volatile() == TasMode::Play as u32;
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
+            // Done means the DLL took the arm.
+            StepOutcome::Done { .. } => return client.mode_volatile() == TasMode::Play as u32,
             StepOutcome::InProgress => thread::sleep(Duration::from_millis(5)),
-            StepOutcome::Wait { ms } => thread::sleep(Duration::from_millis(ms)),
             outcome => {
                 eprintln!("FAIL: serialized controller: {outcome:?}");
                 return false;
@@ -96,20 +89,21 @@ pub fn run_input_protection() -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut passed = false;
     loop {
-        match controller.step(&mut client) {
-            StepOutcome::Wait { .. } => {
-                let state = client.state();
-                let mode = unsafe { std::ptr::read_volatile(&state.mode) };
-                let command = unsafe { std::ptr::read_volatile(&state.command) };
-                let protected = unsafe { std::ptr::read_volatile(&state.cont_suppress_input) };
-                println!("After DLL acknowledged STOP: mode={mode} command={command} cont_suppress_input={protected}");
-                passed = mode == TasMode::Off as u32 && command == 0 && protected == 1;
-                println!(
-                    "{}: live input must remain blocked before the restart",
-                    if passed { "PASS" } else { "FAIL" }
-                );
-                break;
-            }
+        let outcome = controller.step(&mut client);
+        // The step that sees STOP acknowledged sends the Restart.
+        if controller.phase_name().starts_with("RestartWaitDone") {
+            let state = client.state();
+            let mode = unsafe { std::ptr::read_volatile(&state.mode) };
+            let protected = unsafe { std::ptr::read_volatile(&state.cont_suppress_input) };
+            println!("After DLL acknowledged STOP: mode={mode} cont_suppress_input={protected}");
+            passed = mode == TasMode::Off as u32 && protected == 1;
+            println!(
+                "{}: live input must remain blocked into the restart",
+                if passed { "PASS" } else { "FAIL" }
+            );
+            break;
+        }
+        match outcome {
             StepOutcome::InProgress if Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(1));
             }

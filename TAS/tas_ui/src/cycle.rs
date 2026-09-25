@@ -315,10 +315,6 @@ impl TasApp {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(3));
                 }
-                StepOutcome::Wait { ms } => {
-                    // Fixed settle; loop straight on to the next command.
-                    std::thread::sleep(std::time::Duration::from_millis(ms));
-                }
                 StepOutcome::Reroll { attempt, observed } => {
                     let mismatch = observed
                         .map(|frame| frame.to_string())

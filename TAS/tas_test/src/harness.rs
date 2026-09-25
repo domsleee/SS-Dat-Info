@@ -415,7 +415,6 @@ fn drive_cycle(
                 }
                 thread::sleep(Duration::from_millis(5));
             }
-            StepOutcome::Wait { ms } => thread::sleep(Duration::from_millis(ms)),
             StepOutcome::Reroll { attempt, observed } => {
                 println!(
                     "  Retry {}/{}: {} watcher reroll (first mismatch at gate+{:?})",
