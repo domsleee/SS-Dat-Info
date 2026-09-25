@@ -9,7 +9,8 @@
 //!   PRECHECK — unfinished-race quit confirmation hides the underlying menu,
 //!              refuses stale commands, and restores navigation after No.
 //!
-//!   PHASE A — aligned PLAY of a finishing recording at 1x, idle at the save
+//!   PHASE A — aligned PLAY of a finishing recording, fast-forwarded to just
+//!             before the finish and crossing it at 1x; idle at the save
 //!             dialog, decline with physical RIGHT + Enter. No tick burst allowed.
 //!   PHASE B — the TAS user's actual flow: CONT near the finish, the splice
 //!             flips to REC, the run crosses the line RECORDING, the dialog
@@ -32,6 +33,9 @@ const RECORDING: &str = "FE-decent-done.tasrec";
 /// Splice close to the finish (race ends ~tick 6800) so the post-splice REC
 /// coasts across the line with no live input, like a user redoing the ending.
 const CONT_SPLICE_FRAME: u32 = 6700;
+/// Phase A plays at 64x up to here, then rides the last ~4 s to the finish at
+/// 1x: the dialog is reached at native speed, as a user would reach it.
+const FINISH_APPROACH_FRAME: u32 = 6400;
 const DIALOG_IDLE_SECS: u64 = 12;
 /// Native is 100 ticks/sec; each 100ms window reads ~10-11. A backlog burst is
 /// an order of magnitude out, so a generous ceiling still separates them.
@@ -322,12 +326,24 @@ pub fn run() -> bool {
     println!("  {} ticks loaded", loaded.count);
     harness::focus_game();
 
-    println!("--- PHASE A: aligned PLAY at 1x through the finish ---");
-    client.state_mut().playback_speed = 1.0;
+    println!("--- PHASE A: aligned PLAY, 1x through the finish ---");
+    client.state_mut().playback_speed = 64.0;
     if harness::restart_play_aligned_inprocess(&mut client).is_none() {
         eprintln!("ERROR: aligned PLAY failed to arm");
         return false;
     }
+    let approach = Instant::now();
+    while client.mode_volatile() == TasMode::Play as u32
+        && client.playback_pos_volatile() < FINISH_APPROACH_FRAME
+        && approach.elapsed() < Duration::from_secs(120)
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+    client.state_mut().playback_speed = 1.0;
+    println!(
+        "  1x from pos={} to the finish",
+        client.playback_pos_volatile()
+    );
     if !wait_engine_frozen(&client, 240) {
         return false;
     }
