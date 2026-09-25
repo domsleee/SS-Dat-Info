@@ -55,6 +55,35 @@ fn read_doc(client: &TasSharedMemoryClient) -> Option<String> {
     }
 }
 
+/// Whether any menu document is published. It is cleared once no menu has run
+/// for 1.5 s, so after a proceed this going false means a level is loading.
+pub fn has_doc(client: &TasSharedMemoryClient) -> bool {
+    tas_shared::menu_doc(client.state()).is_some()
+}
+
+/// Wait until the published document names `screen`.
+pub fn wait_for_screen(
+    client: &TasSharedMemoryClient,
+    screen: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let start = Instant::now();
+    let mut last = None;
+    while start.elapsed() < timeout {
+        if let Some(doc) = tas_shared::menu_doc(client.state()) {
+            last = screen_in_doc(&doc);
+            if last.as_deref() == Some(screen) {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!(
+        "the menu never reached {screen} (last page: {})",
+        last.as_deref().unwrap_or("none")
+    ))
+}
+
 /// Wait for the document to change and then hold still for 400 ms (a page
 /// transition takes ~1-2 s); give up on "no change" after 1.5 s; cap at 4 s.
 fn wait_for_settle(client: &TasSharedMemoryClient, before: &Option<String>) {

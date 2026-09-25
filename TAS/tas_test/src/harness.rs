@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 
+use crate::menu;
 use crate::win32;
 
 /// Pico HID COM port. Override with `TAS_PICO_PORT` (default COM7).
@@ -473,14 +474,17 @@ pub(crate) fn required_env(name: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{name} is not set (needed to launch the game)"))
 }
 
-/// Launch Supreme Snowboarding via the `revive-supreme.nu` script with `NO_CE=1`.
+/// Launch Supreme Snowboarding to its main menu via `revive-supreme.nu` with
+/// `NO_CE=1 STOP_AT_MENU=1`. The race is reached afterwards through the DLL's
+/// menu channel (`navigate_to_race`), never by the script's blind keystrokes.
 /// Sets `TAS_TEST_PID` so the script can skip killing us.
 fn run_revive(script: &str) -> bool {
-    println!("Launching game via revive-supreme (NO_CE=1)...");
+    println!("Launching game to the main menu via revive-supreme (NO_CE=1, STOP_AT_MENU=1)...");
     println!("  Script: {}", script);
     match Command::new("nu")
         .arg(script)
         .env("NO_CE", "1")
+        .env("STOP_AT_MENU", "1")
         .env("TAS_TEST_PID", std::process::id().to_string())
         .status()
     {
@@ -673,6 +677,81 @@ pub fn verify_expected_level(client: &TasSharedMemoryClient) {
     }
 }
 
+/// The track a fresh launch navigates to: `TAS_TEST_LEVEL` when it names one,
+/// else FE. `any` only disables the track check; it does not pick a track.
+fn navigation_level() -> String {
+    std::env::var("TAS_TEST_LEVEL")
+        .ok()
+        .filter(|code| !code.trim().is_empty() && !code.eq_ignore_ascii_case("any"))
+        .unwrap_or_else(|| DEFAULT_EXPECTED_LEVEL.to_string())
+}
+
+/// Menu labels for a Time Attack track code such as `FE` or `AM`.
+fn track_labels(code: &str) -> Option<(&'static str, &'static str)> {
+    let mut chars = code.trim().chars().map(|c| c.to_ascii_uppercase());
+    let area = match chars.next()? {
+        'F' => "Forest",
+        'A' => "Alpine",
+        'V' => "Village",
+        _ => return None,
+    };
+    let difficulty = match chars.next()? {
+        'E' => "Easy",
+        'M' => "Medium",
+        'H' => "Hard",
+        _ => return None,
+    };
+    chars.next().is_none().then_some((area, difficulty))
+}
+
+/// Drive the menu from the main menu into a Time Attack race on `code` through
+/// the DLL's command channel. Each step names the item it activates and checks
+/// the page it lands on, so a slow transition or a dropped key fails here
+/// instead of silently landing in another mode (revive's blind keystrokes once
+/// put a run into a Pipe/Air trick event).
+fn navigate_to_race(client: &mut TasSharedMemoryClient, code: &str) -> Result<(), String> {
+    let (area, difficulty) = track_labels(code)
+        .ok_or_else(|| format!("{code} is not a Time Attack track the menu can select"))?;
+    let step = Duration::from_secs(10);
+    menu::wait_for_screen(client, "ID_MAIN_MENU", Duration::from_secs(30))?;
+    menu::activate_and_wait(client, "Arcade", Some("ID_ARCADE_MENU"), step)?;
+    menu::activate_and_wait(client, "Time Attack", Some("ID_ARCADE_CHOOSE_TRACK"), step)?;
+    menu::activate_and_wait(client, area, Some("ID_ARCADE_CHOOSE_TRACK"), step)?;
+    menu::activate_and_wait(client, difficulty, Some("ID_ARCADE_CHOOSE_TRACK"), step)?;
+    println!("  Menu: {area} {difficulty} selected; proceeding to the race");
+    // Proceed (>>) through the character, board and settings pages. The last
+    // proceed starts the load and has no page to land on: the document is
+    // cleared 1.5 s after the menu stops running, so give it that long.
+    for _ in 0..6 {
+        if let Err(error) = menu::activate_and_wait(client, "ID_OK", None, step) {
+            let start = Instant::now();
+            while menu::has_doc(client) && start.elapsed() < Duration::from_secs(3) {
+                thread::sleep(Duration::from_millis(100));
+            }
+            return if menu::has_doc(client) {
+                Err(error)
+            } else {
+                Ok(())
+            };
+        }
+    }
+    Err("still in the menu after six proceeds".into())
+}
+
+/// Wait for the engine cycle to tick. A level load freezes it for several
+/// seconds (7.2 s measured on FE), which a single liveness sample would miss.
+fn wait_for_cycle(client: &TasSharedMemoryClient, timeout: Duration) -> bool {
+    let start = Instant::now();
+    let base = client.frame_count_volatile();
+    while start.elapsed() < timeout {
+        thread::sleep(Duration::from_millis(250));
+        if client.frame_count_volatile() != base {
+            return true;
+        }
+    }
+    false
+}
+
 /// Ensure the game is running with hooks active.
 ///
 /// If the game is already live, reuse it. Otherwise kill stale instances and
@@ -736,29 +815,42 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
         std::process::exit(1);
     }
 
-    thread::sleep(Duration::from_secs(3));
-
-    match TasSharedMemoryClient::open() {
-        Ok(c) if check_liveness(&c) => {
-            let s = c.state();
-            println!(
-                "Connected after revive (version {}). Hooks: cycle={} key_handler={} observer={} tick={}",
-                s.version, s.cycle_cave_hooked, s.key_handler_cave_hooked, s.observer_cave_hooked, s.tick_cave_hooked
-            );
-            verify_expected_level(&c);
-            let mut c = c;
-            normalize_playback_speed(&mut c);
-            c
-        }
-        Ok(_) => {
-            eprintln!("ERROR: Game not live after revive-supreme");
-            std::process::exit(1);
-        }
+    // Injected at the main menu, so the menu channel is live: navigate by
+    // observed page, then wait out the level load before sampling liveness.
+    let mut client = match TasSharedMemoryClient::open() {
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("ERROR: No shared memory after revive-supreme: {}", e);
+            eprintln!("ERROR: No shared memory after injection: {}", e);
             std::process::exit(1);
         }
+    };
+    let level = navigation_level();
+    println!("Navigating to {} through the menu channel...", level);
+    if let Err(error) = navigate_to_race(&mut client, &level) {
+        eprintln!("ERROR: menu navigation to {} failed: {}", level, error);
+        std::process::exit(1);
     }
+    if !wait_for_cycle(&client, Duration::from_secs(30)) {
+        eprintln!("ERROR: the race never started ticking after the menu proceeded");
+        std::process::exit(1);
+    }
+
+    if !check_liveness(&client) {
+        eprintln!("ERROR: Game not live after revive-supreme");
+        std::process::exit(1);
+    }
+    let s = client.state();
+    println!(
+        "Connected after revive (version {}). Hooks: cycle={} key_handler={} observer={} tick={}",
+        s.version,
+        s.cycle_cave_hooked,
+        s.key_handler_cave_hooked,
+        s.observer_cave_hooked,
+        s.tick_cave_hooked
+    );
+    verify_expected_level(&client);
+    normalize_playback_speed(&mut client);
+    client
 }
 
 /// Connect to shared memory, exit on failure.
@@ -1056,6 +1148,17 @@ pub fn fixture_path(name: &str) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn track_codes_map_to_the_menu_labels_navigation_activates() {
+        assert_eq!(super::track_labels("FE"), Some(("Forest", "Easy")));
+        assert_eq!(super::track_labels("am"), Some(("Alpine", "Medium")));
+        assert_eq!(super::track_labels(" VH "), Some(("Village", "Hard")));
+        // Practice is not on the Time Attack track page; bad codes are refused.
+        for code in ["PE", "F", "FEX", "", "XE"] {
+            assert_eq!(super::track_labels(code), None, "{code:?}");
+        }
+    }
+
     #[test]
     fn game_reset_excludes_both_child_and_suite_parent() {
         let args = super::kill_arguments("tas_test.exe", Some(123), Some(456));
