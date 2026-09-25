@@ -4,6 +4,8 @@ on:
     paths:
       - .github/workflows/release.yaml
       - Display_Config/scripts/release*.mjs
+      - Display_Config/justfile
+      - justfile
 name: release
 permissions:
   contents: write
@@ -22,6 +24,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: extractions/setup-just@v4
       - uses: arduino/setup-task@v3
+        with:
+          # Authenticated, so GitHub's API rate limit for runners can't fail the job.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Test release scripts
         run: bun test ./Display_Config/scripts/release.test.mjs
@@ -58,7 +63,9 @@ jobs:
           $expected = @(
             "Display_Config.exe",
             "Display_Config_Resources/Display_Config_Helper.dll",
-            "Display_Config_Resources/Injector.exe"
+            "Display_Config_Resources/Injector.exe",
+            "Display_Config_Resources/TAS/TAS_Helper.dll",
+            "Display_Config_Resources/TAS/tas_ui.exe"
           )
           foreach ($file in $expected) {
             if (-not (Test-Path (Join-Path $output $file))) { throw "Build did not produce $file" }

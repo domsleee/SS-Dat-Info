@@ -1,0 +1,324 @@
+//! The Win32 client for the `Local\SupremeTAS` mapping TAS_Helper.dll creates.
+
+use std::ffi::CString;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use crate::menu_screen;
+use crate::state::{
+    rider_pair, TasCommand, TasSharedState, TAS_SHARED_MEMORY_NAME, TAS_SHARED_VERSION,
+};
+use crate::{physics_mode_label, rider_label, transport};
+
+// Raw Win32 FFI — avoids windows-sys version churn
+type Handle = *mut std::ffi::c_void;
+const FILE_MAP_ALL_ACCESS: u32 = 0xF001F;
+
+extern "system" {
+    #[cfg(any(test, feature = "test-mapping"))]
+    fn CreateFileMappingA(
+        file: Handle,
+        attrs: *const std::ffi::c_void,
+        protect: u32,
+        size_high: u32,
+        size_low: u32,
+        name: *const u8,
+    ) -> Handle;
+    fn OpenFileMappingA(desired_access: u32, inherit_handle: i32, name: *const u8) -> Handle;
+    fn MapViewOfFile(
+        file_mapping: Handle,
+        desired_access: u32,
+        offset_high: u32,
+        offset_low: u32,
+        bytes_to_map: usize,
+    ) -> *mut std::ffi::c_void;
+    fn UnmapViewOfFile(base_address: *const std::ffi::c_void) -> i32;
+    fn CloseHandle(handle: Handle) -> i32;
+}
+
+/// Opens the named shared memory created by TAS_Helper.dll.
+pub struct TasSharedMemoryClient {
+    handle: Handle,
+    ptr: *mut TasSharedState,
+}
+
+unsafe impl Send for TasSharedMemoryClient {}
+unsafe impl Sync for TasSharedMemoryClient {}
+
+impl TasSharedMemoryClient {
+    pub fn open() -> Result<Self, String> {
+        if cfg!(test) {
+            return Err("Unit tests must not open the live game mapping".into());
+        }
+        let name = CString::new(TAS_SHARED_MEMORY_NAME).unwrap();
+        unsafe {
+            let handle = OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, name.as_ptr() as *const u8);
+            if handle.is_null() {
+                return Err("OpenFileMappingA failed (is TAS_Helper.dll loaded?)".into());
+            }
+
+            let view = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+            if view.is_null() {
+                CloseHandle(handle);
+                return Err("MapViewOfFile failed".into());
+            }
+            let ptr = view as *mut TasSharedState;
+
+            let version = (*ptr).version;
+            if version != TAS_SHARED_VERSION {
+                UnmapViewOfFile(ptr as *const _);
+                CloseHandle(handle);
+                return Err(format!(
+                    "Version mismatch: expected {}, got {}",
+                    TAS_SHARED_VERSION, version
+                ));
+            }
+
+            Ok(Self { handle, ptr })
+        }
+    }
+
+    #[cfg(any(test, feature = "test-mapping"))]
+    pub fn new_test_mapping() -> Self {
+        unsafe {
+            // Unnamed pagefile-backed mapping: same Windows client code,
+            // but no game can see or consume these test commands.
+            let handle = CreateFileMappingA(
+                (-1isize) as Handle,
+                std::ptr::null(),
+                0x04,
+                0,
+                std::mem::size_of::<TasSharedState>() as u32,
+                std::ptr::null(),
+            );
+            assert!(!handle.is_null(), "CreateFileMappingA failed");
+            let ptr = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0) as *mut TasSharedState;
+            if ptr.is_null() {
+                CloseHandle(handle);
+                panic!("MapViewOfFile failed");
+            }
+            (*ptr).version = TAS_SHARED_VERSION;
+            Self { handle, ptr }
+        }
+    }
+
+    pub fn state(&self) -> &TasSharedState {
+        unsafe { &*self.ptr }
+    }
+
+    /// A `&mut` over the live mapping, which the DLL writes concurrently,
+    /// so this is not a sound exclusive borrow: the seqlocked readers and
+    /// the volatile stores in the `TransportPort` impl exist because of
+    /// that. Use it for fields only this side writes (the command region,
+    /// `menu_cmd_*`) and for tests on a private mapping.
+    pub fn state_mut(&mut self) -> &mut TasSharedState {
+        unsafe { &mut *self.ptr }
+    }
+
+    pub fn send_command(&mut self, cmd: TasCommand) {
+        unsafe {
+            let cmd_ptr = std::ptr::addr_of_mut!((*self.ptr).command);
+            (&*(cmd_ptr.cast::<AtomicU32>())).store(cmd as u32, Ordering::Release);
+        }
+    }
+
+    /// Acquire-read the command publication/acknowledgement word.
+    fn command_word(&self) -> u32 {
+        unsafe {
+            let cmd_ptr = std::ptr::addr_of!((*self.ptr).command);
+            (&*(cmd_ptr.cast::<AtomicU32>())).load(Ordering::Acquire)
+        }
+    }
+
+    pub fn command_idle(&self) -> bool {
+        self.command_word() == TasCommand::Idle as u32
+    }
+
+    /// Raw x87 control word the DLL sampled on the game thread.
+    pub fn fpu_control_word(&self) -> u32 {
+        unsafe { std::ptr::read_volatile(std::ptr::addr_of!((*self.ptr).fpu_control_word)) }
+    }
+
+    /// Loaded renderer plugin (`TAS_RENDERER_*`).
+    pub fn renderer_id(&self) -> u32 {
+        unsafe { std::ptr::read_volatile(std::ptr::addr_of!((*self.ptr).renderer_id)) }
+    }
+
+    /// Live physics-mode stamp (see `physics_mode_label`).
+    pub fn physics_mode(&self) -> Option<String> {
+        physics_mode_label(self.renderer_id(), self.fpu_control_word())
+    }
+
+    /// Live rider stamp (character · stance), `None` until the DLL
+    /// has resolved the human rider's loadout.
+    pub fn rider(&self) -> Option<String> {
+        let (character, stance) = rider_pair(self.state());
+        rider_label(character, stance)
+    }
+
+    /// The current menu screen title, `None` in a level.
+    pub fn menu_screen(&self) -> Option<String> {
+        menu_screen(self.state())
+    }
+
+    /// Volatile read of mode (poll-hot field written by DLL).
+    pub fn mode_volatile(&self) -> u32 {
+        unsafe {
+            let ptr = std::ptr::addr_of!((*self.ptr).mode);
+            std::ptr::read_volatile(ptr)
+        }
+    }
+
+    /// Volatile read of frame_count (poll-hot field written by DLL).
+    pub fn frame_count_volatile(&self) -> u32 {
+        unsafe {
+            let ptr = std::ptr::addr_of!((*self.ptr).frame_count);
+            std::ptr::read_volatile(ptr)
+        }
+    }
+
+    /// Volatile read of game_in_game (1 from a race's launch until it is left).
+    pub fn game_in_game_volatile(&self) -> u32 {
+        unsafe {
+            let ptr = std::ptr::addr_of!((*self.ptr).game_in_game);
+            std::ptr::read_volatile(ptr)
+        }
+    }
+
+    /// Volatile read of playback_pos (poll-hot field written by DLL).
+    pub fn playback_pos_volatile(&self) -> u32 {
+        unsafe {
+            let ptr = std::ptr::addr_of!((*self.ptr).playback_pos);
+            std::ptr::read_volatile(ptr)
+        }
+    }
+
+    /// Volatile read of recorded_count (poll-hot field written by DLL).
+    pub fn recorded_count_volatile(&self) -> u32 {
+        unsafe {
+            let ptr = std::ptr::addr_of!((*self.ptr).recorded_count);
+            std::ptr::read_volatile(ptr)
+        }
+    }
+
+    /// Read the restart state machine status (0=idle, 1=in progress, 2=done).
+    pub fn restart_state(&self) -> u32 {
+        unsafe {
+            let ptr = std::ptr::addr_of!((*self.ptr).restart_state);
+            std::ptr::read_volatile(ptr)
+        }
+    }
+
+    /// Reset restart state to idle (call after restart completes).
+    pub fn reset_restart_state(&mut self) {
+        unsafe {
+            let ptr = std::ptr::addr_of_mut!((*self.ptr).restart_state);
+            std::ptr::write_volatile(ptr, 0);
+        }
+    }
+}
+
+impl Drop for TasSharedMemoryClient {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.ptr.is_null() {
+                UnmapViewOfFile(self.ptr as *const _);
+            }
+            if !self.handle.is_null() {
+                CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
+// Wire the live shared-memory client into the shared transport state machine.
+// Inherent methods win for `self.method()` call syntax, so the same-named
+// trait methods (send_command/restart_state/reset_restart_state) delegate to
+// the inherent ones without recursing.
+impl transport::TransportPort for TasSharedMemoryClient {
+    fn send_command(&mut self, cmd: TasCommand) {
+        self.send_command(cmd);
+    }
+    fn command_idle(&self) -> bool {
+        self.command_idle()
+    }
+    fn mode(&self) -> u32 {
+        self.mode_volatile()
+    }
+    fn restart_state(&self) -> u32 {
+        self.restart_state()
+    }
+    fn reset_restart_state(&mut self) {
+        self.reset_restart_state();
+    }
+    fn playback_pos(&self) -> u32 {
+        self.playback_pos_volatile()
+    }
+    fn play_coords(&self) -> &[[f32; 3]] {
+        &self.state().play_coords[..]
+    }
+    fn rec_coords(&self) -> &[[f32; 3]] {
+        &self.state().rec_coords[..]
+    }
+    fn recorded_count(&self) -> u32 {
+        self.state().recorded_count
+    }
+    fn gate_index(&self) -> u32 {
+        unsafe { std::ptr::read_volatile(&self.state().gate_index as *const u32) }
+    }
+    fn set_continue_from_frame(&mut self, frame: u32) {
+        unsafe {
+            std::ptr::write_volatile(&mut self.state_mut().continue_from_frame as *mut u32, frame);
+        }
+    }
+    fn set_gate_align_rec(&mut self, frame: u32) {
+        unsafe {
+            std::ptr::write_volatile(&mut self.state_mut().gate_align_rec as *mut u32, frame);
+        }
+    }
+    fn set_playback_speed(&mut self, speed: f32) {
+        unsafe {
+            std::ptr::write_volatile(&mut self.state_mut().playback_speed as *mut f32, speed);
+        }
+    }
+    fn arm_generation(&self) -> u32 {
+        unsafe { std::ptr::read_volatile(&self.state().arm_generation as *const u32) }
+    }
+    fn capture_ok(&self) -> bool {
+        unsafe { std::ptr::read_volatile(&self.state().capture_ok as *const u32) != 0 }
+    }
+    fn approve_cont_splice(&mut self) {
+        // Volatile: the reader is the tick cave in another process, which Rust's
+        // memory model cannot see, so a plain store may be elided.
+        let s = self.state_mut();
+        unsafe {
+            std::ptr::write_volatile(&mut s.cont_splice_approved as *mut u32, 1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // These tests use private memory, never the live game mapping.
+
+    /// Two private test mappings must not see each other's writes, and
+    /// neither may be the game's mapping. (Whether the game's mapping exists
+    /// right now is a property of the machine, not of this crate.)
+    #[test]
+    fn unit_tests_cannot_open_live_game_memory() {
+        let mut a = TasSharedMemoryClient::new_test_mapping();
+        let b = TasSharedMemoryClient::new_test_mapping();
+        a.send_command(TasCommand::ArmRec);
+        assert_eq!(b.state().command, TasCommand::Idle as u32);
+    }
+
+    #[test]
+    fn restart_state_helpers() {
+        let mut client = TasSharedMemoryClient::new_test_mapping();
+        client.state_mut().restart_state = 2;
+        assert_eq!(client.restart_state(), 2);
+        client.reset_restart_state();
+        assert_eq!(client.restart_state(), 0);
+    }
+}

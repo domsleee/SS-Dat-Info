@@ -1,0 +1,11 @@
+[package]
+name = "tas_shared"
+version = "0.1.0"
+edition = "2021"
+description = "TAS_Helper.dll shared-memory protocol (TasSharedState, seqlocked readers, Win32 client) plus the gate-aligned replay check and transport controller that tas_ui and tas_test share"
+
+[dependencies]
+
+[features]
+# Unnamed private mappings for other crates' unit tests (tas_ui): never the game's section.
+test-mapping = []
