@@ -447,6 +447,7 @@ static void CompleteContinueSplice(TasSharedState* s) {
         s->mode = MODE_REC;
         s->continue_from_frame = 0;
         g_contArmed = 0;
+        g_spliceDrainPending = true;
         g_cycleLogParam = rec_splice;
         g_cyclePendingLog = 6;
     }

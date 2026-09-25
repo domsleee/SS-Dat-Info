@@ -120,6 +120,11 @@ static constexpr int32_t TICK_CAVE_PER_FRAME_CAP = 64;
 // normal play behaves like the unpatched game.
 static constexpr int32_t NATIVE_GAME_CLAMP_AT_1X = 20;
 
+// Set by the cycle cave on a CONT splice: the catch-up leaves the game clock
+// behind wall time, and the next frame drains that backlog whatever its size
+// or the resume speed, so the new take starts at its own pace. Game thread.
+inline bool g_spliceDrainPending = false;
+
 // Was the engine frozen (dialog, menu, load) since the last call? The backlog
 // after a freeze is dropped at any speed. CONT catch-up is not a freeze.
 static bool ResumedFromFreeze() {
@@ -215,7 +220,7 @@ static void TickCave_Callback(SafetyHookContext& ctx) {
         // After a pause, __ftol hands over the whole gap as ticks (20 s =
         // 2000), which the native clamp spreads into a visible speedup.
         // Drain it in one tick instead: at 1x in any mode, or at any speed
-        // after an engine freeze.
+        // after an engine freeze or a CONT splice.
         const int32_t CATCHUP_THRESHOLD = 50;
 
         bool resumed_from_freeze = ResumedFromFreeze();
@@ -223,9 +228,11 @@ static void TickCave_Callback(SafetyHookContext& ctx) {
         bool splice_parked = IsSpliceParked(s);
 
         bool catchup_drain =
-            realTick > CATCHUP_THRESHOLD
-            && !splice_parked
-            && (s->playback_speed == 1.0f || resumed_from_freeze);
+            !splice_parked
+            && ((realTick > CATCHUP_THRESHOLD
+                    && (s->playback_speed == 1.0f || resumed_from_freeze))
+                || (g_spliceDrainPending && realTick > 1));
+        g_spliceDrainPending = false;
 
         realTick = LimitTicksToSplice(s, realTick);
 

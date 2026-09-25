@@ -12,6 +12,7 @@ mod cont_cases;
 mod cont_hijack;
 mod cont_reliability;
 mod cont_restart_race;
+mod cont_resume_pace;
 mod cont_ui;
 mod cycles;
 mod dialog_e2e;
@@ -261,6 +262,12 @@ const MODES: &[Mode] = &[
         usage: "",
         summary: "A continue_from_frame written during a plain PLAY leaves it in PLAY",
         run: |args| no_args(args) && cont_hijack::run(),
+    },
+    Mode {
+        name: "cont-resume-pace",
+        usage: "",
+        summary: "A CONT resumes at 1x, 2x and 0.5x without a tick burst after the splice",
+        run: |args| no_args(args) && cont_resume_pace::run(),
     },
     Mode {
         name: "cont-restart-race",

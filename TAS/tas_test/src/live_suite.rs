@@ -45,6 +45,7 @@ const FULL_CASES: &[(&str, &[&str])] = &[
     ("fe-cont-reliability", &["--iterations", "2"]),
     ("fe10065-cont", &["--iterations", "2"]),
     ("cont-hijack", &[]),
+    ("cont-resume-pace", &[]),
     ("cont-restart-race", &[]),
     ("cont-input-protection", &[]),
     ("level-seq", &[]),

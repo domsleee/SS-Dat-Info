@@ -196,9 +196,10 @@ the splice. For a recording with a gate:
    the saved normal speed, marks a segment boundary and switches to REC. The
    recording keeps the original's tick numbering: the new take is the old
    prefix followed by new input.
-6. The game clock still owes the ticks the catch-up skipped (about 70). At a
-   1x resume the tick cave's catch-up drain runs them as a single tick, so recording
-   starts in real time with no burst.
+6. The game clock is still behind wall time from the catch-up. The splice
+   tells the tick cave to drain that backlog as a single tick on the next
+   frame, at any resume speed, so recording starts at its own pace with no
+   burst (`tas_test cont-resume-pace`).
 7. The UI sees REC, starts a new session, and the player carries on live.
 
 If anything goes wrong, `cont_suppress_input` is also cleared on abort,
@@ -618,5 +619,3 @@ splice.
   is only visible in the drift banner.
 - Editing inputs keeps the original take's positions, so an edit inside the
   watched window makes PLAY reroll until it gives up.
-- A CONT that resumes at a speed other than 1x doesn't get the catch-up
-  drain, so the ticks the catch-up owed can run as a short burst.
