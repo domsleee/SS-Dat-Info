@@ -15,8 +15,7 @@ use std::time::{Duration, Instant};
 use tas_shared::race_clock::{race_clock, race_finish, RaceFinish};
 use tas_shared::{TasMode, TasSharedMemoryClient};
 
-use crate::command_edges::cleanup;
-use crate::{harness, replay};
+use crate::harness;
 
 const FIXTURE: &str = "FE-decent-done.tasrec";
 /// FE's Finish_Point (levelData.json): the rider crosses when z rises past it
@@ -26,23 +25,10 @@ const PLANE_RADIUS: f32 = 90.5;
 
 pub fn run() -> bool {
     println!("=== FINISH-LINE: the finish comes from the game's Finish_Point ===\n");
-    let mut client = harness::ensure_game_running();
-    harness::stop_competing_tas_ui_writer();
-    let result = check(&mut client);
-    cleanup(&mut client);
-    match result {
-        Ok(()) => {
-            println!("\n*** FINISH-LINE PASSED ***");
-            true
-        }
-        Err(e) => {
-            eprintln!("\n*** FINISH-LINE FAILED: {e} ***");
-            false
-        }
-    }
+    harness::run_case("FINISH-LINE", check)
 }
 
-fn check(client: &mut TasSharedMemoryClient) -> Result<(), String> {
+fn check(client: &mut TasSharedMemoryClient) -> Result<String, String> {
     let slow = play_to_finish(client, 1.0)?;
     let fast = play_to_finish(client, 8.0)?;
     // Playback indices count from the arm, which lands a tick or two apart
@@ -59,15 +45,13 @@ fn check(client: &mut TasSharedMemoryClient) -> Result<(), String> {
         "  gate-relative finish at both speeds: gate+{}",
         from_gate(&slow)
     );
-    rec_through_finish(client, slow.0.tick - slow.1 + slow.2)
+    rec_through_finish(client, slow.0.tick - slow.1 + slow.2)?;
+    Ok(String::new())
 }
 
 fn load(client: &mut TasSharedMemoryClient) -> Result<(), String> {
     harness::stop(client);
-    let path = harness::fixture_path(FIXTURE)?;
-    let loaded = replay::load_tasrec(&path).map_err(|e| format!("loading {FIXTURE}: {e}"))?;
-    replay::write_to_shared(client, &loaded);
-    Ok(())
+    harness::load_fixture(client, FIXTURE).map(drop)
 }
 
 fn seq(client: &TasSharedMemoryClient) -> u32 {

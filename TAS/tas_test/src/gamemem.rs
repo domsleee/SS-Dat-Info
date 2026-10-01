@@ -15,11 +15,11 @@ use crate::win32;
 
 const ROOT_PTR_RVA: usize = 0x1D5450;
 const APP_PTR_RVA: usize = 0x889C4;
-const APP_GAME_OFFSET: u32 = 0x14;
-const GAME_KEYBOARD_OBSERVER_OFFSET: u32 = 0x1AC;
-const OBSERVER_HELD_PTR_OFFSET: u32 = 0x38;
-const KEYBOARD_OBJ_OFFSET: u32 = 0x530;
-const DI_BUFFER_PTR_OFFSET: u32 = 0x30;
+const APP_GAME_OFFSET: usize = 0x14;
+const GAME_KEYBOARD_OBSERVER_OFFSET: usize = 0x1AC;
+const OBSERVER_HELD_PTR_OFFSET: usize = 0x38;
+const KEYBOARD_OBJ_OFFSET: usize = 0x530;
+const DI_BUFFER_PTR_OFFSET: usize = 0x30;
 
 /// Game key codes of the six TAS keys, with the input bit each belongs to.
 /// Gameplay ORs three codes for jump (CTRL, LCTRL, RCTRL) and for shift.
@@ -141,45 +141,44 @@ impl GameMemory {
         }
     }
 
-    /// Address of the game's 256-byte key buffer, resolved fresh (an F5
-    /// restart can rebuild the objects on the chain). The error names the
-    /// link that failed.
+    /// Follow a pointer chain resolved fresh (an F5 restart can rebuild the
+    /// objects on it): from `base`, read the pointer at each offset in turn.
+    /// The error names the link that failed.
+    fn chain(&self, base: usize, links: &[(usize, &str)]) -> Result<usize, String> {
+        links.iter().try_fold(base, |pointer, &(offset, what)| {
+            let address = pointer + offset;
+            match self.read_u32(address) {
+                Ok(0) => Err(format!("{what} at {address:#x} is null")),
+                Ok(p) => Ok(p as usize),
+                Err(e) => Err(format!("{what}: {e}")),
+            }
+        })
+    }
+
+    /// Address of the game's 256-byte key buffer.
     fn key_buffer(&self) -> Result<usize, String> {
-        let link = |address: usize, what: &str| match self.read_u32(address) {
-            Ok(0) => Err(format!("{what} at {address:#x} is null")),
-            Ok(p) => Ok(p),
-            Err(e) => Err(format!(
-                "{what}: {e} (Supreme_Game.dll at {:#x})",
-                self.sg_base
-            )),
-        };
-        let root = link(self.sg_base + ROOT_PTR_RVA, "root pointer")?;
-        let keyboard = link((root + KEYBOARD_OBJ_OFFSET) as usize, "keyboard object")?;
-        link(
-            (keyboard + DI_BUFFER_PTR_OFFSET) as usize,
-            "key buffer pointer",
+        self.chain(
+            self.sg_base,
+            &[
+                (ROOT_PTR_RVA, "root pointer"),
+                (KEYBOARD_OBJ_OFFSET, "keyboard object"),
+                (DI_BUFFER_PTR_OFFSET, "key buffer pointer"),
+            ],
         )
-        .map(|p| p as usize)
+        .map_err(|e| format!("{e} (Supreme_Game.dll at {:#x})", self.sg_base))
     }
 
     /// The keyboard observer's held-state array.
     fn observer_held(&self) -> Result<usize, String> {
-        let link = |address: usize, what: &str| match self.read_u32(address) {
-            Ok(0) => Err(format!("{what} at {address:#x} is null")),
-            Ok(p) => Ok(p),
-            Err(e) => Err(format!("{what}: {e}")),
-        };
-        let app = link(self.exe_base + APP_PTR_RVA, "app pointer")?;
-        let game = link((app + APP_GAME_OFFSET) as usize, "game object")?;
-        let observer = link(
-            (game + GAME_KEYBOARD_OBSERVER_OFFSET) as usize,
-            "keyboard observer",
-        )?;
-        link(
-            (observer + OBSERVER_HELD_PTR_OFFSET) as usize,
-            "observer held array",
+        self.chain(
+            self.exe_base,
+            &[
+                (APP_PTR_RVA, "app pointer"),
+                (APP_GAME_OFFSET, "game object"),
+                (GAME_KEYBOARD_OBSERVER_OFFSET, "keyboard observer"),
+                (OBSERVER_HELD_PTR_OFFSET, "observer held array"),
+            ],
         )
-        .map(|p| p as usize)
     }
 
     fn mask_of(&self, array: usize, what: &str) -> Result<u8, String> {

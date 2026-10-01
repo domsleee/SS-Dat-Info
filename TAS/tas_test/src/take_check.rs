@@ -5,6 +5,8 @@
 use tas_shared::race_clock::{hud_cs, race_finish};
 use tas_shared::{TasSharedMemoryClient, TAS_INPUT_MODEL_HELD};
 
+use crate::drift;
+
 pub fn run() -> bool {
     let client = match TasSharedMemoryClient::open() {
         Ok(c) => c,
@@ -55,27 +57,18 @@ pub fn run() -> bool {
         println!("no replay gate yet: nothing to compare");
         return true;
     }
-    let replayed = (s.playback_pos as usize).saturating_sub(play_gate as usize);
-    let n = replayed.min(count.saturating_sub(rec_gate as usize));
-    let recorded = &s.rec_coords[rec_gate as usize..rec_gate as usize + n];
-    let played = &s.play_coords[play_gate as usize..play_gate as usize + n];
-    let mut first = None;
-    let mut differ = 0;
-    for (i, (r, p)) in recorded.iter().zip(played).enumerate() {
-        if r.map(f32::to_bits) != p.map(f32::to_bits) {
-            differ += 1;
-            first.get_or_insert(i);
-        }
-    }
-    match first {
-        None => {
+    let replayed = s.playback_pos.saturating_sub(play_gate);
+    let n = replayed.min((count as u32).saturating_sub(rec_gate));
+    match drift::bit_mismatches(&s.rec_coords, &s.play_coords, rec_gate, play_gate, n) {
+        (_, None) => {
             println!("replay == recording, bit for bit, over {n} ticks from the gate");
             true
         }
-        Some(i) => {
+        (differ, Some(i)) => {
             println!(
                 "{differ} of {n} ticks differ; first at gate+{i}: recorded {:?} replayed {:?}",
-                recorded[i], played[i]
+                s.rec_coords[(rec_gate + i) as usize],
+                s.play_coords[(play_gate + i) as usize]
             );
             false
         }

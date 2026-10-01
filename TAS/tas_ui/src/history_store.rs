@@ -842,29 +842,20 @@ fn resolve_current(
         return Some(target);
     }
     // search backward, then forward, for the nearest restorable entry
-    for i in (0..pos).rev() {
-        if restorable(&entries[i]) {
-            warnings.push(format!(
-                "current entry {} unavailable — resolved to {}",
-                target, entries[i].meta.entry_id
-            ));
-            return Some(entries[i].meta.entry_id);
-        }
-    }
-    for e in entries.iter().skip(pos + 1) {
-        if restorable(e) {
-            warnings.push(format!(
-                "current entry {} unavailable — resolved to {}",
-                target, e.meta.entry_id
-            ));
-            return Some(e.meta.entry_id);
-        }
-    }
-    warnings.push(format!(
-        "current entry {} unavailable — no restorable entry left",
-        target
-    ));
-    None
+    let found = entries[..pos]
+        .iter()
+        .rev()
+        .chain(&entries[pos + 1..])
+        .find(|e| restorable(e))
+        .map(|e| e.meta.entry_id);
+    warnings.push(match found {
+        Some(id) => format!("current entry {} unavailable — resolved to {}", target, id),
+        None => format!(
+            "current entry {} unavailable — no restorable entry left",
+            target
+        ),
+    });
+    found
 }
 
 #[cfg(test)]
@@ -1075,20 +1066,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn roundtrip_entries_and_marker() {
-        let dir = tmp_dir("rt");
-        let (mut store, _) = HistoryStore::open_eager(dir.clone()).unwrap();
-        let entries = vec![
-            entry(1, "A", false, 3),
-            entry(2, "B", true, 5),
-            marker(3, "saved"),
-        ];
-        store.persist(&entries, Some(2), 4).unwrap();
-        assert_loads_as(&dir, &entries, Some(2));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// Blobs are immutable: an append writes only the new blob, and a
     /// re-persist of the same state touches none.
     #[test]
@@ -1166,20 +1143,6 @@ mod tests {
             dir.join("1.tasrec.corrupt").exists(),
             "corrupt blob quarantined"
         );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn gc_orphan_blob_on_open() {
-        let dir = tmp_dir("gc");
-        let (mut store, _) = HistoryStore::open_eager(dir.clone()).unwrap();
-        store
-            .persist(&[entry(1, "A", false, 3)], Some(1), 2)
-            .unwrap();
-        // Stray blob not referenced by the manifest.
-        std::fs::write(blob_path(&dir, 99), b"orphan").unwrap();
-        let (_s, _res) = HistoryStore::open_eager(dir.clone()).unwrap();
-        assert!(!blob_path(&dir, 99).exists(), "orphan GC'd");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

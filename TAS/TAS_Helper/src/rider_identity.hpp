@@ -4,6 +4,7 @@
 #include "shared_state.hpp"
 #include "game_addresses.hpp"
 #include "rider_identity_parse.hpp"
+#include "safe_read.hpp"
 #include "setup_object.hpp"
 #include <format>
 
@@ -17,34 +18,6 @@
 // the last published value.
 namespace rider {
 
-static bool SafeCopy(uint32_t src, void* dst, uint32_t n) {
-    if (src < 0x10000) return false;
-    __try {
-        memcpy(dst, (const void*)(uintptr_t)src, n);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-static uint32_t SafeU32(uint32_t addr) {
-    uint32_t v = 0;
-    return SafeCopy(addr, &v, sizeof v) ? v : 0;
-}
-
-// MSVC6 std::string at `obj`: {allocator, char* ptr, size, capacity}.
-static bool ReadStdString(uint32_t obj, char* out, uint32_t cap) {
-    uint32_t hdr[4] = {};
-    if (!SafeCopy(obj, hdr, sizeof hdr)) return false;
-    const uint32_t ptr = hdr[GameAddresses::MSVC6_STRING_PTR / 4];
-    const uint32_t len = hdr[GameAddresses::MSVC6_STRING_SIZE / 4];
-    const uint32_t capacity = hdr[3];
-    if (!riderparse::StringHeaderUsable(ptr, len, capacity, cap)) return false;
-    if (!SafeCopy(ptr, out, len)) return false;
-    out[len] = 0;
-    return riderparse::IsPrintableAscii(out, len);
-}
-
 // Publish rider_character / rider_stance; log on change.
 inline void Refresh(TasSharedState* s) {
     static uint32_t lastCharacter = 0xFFFFFFFFu;
@@ -52,13 +25,15 @@ inline void Refresh(TasSharedState* s) {
 
     const uint32_t player = s->player_ptr;
     if (!player) return;
-    const uint32_t loadout = SafeU32(player + GameAddresses::PLAYER_LOADOUT_OFFSET);
+    const uint32_t loadout = SafeRead32(player + GameAddresses::PLAYER_LOADOUT_OFFSET);
     if (!loadout) return;
 
     char name[32];
-    const uint32_t config = SafeU32(player + GameAddresses::PLAYER_CONFIG_OFFSET);
-    if (!(config && ReadStdString(config + GameAddresses::PLAYER_CONFIG_NAME_STRING, name, sizeof name)) &&
-        !ReadStdString(loadout + GameAddresses::LOADOUT_FOLDER_STRING, name, sizeof name)) {
+    const uint32_t config = SafeRead32(player + GameAddresses::PLAYER_CONFIG_OFFSET);
+    if (!(config && riderparse::ReadStdString(SafeCopy, config + GameAddresses::PLAYER_CONFIG_NAME_STRING,
+                                              name, sizeof name)) &&
+        !riderparse::ReadStdString(SafeCopy, loadout + GameAddresses::LOADOUT_FOLDER_STRING, name,
+                                   sizeof name)) {
         return;
     }
     const uint32_t character = riderparse::CharacterFromName(name);

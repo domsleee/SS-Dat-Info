@@ -43,7 +43,7 @@ pub fn run() -> bool {
     harness::arm_rec(&mut client);
 
     let steps = patterns::with_neutral_tail(
-        patterns::build_from_pattern(PATTERN, HOLD_TICKS, 0),
+        patterns::build_from_pattern(PATTERN, HOLD_TICKS),
         TAIL_NEUTRAL_TICKS,
     );
     println!(
@@ -53,9 +53,7 @@ pub fn run() -> bool {
         TAIL_NEUTRAL_TICKS,
         patterns::total_ticks(&steps)
     );
-    if let Err(error) = harness::drive_pico_steps(&steps) {
-        eprintln!("{error}");
-        harness::stop(&mut client);
+    if !harness::drive_or_stop(&mut client, &steps) {
         return false;
     }
     thread::sleep(Duration::from_millis(200));

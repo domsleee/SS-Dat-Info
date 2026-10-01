@@ -13,7 +13,6 @@ pub struct CrashRecord {
     pub module: String,
     pub module_offset: u32,
     pub game_call: u32,
-    pub thread_id: u32,
 }
 
 /// What the game process left behind when it went away.
@@ -57,7 +56,6 @@ pub fn crash_record(state: &TasSharedState, pid: u32) -> Option<CrashRecord> {
         module: String::from_utf8_lossy(&module[..len]).into_owned(),
         module_offset: read(&state.crash_module_offset),
         game_call: read(&state.crash_game_call),
-        thread_id: read(&state.crash_thread_id),
     })
 }
 
@@ -170,7 +168,6 @@ mod tests {
             module: String::new(),
             module_offset: 0,
             game_call: TAS_GAME_CALL_NONE,
-            thread_id: 1,
         };
         assert_eq!(
             record.to_string(),

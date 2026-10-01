@@ -3,41 +3,13 @@
 //! Validates that `ARM_CONTINUE` reliably reaches the REC splice at a large
 //! frame offset without introducing drift in the replayed prefix.
 
-use crate::{drift, harness, patterns, replay};
+use crate::{drift, harness, replay};
 use std::thread;
 use std::time::Duration;
-use tas_shared::{input_bits, TasMode, TasSharedMemoryClient, TAS_MAX_TICKS};
+use tas_shared::{TasMode, TasSharedMemoryClient, TAS_MAX_TICKS};
 
-const BASELINE_TAIL_TICKS: u32 = 120;
 const CONT_RESTART_RETRIES: u32 = 40;
-const BASELINE_BUILD_ATTEMPTS_SYNTHETIC: u32 = 3;
-const DEFAULT_TAP_TICKS: u32 = 8;
 const FORWARD_EPS_Z: f32 = 1e-4;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BaselineInputProfile {
-    /// High-transition pattern: alternating LEFT/RIGHT taps until splice frame.
-    Taps,
-    /// One long LEFT hold followed by one long RIGHT hold.
-    Sweep,
-}
-
-impl BaselineInputProfile {
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw {
-            "taps" => Some(Self::Taps),
-            "sweep" => Some(Self::Sweep),
-            _ => None,
-        }
-    }
-
-    pub fn label(self, tap_ticks: u32) -> String {
-        match self {
-            Self::Taps => format!("taps ({} ticks per tap)", tap_ticks.max(1)),
-            Self::Sweep => "sweep (left/right hold)".to_string(),
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct ContCycleResult {
@@ -79,7 +51,6 @@ pub struct ContReliabilityReport {
     pub speed: f32,
     pub splice_frame: u32,
     pub baseline_ticks: u32,
-    pub baseline_profile: String,
     pub baseline_transitions: u32,
     pub results: Vec<ContCycleResult>,
 }
@@ -97,8 +68,8 @@ impl ContReliabilityReport {
             self.splice_frame, self.speed, self.iterations
         );
         println!(
-            "Baseline recording: {} ticks | profile: {} | transitions: {}",
-            self.baseline_ticks, self.baseline_profile, self.baseline_transitions
+            "Baseline recording: {} ticks | transitions: {}",
+            self.baseline_ticks, self.baseline_transitions
         );
         println!();
         println!(
@@ -189,43 +160,6 @@ impl ContReliabilityReport {
                 "*** CONT RELIABILITY FAILED: {}/{} cycles had issues ***",
                 fail_count, self.iterations
             );
-        }
-    }
-}
-
-fn build_baseline_steps(
-    splice_frame: u32,
-    profile: BaselineInputProfile,
-    tap_ticks: u32,
-) -> Vec<patterns::PatternStep> {
-    match profile {
-        BaselineInputProfile::Sweep => {
-            let left_ticks = (splice_frame / 2).max(1);
-            let right_ticks = splice_frame.saturating_sub(left_ticks).max(1);
-            patterns::build_from_explicit(&[
-                (input_bits::LEFT, left_ticks),
-                (input_bits::RIGHT, right_ticks),
-                (0x00, BASELINE_TAIL_TICKS),
-            ])
-        }
-        BaselineInputProfile::Taps => {
-            let mut holds = Vec::new();
-            let mut remaining = splice_frame.max(1);
-            let mut left = true;
-            let tap_ticks = tap_ticks.max(1);
-            while remaining > 0 {
-                let hold = remaining.min(tap_ticks);
-                let mask = if left {
-                    input_bits::LEFT
-                } else {
-                    input_bits::RIGHT
-                };
-                holds.push((mask, hold));
-                remaining -= hold;
-                left = !left;
-            }
-            holds.push((0x00, BASELINE_TAIL_TICKS));
-            patterns::build_from_explicit(&holds)
         }
     }
 }
@@ -468,199 +402,110 @@ pub fn run(
     iterations: u32,
     speed: f32,
     splice_frame: u32,
-    source_tasrec: Option<&str>,
-    baseline_profile: BaselineInputProfile,
-    tap_ticks: Option<u32>,
+    source_tasrec: &str,
 ) -> ContReliabilityReport {
     let splice_frame = splice_frame.max(1);
-    let tap_ticks = tap_ticks.unwrap_or(DEFAULT_TAP_TICKS).max(1);
     println!(
         "=== CONT Reliability Test: {}x splice at frame {} ({}x catch-up) ===\n",
         iterations, splice_frame, speed
     );
-    if let Some(path) = source_tasrec {
-        println!("Source baseline: {}", path);
-    } else {
-        println!(
-            "Synthetic baseline profile: {}",
-            baseline_profile.label(tap_ticks)
-        );
-    }
+    println!("Source baseline: {}", source_tasrec);
 
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
     harness::ensure_exclusive_runtime_ownership(&mut client, "CONT anchor mismatch");
     harness::assert_proven_config(&client);
 
-    let baseline_attempts = if source_tasrec.is_some() {
-        1
-    } else {
-        BASELINE_BUILD_ATTEMPTS_SYNTHETIC
-    };
-
-    for baseline_attempt in 1..=baseline_attempts {
-        if baseline_attempts > 1 {
-            println!(
-                "\n--- Baseline attempt {}/{} ---",
-                baseline_attempt, baseline_attempts
-            );
-        }
-
-        let (baseline_ticks, _, baseline_profile_label, baseline_transitions) = if let Some(path) =
-            source_tasrec
-        {
-            println!("--- Baseline load from .tasrec ---");
-            let loaded = match replay::load_tasrec(std::path::Path::new(path)) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("ERROR: Failed to load {}: {}", path, e);
-                    std::process::exit(1);
-                }
-            };
-            if loaded.count == 0 || loaded.rec_coords.is_empty() {
-                eprintln!("ERROR: Baseline recording is empty");
-                std::process::exit(1);
-            }
-            replay::write_to_shared(&mut client, &loaded);
-            println!("  Loaded: {} ticks", loaded.count);
-            if !loaded.meta.notes.is_empty() {
-                println!("  Notes: {}", loaded.meta.notes);
-            }
-            let rec_start = loaded.rec_coords[0];
-            println!(
-                "  REC start: ({:.6}, {:.6}, {:.6})",
-                rec_start[0], rec_start[1], rec_start[2]
-            );
-            let baseline_transitions =
-                drift::count_transitions(&loaded.input_log, loaded.count as usize);
-            println!("  Input transitions: {}", baseline_transitions);
-            (
-                loaded.count,
-                rec_start,
-                "file (.tasrec)".to_string(),
-                baseline_transitions,
-            )
-        } else {
-            println!("--- Baseline REC build (single pass) ---");
-            client.state_mut().playback_speed = 1.0;
-            // Focus BEFORE the restart so ARM_REC follows the restart
-            // immediately, as the CONT cycles' arms do.
-            harness::focus_game();
-            if !harness::restart_and_stabilize_inprocess(&mut client) {
-                eprintln!("ERROR: Game not alive for baseline REC (in-process restart)");
-                std::process::exit(1);
-            }
-            harness::arm_rec(&mut client);
-            let baseline_steps = build_baseline_steps(splice_frame, baseline_profile, tap_ticks);
-            println!(
-                "  Driving baseline pattern for {} ticks ({})",
-                patterns::total_ticks(&baseline_steps),
-                baseline_profile.label(tap_ticks)
-            );
-            if let Err(error) = harness::drive_pico_steps(&baseline_steps) {
-                eprintln!("{error}");
-                harness::stop(&mut client);
-                client.state_mut().playback_speed = 1.0;
-                std::process::exit(1);
-            }
-            thread::sleep(Duration::from_millis(200));
-            let baseline_ticks = client.state().recorded_count;
-            let rec_start = client.state().rec_coords[0];
-            let baseline_transitions =
-                drift::count_transitions(&client.state().input_log, baseline_ticks as usize);
-            harness::stop(&mut client);
-            println!("  Baseline recorded: {} ticks", baseline_ticks);
-            println!("  Input transitions: {}", baseline_transitions);
-            println!(
-                "  REC start: ({:.6}, {:.6}, {:.6})",
-                rec_start[0], rec_start[1], rec_start[2]
-            );
-            (
-                baseline_ticks,
-                rec_start,
-                baseline_profile.label(tap_ticks),
-                baseline_transitions,
-            )
-        };
-
-        if baseline_ticks <= splice_frame {
-            eprintln!(
-                "ERROR: Baseline too short ({} <= splice frame {})",
-                baseline_ticks, splice_frame
-            );
-            if baseline_attempt < baseline_attempts {
-                println!("  Retrying baseline capture...");
-                continue;
-            }
+    println!("--- Baseline load from .tasrec ---");
+    let loaded = match replay::load_tasrec(std::path::Path::new(source_tasrec)) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("ERROR: Failed to load {}: {}", source_tasrec, e);
             std::process::exit(1);
         }
+    };
+    if loaded.count == 0 || loaded.rec_coords.is_empty() {
+        eprintln!("ERROR: Baseline recording is empty");
+        std::process::exit(1);
+    }
+    replay::write_to_shared(&mut client, &loaded);
+    println!("  Loaded: {} ticks", loaded.count);
+    if !loaded.meta.notes.is_empty() {
+        println!("  Notes: {}", loaded.meta.notes);
+    }
+    let rec_start = loaded.rec_coords[0];
+    println!(
+        "  REC start: ({:.6}, {:.6}, {:.6})",
+        rec_start[0], rec_start[1], rec_start[2]
+    );
+    let baseline_ticks = loaded.count;
+    let baseline_transitions = drift::count_transitions(&loaded.input_log, loaded.count as usize);
+    println!("  Input transitions: {}", baseline_transitions);
 
-        let (baseline_input, baseline_rec_coords) = snapshot_baseline(&client, baseline_ticks);
-        let baseline_model = client.state().input_model;
-        let mut results = Vec::new();
-        for i in 1..=iterations {
-            println!("\n{}", "=".repeat(60));
-            println!("  CONT cycle {}/{}", i, iterations);
-            println!("{}", "=".repeat(60));
-
-            restore_baseline(
-                &mut client,
-                baseline_ticks,
-                &baseline_input,
-                &baseline_rec_coords,
-                baseline_model,
-            );
-            client.state_mut().playback_speed = speed;
-            // The DLL drops to this speed atomically at the splice, so the
-            // post-splice recorded_count overshoot stays near zero.
-            client.state_mut().cont_resume_speed = 1.0;
-            let resume_t0 = std::time::Instant::now();
-            let splice_result = harness::restart_continue_and_splice_inprocess(
-                &mut client,
-                splice_frame,
-                CONT_RESTART_RETRIES,
-            );
-            let resume_ms = resume_t0.elapsed().as_secs_f64() * 1000.0;
-            results.push(match splice_result {
-                Some(rerolls) => assess_splice(
-                    &client,
-                    i,
-                    rerolls,
-                    resume_ms,
-                    splice_frame,
-                    &baseline_rec_coords,
-                ),
-                None => {
-                    println!("  Splice failed before REC transition");
-                    failed_splice(i, resume_ms)
-                }
-            });
-
-            harness::stop(&mut client);
-            thread::sleep(Duration::from_millis(100));
-        }
-
-        client.state_mut().playback_speed = 1.0;
-        println!("\nReset playback_speed to 1.0");
-
-        let report = ContReliabilityReport {
-            iterations,
-            speed,
-            splice_frame,
-            baseline_ticks,
-            baseline_profile: baseline_profile_label,
-            baseline_transitions,
-            results,
-        };
-        report.print_summary();
-        if report.all_pass() || baseline_attempt == baseline_attempts {
-            return report;
-        }
-        println!(
-            "\nBaseline attempt {}/{} failed; rebuilding baseline and retrying...",
-            baseline_attempt, baseline_attempts
+    if baseline_ticks <= splice_frame {
+        eprintln!(
+            "ERROR: Baseline too short ({} <= splice frame {})",
+            baseline_ticks, splice_frame
         );
+        std::process::exit(1);
     }
 
-    unreachable!("baseline attempt loop must return a report");
+    let (baseline_input, baseline_rec_coords) = snapshot_baseline(&client, baseline_ticks);
+    let baseline_model = client.state().input_model;
+    let mut results = Vec::new();
+    for i in 1..=iterations {
+        println!("\n{}", "=".repeat(60));
+        println!("  CONT cycle {}/{}", i, iterations);
+        println!("{}", "=".repeat(60));
+
+        restore_baseline(
+            &mut client,
+            baseline_ticks,
+            &baseline_input,
+            &baseline_rec_coords,
+            baseline_model,
+        );
+        client.state_mut().playback_speed = speed;
+        // The DLL drops to this speed atomically at the splice, so the
+        // post-splice recorded_count overshoot stays near zero.
+        client.state_mut().cont_resume_speed = 1.0;
+        let resume_t0 = std::time::Instant::now();
+        let splice_result = harness::restart_continue_and_splice_inprocess(
+            &mut client,
+            splice_frame,
+            CONT_RESTART_RETRIES,
+        );
+        let resume_ms = resume_t0.elapsed().as_secs_f64() * 1000.0;
+        results.push(match splice_result {
+            Some(rerolls) => assess_splice(
+                &client,
+                i,
+                rerolls,
+                resume_ms,
+                splice_frame,
+                &baseline_rec_coords,
+            ),
+            None => {
+                println!("  Splice failed before REC transition");
+                failed_splice(i, resume_ms)
+            }
+        });
+
+        harness::stop(&mut client);
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    client.state_mut().playback_speed = 1.0;
+    println!("\nReset playback_speed to 1.0");
+
+    let report = ContReliabilityReport {
+        iterations,
+        speed,
+        splice_frame,
+        baseline_ticks,
+        baseline_transitions,
+        results,
+    };
+    report.print_summary();
+    report
 }

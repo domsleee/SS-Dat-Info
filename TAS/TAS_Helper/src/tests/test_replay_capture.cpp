@@ -19,7 +19,7 @@
 
 int main() {
     std::printf("replay_capture tests:\n");
-    constexpr bool OFF = true, ACTIVE = false, HUMAN = true, OTHER = false;
+    constexpr bool HUMAN = true, OTHER = false;
     // Addresses as observed in-game.
     constexpr uint32_t HUMAN_A = 0x0AEF1BA8, HUMAN_B = 0x0AF16450, GHOST = 0x0C4610C0,
                        GARBAGE_OWNER_REC = 0x0C460630;
@@ -29,36 +29,35 @@ int main() {
         // allocator hands the SAME address to a ghost. An address-change gate
         // cannot see that; revalidation on every push of the cached address does.
         ReplayCaptureState st;
-        check(ReplayCaptureAdopt(OFF, HUMAN_A, HUMAN, st) && st.cached == HUMAN_A, "reuse: human adopted");
-        check(!ReplayCaptureRevalidate(true, st) && st.cached == HUMAN_A && st.dropped == 0,
+        check(ReplayCaptureAdopt(HUMAN_A, HUMAN, st) && st.cached == HUMAN_A, "reuse: human adopted");
+        check(!ReplayCaptureRevalidate(true, st) && st.cached == HUMAN_A,
               "reuse: still human on the next push - nothing happens");
-        check(ReplayCaptureRevalidate(false, st) && st.cached == 0 && st.dropped == 1,
+        check(ReplayCaptureRevalidate(false, st) && st.cached == 0,
               "reuse: the same address now owned by a ghost is DROPPED");
-        check(!ReplayCaptureRevalidate(false, st) && st.dropped == 1,
-              "reuse: nothing cached - a further non-human push is a no-op (not counted twice)");
-        check(!ReplayCaptureAdopt(ACTIVE, HUMAN_A, OTHER, st) && st.cached == 0,
+        check(!ReplayCaptureRevalidate(false, st),
+              "reuse: nothing cached - a further non-human push is a no-op");
+        check(!ReplayCaptureAdopt(HUMAN_A, OTHER, st) && st.cached == 0,
               "reuse: the ghost at the old address is never adopted");
-        check(ReplayCaptureAdopt(ACTIVE, HUMAN_A, HUMAN, st) && st.cached == HUMAN_A,
+        check(ReplayCaptureAdopt(HUMAN_A, HUMAN, st) && st.cached == HUMAN_A,
               "reuse: the human re-created at that address is adopted again (mid-run)");
-        check(st.changes_while_active == 0, "reuse: re-adoption from empty is not a mid-run change");
     }
 
     {
         ReplayCaptureState st;
-        check(ReplayCaptureAdopt(OFF, HUMAN_A, HUMAN, st) && st.cached == HUMAN_A,
+        check(ReplayCaptureAdopt(HUMAN_A, HUMAN, st) && st.cached == HUMAN_A,
               "idle: the human's recorder is adopted on its first push");
-        check(!ReplayCaptureAdopt(OFF, HUMAN_A, HUMAN, st), "same recorder again is not a change");
-        check(st.changes_while_active == 0 && st.rejected == 0, "clean counters");
+        check(!ReplayCaptureAdopt(HUMAN_A, HUMAN, st), "same recorder again is not a change");
+        check(st.rejected == 0, "clean counter");
     }
     {
         // transient_pushers_never_hijack: however often a non-human recorder
         // pushes, idle or mid-run, the human stays followed.
         ReplayCaptureState st;
-        ReplayCaptureAdopt(OFF, HUMAN_A, HUMAN, st);
+        ReplayCaptureAdopt(HUMAN_A, HUMAN, st);
         bool any = false;
         for (int i = 0; i < 50; i++) {
-            any = ReplayCaptureAdopt(OFF, GHOST, OTHER, st) || any;
-            any = ReplayCaptureAdopt(ACTIVE, GARBAGE_OWNER_REC, OTHER, st) || any;
+            any = ReplayCaptureAdopt(GHOST, OTHER, st) || any;
+            any = ReplayCaptureAdopt(GARBAGE_OWNER_REC, OTHER, st) || any;
         }
         check(!any && st.cached == HUMAN_A, "transient_pushers_never_hijack: ghost / garbage pushers ignored");
         check(st.rejected == 100, "each ignored pusher is counted (diagnostic)");
@@ -67,19 +66,18 @@ int main() {
         // ghost_restart_recreates_recorder_mid_play: REC on HUMAN_A, the PLAY
         // restart rebuilds the player set, HUMAN_B is the new human recorder.
         ReplayCaptureState st;
-        ReplayCaptureAdopt(OFF, HUMAN_A, HUMAN, st);
-        check(ReplayCaptureAdopt(ACTIVE, HUMAN_B, HUMAN, st) && st.cached == HUMAN_B,
+        ReplayCaptureAdopt(HUMAN_A, HUMAN, st);
+        check(ReplayCaptureAdopt(HUMAN_B, HUMAN, st) && st.cached == HUMAN_B,
               "ghost_restart_recreates_recorder_mid_play: re-created human recorder adopted mid-run");
-        check(st.changes_while_active == 1, "mid-run re-creations are counted (diagnostic)");
-        check(!ReplayCaptureAdopt(ACTIVE, HUMAN_B, HUMAN, st), "steady state: no churn while it stays put");
+        check(!ReplayCaptureAdopt(HUMAN_B, HUMAN, st), "steady state: no churn while it stays put");
     }
     {
         ReplayCaptureState st;
-        check(!ReplayCaptureAdopt(ACTIVE, GHOST, OTHER, st) && st.cached == 0,
+        check(!ReplayCaptureAdopt(GHOST, OTHER, st) && st.cached == 0,
               "nothing cached and a non-human pusher: still nothing (never follow a ghost)");
-        check(ReplayCaptureAdopt(ACTIVE, HUMAN_A, HUMAN, st) && st.changes_while_active == 0,
-              "first human recorder mid-run is an adoption, not a re-creation");
-        check(!ReplayCaptureAdopt(ACTIVE, 0, HUMAN, st) && st.cached == HUMAN_A,
+        check(ReplayCaptureAdopt(HUMAN_A, HUMAN, st) && st.cached == HUMAN_A,
+              "first human recorder mid-run is adopted");
+        check(!ReplayCaptureAdopt(0, HUMAN, st) && st.cached == HUMAN_A,
               "a null ECX never replaces a live recorder");
     }
 
@@ -101,32 +99,28 @@ int main() {
         mem[GHOST] = GHOST_VT;    mem[GHOST + 0x14C] = GHOST_REC;  mem[GHOST_REC + 0x84] = GHOST;
         mem[AI] = AI_VT;          mem[AI + 0x14C] = AI_REC;        mem[AI_REC + 0x84] = AI;
         mem[DEAD_REC + 0x84] = HUMAN;  // still names the human, who has moved on to HUMAN_REC
-        ReplayIdentityEnv env{};
-        env.player_vtable = PLAYER_VT;
-        env.ghost_vtable = GHOST_VT;
         ReplayIdentityTrace t{};
 
-        check(ClassifyRecorderOwner(HUMAN_REC, env, read, &t) == OWNER_HUMAN,
+        check(ClassifyRecorderOwner(HUMAN_REC, PLAYER_VT, read, &t) == OWNER_HUMAN,
               "identity: the Player's linked recorder is the human's");
         check(t.owner == HUMAN && t.owner_vtable == PLAYER_VT && t.owner_recorder == HUMAN_REC,
               "identity: trace carries owner / vtable / back-link");
-        check(ClassifyRecorderOwner(GHOST_REC, env, read, &t) == OWNER_GHOST,
-              "identity: a Ghost_Player's recorder is a ghost");
-        check(ClassifyRecorderOwner(AI_REC, env, read, &t) == OWNER_OTHER,
+        check(ClassifyRecorderOwner(GHOST_REC, PLAYER_VT, read, &t) == OWNER_OTHER,
+              "identity: a Ghost_Player's recorder is 'other' (never adopted)");
+        check(ClassifyRecorderOwner(AI_REC, PLAYER_VT, read, &t) == OWNER_OTHER,
               "identity: an AI_Player's recorder is 'other' (never adopted)");
-        check(ClassifyRecorderOwner(DEAD_REC, env, read, &t) == OWNER_UNLINKED,
+        check(ClassifyRecorderOwner(DEAD_REC, PLAYER_VT, read, &t) == OWNER_UNLINKED,
               "identity: the human's PREVIOUS recorder is unlinked once the player set was rebuilt");
-        check(ClassifyRecorderOwner(0x0C460630, env, read, &t) == OWNER_UNREADABLE,
+        check(ClassifyRecorderOwner(0x0C460630, PLAYER_VT, read, &t) == OWNER_UNREADABLE,
               "identity: a pusher with an unreadable owner is rejected");
         mem[0x0C460630 + 0x84] = 2;  // the garbage-owner pusher seen around restarts
-        check(ClassifyRecorderOwner(0x0C460630, env, read, &t) == OWNER_UNREADABLE && t.owner == 2,
+        check(ClassifyRecorderOwner(0x0C460630, PLAYER_VT, read, &t) == OWNER_UNREADABLE && t.owner == 2,
               "identity: owner == 2 (garbage) is rejected, traced");
-        check(ClassifyRecorderOwner(0, env, read, &t) == OWNER_UNREADABLE,
+        check(ClassifyRecorderOwner(0, PLAYER_VT, read, &t) == OWNER_UNREADABLE,
               "identity: a null ECX is rejected");
-        ReplayIdentityEnv none{};
-        check(ClassifyRecorderOwner(HUMAN_REC, none, read, &t) == OWNER_OTHER,
+        check(ClassifyRecorderOwner(HUMAN_REC, 0, read, &t) == OWNER_OTHER,
               "identity: without a resolved Player vtable nothing is ever human");
-        check(ReplayOwnerKindName(OWNER_HUMAN)[0] == 'h' && ReplayOwnerKindName(OWNER_GHOST)[0] == 'g',
+        check(ReplayOwnerKindName(OWNER_HUMAN)[0] == 'h' && ReplayOwnerKindName(OWNER_OTHER)[0] == 'o',
               "identity: kind names for the ring log");
     }
 

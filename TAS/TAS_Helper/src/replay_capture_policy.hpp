@@ -12,9 +12,7 @@
 // links back to it (replay_identity.hpp).
 struct ReplayCaptureState {
     uint32_t cached = 0;                 // recorder the DLL currently follows
-    uint32_t changes_while_active = 0;   // re-creations adopted during REC/PLAY (diagnostic)
     uint32_t rejected = 0;               // non-human pushers ignored (diagnostic)
-    uint32_t dropped = 0;                // cached recorder that stopped being the human's (diagnostic)
 };
 
 // The cached recorder pushed again; drop it if it is no longer the human's
@@ -22,19 +20,16 @@ struct ReplayCaptureState {
 inline bool ReplayCaptureRevalidate(bool still_human, ReplayCaptureState& st) {
     if (st.cached == 0 || still_human) return false;
     st.cached = 0;
-    st.dropped++;
     return true;
 }
 
 // Returns true when `incoming` replaced the cached recorder.
-inline bool ReplayCaptureAdopt(bool mode_off, uint32_t incoming, bool incoming_is_human,
-                               ReplayCaptureState& st) {
+inline bool ReplayCaptureAdopt(uint32_t incoming, bool incoming_is_human, ReplayCaptureState& st) {
     if (incoming == 0 || incoming == st.cached) return false;
     if (!incoming_is_human) {
         st.rejected++;
         return false;
     }
-    if (!mode_off && st.cached != 0) st.changes_while_active++;
     st.cached = incoming;
     return true;
 }

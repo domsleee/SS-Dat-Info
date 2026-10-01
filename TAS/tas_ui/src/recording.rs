@@ -9,7 +9,7 @@ mod snapshot;
 #[cfg(test)]
 mod test_support;
 
-pub use dialogs::{load_recording_path, pick_recording_path, save_dialog};
+pub use dialogs::{load_recording_path, pick_recording_path, save_dialog, warn_identity_mismatch};
 pub use file::{IdentityStamps, RecordingFile};
 pub use history::{HistoryEntry, HistoryEntryKind, RecordingHistory};
 pub use recovery::{RecoverySessionContext, RecoveryStore, RecoveryWriter};
@@ -29,19 +29,13 @@ pub enum RecordingSessionKind {
 pub fn format_recording_duration(ticks: u32) -> String {
     let total_seconds = ticks / TAS_TICKS_PER_SECOND;
     let centiseconds = ticks % TAS_TICKS_PER_SECOND;
-    let minutes = total_seconds / 60;
-    let seconds = total_seconds % 60;
-
-    if minutes >= 60 {
-        let hours = minutes / 60;
-        let rem_minutes = minutes % 60;
-        format!(
-            "{}:{:02}:{:02}.{:02}",
-            hours, rem_minutes, seconds, centiseconds
-        )
-    } else {
-        format!("{}:{:02}.{:02}", minutes, seconds, centiseconds)
-    }
+    // Takes end at TAS_MAX_TICKS (10:55.36), so minutes never reach an hour.
+    format!(
+        "{}:{:02}.{:02}",
+        total_seconds / 60,
+        total_seconds % 60,
+        centiseconds
+    )
 }
 
 pub fn completed_session_label(
@@ -117,7 +111,6 @@ mod tests {
         assert_eq!(format_recording_duration(2303), "0:23.03");
         assert_eq!(format_recording_duration(5303), "0:53.03");
         assert_eq!(format_recording_duration(65536), "10:55.36");
-        assert_eq!(format_recording_duration(372300), "1:02:03.00");
     }
 
     #[test]
@@ -178,10 +171,6 @@ mod tests {
         assert_eq!(format_recording_duration(5999), "0:59.99");
         // 6000 ticks = 1:00.00
         assert_eq!(format_recording_duration(6000), "1:00.00");
-        // 359999 ticks = 59:59.99 (just under 1 hour)
-        assert_eq!(format_recording_duration(359999), "59:59.99");
-        // 360000 ticks = 1:00:00.00
-        assert_eq!(format_recording_duration(360000), "1:00:00.00");
         // 65536 ticks: past the 16-bit range
         assert_eq!(format_recording_duration(65536), "10:55.36");
     }

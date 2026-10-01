@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use tas_shared::transport::{Arm, ArmConfig, StepOutcome, TransportController};
 use tas_shared::{TasMode, TasSharedMemoryClient};
 
-use crate::command_edges::{cleanup, load_fixture};
+use crate::command_edges::FIXTURE;
 use crate::gamemem::GameMemory;
 use crate::harness;
 
@@ -23,23 +23,10 @@ const LOG_LINE: &str = "exited: stopped the TAS";
 
 pub fn run() -> bool {
     println!("=== OWNER-DEATH: the DLL stops the TAS when its controller dies ===\n");
-    let mut client = harness::ensure_game_running();
-    harness::stop_competing_tas_ui_writer();
-    let result = run_cases(&mut client);
-    cleanup(&mut client);
-    match result {
-        Ok(()) => {
-            println!("\n*** OWNER-DEATH PASSED ***");
-            true
-        }
-        Err(e) => {
-            eprintln!("\n*** OWNER-DEATH FAILED: {e} ***");
-            false
-        }
-    }
+    harness::run_case("OWNER-DEATH", run_cases)
 }
 
-fn run_cases(client: &mut TasSharedMemoryClient) -> Result<(), String> {
+fn run_cases(client: &mut TasSharedMemoryClient) -> Result<String, String> {
     let memory = GameMemory::attach().ok_or("cannot read the game's memory")?;
     for point in KILL_POINTS {
         killed_owner_stops_the_tas(client, &memory, point)?;
@@ -47,7 +34,7 @@ fn run_cases(client: &mut TasSharedMemoryClient) -> Result<(), String> {
     reader_death_changes_nothing(client)?;
     second_controller_is_refused_while_the_owner_lives(client)?;
     living_owner_keeps_its_block(client)?;
-    Ok(())
+    Ok(String::new())
 }
 
 fn killed_owner_stops_the_tas(
@@ -57,7 +44,7 @@ fn killed_owner_stops_the_tas(
 ) -> Result<(), String> {
     println!("  -- kill the owner at: {point}");
     harness::stop(client);
-    load_fixture(client)?;
+    harness::load_fixture(client, FIXTURE)?;
     let (mut child, pid) = spawn_child(point)?;
     let st = client.state();
     if st.owner_pid != pid {
@@ -130,7 +117,7 @@ fn killed_owner_stops_the_tas(
 fn reader_death_changes_nothing(client: &mut TasSharedMemoryClient) -> Result<(), String> {
     println!("  -- a reader that never owned dies mid-replay");
     harness::stop(client);
-    load_fixture(client)?;
+    harness::load_fixture(client, FIXTURE)?;
     harness::restart_play_aligned_unwatched(client)?;
     let (mut child, _) = spawn_child("reader")?;
     kill(&mut child);
@@ -148,7 +135,7 @@ fn second_controller_is_refused_while_the_owner_lives(
 ) -> Result<(), String> {
     println!("  -- a second controller while the owner lives");
     harness::stop(client);
-    load_fixture(client)?;
+    harness::load_fixture(client, FIXTURE)?;
     let (mut child, pid) = spawn_child("replay")?;
     let mut mine = TransportController::new(aligned_play(client));
     let refused = step_until_decided(&mut mine, client);

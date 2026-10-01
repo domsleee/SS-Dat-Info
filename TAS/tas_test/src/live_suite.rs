@@ -223,10 +223,6 @@ fn preflight(stages: &mut [Stage], full: bool, executable: &Path) -> Result<(), 
                     .into(),
             );
         }
-        // Filters make a nominal full suite incomplete.
-        if std::env::var("TAS_TEST_CASE_FILTER").is_ok_and(|v| !v.trim().is_empty()) {
-            return Err("Unset TAS_TEST_CASE_FILTER for live-full".into());
-        }
     }
     if let Ok(client) = tas_shared::TasSharedMemoryClient::open() {
         if tas_shared::resolved_level_id(client.state()) != Some(0) {

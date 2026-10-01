@@ -16,7 +16,6 @@ mod win32;
 mod worker;
 
 use eframe::egui;
-#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 
@@ -55,8 +54,10 @@ struct TasApp {
     connect_error: Option<String>,
 
     // UI state
-    show_config: bool,
-    show_pico_panel: bool,
+    /// Panel toggles, CONT catch-up speed and history cap, edited in place
+    /// and saved on exit. Its `playback_speed` is only written at save time;
+    /// the live speed is the `playback_speed` field below.
+    settings: settings::Settings,
     pico: PicoState,
     history: RecordingHistory,
     history_writer: Option<history_store::HistoryWriter>,
@@ -85,8 +86,6 @@ struct TasApp {
     /// lifecycle as the labels above. PLAY/CONT refuse a take from another
     /// track: its spawn is elsewhere, so it can never match.
     loaded_level: Option<String>,
-    /// Soft cap (max unpinned entries) — from settings.
-    history_cap: usize,
     recovery_store: Option<recording::RecoveryStore>,
     /// Serialized off-thread writer for recovery checkpoints. One writer keeps
     /// writes ordered, so a late write can't land after `clear_pending` and
@@ -107,14 +106,11 @@ struct TasApp {
     continue_from_frame: u32,
     continue_from_text: String,
     playback_speed: f32,
-    show_history: bool,
-    show_log: bool,
     active_recording_session: Option<ActiveRecordingSession>,
     pending_session_kind: Option<RecordingSessionKind>,
     pending_continue_start_tick: Option<u32>,
     last_mode: u32,
     resume_speed: Option<f32>, // speed to return to when a CONT catch-up ends
-    cont_catchup_multiplier: f32, // configurable CONT catch-up speed (default 12x)
     /// Which transport (PLAY or CONT) the in-flight cycle is for, so retry and
     /// abort log lines name the right one.
     cycle_arm: tas_shared::transport::Arm,
@@ -202,69 +198,21 @@ struct TasApp {
     last_resolved_epoch: Option<u32>,
 
     // One-shot: force dark title bar on first frame
-    #[cfg(windows)]
     dark_title_bar_set: bool,
 }
 
 impl TasApp {
-    fn new() -> Self {
-        let (shared, connect_error) = match TasSharedMemoryClient::open() {
-            Ok(s) => (Some(s), None),
-            Err(e) => (None, Some(e)),
-        };
-
-        let settings = settings::Settings::load();
-        // File-per-entry history store.
-        let history_cap = settings.history_cap.max(1);
-        let mut history = RecordingHistory::new(history_cap);
-        let history_dir = history_store::default_history_dir();
-        let mut history_notices: Vec<String> = Vec::new();
-        let history_writer = match history_store::HistoryWriter::open(history_dir.clone()) {
-            Ok((writer, load)) => {
-                // Entries load lazily: a restore reads its blob from here.
-                history.set_blob_dir(history_dir.clone());
-                if load.entries.is_empty() {
-                    // Preserve the computed id floor even for an empty or
-                    // damaged manifest so a new entry cannot reuse a blob id.
-                    history.adopt_id_floor(load.next_entry_id);
-                } else {
-                    history.apply_loaded(load.entries, load.current_entry_id, load.next_entry_id);
-                }
-                for warning in load.warnings {
-                    history_notices.push(format!("History: {}", warning));
-                }
-                history_notices.push(format!("History store: {}", history_dir.display()));
-                Some(writer)
-            }
-            Err(e) => {
-                history_notices.push(format!("History store disabled: {}", e));
-                None
-            }
-        };
-        // One-time level backfill: tag pre-tagging entries by classifying
-        // their snapshot's spawn position (only unambiguous spawns — shared
-        // Alpine / FM-FH clusters stay untagged and remain visible on every
-        // level). Idempotent: already-tagged entries are skipped, so this is
-        // a no-op on every launch after the first.
-        let backfilled = history.backfill_levels(start_line::level_code_from_spawn);
-        if backfilled > 0 {
-            history_notices.push(format!(
-                "History: backfilled level tags on {} entries (by spawn position)",
-                backfilled
-            ));
-        }
-        let recovery_store = recording::RecoveryStore::new().ok();
-        let recovery_store_notice = recovery_store
-            .as_ref()
-            .map(|store| format!("Crash recovery: {}", store.root().display()));
-        let mut app = Self {
-            shared,
-            connect_error,
-            show_config: settings.show_config,
-            show_pico_panel: settings.show_pico_panel,
+    /// Every field at its starting value, with no game connection, history
+    /// store, recovery store or session log file: `new` attaches those, and
+    /// the tests run on it as is.
+    fn blank(mut settings: settings::Settings) -> Self {
+        settings.history_cap = settings.history_cap.max(1);
+        Self {
+            shared: None,
+            connect_error: None,
             pico: PicoState::new(),
-            history,
-            history_writer,
+            history: RecordingHistory::new(settings.history_cap),
+            history_writer: None,
             last_persisted_revision: 0,
             last_queued_revision: 0,
             last_failed_revision: 0,
@@ -274,10 +222,9 @@ impl TasApp {
             loaded_rider: None,
             loaded_identity: None,
             loaded_level: None,
-            history_cap,
-            recovery_store,
+            recovery_store: None,
             recovery_writer: recording::RecoveryWriter::new(),
-            log_lines: ui_log::UiLog::new(&history_dir),
+            log_lines: ui_log::UiLog::default(),
             timeline_view: timeline::TimelineView::default(),
             timeline_edit: timeline::TimelineEdit::default(),
             pending_input_edit: None,
@@ -286,14 +233,12 @@ impl TasApp {
             continue_from_frame: 0,
             continue_from_text: "0".to_string(),
             playback_speed: normalize_playback_speed(settings.playback_speed),
-            show_history: settings.show_history,
-            show_log: settings.show_log,
+            settings,
             active_recording_session: None,
             pending_session_kind: None,
             pending_continue_start_tick: None,
             last_mode: 0,
             resume_speed: None,
-            cont_catchup_multiplier: settings.cont_catchup_speed,
             cycle_arm: tas_shared::transport::Arm::Continue,
             log_read_cursor: 0,
             finish_seq_seen: 0,
@@ -324,17 +269,75 @@ impl TasApp {
                 .unwrap_or_else(std::time::Instant::now),
             last_resolved_level: None,
             last_resolved_epoch: None,
-            #[cfg(windows)]
             dark_title_bar_set: false,
-        };
+        }
+    }
 
-        // Auto-detect Pico on startup
-        let detect_logs = if std::env::var_os("SSB_INSPECT_E2E_RECORDING").is_some() {
-            Vec::new() // The live test owns the physical Pico input.
-        } else {
-            app.pico.auto_detect()
+    fn new() -> Self {
+        let mut app = Self::blank(settings::Settings::load());
+        match TasSharedMemoryClient::open() {
+            Ok(s) => app.shared = Some(s),
+            Err(e) => app.connect_error = Some(e),
+        }
+
+        // File-per-entry history store.
+        let history_dir = history_store::default_history_dir();
+        let mut history_notices: Vec<String> = Vec::new();
+        app.history_writer = match history_store::HistoryWriter::open(history_dir.clone()) {
+            Ok((writer, load)) => {
+                // Entries load lazily: a restore reads its blob from here.
+                app.history.set_blob_dir(history_dir.clone());
+                if load.entries.is_empty() {
+                    // Preserve the computed id floor even for an empty or
+                    // damaged manifest so a new entry cannot reuse a blob id.
+                    app.history.adopt_id_floor(load.next_entry_id);
+                } else {
+                    app.history.apply_loaded(
+                        load.entries,
+                        load.current_entry_id,
+                        load.next_entry_id,
+                    );
+                }
+                for warning in load.warnings {
+                    history_notices.push(format!("History: {}", warning));
+                }
+                history_notices.push(format!("History store: {}", history_dir.display()));
+                Some(writer)
+            }
+            Err(e) => {
+                history_notices.push(format!("History store disabled: {}", e));
+                None
+            }
         };
-        for msg in detect_logs {
+        // One-time level backfill: tag pre-tagging entries by classifying
+        // their snapshot's spawn position (only unambiguous spawns — shared
+        // Alpine / FM-FH clusters stay untagged and remain visible on every
+        // level). Idempotent: already-tagged entries are skipped, so this is
+        // a no-op on every launch after the first.
+        let backfilled = app
+            .history
+            .backfill_levels(start_line::level_code_from_spawn);
+        if backfilled > 0 {
+            history_notices.push(format!(
+                "History: backfilled level tags on {} entries (by spawn position)",
+                backfilled
+            ));
+        }
+        app.recovery_store = recording::RecoveryStore::new().ok();
+        let recovery_store_notice = app
+            .recovery_store
+            .as_ref()
+            .map(|store| format!("Crash recovery: {}", store.root().display()));
+        app.log_lines = ui_log::UiLog::new(&history_dir);
+
+        // Connect the Pico on startup. The live test owns the physical Pico
+        // input, so it is left alone there.
+        if std::env::var_os("SSB_INSPECT_E2E_RECORDING").is_none() {
+            app.pico.connect();
+            let msg = match app.pico.error.as_deref() {
+                None => format!("Pico data interface connected on {}", app.pico.port_name),
+                Some(error) => format!("Pico auto-detect: {error}"),
+            };
             app.log_lines.push(msg);
         }
         for msg in history_notices {
@@ -346,7 +349,7 @@ impl TasApp {
         // Recovery-as-history (no banner): an existing checkpoint means an
         // unsaved recording that never reached history (STOP clears it), i.e.
         // the app crashed/closed mid-recording. Bring it back as a PINNED entry.
-        let recovered_checkpoint = app.recover_pending_checkpoint();
+        let recovered_checkpoint = app.recover_pending_checkpoint_matching(None);
         app.persist_history_if_needed();
 
         // Clear the checkpoint only after the recovered entry is confirmed
@@ -358,10 +361,8 @@ impl TasApp {
 
         app.adopt_buffer_identity();
         if let Some(path) = std::env::var_os("SSB_INSPECT_E2E_RECORDING") {
+            // main() has already refused to start without SSB_INSPECT_DATA_DIR.
             let setup = (|| -> Result<(), String> {
-                if std::env::var_os("SSB_INSPECT_DATA_DIR").is_none() {
-                    return Err("E2E startup requires an isolated SSB_INSPECT_DATA_DIR".into());
-                }
                 let splice = std::env::var("SSB_INSPECT_E2E_SPLICE")
                     .map_err(|e| e.to_string())?
                     .parse::<u32>()
@@ -383,27 +384,25 @@ impl TasApp {
         if shared.mode_volatile() != TasMode::Off as u32 || !shared.command_idle() {
             return Err("Game must be stopped before UI fixture loading".into());
         }
-        let metadata = recording::RecordingFile::read_metadata(path)?;
-        if splice > metadata.recorded_count {
+        if splice > recording::RecordingFile::read_metadata(path)?.recorded_count {
             return Err("Splice outside recording".into());
         }
         tas_shared::level::check_recording_matches_live(
             &path.to_string_lossy(),
             shared.state().level_id,
         )?;
-        if !recording::load_recording_path(shared.state_mut(), &mut self.log_lines, path) {
+        let Some(metadata) =
+            recording::load_recording_path(shared.state_mut(), &mut self.log_lines, path)
+        else {
             return Err("Could not load UI fixture".into());
-        }
+        };
         self.loaded_physics = metadata.physics_label();
         self.loaded_rider = metadata.rider_label();
         self.loaded_identity = Some(recording::IdentityStamps::from_metadata(&metadata));
         self.loaded_level =
             tas_shared::level::code_from_recording_name(&path.to_string_lossy()).map(Into::into);
-        self.history.push_loaded_snapshot(
-            shared.state(),
-            path,
-            Some(recording::IdentityStamps::from_metadata(&metadata)),
-        );
+        self.history
+            .push_loaded_snapshot(shared.state(), path, self.loaded_identity.clone());
         self.apply_transport_action(transport::Action::SetContinueFrame(splice));
         Ok(())
     }
@@ -451,58 +450,27 @@ impl TasApp {
     /// the status chip and warn if it differs from the live mode (24-bit
     /// DirectX vs 53-bit OpenGL round the sim differently).
     fn note_restored_physics(&mut self) {
-        let Some(idx) = self.history.current_index() else {
+        let Some(entry) = self
+            .history
+            .current_index()
+            .and_then(|i| self.history.entries().get(i))
+        else {
             return;
         };
-        let stamp = self
-            .history
-            .entries()
-            .get(idx)
-            .and_then(|e| e.physics.clone());
-        if let (Some(stamp), Some(live)) = (stamp.as_deref(), self.history.live_physics()) {
-            if stamp != live {
-                self.log_lines.push(format!(
-                    "WARNING: this take was recorded under {} but the game is running {}: \
-                     the physics round differently, a replay will not be bit-exact",
-                    stamp, live
-                ));
-            }
-        }
-        self.loaded_physics = stamp;
-        // Who rode the take vs who is on the board now (character / stance).
-        let rider = self
-            .history
-            .entries()
-            .get(idx)
-            .and_then(|e| e.rider.clone());
-        if let (Some(stamp), Some(live)) = (rider.as_deref(), self.history.live_rider()) {
-            if stamp != live {
-                self.log_lines.push(format!(
-                    "WARNING: this take was recorded as {} but the rider is {}: \
-                     a different character or stance has different physics, a replay will not line up",
-                    stamp, live
-                ));
-            }
-        }
-        self.loaded_rider = rider;
-        self.loaded_identity = self.history.entries().get(idx).map(|e| e.stamps.clone());
-        self.loaded_level = self
-            .history
-            .entries()
-            .get(idx)
-            .and_then(|e| e.level.clone());
+        // Who rode the take, and under which physics, vs the live game.
+        recording::warn_identity_mismatch(
+            &mut self.log_lines,
+            (entry.physics.as_deref(), self.history.live_physics()),
+            (entry.rider.as_deref(), self.history.live_rider()),
+        );
+        self.loaded_physics = entry.physics.clone();
+        self.loaded_rider = entry.rider.clone();
+        self.loaded_identity = Some(entry.stamps.clone());
+        self.loaded_level = entry.level.clone();
     }
 
     fn push_log(&mut self, msg: &str) {
         self.log_lines.push(msg);
-    }
-
-    /// Append any newly-pushed log lines to the session log file. Called
-    /// once per UI frame from `update`. If the file is unavailable
-    /// (couldn't open at start) this is a no-op — the in-memory log
-    /// remains the only record.
-    fn flush_log_lines_to_file(&mut self) {
-        self.log_lines.flush_to_file();
     }
 
     fn send_action_command(&mut self, command: TasCommand) {
@@ -543,25 +511,17 @@ impl TasApp {
         // Spin up to ~250ms for the DLL's cycle hook to process CMD_STOP and
         // flip to OFF (typically 1-2 cycles, ~7-14ms).
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
-        let mut stopped = false;
-        while std::time::Instant::now() < deadline {
-            stopped = self
+        let stopped = loop {
+            let stopped = self
                 .shared
                 .as_ref()
                 .map(|s| stop_is_acknowledged(s.mode_volatile(), s.command_idle()))
                 .unwrap_or(true);
-            if stopped {
-                break;
+            if stopped || std::time::Instant::now() >= deadline {
+                break stopped;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        if !stopped {
-            stopped = self
-                .shared
-                .as_ref()
-                .map(|s| stop_is_acknowledged(s.mode_volatile(), s.command_idle()))
-                .unwrap_or(true);
-        }
+        };
         if !stopped {
             self.log_lines.push(
                 "Load/restore refused: Stop was not acknowledged; recording buffer unchanged",
@@ -617,7 +577,7 @@ impl TasApp {
         // pair the old track's id with the new epoch across a switch.
         match tas_shared::resolved_level_id_with_epoch(shared.state()) {
             Some((id, epoch)) => {
-                let code = crate::level::level_code_from_id(id);
+                let code = tas_shared::level::code_from_id(id);
                 if let Some(c) = code {
                     self.last_resolved_level = Some(c.to_string());
                 }
@@ -659,26 +619,26 @@ impl TasApp {
             // Undo/Redo overwrite the whole shared input/coord buffer like a
             // history restore, so they stop an active REC/PLAY first; the DLL
             // must not be writing input_log during the copy.
-            transport::Action::Undo => {
-                if self.stop_active_session_for_load() {
-                    if let Some(snap) = self.history.undo() {
-                        if let Some(shared) = self.shared.as_mut() {
-                            snap.restore_to(shared.state_mut());
-                        }
-                        self.log_lines.push("Undo: restored previous recording");
-                        self.note_restored_physics();
-                    }
+            transport::Action::Undo | transport::Action::Redo => {
+                if !self.stop_active_session_for_load() {
+                    return;
                 }
-            }
-            transport::Action::Redo => {
-                if self.stop_active_session_for_load() {
-                    if let Some(snap) = self.history.redo() {
-                        if let Some(shared) = self.shared.as_mut() {
-                            snap.restore_to(shared.state_mut());
-                        }
-                        self.log_lines.push("Redo: restored next recording");
-                        self.note_restored_physics();
+                let undo = matches!(cmd, transport::Action::Undo);
+                let snap = if undo {
+                    self.history.undo()
+                } else {
+                    self.history.redo()
+                };
+                if let Some(snap) = snap {
+                    if let Some(shared) = self.shared.as_mut() {
+                        snap.restore_to(shared.state_mut());
                     }
+                    self.log_lines.push(if undo {
+                        "Undo: restored previous recording"
+                    } else {
+                        "Redo: restored next recording"
+                    });
+                    self.note_restored_physics();
                 }
             }
             transport::Action::SetContinueFrame(frame) => {
@@ -866,7 +826,7 @@ impl TasApp {
                 // Re-test liveness every 5 stale seconds, not once: the cycle
                 // also freezes at the menu while the game is alive, and the
                 // game may exit later while still stale.
-                if self.stale_frame_ticks.is_multiple_of(5) && !win32::is_supreme_running() {
+                if self.stale_frame_ticks.is_multiple_of(5) && win32::find_supreme_pid().is_none() {
                     self.disconnect_from_dead_game();
                 }
             } else {
@@ -912,20 +872,19 @@ impl TasApp {
         if let Some(shared) = self.shared.as_mut() {
             let loaded =
                 recording::load_recording_path(shared.state_mut(), &mut self.log_lines, &path);
-            if loaded {
+            if let Some(meta) = loaded {
                 // The file's stamp (load_recording_path already logged a
                 // mismatch warning); the chip shows it next to the live mode.
-                let meta = recording::RecordingFile::read_metadata(&path).ok();
-                self.loaded_physics = meta.as_ref().and_then(|m| m.physics_label());
-                self.loaded_rider = meta.as_ref().and_then(|m| m.rider_label());
-                self.loaded_identity = meta.as_ref().map(recording::IdentityStamps::from_metadata);
+                self.loaded_physics = meta.physics_label();
+                self.loaded_rider = meta.rider_label();
+                self.loaded_identity = Some(recording::IdentityStamps::from_metadata(&meta));
                 self.loaded_level =
                     tas_shared::level::code_from_recording_name(&path.to_string_lossy())
                         .map(Into::into);
                 let _ = self.history.push_loaded_snapshot(
                     shared.state(),
                     &path,
-                    meta.as_ref().map(recording::IdentityStamps::from_metadata),
+                    self.loaded_identity.clone(),
                 );
                 if shared.state().recorded_count > 0 {
                     self.queue_restart_then(TasCommand::ArmPlay);
@@ -941,16 +900,8 @@ impl eframe::App for TasApp {
     }
 
     fn on_exit(&mut self) {
-        let s = settings::Settings {
-            show_pico_panel: self.show_pico_panel,
-            show_history: self.show_history,
-            show_config: self.show_config,
-            show_log: self.show_log,
-            playback_speed: self.playback_speed_for_settings(),
-            cont_catchup_speed: self.cont_catchup_multiplier,
-            history_cap: self.history_cap,
-        };
-        s.save();
+        self.settings.playback_speed = self.playback_speed_for_settings();
+        self.settings.save();
         // Make sure the latest history is flushed to disk before we exit.
         if let Some(writer) = self.history_writer.as_ref() {
             let _ = writer.flush();
@@ -958,7 +909,7 @@ impl eframe::App for TasApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.sync_frame_state(ctx);
+        self.sync_frame_state();
         self.track_mode_transitions();
 
         // handle_shortcuts takes keys delivered to tas_ui by egui;
@@ -1012,19 +963,18 @@ impl eframe::App for TasApp {
 /// The sections of `update`, in the order it runs them.
 impl TasApp {
     /// Once-per-frame bookkeeping that must run before anything reads live state.
-    fn sync_frame_state(&mut self, ctx: &egui::Context) {
-        // Force dark theme + title bar on Windows (one-shot, first frame)
-        #[cfg(windows)]
+    fn sync_frame_state(&mut self) {
+        // Dark title bar (one-shot, first frame: the window must exist).
         if !self.dark_title_bar_set {
             self.dark_title_bar_set = true;
-            ctx.set_theme(egui::Theme::Dark);
             win32::set_dark_title_bar("SSB Inspect");
         }
 
         // Persist any new log lines added since last frame to the on-disk
         // session log. Done first so a panic later in the frame still
-        // captures the events that led up to it.
-        self.flush_log_lines_to_file();
+        // captures the events that led up to it. A no-op when the file could
+        // not be opened at start: the in-memory log is then the only record.
+        self.log_lines.flush_to_file();
 
         // Synchronise the live level first: the history panel filters and
         // restores against it later this frame, and must not see the previous
@@ -1218,7 +1168,7 @@ impl TasApp {
                     ui.horizontal(|ui| {
                         ui.label("CONT catch-up");
                         ui.add(
-                            egui::DragValue::new(&mut self.cont_catchup_multiplier)
+                            egui::DragValue::new(&mut self.settings.cont_catchup_speed)
                                 .range(1.0..=384.0)
                                 .prefix("\u{00D7}")
                                 .speed(1.0),
@@ -1240,11 +1190,11 @@ impl TasApp {
                             .color(egui::Color32::from_gray(140)),
                     );
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.show_history, "History");
+                        ui.checkbox(&mut self.settings.show_history, "History");
                         ui.weak("Ctrl+H");
                     });
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.show_log, "Log");
+                        ui.checkbox(&mut self.settings.show_log, "Log");
                         ui.weak("Ctrl+L");
                     });
                     ui.separator();
@@ -1254,8 +1204,8 @@ impl TasApp {
                             .small()
                             .color(egui::Color32::from_gray(140)),
                     );
-                    ui.checkbox(&mut self.show_pico_panel, "Pico HID");
-                    ui.checkbox(&mut self.show_config, "Debug Config");
+                    ui.checkbox(&mut self.settings.show_pico_panel, "Pico HID");
+                    ui.checkbox(&mut self.settings.show_config, "Debug Config");
                 });
             });
         });
@@ -1265,7 +1215,7 @@ impl TasApp {
         // Bottom log panel (hidden by default, toggle via View menu).
         // Declared FIRST so it sits at the very bottom of the window;
         // egui stacks subsequent bottom panels above it.
-        if self.show_log {
+        if self.settings.show_log {
             egui::TopBottomPanel::bottom("log_panel")
                 .resizable(true)
                 .default_height(100.0)
@@ -1313,14 +1263,14 @@ impl TasApp {
 
     fn show_left_panel(&mut self, ctx: &egui::Context) {
         // Left side panel: only shown if at least one sub-panel is visible
-        let left_panel_visible = self.show_config || self.show_pico_panel;
+        let left_panel_visible = self.settings.show_config || self.settings.show_pico_panel;
         if left_panel_visible {
             egui::SidePanel::left("config_panel")
                 .resizable(true)
                 .default_width(200.0)
                 .show(ctx, |ui| {
                     if let Some(ref mut shared) = self.shared {
-                        if self.show_config {
+                        if self.settings.show_config {
                             egui::CollapsingHeader::new("Debug Config")
                                 .default_open(false)
                                 .show(ui, |ui| {
@@ -1328,18 +1278,18 @@ impl TasApp {
                                 });
                             ui.separator();
                         }
-                        if self.show_pico_panel {
+                        if self.settings.show_pico_panel {
                             pico::show_panel(ui, &mut self.pico, &mut self.log_lines);
                         }
                     }
                     // History settings — available even when disconnected.
-                    if self.show_config {
+                    if self.settings.show_config {
                         egui::CollapsingHeader::new("History")
                             .default_open(false)
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label("Undo cap:");
-                                    let mut cap = self.history_cap as u32;
+                                    let mut cap = self.settings.history_cap as u32;
                                     if ui
                                         .add(
                                             egui::DragValue::new(&mut cap)
@@ -1352,8 +1302,8 @@ impl TasApp {
                                         )
                                         .changed()
                                     {
-                                        self.history_cap = cap.max(1) as usize;
-                                        self.history.set_capacity(self.history_cap);
+                                        self.settings.history_cap = cap.max(1) as usize;
+                                        self.history.set_capacity(self.settings.history_cap);
                                     }
                                 });
                                 ui.label(
@@ -1375,7 +1325,7 @@ impl TasApp {
             .as_ref()
             .map(|_| history_store::default_history_dir());
         let mut open_history_dir = false;
-        if self.show_history {
+        if self.settings.show_history {
             egui::SidePanel::right("history_panel")
                 .resizable(true)
                 .default_width(280.0)
@@ -1410,12 +1360,7 @@ impl TasApp {
                     // 1 while paused, so also require the cycle ticking). The
                     // panel shows "In Menu" rather than "resolving…", since
                     // nothing is resolved at a menu.
-                    let in_menu = !(self
-                        .shared
-                        .as_ref()
-                        .map(|s| s.state().game_in_game != 0)
-                        .unwrap_or(false)
-                        && self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400));
+                    let in_menu = !self.arming_allowed();
                     let game_flag = self
                         .shared
                         .as_ref()
@@ -1524,7 +1469,7 @@ impl TasApp {
                         continue_from: &mut self.continue_from_frame,
                         continue_from_text: &mut self.continue_from_text,
                         playback_speed: &mut self.playback_speed,
-                        cont_catchup_speed: self.cont_catchup_multiplier,
+                        cont_catchup_speed: self.settings.cont_catchup_speed,
                         history: &self.history,
                         state: shared.state(),
                         catchup_active: self.resume_speed.is_some(),
@@ -1562,13 +1507,11 @@ impl TasApp {
                 ui.separator();
 
                 let state = shared.state();
-                let cycle_ticking =
-                    self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400);
                 status::status_card(
                     ui,
                     state,
                     &status::StatusProps {
-                        in_game: state.game_in_game != 0 && cycle_ticking,
+                        in_game: arming_allowed,
                         finished_at_tick: self.finished_at_tick,
                         loaded_physics: self.loaded_physics.as_deref(),
                         loaded_rider: self.loaded_rider.as_deref(),
@@ -1621,16 +1564,13 @@ impl TasApp {
                     let path = script_watch::ScriptWatch::fresh_path();
                     match std::fs::write(&path, &script) {
                         Ok(()) => {
-                            #[cfg(windows)]
-                            {
-                                let _ = std::process::Command::new("cmd")
-                                    .arg("/C")
-                                    .arg("start")
-                                    .arg("")
-                                    .arg(&path)
-                                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                                    .spawn();
-                            }
+                            let _ = std::process::Command::new("cmd")
+                                .arg("/C")
+                                .arg("start")
+                                .arg("")
+                                .arg(&path)
+                                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                                .spawn();
                             self.script_watch =
                                 Some(script_watch::ScriptWatch::new(path.clone(), script));
                             self.log_lines.push(format!(
@@ -1644,7 +1584,7 @@ impl TasApp {
                 }
 
                 // DLL counters, shown only with Debug Config.
-                if self.show_config {
+                if self.settings.show_config {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.label(format!(
@@ -2062,75 +2002,25 @@ mod tests {
     /// Test constructor: creates TasApp without shared memory or Pico.
     fn test_app() -> TasApp {
         TasApp {
-            shared: None,
             connect_error: Some("Test mode: no DLL".into()),
-            show_config: false,
-            show_pico_panel: false,
-            pico: PicoState::new(),
-            history: RecordingHistory::new(64),
-            history_writer: None,
-            recovery_writer: recording::RecoveryWriter::new(),
-            last_persisted_revision: 0,
-            last_queued_revision: 0,
-            last_failed_revision: 0,
-            history_retry_after: None,
-            last_reconnect_attempt: std::time::Instant::now(),
-            loaded_physics: None,
-            loaded_rider: None,
-            loaded_identity: None,
-            loaded_level: None,
-            history_cap: 64,
-            recovery_store: None,
-            log_lines: ui_log::UiLog::default(),
-            finish_seq_seen: 0,
-            finish_baseline_armed: false,
-            finished_at_tick: None,
-            finished_hud_cs: None,
-            timeline_view: timeline::TimelineView::default(),
-            timeline_edit: timeline::TimelineEdit::default(),
-            pending_input_edit: None,
-            pending_edit_autostop: false,
-            script_watch: None,
-            continue_from_frame: 0,
-            continue_from_text: "0".to_string(),
-            playback_speed: 1.0,
-            show_history: false,
-            show_log: false,
-            active_recording_session: None,
-            pending_session_kind: None,
-            pending_continue_start_tick: None,
-            last_mode: 0,
-            resume_speed: None,
-            cont_catchup_multiplier: 12.0,
-            cycle_arm: tas_shared::transport::Arm::Continue,
-            log_read_cursor: 0,
-            drift_tracker: drift_scan::DriftTracker::default(),
-            last_logged_drift_level: 0,
-            cycle: None,
-            cycle_deadline: None,
-            cont_last_outcome: None,
-            prev_global_keys: [false; 4],
-            game_pid_cached: None,
-            game_pid_seen: None,
-            expect_ring_restart: None,
-            game_exit_banner: None,
-            game_exit_reported_pid: None,
-            crash_seq_seen: 0,
-            last_frame_count: 0,
-            stale_frame_ticks: 0,
-            last_health_check: std::time::Instant::now(),
-            cycle_fc: 0,
-            cycle_fc_seeded: false,
-            // Ancient, not now(): "ticking" must be FALSE until a real
-            // frame_count advance is observed.
-            cycle_advance_at: std::time::Instant::now()
-                .checked_sub(std::time::Duration::from_secs(600))
-                .unwrap_or_else(std::time::Instant::now),
-            last_resolved_level: None,
-            last_resolved_epoch: None,
-            #[cfg(windows)]
-            dark_title_bar_set: false,
+            ..TasApp::blank(settings::Settings {
+                history_cap: 64,
+                cont_catchup_speed: 12.0,
+                ..Default::default()
+            })
         }
+    }
+
+    /// An app connected to an idle DLL in a ticking level holding `recorded`
+    /// ticks: the state in which the REC / PLAY / CONT buttons are enabled.
+    fn idle_in_level_app(recorded: u32) -> TasApp {
+        let mut app = test_app();
+        let mut shared = TasSharedMemoryClient::new_test_mapping();
+        shared.state_mut().game_in_game = 1;
+        shared.state_mut().recorded_count = recorded;
+        app.shared = Some(shared);
+        app.cycle_advance_at = std::time::Instant::now();
+        app
     }
 
     // ===== App startup without DLL =====

@@ -19,7 +19,7 @@
 //! 473-727 press up
 //! ```
 
-use tas_shared::input_bits;
+use tas_shared::input_bits::ALL;
 
 /// One held input: `bit` is active over the half-open tick range
 /// `[start, end)`.
@@ -39,28 +39,21 @@ pub struct ParseError {
     pub reason: String,
 }
 
-/// (bit, TMInterface-style keyword). `press <keyword>`.
-const KEYS: &[(u8, &str)] = &[
-    (input_bits::LEFT, "left"),
-    (input_bits::RIGHT, "right"),
-    (input_bits::UP, "up"),
-    (input_bits::DOWN, "down"),
-    (input_bits::JUMP, "jump"),
-    (input_bits::SHIFT, "shift"),
-];
-
-fn keyword(bit: u8) -> Option<&'static str> {
-    KEYS.iter().find(|(b, _)| *b == bit).map(|(_, k)| *k)
+/// TMInterface-style `press <keyword>`: the key's name, lower-cased.
+fn keyword(bit: u8) -> Option<String> {
+    ALL.iter()
+        .find(|(b, ..)| *b == bit)
+        .map(|(.., name)| name.to_ascii_lowercase())
 }
 
 fn bit_of(keyword: &str) -> Option<u8> {
-    KEYS.iter()
-        .find(|(_, k)| k.eq_ignore_ascii_case(keyword))
-        .map(|(b, _)| *b)
+    ALL.iter()
+        .find(|(.., name)| name.eq_ignore_ascii_case(keyword))
+        .map(|(b, ..)| *b)
 }
 
 fn key_mask() -> u8 {
-    KEYS.iter().fold(0u8, |m, (b, _)| m | b)
+    ALL.iter().fold(0u8, |m, (b, ..)| m | b)
 }
 
 /// Decode an `input_log` buffer into run-length `InputEvent`s, one run per
@@ -68,7 +61,7 @@ fn key_mask() -> u8 {
 pub fn runs_from_log(log: &[u8], recorded_count: u32) -> Vec<InputEvent> {
     let n = (recorded_count as usize).min(log.len());
     let mut out = Vec::new();
-    for &(bit, _) in KEYS {
+    for &(bit, ..) in ALL {
         let mut start: Option<u32> = None;
         for (t, &mask) in log.iter().enumerate().take(n) {
             let on = mask & bit != 0;

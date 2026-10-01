@@ -35,7 +35,7 @@ and menu checks; repeated STOP/CONT/reliability checks use two cycles per
 configuration. Timing medians retain three samples. `test_live_soak` increases
 UI, acceptance, replay, STOP and CONT repetitions without changing their judges.
 The spawn/countdown checks from `rec-start` run on both `rec-repro` captures,
-avoiding a separate recording procedure. Its standalone/file-check mode remains.
+avoiding a separate recording procedure; `rec-start --file` checks a saved take.
 
 Pattern holds refresh the Pico every 200 ms. Input regression and reproducibility
 compare each key's captured edges with the requested schedule, including releases,

@@ -6,6 +6,7 @@
 #include "shared_state.hpp"
 #include "log.hpp"
 #include "setup_object.hpp"
+#include "safe_read.hpp"
 #include "level_path_parse.hpp"
 
 // Publishes which track is running (level_id, level_path; see shared_state.hpp).
@@ -15,14 +16,12 @@
 namespace levelcontext {
 
 inline uint32_t g_levelPathPtrAddr = 0;
-inline uint32_t (*g_readPtr)(uint32_t) = nullptr;
 
 // SEH only contains faults; freed heap reads fine and can be rewritten
 // mid-copy. So require a NUL in bounds and a plausible grammar here, and
 // readLevelPath requires two agreeing samples.
 static bool readLevelPathOnce(char* out, size_t cap) {
-    if (!g_levelPathPtrAddr || !g_readPtr) return false;
-    uint32_t p = g_readPtr(g_levelPathPtrAddr);
+    uint32_t p = SafeRead32(g_levelPathPtrAddr);
     if (!p) return false;
     __try {
         const char* src = (const char*)p;
@@ -112,9 +111,8 @@ inline void PublishLeft(TasSharedState* s) {
 
 // Starts as "no race"; if injected mid-race, the first Supreme::Cycle tick
 // corrects it (lifecycle_cave.hpp).
-inline void Init(TasSharedState* s, uint32_t levelPathPtrAddr, uint32_t (*readPtr)(uint32_t)) {
+inline void Init(TasSharedState* s, uint32_t levelPathPtrAddr) {
     g_levelPathPtrAddr = levelPathPtrAddr;
-    g_readPtr = readPtr;
     // Shared memory survives reinjection; a killed instance can leave the
     // sequence odd, which would reject every read.
     if (InterlockedOr((volatile LONG*)&s->level_ctx_seq, 0) & 1) {

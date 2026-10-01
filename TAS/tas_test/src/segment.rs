@@ -41,9 +41,7 @@ pub fn run() -> bool {
     harness::arm_rec(&mut client);
     println!("  Recording with LEFT steering via Pico HID...");
     let seg0_steps = patterns::build_from_explicit(&[(0, 350), (input_bits::LEFT, 200), (0, 100)]);
-    if let Err(error) = harness::drive_pico_steps(&seg0_steps) {
-        eprintln!("{error}");
-        harness::stop(&mut client);
+    if !harness::drive_or_stop(&mut client, &seg0_steps) {
         return false;
     }
 
@@ -83,9 +81,7 @@ pub fn run() -> bool {
 
     println!("  Recording segment 1 with RIGHT steering via Pico HID...");
     let seg1_steps = patterns::build_from_explicit(&[(input_bits::RIGHT, 200), (0x00, 100)]);
-    if let Err(error) = harness::drive_pico_steps(&seg1_steps) {
-        eprintln!("{error}");
-        harness::stop(&mut client);
+    if !harness::drive_or_stop(&mut client, &seg1_steps) {
         return false;
     }
 

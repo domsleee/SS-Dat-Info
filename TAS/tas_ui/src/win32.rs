@@ -91,10 +91,6 @@ fn find_process_pid(names: &[&str]) -> Option<u32> {
     None
 }
 
-pub fn is_supreme_running() -> bool {
-    find_supreme_pid().is_some()
-}
-
 /// Dark title bar on Windows 10+ for the window with this exact title.
 pub fn set_dark_title_bar(title: &str) {
     let title = wide(title);

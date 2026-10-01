@@ -247,20 +247,17 @@ pub fn run(path: &str, iterations: u32, verbose: bool) -> ReplayReport {
             );
             // The first bit-level divergence tells a sudden rotation mismatch
             // at the start from a gradual one.
-            let mut first_div: Option<(usize, [f32; 3], [f32; 3])> = None;
-            for k in 0..played as usize {
-                let i = rec_gate as usize + k;
-                let p = state.play_coords[play_gate as usize + k];
+            let (_, first) = drift::bit_mismatches(
+                &state.rec_coords,
+                &state.play_coords,
+                rec_gate,
+                play_gate,
+                played,
+            );
+            if let Some(k) = first {
+                let i = (rec_gate + k) as usize;
+                let p = state.play_coords[(play_gate + k) as usize];
                 let r = state.rec_coords[i];
-                if p[0].to_bits() != r[0].to_bits()
-                    || p[1].to_bits() != r[1].to_bits()
-                    || p[2].to_bits() != r[2].to_bits()
-                {
-                    first_div = Some((i, p, r));
-                    break;
-                }
-            }
-            if let Some((i, p, r)) = first_div {
                 let dx = (p[0] as f64 - r[0] as f64).abs();
                 let dy = (p[1] as f64 - r[1] as f64).abs();
                 let dz = (p[2] as f64 - r[2] as f64).abs();

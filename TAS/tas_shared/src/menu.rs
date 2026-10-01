@@ -12,35 +12,6 @@ use crate::state::{
     TAS_MENU_RESULT_STALE_PAGE, TAS_MENU_SCREEN_MAX,
 };
 
-/// The current menu page id exactly as the DLL publishes it
-/// ("ID_ARCADE_MENU"), or `None` while a level runs (the buffer is empty
-/// then) or the writer kept it busy. Read under `menu_seq`, together with
-/// which the DLL writes it, so it never names another page's items.
-pub fn menu_screen_id(state: &TasSharedState) -> Option<String> {
-    let bytes = with_seqlock(&state.menu_seq, || {
-        let mut v = Vec::new();
-        for i in 0..TAS_MENU_SCREEN_MAX {
-            // SAFETY: shared mapping written by the DLL's menu thread.
-            let b = unsafe { std::ptr::read_volatile(&state.menu_screen[i]) };
-            if b == 0 {
-                break;
-            }
-            v.push(b);
-        }
-        v
-    })?;
-    if bytes.is_empty() || bytes.iter().any(|&c| !(0x20..0x7f).contains(&c)) {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&bytes).into_owned())
-}
-
-/// The menu screen the game is showing as a human label ("Main Menu",
-/// "Arcade Choose Track"), or `None` while a level runs. See [`menu_screen_id`].
-pub fn menu_screen(state: &TasSharedState) -> Option<String> {
-    menu_screen_id(state).map(|raw| prettify_menu_id(&raw))
-}
-
 /// The menu document: the current page's items with labels and stable
 /// ids as a JSON string (see the field doc), or `None` while a level runs or
 /// while the writer kept it busy. One coherent read under `menu_seq`.
@@ -157,47 +128,10 @@ pub fn menu_command_result(state: &TasSharedState, seq: u32) -> Option<u32> {
     Some(unsafe { std::ptr::read_volatile(&state.menu_cmd_result) })
 }
 
-/// The DLL publishes the menu's internal page id ("ID_ARCADE_CHOOSE_TRACK").
-/// Turn it into a human label ("Arcade Choose Track"): drop the `ID_` prefix
-/// and title-case the underscore-separated words. Anything not in that shape is
-/// returned unchanged.
-pub fn prettify_menu_id(id: &str) -> String {
-    let body = id.strip_prefix("ID_").unwrap_or(id);
-    if body.is_empty() {
-        return id.to_string();
-    }
-    body.split('_')
-        .filter(|w| !w.is_empty())
-        .map(|w| {
-            let mut c = w.chars();
-            match c.next() {
-                Some(f) => f.to_ascii_uppercase().to_string() + &c.as_str().to_ascii_lowercase(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::zeroed_boxed;
-
-    #[test]
-    fn menu_id_prettifies() {
-        assert_eq!(
-            prettify_menu_id("ID_ARCADE_CHOOSE_TRACK"),
-            "Arcade Choose Track"
-        );
-        assert_eq!(prettify_menu_id("ID_MAIN_MENU"), "Main Menu");
-        assert_eq!(
-            prettify_menu_id("ID_ARCADE_CHOOSE_BOARD"),
-            "Arcade Choose Board"
-        );
-        assert_eq!(prettify_menu_id("Weird"), "Weird");
-        assert_eq!(prettify_menu_id("ID_"), "ID_");
-    }
 
     fn put_menu_doc(s: &mut TasSharedState, doc: &[u8], seq: u32) {
         s.menu_doc = [0u8; TAS_MENU_DOC_MAX];
@@ -289,19 +223,6 @@ mod tests {
             s.menu_cmd_screen[0], 0,
             "an empty page id clears the buffer (= unchecked)"
         );
-    }
-
-    /// The raw page id and the pretty label come from the same seqlocked read.
-    #[test]
-    fn menu_screen_id_and_label() {
-        let mut s = zeroed_boxed();
-        assert_eq!(menu_screen_id(&s), None);
-        s.menu_screen[..14].copy_from_slice(b"ID_ARCADE_MENU");
-        s.menu_seq.store(2, Ordering::Relaxed);
-        assert_eq!(menu_screen_id(&s).as_deref(), Some("ID_ARCADE_MENU"));
-        assert_eq!(menu_screen(&s).as_deref(), Some("Arcade Menu"));
-        s.menu_seq.store(3, Ordering::Relaxed); // writer mid-update
-        assert_eq!(menu_screen_id(&s), None);
     }
 
     /// A target longer than the buffer is cut, never overrun, and stays NUL-terminated.

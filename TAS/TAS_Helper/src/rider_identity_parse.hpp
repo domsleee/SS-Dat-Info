@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <string.h>
 
 // Pure helpers for the rider stamp, unit-tested in tests/test_rider_identity.cpp.
 namespace riderparse {
@@ -23,16 +24,6 @@ inline bool IsPrintableAscii(const char* s, uint32_t n) {
     return true;
 }
 
-inline bool EqualsIgnoreCase(const char* a, const char* b) {
-    for (;; a++, b++) {
-        char x = *a, y = *b;
-        if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
-        if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
-        if (x != y) return false;
-        if (!x) return true;
-    }
-}
-
 // Can this MSVC6 std::string header be copied into a `cap`-byte buffer? No
 // arithmetic on `len`: a dangling string can report 0xFFFFFFFF, and `len + 1`
 // would wrap.
@@ -41,6 +32,19 @@ inline bool StringHeaderUsable(uint32_t ptr, uint32_t len, uint32_t capacity, ui
     if (len == 0 || len >= cap) return false;
     if (capacity < len) return false;
     return true;
+}
+
+// MSVC6 std::string at `obj` ({allocator, char* ptr, size, capacity}) into a
+// `cap`-byte buffer; printable ASCII only. `read(address, dst, n) -> bool`.
+template <typename Reader>
+bool ReadStdString(Reader&& read, uint32_t obj, char* out, uint32_t cap) {
+    uint32_t hdr[4] = {};
+    if (!read(obj, hdr, (uint32_t)sizeof hdr)) return false;
+    const uint32_t ptr = hdr[1], len = hdr[2], capacity = hdr[3];
+    if (!StringHeaderUsable(ptr, len, capacity, cap)) return false;
+    if (!read(ptr, out, len)) return false;
+    out[len] = 0;
+    return IsPrintableAscii(out, len);
 }
 
 // Character id for a display name ("Vincent") or folder ("vincent"). Unknown
@@ -53,7 +57,7 @@ inline uint32_t CharacterFromName(const char* name) {
         {"mike", CHARACTER_MIKE},     {"ulrika", CHARACTER_ULRIKA},
     };
     for (const auto& e : kTable) {
-        if (EqualsIgnoreCase(name, e.name)) return e.id;
+        if (_stricmp(name, e.name) == 0) return e.id;
     }
     return CHARACTER_OTHER;
 }
@@ -63,7 +67,7 @@ inline uint32_t CharacterFromName(const char* name) {
 inline uint32_t StanceForRider(uint32_t setup_stance, const char* setup_character,
                                const char* live_character) {
     if (setup_stance > 1 || !setup_character || !live_character) return STANCE_UNKNOWN;
-    return EqualsIgnoreCase(setup_character, live_character) ? setup_stance : STANCE_UNKNOWN;
+    return _stricmp(setup_character, live_character) == 0 ? setup_stance : STANCE_UNKNOWN;
 }
 
 } // namespace riderparse

@@ -23,6 +23,7 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
+use tas_shared::race_clock::race_clock;
 use tas_shared::TasMode;
 
 use crate::harness;
@@ -203,15 +204,12 @@ fn wait_engine_frozen(client: &tas_shared::TasSharedMemoryClient, deadline_secs:
             };
             // A stalled restart or an early pause is not the finishing dialog.
             // This fixture crosses the line after the near-finish splice.
-            if progress > CONT_SPLICE_FRAME
-                && state.race_time_cs != u32::MAX
-                && state.race_time_cs > 0
-            {
+            let clock = race_clock(state);
+            if progress > CONT_SPLICE_FRAME && clock.is_some_and(|c| c.started && c.seconds > 0.0) {
                 return true;
             }
             eprintln!(
-                "FAIL: engine froze before a finishing run (progress={progress}, race_time={})",
-                state.race_time_cs
+                "FAIL: engine froze before a finishing run (progress={progress}, race clock={clock:?})"
             );
             return false;
         }
@@ -348,9 +346,9 @@ pub fn run() -> bool {
         return false;
     }
     println!(
-        "  finish reached: pos={} race_time_cs={:#x}",
+        "  finish reached: pos={} race clock={:?}",
         client.state().playback_pos,
-        client.state().race_time_cs
+        race_clock(client.state())
     );
     let (_rate_a, pass_a) = idle_dismiss_profile(&client, "A/PLAY");
     if !pass_a {

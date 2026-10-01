@@ -5,7 +5,7 @@ use eframe::egui;
 use tas_shared::{TasMode, TasSharedState};
 
 use crate::drift_scan::DriftTracker;
-use crate::panels::timeline;
+use crate::recording::format_recording_duration;
 
 /// Fixed so the card does not resize as the level / rider / clock text
 /// changes underneath it.
@@ -123,18 +123,12 @@ pub fn status_card(ui: &mut egui::Ui, state: &TasSharedState, props: &StatusProp
                 };
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new(t).color(clock_color).size(12.0))
-                        .on_hover_text(
-                            match race_clock
+                        .on_hover_text(format!(
+                            "Race time from the game's own clock, as the HUD shows it{}",
+                            race_clock
                                 .and_then(|c| tas_shared::race_clock::ticks(c.seconds, 70_000))
-                            {
-                                Some(ticks) => format!(
-                                    "Race time from the game's own clock, as the HUD shows it \
-                                 ({ticks} race ticks)"
-                                ),
-                                None => "Race time from the game's own clock, as the HUD shows it"
-                                    .to_string(),
-                            },
-                        );
+                                .map_or(String::new(), |ticks| format!(" ({ticks} race ticks)"))
+                        ));
                 });
             }
         });
@@ -227,9 +221,9 @@ pub fn drift_banner(ui: &mut egui::Ui, state: &TasSharedState, tracker: &DriftTr
 /// "Input Timeline" with the human time at a glance and the text-script route
 /// as a primary action. Returns `true` when the Text Script button was clicked.
 pub fn timeline_header(ui: &mut egui::Ui, state: &TasSharedState, watching_script: bool) -> bool {
-    let total_time = timeline::format_time(state.recorded_count);
+    let total_time = format_recording_duration(state.recorded_count);
     let current_time = match state.mode_enum() {
-        TasMode::Play => Some(timeline::format_time(
+        TasMode::Play => Some(format_recording_duration(
             state.playback_pos.min(state.recorded_count),
         )),
         TasMode::Rec => Some(total_time.clone()),

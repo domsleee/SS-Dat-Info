@@ -82,7 +82,6 @@ pub struct PicoState {
     pub connected: bool,
     pub port: Option<Box<dyn serialport::SerialPort>>,
     pub error: Option<String>,
-    scan_attempted: bool,
 }
 
 impl PicoState {
@@ -92,40 +91,11 @@ impl PicoState {
             connected: false,
             port: None,
             error: None,
-            scan_attempted: false,
         }
     }
 
-    /// Identify the configured data interface without sending probe bytes.
-    /// Called once on startup. Returns log messages.
-    pub fn auto_detect(&mut self) -> Vec<String> {
-        if self.scan_attempted || self.connected {
-            return Vec::new();
-        }
-        self.scan_attempted = true;
-
-        let ports = match serialport::available_ports() {
-            Ok(p) => p,
-            Err(_) => return Vec::new(),
-        };
-
-        if let Err(error) = select_data_port(&ports, &self.port_name) {
-            return vec![format!("Pico auto-detect: {error}")];
-        }
-        self.connect();
-        if self.connected {
-            vec![format!(
-                "Pico data interface connected on {}",
-                self.port_name
-            )]
-        } else {
-            vec![format!(
-                "Pico connection failed: {}",
-                self.error.as_deref().unwrap_or("unknown error")
-            )]
-        }
-    }
-
+    /// Open the configured data interface, verified by its USB identity
+    /// without sending probe bytes. On failure `error` says why.
     pub fn connect(&mut self) {
         self.disconnect();
         let verified = serialport::available_ports()
@@ -340,22 +310,6 @@ mod tests {
     fn health_check_disconnected_returns_false() {
         let mut pico = PicoState::new();
         assert!(!pico.health_check());
-    }
-
-    #[test]
-    fn auto_detect_skips_when_already_scanned() {
-        let mut pico = PicoState::new();
-        pico.scan_attempted = true;
-        let logs = pico.auto_detect();
-        assert!(logs.is_empty());
-    }
-
-    #[test]
-    fn auto_detect_skips_when_connected() {
-        let mut pico = PicoState::new();
-        pico.connected = true;
-        let logs = pico.auto_detect();
-        assert!(logs.is_empty());
     }
 
     #[test]

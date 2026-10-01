@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <string.h>
 
 // Pure parsing of the engine's level-path string. Dependency-free so it can be
 // unit-tested standalone (`just test_dll`); level_context.hpp needs the game.
@@ -10,18 +11,10 @@ inline bool IsSep(char c) { return c == '/' || c == (char)0x5C; }
 
 inline char Lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
 
-// Case-insensitive match of [p, p+n) against lowercase needles. Returns the index, or -1.
+// Case-insensitive match of [p, p+n) against the table. Returns the index, or -1.
 inline int MatchOne(const char* p, size_t n, const char* const* table, int count) {
     for (int t = 0; t < count; t++) {
-        const char* w = table[t];
-        size_t wl = 0;
-        while (w[wl]) wl++;
-        if (wl != n) continue;
-        bool ok = true;
-        for (size_t i = 0; i < n; i++) {
-            if (Lower(p[i]) != w[i]) { ok = false; break; }
-        }
-        if (ok) return t;
+        if (strlen(table[t]) == n && _strnicmp(p, table[t], n) == 0) return t;
     }
     return -1;
 }

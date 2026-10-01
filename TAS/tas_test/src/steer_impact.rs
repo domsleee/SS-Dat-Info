@@ -158,7 +158,7 @@ pub fn run() -> bool {
     if !src_ok {
         println!(
             "*** STEER-IMPACT FAILED: arg4_source = {} (expected 1 = Kernel::Time::Current) — \
-             the proper Time path didn't fire (export unresolved → calibrated fallback?) ***",
+             the proper Time path didn't fire ***",
             live_source
         );
     }

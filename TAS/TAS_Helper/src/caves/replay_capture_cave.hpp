@@ -5,6 +5,8 @@
 #include "../game_addresses.hpp"
 #include "../replay_capture_policy.hpp"
 #include "../replay_identity.hpp"
+#include "../menu_model.hpp"
+#include "../safe_read.hpp"
 #include "../fpu_safe_hook.hpp"
 
 // Replay recorder capture hook at SG+0x9E8F0 (sub esp, 0x80; 6 bytes), the
@@ -23,27 +25,6 @@ inline void UninstallReplayCapture() {
     g_replayAddr = nullptr;
 }
 
-// Hook-safe helpers (no CRT, no C++ objects).
-static uint32_t ReplaySafeReadU32(uint32_t addr) {
-    if (addr < 0x10000) return 0;
-    __try {
-        return *(volatile uint32_t*)addr;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-static void ReplayHexU32(char* dst, uint32_t v) {
-    static const char H[] = "0123456789ABCDEF";
-    for (int i = 7; i >= 0; i--) {
-        dst[i] = H[v & 0xF];
-        v >>= 4;
-    }
-}
-static char* ReplayPut(char* p, const char* s) {
-    while (*s) *p++ = *s++;
-    return p;
-}
-
 static ReplayCaptureState g_capture;
 
 // Runs on every recorder push (every rider, every tick).
@@ -55,48 +36,45 @@ static void ReplayCaptureCb(SafetyHookContext& ctx) {
     auto newPtr = (uint32_t)ctx.ecx;
 
     static uint32_t s_logged = 0;
-    ReplayIdentityEnv env{};
-    env.player_vtable = addr->player_vtable;
-    env.ghost_vtable = addr->ghost_vtable;
+    char msg[TAS_LOG_ENTRY_SIZE];
+    menumodel::TextWriter w{msg, sizeof msg};
     if (newPtr != 0 && newPtr == g_capture.cached) {
         // Recheck every push: after F5 the address can be reused by a ghost.
-        const ReplayOwnerKind kind = ClassifyRecorderOwner(newPtr, env, ReplaySafeReadU32, nullptr);
+        const ReplayOwnerKind kind =
+            ClassifyRecorderOwner(newPtr, addr->player_vtable, SafeRead32, nullptr);
         if (ReplayCaptureRevalidate(kind == OWNER_HUMAN, g_capture)) {
             s->replay_ptr = 0;
             s->player_ptr = 0;
             if (++s_logged <= 60) {
-                char msg[96];
-                char* p = ReplayPut(msg, "replay-capture ecx=");
-                ReplayHexU32(p, newPtr);
-                p = ReplayPut(p + 8, " now ");
-                p = ReplayPut(p, ReplayOwnerKindName(kind));
-                p = ReplayPut(p, " - DROPPED (address reused)");
-                *p = 0;
-                LogRing(s, LOG_DEBUG, msg);
+                w.Put("replay-capture ecx=");
+                w.PutHex(newPtr);
+                w.Put(" now ");
+                w.Put(ReplayOwnerKindName(kind));
+                w.Put(" - DROPPED (address reused)");
+                LogRing(s, LOG_DEBUG, w.Finish());
             }
         }
     } else if (newPtr != g_capture.cached) {
         ReplayIdentityTrace trace{};
-        const ReplayOwnerKind kind = ClassifyRecorderOwner(newPtr, env, ReplaySafeReadU32, &trace);
+        const ReplayOwnerKind kind =
+            ClassifyRecorderOwner(newPtr, addr->player_vtable, SafeRead32, &trace);
         const bool human = kind == OWNER_HUMAN;
         const uint32_t rejectedBefore = g_capture.rejected;
-        const bool adopted = ReplayCaptureAdopt(s->mode == MODE_OFF, newPtr, human, g_capture);
+        const bool adopted = ReplayCaptureAdopt(newPtr, human, g_capture);
         if (adopted) s->replay_ptr = newPtr;
         if ((adopted || g_capture.rejected != rejectedBefore) && ++s_logged <= 60) {
-            char msg[128];
-            char* p = ReplayPut(msg, "replay-capture ecx=");
-            ReplayHexU32(p, newPtr);
-            p = ReplayPut(p + 8, " owner=");
-            ReplayHexU32(p, trace.owner);
-            p = ReplayPut(p + 8, " vt=");
-            ReplayHexU32(p, trace.owner_vtable);
-            p = ReplayPut(p + 8, " ");
-            p = ReplayPut(p, ReplayOwnerKindName(kind));
-            p = ReplayPut(p, adopted
+            w.Put("replay-capture ecx=");
+            w.PutHex(newPtr);
+            w.Put(" owner=");
+            w.PutHex(trace.owner);
+            w.Put(" vt=");
+            w.PutHex(trace.owner_vtable);
+            w.Put(" ");
+            w.Put(ReplayOwnerKindName(kind));
+            w.Put(adopted
                 ? ((s->mode == MODE_OFF) ? " adopted (idle)" : " adopted (MID-RUN re-creation)")
                 : " ignored");
-            *p = 0;
-            LogRing(s, LOG_DEBUG, msg);
+            LogRing(s, LOG_DEBUG, w.Finish());
         }
     }
 }

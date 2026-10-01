@@ -51,16 +51,6 @@ That gate also tests physical-device selection with mocked Windows ancestry.
 timeout/explicit release, 100 ACKs and reset/reopen. It sends real keys: close other
 controllers and keep the interactive desktop available (no pending UAC prompt).
 
-`test.py` is a manual, host-side keyboard check, not firmware or an automated
-regression test. It requires pyserial and sends real keys to the focused window:
-
-```powershell
-uv run TAS/pico/test.py COM7
-```
-
-Select the data port explicitly, then focus a harmless text editor during the
-three-second countdown. Do not run this alongside a live game test.
-
 ## USB connection
 
 The UI and the harness use `TAS_PICO_PORT` (default `COM7`). The UI and the

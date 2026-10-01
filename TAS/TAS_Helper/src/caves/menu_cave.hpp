@@ -5,6 +5,7 @@
 #include "../game_addresses.hpp"
 #include "../menu_model.hpp"
 #include "../rider_identity_parse.hpp"
+#include "../safe_read.hpp"
 #include "../fpu_safe_hook.hpp"
 #include "../crash_report.hpp"
 #include <format>
@@ -24,7 +25,6 @@ inline uint32_t g_mainMenuBase = 0;
 inline SafetyHookMid g_changePageHook{};
 inline SafetyHookMid g_executeHook{};
 inline bool g_cmdInstalled = false;
-inline bool g_menuDiag = false;   // TAS_MENU_DIAG=1: log the item list on change
 using GetModalFn = uint32_t(__fastcall*)(uint32_t);
 inline GetModalFn g_getModal = nullptr;
 
@@ -51,27 +51,9 @@ using menumodel::MenuItem;
 using menumodel::MenuSnapshot;
 using menumodel::kMaxItems;
 
-// Reads an MSVC6 std::string at `obj` ({allocator, char* ptr, size, capacity}).
-// The header is bounds-checked without arithmetic on the length, so a torn
-// size of 0xFFFFFFFF cannot wrap past the check. Printable ASCII only.
+// An MSVC6 std::string at `obj`, printable ASCII only.
 static bool ReadMenuString(uint32_t obj, char* out, uint32_t cap) {
-    if (obj < 0x10000 || cap == 0) return false;
-    __try {
-        uint32_t hdr[4];
-        for (int i = 0; i < 4; i++) hdr[i] = *(uint32_t*)(obj + 4 * i);
-        const uint32_t ptr = hdr[1], len = hdr[2], capacity = hdr[3];
-        if (!riderparse::StringHeaderUsable(ptr, len, capacity, cap)) return false;
-        const char* s = (const char*)ptr;
-        for (uint32_t i = 0; i < len; i++) {
-            const char c = s[i];
-            if (c < 0x20 || c > 0x7E) return false;
-            out[i] = c;
-        }
-        out[len] = 0;
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return riderparse::ReadStdString(SafeCopy, obj, out, cap);
 }
 
 static bool IsIdLike(const char* s) { return s[0] == 'I' && s[1] == 'D' && s[2] == '_'; }
@@ -162,36 +144,27 @@ static uint32_t ActiveComponent(uint32_t uiMenu) {
     return ((GetActiveComponent)(uintptr_t)(g_mainMenuBase + 0x1A6B0))(uiMenu);
 }
 
-static bool ReadU32Guarded(uint32_t addr, uint32_t* out) {
-    __try {
-        *out = *(uint32_t*)addr;
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
 static bool ReadMenu(uint32_t uiMenu, MenuSnapshot& out) {
     out = MenuSnapshot{};
     if (!uiMenu || !g_mainMenuBase) return false;
     uint32_t parent = 0, page = 0, begin = 0, end = 0;
     const uint32_t comp = ActiveComponent(uiMenu);
     if (comp < 0x10000) return false;
-    if (!ReadU32Guarded(comp + 0xC, &parent) || parent < 0x10000) return false;
-    if (!ReadU32Guarded(uiMenu + 0x10C, &page)) return false;
+    if (!SafeCopy(comp + 0xC, &parent, 4) || parent < 0x10000) return false;
+    if (!SafeCopy(uiMenu + 0x10C, &page, 4)) return false;
     {
         // Get_Active_Component still returns the pause-menu item under an
         // "Are you sure?" modal; never expose or activate it.
         crash::ScopedGameCall call(TAS_GAME_CALL_MENU_ACTIVE);
         if (!g_getModal || !menumodel::UnobscuredMenu(page, parent, g_getModal)) return false;
     }
-    if (!ReadU32Guarded(parent + 0x2C, &begin) || !ReadU32Guarded(parent + 0x30, &end)) return false;
+    if (!SafeCopy(parent + 0x2C, &begin, 4) || !SafeCopy(parent + 0x30, &end, 4)) return false;
     if (begin < 0x10000 || end < begin || (end - begin) > 0x1000) return false;
     out.container = parent;
     const uint32_t n = (end - begin) / 4;
     for (uint32_t i = 0; i < n && out.count < kMaxItems; i++) {
         uint32_t child = 0;
-        if (!ReadU32Guarded(begin + i * 4, &child)) break;
+        if (!SafeCopy(begin + i * 4, &child, 4)) break;
         MenuItem it;
         if (!ReadItem(child, comp, it)) continue;
         if (it.focused) out.selector = out.count;
@@ -202,7 +175,6 @@ static bool ReadMenu(uint32_t uiMenu, MenuSnapshot& out) {
 
 inline volatile uint64_t g_lastExecuteMs = 0;           // heartbeat: a menu is executing
 inline uint64_t g_lastSnapMs = 0;
-inline uint32_t g_lastDumpHash = 0;
 
 static void ChangePageCb(SafetyHookContext& ctx) {
     char name[TAS_MENU_SCREEN_MAX];
@@ -212,61 +184,19 @@ static void ChangePageCb(SafetyHookContext& ctx) {
     }
 }
 
-static uint32_t SnapshotHash(const MenuSnapshot& s) {
-    uint32_t h = 2166136261u;
-    auto mix = [&](const char* p) { for (; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u; };
-    mix(g_screen);
-    h = (h ^ s.selector) * 16777619u;
-    for (uint32_t i = 0; i < s.count; i++) {
-        mix(s.items[i].name);
-        mix(s.items[i].label);
-        h = (h ^ s.items[i].enabled) * 16777619u;
-    }
-    return h;
-}
-
-static void DumpIfChanged(const MenuSnapshot& s) {
-    if (!g_menuDiag) return;
-    const uint32_t h = SnapshotHash(s);
-    if (h == g_lastDumpHash) return;
-    g_lastDumpHash = h;
-    char cname[TAS_MENU_SCREEN_MAX] = {};
-    ReadMenuString(s.container + 0x10, cname, sizeof cname);
-    Log(std::format("Menu diag: screen='{}' selector={} items={} container={:#x} '{}'", g_screen,
-                    s.selector == 0xFFFFFFFFu ? -1 : (int)s.selector, s.count, s.container, cname));
-    for (uint32_t i = 0; i < s.count; i++) {
-        const auto& it = s.items[i];
-        Log(std::format("  [{}] {}'{}' name='{}' comp={:#x} en={} vis={}", i, it.focused ? "* " : "",
-                        it.label, it.name, it.comp, it.enabled, it.visible));
-    }
-}
-
-// [UI_Menu+0x10C] = the current Menu_Page (0 during a swap). Separate function
-// because the caller's std::strings cannot share a frame with __try.
-static uint32_t ReadPage(uint32_t uiMenu) {
-    __try {
-        return *(uint32_t*)(uiMenu + 0x10C);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
 // Every ~50 ms, or at once after a command. The game reuses one Menu_Page
 // object for every page, so the screen id comes from the Change_Page event.
 static void Snapshot(uint32_t uiMenu, bool force) {
     const uint64_t now = GetTickCount64();
     if (!force && now - g_lastSnapMs < 50) return;
     g_lastSnapMs = now;
-    const uint32_t page = ReadPage(uiMenu);
-    if (AdoptPendingPage()) {
-        if (g_menuDiag) Log(std::format("Menu diag: page change #{} -> screen '{}' (page {:#x})", g_snapGen, g_screen, page));
-    } else if (!g_screen[0] && page) {
-
+    // [UI_Menu+0x10C] = the current Menu_Page (0 during a swap).
+    const uint32_t page = SafeRead32(uiMenu + 0x10C);
+    if (!AdoptPendingPage() && !g_screen[0] && page) {
         // No Change_Page seen since injection: bootstrap from the page's own name.
         char own[TAS_MENU_SCREEN_MAX];
         if (ReadMenuString(page + 0x10, own, sizeof own) && IsIdLike(own)) {
             memcpy(g_screen, own, sizeof own);
-            if (g_menuDiag) Log(std::format("Menu diag: bootstrapped screen '{}' from the page object", g_screen));
         }
     }
     if (!page) {
@@ -295,7 +225,6 @@ static void Snapshot(uint32_t uiMenu, bool force) {
     static char doc[TAS_MENU_DOC_MAX];
     const uint32_t n = menumodel::BuildDoc(snap, g_screen, doc, sizeof doc);
     Publish(g_screen, n ? snap.selector : 0xFFFFFFFFu, doc);
-    DumpIfChanged(snap);
 }
 
 // Command channel: the agent writes kind, target and the page id it read, then
@@ -520,11 +449,8 @@ static DWORD WINAPI InstallThread(LPVOID) {
     g_imgMainMenu = ImageRangeOf("Main_Menu.dll");
     g_imgUit = ImageRangeOf("UIT.dll");
     g_imgSrUit = ImageRangeOf("SR_UIT.dll");
-    char diag[8] = {};
-    g_menuDiag = GetEnvironmentVariableA("TAS_MENU_DIAG", diag, sizeof diag) && diag[0] == '1';
-    Log(std::format("Menu state: images Main_Menu {:#x}-{:#x} UIT {:#x}-{:#x} SR_UIT {:#x}-{:#x}{}",
-                    g_imgMainMenu.lo, g_imgMainMenu.hi, g_imgUit.lo, g_imgUit.hi, g_imgSrUit.lo, g_imgSrUit.hi,
-                    g_menuDiag ? " (diag on)" : ""));
+    Log(std::format("Menu state: images Main_Menu {:#x}-{:#x} UIT {:#x}-{:#x} SR_UIT {:#x}-{:#x}",
+                    g_imgMainMenu.lo, g_imgMainMenu.hi, g_imgUit.lo, g_imgUit.hi, g_imgSrUit.lo, g_imgSrUit.hi));
     g_changePageHook = CreateMidHook<ChangePageCb>(base + 0x1A7C0);
     Log(g_changePageHook
             ? std::format("Menu state: hooked UI_Menu::Change_Page at {:p} (Main_Menu.dll {:p})",

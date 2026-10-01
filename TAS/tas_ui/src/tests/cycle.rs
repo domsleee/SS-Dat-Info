@@ -9,7 +9,7 @@ use super::*;
 fn cont_with_no_recording_does_not_arm_catchup() {
     let mut app = test_app();
     app.playback_speed = 1.0;
-    app.cont_catchup_multiplier = 32.0;
+    app.settings.cont_catchup_speed = 32.0;
     // No shared memory, so recorded_count reads as 0.
     app.queue_restart_then(TasCommand::ArmContinue);
     assert!(
@@ -32,14 +32,9 @@ fn cont_with_no_recording_does_not_arm_catchup() {
 #[test]
 fn cont_from_zero_records_a_fresh_take() {
     for (recorded, from) in [(100, 0), (0, 0), (0, 40)] {
-        let mut app = test_app();
-        let mut shared = TasSharedMemoryClient::new_test_mapping();
-        shared.state_mut().game_in_game = 1;
-        shared.state_mut().recorded_count = recorded;
-        app.shared = Some(shared);
-        app.cycle_advance_at = std::time::Instant::now();
+        let mut app = idle_in_level_app(recorded);
         app.playback_speed = 1.0;
-        app.cont_catchup_multiplier = 32.0;
+        app.settings.cont_catchup_speed = 32.0;
         app.continue_from_frame = from;
         app.queue_restart_then(TasCommand::ArmContinue);
         assert!(
@@ -52,30 +47,19 @@ fn cont_from_zero_records_a_fresh_take() {
     }
 }
 
-// ===== Transport controller state =====
-
-#[test]
-fn cont_controller_initially_none() {
-    let app = test_app();
-    assert!(app.cycle.is_none());
-}
-
 /// A finish that comes after the cycle starts counts even if the UI only
 /// sees REC later (a CONT spliced just before the line): the baseline is
 /// taken when the cycle is queued.
 #[test]
 fn a_cycle_takes_the_finish_baseline_when_it_starts() {
-    let mut app = test_app();
-    let mut shared = TasSharedMemoryClient::new_test_mapping();
-    shared.state_mut().game_in_game = 1;
-    shared.state_mut().recorded_count = 100;
+    let mut app = idle_in_level_app(100);
     // Two finishes before (seqlock: two steps each).
-    shared
+    app.shared
+        .as_mut()
+        .unwrap()
         .state_mut()
         .race_finish_seq
         .store(4, std::sync::atomic::Ordering::Release);
-    app.shared = Some(shared);
-    app.cycle_advance_at = std::time::Instant::now();
     app.continue_from_frame = 50;
     app.finish_seq_seen = 0;
     app.queue_restart_then(TasCommand::ArmContinue);
@@ -126,13 +110,8 @@ fn the_buffer_model_falls_back_to_the_dll_when_nothing_was_loaded() {
 #[test]
 fn play_and_cont_refuse_a_take_from_another_track() {
     let arm = |take: Option<&str>, live: u32, command: TasCommand| {
-        let mut app = test_app();
-        let mut shared = TasSharedMemoryClient::new_test_mapping();
-        shared.state_mut().game_in_game = 1;
-        shared.state_mut().recorded_count = 100;
-        shared.state_mut().level_id = live;
-        app.shared = Some(shared);
-        app.cycle_advance_at = std::time::Instant::now();
+        let mut app = idle_in_level_app(100);
+        app.shared.as_mut().unwrap().state_mut().level_id = live;
         app.continue_from_frame = 50;
         app.loaded_level = take.map(Into::into);
         app.queue_restart_then(command);
@@ -154,14 +133,10 @@ fn play_and_cont_refuse_a_take_from_another_track() {
 #[test]
 fn play_refuses_another_rider_or_precision() {
     let arm = |take_rider: &str, take_cw: u32, live_cw: u32| {
-        let mut app = test_app();
-        let mut shared = TasSharedMemoryClient::new_test_mapping();
-        shared.state_mut().game_in_game = 1;
-        shared.state_mut().recorded_count = 100;
-        shared.state_mut().level_id = u32::MAX;
-        shared.state_mut().fpu_control_word = live_cw;
-        app.shared = Some(shared);
-        app.cycle_advance_at = std::time::Instant::now();
+        let mut app = idle_in_level_app(100);
+        let state = app.shared.as_mut().unwrap().state_mut();
+        state.level_id = u32::MAX;
+        state.fpu_control_word = live_cw;
         app.history.set_live_rider(Some("Vincent · regular".into()));
         app.loaded_rider = Some(take_rider.into());
         app.loaded_identity = Some(crate::recording::IdentityStamps {

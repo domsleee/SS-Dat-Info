@@ -17,20 +17,6 @@ pub fn pico_port() -> String {
     std::env::var("TAS_PICO_PORT").unwrap_or_else(|_| "COM7".into())
 }
 
-/// Release every Pico key (`0xFF` is the firmware's "all up" mask).
-///
-/// The firmware's own 500 ms watchdog would release them anyway; this makes the
-/// starting state explicit and reports whether the device is reachable before a
-/// test leans on it. Best effort: if the port will not open there is nothing to
-/// release.
-pub fn pico_release_all() -> bool {
-    let com_path = format!("\\\\.\\{}", pico_port());
-    match std::fs::OpenOptions::new().write(true).open(&com_path) {
-        Ok(mut p) => p.write_all(&[0xFF]).and_then(|_| p.flush()).is_ok(),
-        Err(_) => false,
-    }
-}
-
 /// Holds the Pico port open for a press/release pair and guarantees the release:
 /// `Drop` runs on early return, `?` and panic unwind, so a held key cannot
 /// outlive the code that pressed it.
@@ -40,10 +26,6 @@ pub struct PicoKeys {
 }
 
 impl PicoKeys {
-    pub fn open() -> Option<PicoKeys> {
-        Self::open_checked().ok()
-    }
-
     pub fn open_checked() -> Result<PicoKeys, String> {
         let port_name = pico_port();
         let com_path = format!("\\\\.\\{}", port_name);
@@ -112,7 +94,7 @@ pub fn focus_game() {
 /// for the hardware delivery that pause/dialog tests claim to exercise.
 pub fn send_escape() -> bool {
     focus_game();
-    if let Some(mut keys) = PicoKeys::open() {
+    if let Ok(mut keys) = PicoKeys::open_checked() {
         if !keys.send(0x80) {
             eprintln!(
                 "  WARNING: Pico on {} opened but the Escape press failed to write",
@@ -770,17 +752,16 @@ fn wait_for_cycle(client: &TasSharedMemoryClient, timeout: Duration) -> bool {
 /// and drive the menu into the race. `NO_REVIVE=1` refuses to launch and
 /// exits instead.
 pub fn ensure_game_running() -> TasSharedMemoryClient {
-    if pico_release_all() {
+    // Release every key (0xFF is the firmware's "all up" mask). Its 500 ms
+    // watchdog would anyway; this makes the starting state explicit. Best
+    // effort: a port that will not open has nothing to release.
+    if PicoKeys::open_checked().is_ok_and(|mut keys| keys.send(0xFF)) {
         println!("  Pico: released all keys ({})", pico_port());
     }
 
     if let Ok(c) = TasSharedMemoryClient::open() {
         if check_liveness(&c) {
-            let s = c.state();
-            println!(
-                "Game already live (version {}). Hooks: cycle={} key_handler={} observer={} tick={}",
-                s.version, s.cycle_cave_hooked, s.key_handler_cave_hooked, s.observer_cave_hooked, s.tick_cave_hooked
-            );
+            print_hooks("Game already live", &c);
             // A reused session is exactly where the track and playback_speed
             // can have drifted since the last run.
             verify_expected_level(&c);
@@ -839,15 +820,7 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
         eprintln!("ERROR: the race never started ticking after the menu proceeded");
         std::process::exit(1);
     }
-    let s = client.state();
-    println!(
-        "Connected after launch (version {}). Hooks: cycle={} key_handler={} observer={} tick={}",
-        s.version,
-        s.cycle_cave_hooked,
-        s.key_handler_cave_hooked,
-        s.observer_cave_hooked,
-        s.tick_cave_hooked
-    );
+    print_hooks("Connected after launch", &client);
     verify_expected_level(&client);
     normalize_playback_speed(&mut client);
     client
@@ -857,15 +830,7 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
 pub fn connect() -> TasSharedMemoryClient {
     match TasSharedMemoryClient::open() {
         Ok(c) => {
-            let s = c.state();
-            println!(
-                "Connected (version {}). Hooks: cycle={} key_handler={} observer={} tick={}",
-                s.version,
-                s.cycle_cave_hooked,
-                s.key_handler_cave_hooked,
-                s.observer_cave_hooked,
-                s.tick_cave_hooked
-            );
+            print_hooks("Connected", &c);
             c
         }
         Err(e) => {
@@ -873,6 +838,18 @@ pub fn connect() -> TasSharedMemoryClient {
             std::process::exit(1);
         }
     }
+}
+
+fn print_hooks(label: &str, client: &TasSharedMemoryClient) {
+    let s = client.state();
+    println!(
+        "{label} (version {}). Hooks: cycle={} key_handler={} observer={} tick={}",
+        s.version,
+        s.cycle_cave_hooked,
+        s.key_handler_cave_hooked,
+        s.observer_cave_hooked,
+        s.tick_cave_hooked
+    );
 }
 
 /// Print current shared state status.
@@ -896,8 +873,8 @@ pub fn print_status(client: &TasSharedMemoryClient) {
         None => println!("Path: gen={} UNRESOLVED", s.level_path_gen),
     }
     println!(
-        "Ptrs: replay={:#010x} player={:#010x} level_id={:#x} race_time_cs={:#x} pos=({:.2},{:.2},{:.2})",
-        s.replay_ptr, s.player_ptr, s.level_id, s.race_time_cs,
+        "Ptrs: replay={:#010x} player={:#010x} level_id={:#x} race_clock={:?} pos=({:.2},{:.2},{:.2})",
+        s.replay_ptr, s.player_ptr, s.level_id, tas_shared::race_clock::race_clock(s),
         s.player_x, s.player_y, s.player_z
     );
     // The CONT interlock and gate-alignment fields: what a controller left
@@ -1078,6 +1055,20 @@ pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep]) -> Result<(), St
     Ok(())
 }
 
+/// Drive `steps` on the Pico; on a failure print it and STOP the REC the steps
+/// were feeding. Returns whether the steps were driven.
+pub fn drive_or_stop(
+    client: &mut TasSharedMemoryClient,
+    steps: &[crate::patterns::PatternStep],
+) -> bool {
+    let result = drive_pico_steps(steps);
+    if let Err(error) = &result {
+        eprintln!("ERROR: {error}");
+        stop(client);
+    }
+    result.is_ok()
+}
+
 fn require_pico_write(sent: bool, port: &str) -> Result<(), String> {
     if sent {
         Ok(())
@@ -1150,6 +1141,69 @@ pub fn fixture_path(name: &str) -> Result<PathBuf, String> {
         let from_tas = Path::new("recordings").join(name);
         from_tas.is_file().then_some(from_tas).ok_or(error)
     })
+}
+
+/// Load a committed recording into shared memory.
+pub fn load_fixture(
+    client: &mut TasSharedMemoryClient,
+    name: &str,
+) -> Result<crate::replay::LoadedRecording, String> {
+    let loaded = crate::replay::load_tasrec(&fixture_path(name)?)
+        .map_err(|e| format!("loading {name}: {e}"))?;
+    crate::replay::write_to_shared(client, &loaded);
+    Ok(loaded)
+}
+
+/// Wait for the DLL to take the pending command.
+pub fn wait_idle(client: &TasSharedMemoryClient, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    while !client.command_idle() {
+        if Instant::now() > deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    true
+}
+
+/// STOP, wait for the DLL to take it, and put the speed back to 1x.
+pub fn cleanup(client: &mut TasSharedMemoryClient) {
+    stop(client);
+    if !wait_idle(client, Duration::from_secs(3)) {
+        eprintln!("  WARNING: the cleanup STOP was not consumed");
+    }
+    client.state_mut().playback_speed = 1.0;
+}
+
+/// One live case: own the game and the command channel, run `check`, clean up
+/// and print `*** NAME PASSED ***` or `*** NAME FAILED: why ***`. A non-empty
+/// `Ok` detail is appended to PASSED the same way; an empty `Err` prints a bare
+/// FAILED, for checks that printed why themselves.
+pub fn run_case(
+    name: &str,
+    check: impl FnOnce(&mut TasSharedMemoryClient) -> Result<String, String>,
+) -> bool {
+    let mut client = ensure_game_running();
+    stop_competing_tas_ui_writer();
+    let result = check(&mut client);
+    cleanup(&mut client);
+    let detail = |text: &str| {
+        if text.is_empty() {
+            String::new()
+        } else {
+            format!(": {text}")
+        }
+    };
+    match result {
+        Ok(text) => {
+            println!("\n*** {name} PASSED{} ***", detail(&text));
+            true
+        }
+        Err(e) => {
+            eprintln!("\n*** {name} FAILED{} ***", detail(&e));
+            false
+        }
+    }
 }
 
 #[cfg(test)]

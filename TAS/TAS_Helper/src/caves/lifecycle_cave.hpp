@@ -73,7 +73,7 @@ static void OnPump(SafetyHookContext&) {
 inline bool Install(GameAddresses& addr, TasSharedState* s) {
     g_state = s;
     g_frameAtInstall = s->frame_count;
-    levelcontext::Init(s, (uint32_t)(uintptr_t)addr.level_path_ptr, &SafeReadPtr);
+    levelcontext::Init(s, (uint32_t)(uintptr_t)addr.level_path_ptr);
     s->game_in_game = 0;
     g_launchHook = CreateMidHook<OnLaunch>(addr.launch_site);
     g_stopHook = CreateMidHook<OnStop>(addr.stop_site);

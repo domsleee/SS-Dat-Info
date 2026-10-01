@@ -24,7 +24,7 @@ fn cycle(client: &mut TasSharedMemoryClient, case: &Case) -> Result<bool, String
         3.5 / f64::from(case.rec_speed),
     ));
     let steps =
-        patterns::with_neutral_tail(patterns::build_from_pattern("LRLR", 56, 0), case.tail_ticks);
+        patterns::with_neutral_tail(patterns::build_from_pattern("LRLR", 56), case.tail_ticks);
     harness::drive_pico_steps(&steps)?;
     std::thread::sleep(std::time::Duration::from_millis(200));
     let rec_speed = client.state().playback_speed;

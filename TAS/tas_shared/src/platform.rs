@@ -3,7 +3,6 @@
 use std::ffi::CString;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::menu_screen;
 use crate::state::{
     rider_pair, TasCommand, TasSharedState, TAS_SHARED_MEMORY_NAME, TAS_SHARED_VERSION,
 };
@@ -135,12 +134,12 @@ impl TasSharedMemoryClient {
 
     /// Raw x87 control word the DLL sampled on the game thread.
     pub fn fpu_control_word(&self) -> u32 {
-        unsafe { std::ptr::read_volatile(std::ptr::addr_of!((*self.ptr).fpu_control_word)) }
+        unsafe { std::ptr::read_volatile(&self.state().fpu_control_word) }
     }
 
     /// Loaded renderer plugin (`TAS_RENDERER_*`).
     pub fn renderer_id(&self) -> u32 {
-        unsafe { std::ptr::read_volatile(std::ptr::addr_of!((*self.ptr).renderer_id)) }
+        unsafe { std::ptr::read_volatile(&self.state().renderer_id) }
     }
 
     /// Live physics-mode stamp (see `physics_mode_label`).
@@ -155,65 +154,39 @@ impl TasSharedMemoryClient {
         rider_label(character, stance)
     }
 
-    /// The current menu screen title, `None` in a level.
-    pub fn menu_screen(&self) -> Option<String> {
-        menu_screen(self.state())
-    }
-
     /// Volatile read of mode (poll-hot field written by DLL).
     pub fn mode_volatile(&self) -> u32 {
-        unsafe {
-            let ptr = std::ptr::addr_of!((*self.ptr).mode);
-            std::ptr::read_volatile(ptr)
-        }
+        unsafe { std::ptr::read_volatile(&self.state().mode) }
     }
 
     /// Volatile read of frame_count (poll-hot field written by DLL).
     pub fn frame_count_volatile(&self) -> u32 {
-        unsafe {
-            let ptr = std::ptr::addr_of!((*self.ptr).frame_count);
-            std::ptr::read_volatile(ptr)
-        }
+        unsafe { std::ptr::read_volatile(&self.state().frame_count) }
     }
 
     /// Volatile read of game_in_game (1 from a race's launch until it is left).
     pub fn game_in_game_volatile(&self) -> u32 {
-        unsafe {
-            let ptr = std::ptr::addr_of!((*self.ptr).game_in_game);
-            std::ptr::read_volatile(ptr)
-        }
+        unsafe { std::ptr::read_volatile(&self.state().game_in_game) }
     }
 
     /// Volatile read of playback_pos (poll-hot field written by DLL).
     pub fn playback_pos_volatile(&self) -> u32 {
-        unsafe {
-            let ptr = std::ptr::addr_of!((*self.ptr).playback_pos);
-            std::ptr::read_volatile(ptr)
-        }
+        unsafe { std::ptr::read_volatile(&self.state().playback_pos) }
     }
 
     /// Volatile read of recorded_count (poll-hot field written by DLL).
     pub fn recorded_count_volatile(&self) -> u32 {
-        unsafe {
-            let ptr = std::ptr::addr_of!((*self.ptr).recorded_count);
-            std::ptr::read_volatile(ptr)
-        }
+        unsafe { std::ptr::read_volatile(&self.state().recorded_count) }
     }
 
     /// Read the restart state machine status (0=idle, 1=in progress, 2=done).
     pub fn restart_state(&self) -> u32 {
-        unsafe {
-            let ptr = std::ptr::addr_of!((*self.ptr).restart_state);
-            std::ptr::read_volatile(ptr)
-        }
+        unsafe { std::ptr::read_volatile(&self.state().restart_state) }
     }
 
     /// Reset restart state to idle (call after restart completes).
     pub fn reset_restart_state(&mut self) {
-        unsafe {
-            let ptr = std::ptr::addr_of_mut!((*self.ptr).restart_state);
-            std::ptr::write_volatile(ptr, 0);
-        }
+        unsafe { std::ptr::write_volatile(&mut self.state_mut().restart_state, 0) }
     }
 }
 
@@ -263,41 +236,30 @@ impl transport::TransportPort for TasSharedMemoryClient {
         self.state().recorded_count
     }
     fn gate_index(&self) -> u32 {
-        unsafe { std::ptr::read_volatile(&self.state().gate_index as *const u32) }
+        unsafe { std::ptr::read_volatile(&self.state().gate_index) }
     }
     fn set_continue_from_frame(&mut self, frame: u32) {
-        unsafe {
-            std::ptr::write_volatile(&mut self.state_mut().continue_from_frame as *mut u32, frame);
-        }
+        unsafe { std::ptr::write_volatile(&mut self.state_mut().continue_from_frame, frame) }
     }
     fn set_gate_align_rec(&mut self, frame: u32) {
-        unsafe {
-            std::ptr::write_volatile(&mut self.state_mut().gate_align_rec as *mut u32, frame);
-        }
+        unsafe { std::ptr::write_volatile(&mut self.state_mut().gate_align_rec, frame) }
     }
     fn set_input_model(&mut self, model: u32) {
-        unsafe {
-            std::ptr::write_volatile(&mut self.state_mut().input_model as *mut u32, model);
-        }
+        unsafe { std::ptr::write_volatile(&mut self.state_mut().input_model, model) }
     }
     fn set_playback_speed(&mut self, speed: f32) {
-        unsafe {
-            std::ptr::write_volatile(&mut self.state_mut().playback_speed as *mut f32, speed);
-        }
+        unsafe { std::ptr::write_volatile(&mut self.state_mut().playback_speed, speed) }
     }
     fn arm_generation(&self) -> u32 {
-        unsafe { std::ptr::read_volatile(&self.state().arm_generation as *const u32) }
+        unsafe { std::ptr::read_volatile(&self.state().arm_generation) }
     }
     fn capture_ok(&self) -> bool {
-        unsafe { std::ptr::read_volatile(&self.state().capture_ok as *const u32) != 0 }
+        unsafe { std::ptr::read_volatile(&self.state().capture_ok) != 0 }
     }
     fn approve_cont_splice(&mut self) {
         // Volatile: the reader is the tick cave in another process, which Rust's
         // memory model cannot see, so a plain store may be elided.
-        let s = self.state_mut();
-        unsafe {
-            std::ptr::write_volatile(&mut s.cont_splice_approved as *mut u32, 1);
-        }
+        unsafe { std::ptr::write_volatile(&mut self.state_mut().cont_splice_approved, 1) }
     }
     fn request_ownership(&mut self, kind: u32) -> u32 {
         crate::owner::owner_request_submit(

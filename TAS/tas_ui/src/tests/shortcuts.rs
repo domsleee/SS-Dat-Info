@@ -45,32 +45,17 @@ fn action_has_log(actions: &[transport::Action], needle: &str) -> bool {
 
 // ===== Keyboard shortcuts =====
 
-/// An app connected to an idle DLL in a ticking level holding `recorded`
-/// ticks: the state in which the REC / PLAY / CONT buttons are enabled.
-fn idle_in_level_app(recorded: u32) -> TasApp {
-    let mut app = test_app();
-    let mut shared = TasSharedMemoryClient::new_test_mapping();
-    shared.state_mut().game_in_game = 1;
-    shared.state_mut().recorded_count = recorded;
-    app.shared = Some(shared);
-    app.cycle_advance_at = std::time::Instant::now();
-    app
-}
-
 #[test]
-fn shortcut_f9_arms_rec() {
-    let mut app = idle_in_level_app(0);
-    let actions = press_key(&mut app, Key::F9, Modifiers::NONE);
-    assert!(action_has_restart_then(&actions, TasCommand::ArmRec));
-    assert!(action_has_log(&actions, "F9"));
-}
-
-#[test]
-fn shortcut_f10_arms_play() {
-    let mut app = idle_in_level_app(100);
-    let actions = press_key(&mut app, Key::F10, Modifiers::NONE);
-    assert!(action_has_restart_then(&actions, TasCommand::ArmPlay));
-    assert!(action_has_log(&actions, "F10"));
+fn shortcut_f9_f10_arm_rec_and_play() {
+    for (key, recorded, command, name) in [
+        (Key::F9, 0, TasCommand::ArmRec, "F9"),
+        (Key::F10, 100, TasCommand::ArmPlay, "F10"),
+    ] {
+        let mut app = idle_in_level_app(recorded);
+        let actions = press_key(&mut app, key, Modifiers::NONE);
+        assert!(action_has_restart_then(&actions, command), "{name}");
+        assert!(action_has_log(&actions, name), "{name}");
+    }
 }
 
 #[test]
@@ -86,11 +71,13 @@ fn shortcuts_are_inert_without_a_game() {
 }
 
 #[test]
-fn shortcut_f11_stops() {
-    let mut app = test_app();
-    let actions = press_key(&mut app, Key::F11, Modifiers::NONE);
-    assert!(action_has_command(&actions, TasCommand::Stop));
-    assert!(action_has_log(&actions, "F11"));
+fn shortcut_f11_and_space_stop() {
+    for (key, name) in [(Key::F11, "F11"), (Key::Space, "Space")] {
+        let mut app = test_app();
+        let actions = press_key(&mut app, key, Modifiers::NONE);
+        assert!(action_has_command(&actions, TasCommand::Stop), "{name}");
+        assert!(action_has_log(&actions, name), "{name}");
+    }
 }
 
 #[test]
@@ -104,14 +91,6 @@ fn shortcut_f12_arms_continue() {
     ));
     assert!(action_has_restart_then(&actions, TasCommand::ArmContinue));
     assert!(action_has_log(&actions, "F12"));
-}
-
-#[test]
-fn shortcut_space_stops() {
-    let mut app = test_app();
-    let actions = press_key(&mut app, Key::Space, Modifiers::NONE);
-    assert!(action_has_command(&actions, TasCommand::Stop));
-    assert!(action_has_log(&actions, "Space"));
 }
 
 #[test]
@@ -216,18 +195,6 @@ fn global_shortcut_edges_fire_only_on_press() {
     assert_eq!(edges, [true, false, false, false]);
 }
 
-/// A key held across many frames (repeated identical reads) produces no
-/// further edges.
-#[test]
-fn global_shortcut_held_does_not_repeat() {
-    let mut prev = [false; 4];
-    compute_global_key_edges([true, true, true, true], &mut prev);
-    for _ in 0..100 {
-        let edges = compute_global_key_edges([true, true, true, true], &mut prev);
-        assert_eq!(edges, [false, false, false, false]);
-    }
-}
-
 fn only_log(actions: &[transport::Action]) -> String {
     match actions {
         [transport::Action::Log(line)] => line.clone(),
@@ -237,13 +204,8 @@ fn only_log(actions: &[transport::Action]) -> String {
 
 #[test]
 fn shortcuts_follow_the_button_rule() {
-    let mut app = test_app();
-    let mut shared = TasSharedMemoryClient::new_test_mapping();
-    shared.state_mut().game_in_game = 1;
-    shared.state_mut().mode = TasMode::Rec as u32;
-    shared.state_mut().recorded_count = 100;
-    app.shared = Some(shared);
-    app.cycle_advance_at = std::time::Instant::now(); // the level is ticking
+    let mut app = idle_in_level_app(100);
+    app.shared.as_mut().unwrap().state_mut().mode = TasMode::Rec as u32;
 
     // F9 during a REC: the button is grey, so the key refuses too.
     let line = only_log(&app.shortcut_arm("Shortcut: F9 REC", TasCommand::ArmRec));

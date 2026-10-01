@@ -61,17 +61,14 @@ fn judge(case: &Case, report: &ContReliabilityReport) -> bool {
     clean && timing
 }
 
-pub fn run_iterations(case: &Case, iterations: u32) -> bool {
+pub fn run(case: &Case, iterations: u32) -> bool {
     if iterations == 0 {
         return false;
     }
-    run(&Case {
+    let case = &Case {
         iterations,
         ..case.clone()
-    })
-}
-
-pub fn run(case: &Case) -> bool {
+    };
     let path = match harness::fixture_path(case.recording) {
         Ok(path) => path,
         Err(error) => {
@@ -89,14 +86,8 @@ pub fn run(case: &Case) -> bool {
     );
     let mut passed = true;
     for &speed in case.speeds {
-        let report = cont_reliability::run(
-            case.iterations,
-            speed,
-            case.splice,
-            Some(&path.to_string_lossy()),
-            cont_reliability::BaselineInputProfile::Taps,
-            None,
-        );
+        let report =
+            cont_reliability::run(case.iterations, speed, case.splice, &path.to_string_lossy());
         passed &= judge(case, &report);
     }
     println!(
@@ -132,7 +123,6 @@ mod tests {
                 speed: case.speeds[0],
                 splice_frame: case.splice,
                 baseline_ticks: 0,
-                baseline_profile: String::new(),
                 baseline_transitions: 0,
                 results: vec![],
             };
@@ -149,7 +139,6 @@ mod tests {
                 speed: case.speeds[0],
                 splice_frame: case.splice,
                 baseline_ticks: 10000,
-                baseline_profile: "taps".into(),
                 baseline_transitions: 10,
                 results: (0..case.iterations)
                     .map(|iteration| ContCycleResult {

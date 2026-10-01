@@ -72,20 +72,7 @@ fn compute_drift_between(
 
 /// Compute drift between rec_coords and play_coords over `count` ticks.
 pub fn compute_drift(state: &TasSharedState, count: u32) -> DriftResult {
-    compute_drift_window(state, 0, count)
-}
-
-/// Compute drift between rec_coords and play_coords over the window `[start, count)`.
-pub fn compute_drift_window(state: &TasSharedState, start: u32, count: u32) -> DriftResult {
-    let end = count as usize;
-    let start = (start as usize).min(end);
-    compute_drift_between(
-        &state.rec_coords,
-        &state.play_coords,
-        start,
-        start,
-        end - start,
-    )
+    compute_drift_between(&state.rec_coords, &state.play_coords, 0, 0, count as usize)
 }
 
 /// Compare recording and playback at equal offsets from their independently
@@ -105,6 +92,29 @@ pub fn compute_gate_relative_drift(
         play_gate as usize,
         count as usize,
     )
+}
+
+/// Bit-for-bit comparison of up to `n` positions from each log's own gate:
+/// how many differ, and the first that does as an offset from the gates.
+pub fn bit_mismatches(
+    rec: &[[f32; 3]],
+    play: &[[f32; 3]],
+    rec_gate: u32,
+    play_gate: u32,
+    n: u32,
+) -> (u32, Option<u32>) {
+    let pairs = rec[rec_gate as usize..]
+        .iter()
+        .zip(&play[play_gate as usize..])
+        .take(n as usize);
+    let mut differ = (0, None);
+    for (i, (r, p)) in pairs.enumerate() {
+        if r.map(f32::to_bits) != p.map(f32::to_bits) {
+            differ.0 += 1;
+            differ.1.get_or_insert(i as u32);
+        }
+    }
+    differ
 }
 
 /// Compute max coordinate delta (movement) for a single coord log.
@@ -262,17 +272,19 @@ mod tests {
     }
 
     #[test]
-    fn drift_window_skips_prefix_before_start() {
-        let mut state = zeroed_state();
-        state.rec_coords[0] = [10.0, 0.0, 20.0];
-        state.play_coords[0] = [999.0, 0.0, 999.0];
-        for i in 1..5 {
-            state.rec_coords[i] = [i as f32, 0.0, (i * 10) as f32];
-            state.play_coords[i] = state.rec_coords[i];
-        }
-
-        let d = compute_drift_window(&state, 1, 5);
-        assert!(d.is_zero());
+    fn bit_mismatches_count_from_each_gate() {
+        let rec = [
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, 3.0],
+            [0.0, 0.0, 4.0],
+        ];
+        let mut play = [[9.0; 3], [0.0, 0.0, 2.0], [0.0, 0.0, 3.0], [0.0, 0.0, 4.0]];
+        assert_eq!(bit_mismatches(&rec, &play, 1, 1, 10), (0, None));
+        play[2][1] = -0.0;
+        assert_eq!(bit_mismatches(&rec, &play, 1, 1, 10), (1, Some(1)));
+        assert_eq!(bit_mismatches(&rec, &play, 1, 1, 1), (0, None));
+        assert_eq!(bit_mismatches(&rec, &play, 0, 1, 3), (3, Some(0)));
     }
 
     #[test]

@@ -144,7 +144,7 @@ pub enum CompletedVia {
 pub struct TransportController {
     cfg: ArmConfig,
     phase: Phase,
-    retries_remaining: u32,
+    retries_used: u32,
     completed_via: CompletedVia,
     /// The DLL's arm counter as it stood just before this attempt armed.
     /// Once it differs, the mode and position being read describe THIS
@@ -165,11 +165,10 @@ pub struct TransportController {
 
 impl TransportController {
     pub fn new(cfg: ArmConfig) -> Self {
-        let retries_remaining = cfg.max_retries;
         Self {
             cfg,
             phase: Phase::Start,
-            retries_remaining,
+            retries_used: 0,
             completed_via: CompletedVia::Unjudged,
             arm_generation_at_arm: 0,
             owner_seq: 0,
@@ -211,10 +210,6 @@ impl TransportController {
                 | Phase::RestartWaitDone
                 | Phase::ArmWaitAck
         )
-    }
-
-    fn retries_used(&self) -> u32 {
-        self.cfg.max_retries - self.retries_remaining
     }
 
     /// Perform at most one transition. Never blocks/sleeps. A terminal
@@ -436,7 +431,7 @@ impl TransportController {
                 }
             }
             Phase::Done => StepOutcome::Done {
-                retries_used: self.retries_used(),
+                retries_used: self.retries_used,
                 completed_via: self.completed_via,
             },
             Phase::Aborted => StepOutcome::Aborted {
@@ -450,7 +445,7 @@ impl TransportController {
         self.completed_via = via;
         self.phase = Phase::Done;
         StepOutcome::Done {
-            retries_used: self.retries_used(),
+            retries_used: self.retries_used,
             completed_via: via,
         }
     }
@@ -469,7 +464,7 @@ impl TransportController {
         detail: String,
         observed: Option<u32>,
     ) -> StepOutcome {
-        if self.retries_remaining == 0 {
+        if self.retries_used == self.cfg.max_retries {
             port.send_command(TasCommand::Stop);
             self.phase = Phase::Aborted;
             let reason = if self.cfg.max_retries == 0 {
@@ -479,14 +474,16 @@ impl TransportController {
             };
             return StepOutcome::Aborted { reason };
         }
-        self.retries_remaining -= 1;
-        let attempt = self.cfg.max_retries - self.retries_remaining;
+        self.retries_used += 1;
         port.set_continue_from_frame(self.cfg.continue_from_frame);
         port.set_gate_align_rec(0);
         port.set_playback_speed(self.cfg.speed);
         port.send_command(self.restart_stop_command());
         self.phase = Phase::StopWaitAck;
-        StepOutcome::Reroll { attempt, observed }
+        StepOutcome::Reroll {
+            attempt: self.retries_used,
+            observed,
+        }
     }
 }
 

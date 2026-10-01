@@ -33,10 +33,8 @@ pub fn run() -> bool {
         return false;
     }
     harness::arm_rec(&mut client);
-    let steps = patterns::with_neutral_tail(patterns::build_from_pattern("LRLR", 500, 0), 200);
-    if let Err(error) = harness::drive_pico_steps(&steps) {
-        eprintln!("ERROR: {error}");
-        harness::stop(&mut client);
+    let steps = patterns::with_neutral_tail(patterns::build_from_pattern("LRLR", 500), 200);
+    if !harness::drive_or_stop(&mut client, &steps) {
         return false;
     }
     thread::sleep(Duration::from_millis(200));

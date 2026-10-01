@@ -49,9 +49,7 @@ fn record_pass(
         return None;
     }
     harness::arm_rec(client);
-    if let Err(error) = harness::drive_pico_steps(steps) {
-        eprintln!("{error}");
-        harness::stop(client);
+    if !harness::drive_or_stop(client, steps) {
         return None;
     }
     thread::sleep(Duration::from_millis(300));

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::command_edges::{cleanup, load_fixture};
+use crate::command_edges::FIXTURE;
 use crate::gamemem::GameMemory;
 use crate::harness;
 
@@ -21,21 +21,10 @@ const RELEASE_TICK: i64 = 302;
 
 pub fn run() -> bool {
     println!("=== COUNTDOWN-ANCHOR: does the countdown fix the gate? ===\n");
-    let mut client = harness::ensure_game_running();
-    let result = measure(&mut client);
-    cleanup(&mut client);
-    match result {
-        Ok(true) => true,
-        Ok(false) => false,
-        Err(e) => {
-            eprintln!("ERROR: {e}");
-            false
-        }
-    }
+    harness::run_case("COUNTDOWN-ANCHOR", measure)
 }
 
-fn measure(client: &mut tas_shared::TasSharedMemoryClient) -> Result<bool, String> {
-    harness::stop_competing_tas_ui_writer();
+fn measure(client: &mut tas_shared::TasSharedMemoryClient) -> Result<String, String> {
     harness::stop(client);
     let memory = GameMemory::attach().ok_or("cannot read the game's memory")?;
     let mut arm_offsets = Vec::new();
@@ -43,7 +32,7 @@ fn measure(client: &mut tas_shared::TasSharedMemoryClient) -> Result<bool, Strin
     let (_, log_cursor) = client.state().read_log_entries(0);
     let mut captures_ok = true;
     for run in 1..=RUNS {
-        load_fixture(client)?;
+        harness::load_fixture(client, FIXTURE)?;
         client.state_mut().playback_speed = 1.0;
         let (_rec_gate, live_gate) = harness::restart_play_aligned_unwatched(client)?;
         // Sample (countdown ticks - playback_pos) many times; a sample taken
@@ -94,19 +83,14 @@ fn measure(client: &mut tas_shared::TasSharedMemoryClient) -> Result<bool, Strin
         .count();
     println!("  DLL prediction mismatches: {mismatches}, capture_ok throughout: {captures_ok}");
     if mismatches > 0 || !captures_ok {
-        println!(
-            "*** COUNTDOWN-ANCHOR FAILED: the DLL's predicted gate missed the observed gate ***"
-        );
-        return Ok(false);
+        return Err("the DLL's predicted gate missed the observed gate".into());
     }
     if gaps.len() == 1 {
-        println!(
-            "*** COUNTDOWN-ANCHOR PASSED: the gate is always {} tick(s) after release across {RUNS} restarts ***",
+        Ok(format!(
+            "the gate is always {} tick(s) after release across {RUNS} restarts",
             gaps[0]
-        );
-        Ok(true)
+        ))
     } else {
-        println!("*** COUNTDOWN-ANCHOR FAILED: the gate moved relative to the countdown ***");
-        Ok(false)
+        Err("the gate moved relative to the countdown".into())
     }
 }

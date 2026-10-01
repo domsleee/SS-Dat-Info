@@ -70,20 +70,9 @@ bool run() {
         return false;
     }
 
-    Log("=== Hook installation summary ===");
-    Log(std::format("  Replay capture (SG+9E8F0):  {}", replay_ok ? "OK" : "FAILED"));
-    Log(std::format("  the observer cave (BB3B10 gate):      {}", observer_ok ? "OK" : "FAILED"));
-    Log(std::format("  the key-handler cave (handler gate):      {}", key_handler_ok ? "OK" : "FAILED"));
-    Log(std::format("  the cycle cave  (Supreme::Cycle):    {}", cycle_ok ? "OK" : "FAILED"));
-    Log(std::format("  the tick cave  (fixed tick):        {}", tick_ok ? "OK" : "FAILED"));
-    Log(std::format("  F5 restart (accept/done):    {}", f5_ok ? "OK" : "FAILED"));
-    Log(std::format("  Lifecycle (launch/stop/pump): {}", lifecycle_ok ? "OK" : "FAILED"));
+    Log("Core hooks installed: replay capture, observer, key handler, cycle, tick, F5 restart, lifecycle");
 
-    if (racetimer::Install(g_addr, state)) {
-        Log("  Race timer: started");
-    } else {
-        Log("  Race timer: unavailable");
-    }
+    racetimer::Install(g_addr, state);
 
     if (!finishline::Install(g_addr, state)) {
         Log("  Finish line: unavailable");

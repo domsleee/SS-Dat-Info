@@ -433,20 +433,18 @@ the race's first tick.
 
 Two more readers:
 
-- **Race timer** (`race_timer_cave.hpp`): hooks the HUD text renderer and reads the
-  on-screen race time, so the UI shows exactly what the game shows. It also
-  publishes the game's own race clock every clock tick: the player's timer
+- **Race timer** (`race_timer_cave.hpp`): publishes the game's own race
+  clock every clock tick: the player's timer
   object at `[player+0xB8]` holds the elapsed time as a float at `+0x0C`
   (0.01f added per Player update from the start line to the finish line)
   and started/finished bytes at `+0x10`/`+0x11`. The HUD formats that float
   as `MM:SS:CC` with truncating conversions, so the float, not a tick count,
   is the official time: it drifts (60,000 ticks read 600.27 s), and the tick
   count is recovered by replaying the float sum (`tas_shared::race_clock`).
-  Each HUD player-line time is published together with the clock read in the
-  same call; `tas_test race-clock` checks the HUD formula applied to the
-  clock equals every scraped time, at 1x and 8x, through the finish, with
-  and without ghosts. The UI shows the clock's time; the scraper stays only
-  as that test's reference.
+  The UI shows the clock's time through the HUD formula. A HUD-text scraper
+  once confirmed that formula against every on-screen time, at 1x and 8x,
+  through the finish; it is retired, and `tas_test race-clock` now checks
+  that the clock starts, never runs backward and finishes on a tick sum.
 - **Finish line** (`finish_cave.hpp`): the game's Finish_Point crossing
   callback calls the rider's race timer finish (`SG+0x7F9D0`), which decides
   whether the finish counts (a missed checkpoint voids the time) and latches

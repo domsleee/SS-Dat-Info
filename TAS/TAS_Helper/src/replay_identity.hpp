@@ -12,10 +12,6 @@
 // (the player update pushes [player+0x14C] every tick). A recorder is the
 // human's iff its owner is a Player and the back-link still points at it,
 // which rejects dead recorders and garbage owners.
-struct ReplayIdentityEnv {
-    uint32_t player_vtable = 0;  // live address of the Player vtable (SG + RVA)
-    uint32_t ghost_vtable = 0;   // live address of the Ghost_Player vtable (diagnostic only)
-};
 
 struct ReplayIdentityTrace {
     uint32_t owner = 0;           // [recorder + 0x84]
@@ -26,8 +22,7 @@ struct ReplayIdentityTrace {
 enum ReplayOwnerKind : uint32_t {
     OWNER_UNREADABLE = 0,  // recorder / owner pointer not a usable address
     OWNER_UNLINKED = 1,    // owner does not (any more) point at this recorder
-    OWNER_GHOST = 2,       // Ghost_Player
-    OWNER_OTHER = 3,       // AI / net / unknown class
+    OWNER_OTHER = 3,       // ghost / AI / net / unknown class
     OWNER_HUMAN = 4,       // Player, linked: the recorder to follow
 };
 
@@ -35,9 +30,10 @@ static constexpr uint32_t REPLAY_IDENTITY_RECORDER_OWNER = 0x84;
 static constexpr uint32_t REPLAY_IDENTITY_PLAYER_RECORDER = 0x14C;
 static constexpr uint32_t REPLAY_IDENTITY_MIN_PTR = 0x10000;
 
+// `player_vtable` is the live Player vtable (SG + RVA; 0 = unresolved).
 // `read(addr)` returns the u32 at `addr` or 0 when unreadable.
 template <class ReadU32>
-inline ReplayOwnerKind ClassifyRecorderOwner(uint32_t recorder, const ReplayIdentityEnv& env,
+inline ReplayOwnerKind ClassifyRecorderOwner(uint32_t recorder, uint32_t player_vtable,
                                              ReadU32 read, ReplayIdentityTrace* trace) {
     ReplayIdentityTrace t{};
     if (trace) *trace = t;
@@ -49,8 +45,7 @@ inline ReplayOwnerKind ClassifyRecorderOwner(uint32_t recorder, const ReplayIden
     t.owner_recorder = read(t.owner + REPLAY_IDENTITY_PLAYER_RECORDER);
     if (trace) *trace = t;
     if (t.owner_recorder != recorder) return OWNER_UNLINKED;
-    if (env.player_vtable && t.owner_vtable == env.player_vtable) return OWNER_HUMAN;
-    if (env.ghost_vtable && t.owner_vtable == env.ghost_vtable) return OWNER_GHOST;
+    if (player_vtable && t.owner_vtable == player_vtable) return OWNER_HUMAN;
     return OWNER_OTHER;
 }
 
@@ -58,7 +53,6 @@ inline const char* ReplayOwnerKindName(ReplayOwnerKind k) {
     switch (k) {
         case OWNER_UNREADABLE: return "unreadable";
         case OWNER_UNLINKED: return "unlinked";
-        case OWNER_GHOST: return "ghost";
         case OWNER_OTHER: return "other";
         case OWNER_HUMAN: return "human";
     }

@@ -8,13 +8,13 @@
 
 use super::*;
 
-fn scratch_recovery_root(tag: &str) -> std::path::PathBuf {
+/// A recovery store in a fresh scratch directory holding a `ticks`-long REC
+/// checkpoint.
+fn checkpoint_store(tag: &str, ticks: u32) -> (std::path::PathBuf, recording::RecoveryStore) {
     let root = std::env::temp_dir().join(format!("ssb_inspect_{}_{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    root
-}
-
-fn write_checkpoint(store: &mut recording::RecoveryStore, ticks: u32) {
+    let mut store =
+        recording::RecoveryStore::new_with(root.clone(), std::time::Duration::ZERO).unwrap();
     let state = state_with_recorded_count(ticks);
     let snapshot = recording::RecordingSnapshot::from_state(&state);
     let session =
@@ -24,14 +24,16 @@ fn write_checkpoint(store: &mut recording::RecoveryStore, ticks: u32) {
         .unwrap()
         .write()
         .unwrap();
+    (root, store)
+}
+
+fn logged(app: &TasApp, needle: &str) -> bool {
+    app.log_lines.lines().iter().any(|l| l.contains(needle))
 }
 
 #[test]
 fn finalize_with_an_empty_buffer_recovers_the_checkpoint_into_history() {
-    let root = scratch_recovery_root("finalize_keep");
-    let mut store =
-        recording::RecoveryStore::new_in_root(root.clone(), std::time::Duration::ZERO).unwrap();
-    write_checkpoint(&mut store, 300);
+    let (root, store) = checkpoint_store("finalize_keep", 300);
     let checkpoint = root.join("recovery_checkpoint.tasrec");
     assert!(checkpoint.exists());
 
@@ -64,12 +66,9 @@ fn finalize_with_an_empty_buffer_recovers_the_checkpoint_into_history() {
 
 #[test]
 fn recovery_drains_queued_checkpoint_writes_before_reading() {
-    let root = scratch_recovery_root("recover_flush");
-    let mut store =
-        recording::RecoveryStore::new_in_root(root.clone(), std::time::Duration::ZERO).unwrap();
     // Checkpoint A is on disk; checkpoint B (longer) is still queued in the
     // background writer when recovery runs.
-    write_checkpoint(&mut store, 300);
+    let (root, mut store) = checkpoint_store("recover_flush", 300);
     let app_state = state_with_recorded_count(500);
     let snapshot = recording::RecordingSnapshot::from_state(&app_state);
     let session =
@@ -79,7 +78,7 @@ fn recovery_drains_queued_checkpoint_writes_before_reading() {
     let mut app = test_app();
     app.recovery_store = Some(store);
     assert!(app.recovery_writer.submit(job));
-    assert!(app.recover_pending_checkpoint());
+    assert!(app.recover_pending_checkpoint_matching(None));
     assert_eq!(
         app.history.entries()[0].end_tick,
         500,
@@ -134,11 +133,7 @@ fn dll_reinitialisation_resets_the_session_view() {
     app.shared.as_mut().unwrap().state_mut().frame_count = 7;
     app.check_game_health();
 
-    assert!(app
-        .log_lines
-        .lines()
-        .iter()
-        .any(|l| l.contains("re-initialised its shared memory")));
+    assert!(logged(&app, "re-initialised its shared memory"));
     assert_eq!(app.game_pid_cached, None);
     assert_eq!(app.log_read_cursor, 0);
     assert_eq!(app.last_mode, TasMode::Off as u32);
@@ -187,11 +182,7 @@ fn game_process_change_captures_the_take_still_in_the_mapping() {
         TasMode::Rec as u32,
         "the dead mapping's frozen REC must not read as a fresh REC start"
     );
-    assert!(app
-        .log_lines
-        .lines()
-        .iter()
-        .any(|l| l.contains("captured its 450 ticks")));
+    assert!(logged(&app, "captured its 450 ticks"));
 }
 
 #[test]
@@ -238,10 +229,7 @@ fn a_regression_from_a_different_process_is_a_new_relaunch() {
 
 #[test]
 fn relaunch_reset_after_the_memset_recovers_the_checkpoint_not_the_new_buffer() {
-    let root = scratch_recovery_root("reset_after_memset");
-    let mut store =
-        recording::RecoveryStore::new_in_root(root.clone(), std::time::Duration::ZERO).unwrap();
-    write_checkpoint(&mut store, 300);
+    let (root, store) = checkpoint_store("reset_after_memset", 300);
     // The section already belongs to the new game, which has 450 ticks of
     // someone else's take in it; our counter was 700_000.
     let mut app = app_recording_in_dead_mapping(450);
@@ -310,11 +298,7 @@ fn log_cursor_rewinds_when_the_ring_sequence_drops() {
     app.log_read_cursor = 40;
     app.drain_dll_log();
     assert_eq!(app.log_read_cursor, 2);
-    assert!(app
-        .log_lines
-        .lines()
-        .iter()
-        .any(|l| l.contains("second line")));
+    assert!(logged(&app, "second line"));
 }
 
 #[test]
@@ -353,11 +337,8 @@ fn a_vanished_pid_with_no_recording_does_nothing() {
 
 #[test]
 fn rejected_finalize_recovers_only_its_own_checkpoint() {
-    let root = scratch_recovery_root("finalize_owner");
-    let mut store =
-        recording::RecoveryStore::new_in_root(root.clone(), std::time::Duration::ZERO).unwrap();
     // An older take's checkpoint (300 ticks) whose clear was refused.
-    write_checkpoint(&mut store, 300);
+    let (root, store) = checkpoint_store("finalize_owner", 300);
     let checkpoint = root.join("recovery_checkpoint.tasrec");
     let mut app = test_app();
     app.recovery_store = Some(store);
@@ -447,11 +428,7 @@ fn a_normally_closed_game_raises_no_banner() {
     app.shared.as_mut().unwrap().state_mut().game_exit_clean = 1;
     app.on_game_pid_observed(None);
     assert!(app.game_exit_banner.is_none());
-    assert!(app
-        .log_lines
-        .lines()
-        .iter()
-        .any(|l| l.contains("closed normally")));
+    assert!(logged(&app, "closed normally"));
 }
 
 #[test]

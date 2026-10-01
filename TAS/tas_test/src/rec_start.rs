@@ -1,5 +1,6 @@
-//! Recording-start regression test: a fresh recording must BEGIN at the
-//! stationary spawn, capturing the countdown and pre-timer inputs.
+//! Recording-start check: a recording must BEGIN at the stationary spawn,
+//! capturing the countdown and pre-timer inputs. rec-repro applies it to its
+//! fresh live captures; `rec-start --file` judges a saved `.tasrec`.
 //!
 //! The REC button does an in-process F5 restart and arms once the restart
 //! state machine reports done; a settle that is too long arms mid-fall. The
@@ -7,10 +8,7 @@
 //! is perfectly reproducible. The invariant here is relative (opening speed
 //! vs mid-run speed), so it is independent of level, spawn position and units.
 
-use crate::{harness, replay};
-use std::thread;
-use std::time::Duration;
-use tas_shared::TAS_MAX_TICKS;
+use crate::replay;
 
 /// The opening of a recording must be at most this fraction of the mid-run
 /// speed to count as "started at the spawn". A spawn start is ~stationary
@@ -92,18 +90,12 @@ pub fn analyze_start(coords: &[[f32; 3]], count: usize) -> StartAnalysis {
         1.0
     };
 
-    // Stationary prefix: leading frames moving slower than 10% of mid speed.
+    // First frame where the player is actually moving (end of the countdown):
+    // the first moving faster than 10% of mid speed. The frames before it are
+    // the stationary prefix.
     let eps = (mid_speed * 0.1).max(1e-3);
-    let mut stationary_prefix = 0usize;
-    for i in 1..n {
-        if frame_speed(coords, i) < eps {
-            stationary_prefix += 1;
-        } else {
-            break;
-        }
-    }
-    // First frame where the player is actually moving (end of the countdown).
     let first_moving = (1..n).find(|&i| frame_speed(coords, i) >= eps).unwrap_or(n);
+    let stationary_prefix = first_moving - 1;
 
     // Distance traveled = cumulative XYZ path length. Robust to a run that
     // loops back near its origin (endpoint displacement would look degenerate).
@@ -123,48 +115,24 @@ pub fn analyze_start(coords: &[[f32; 3]], count: usize) -> StartAnalysis {
     }
 }
 
-/// Invariant check: a real run that begins at the stationary spawn. All four
-/// gates must hold — the ratio alone is fooled by a late-countdown arm that
-/// keeps a few stationary frames, so we also require a real countdown prefix
-/// and real motion after it.
-pub fn passes(a: &StartAnalysis) -> bool {
-    a.count >= MIN_FRAMES
-        && a.travel >= MIN_TRAVEL
-        && a.ratio < MAX_START_RATIO
-        && a.stationary_prefix >= MIN_PREFIX
-        && a.count.saturating_sub(a.first_moving) >= MIN_MOVING_FRAMES
+/// Too short or too still to judge the start at all. (NaN travel counts.)
+fn degenerate(a: &StartAnalysis) -> bool {
+    a.count < MIN_FRAMES || a.travel.is_nan() || a.travel < MIN_TRAVEL
 }
 
-fn print_analysis(label: &str, a: &StartAnalysis) {
-    println!(
-        "  {label}: frames={} start_speed={:.5} mid_speed={:.5} ratio={:.3} \
-         stationary_prefix={} first_moving={} path_len={:.2}",
-        a.count, a.start_speed, a.mid_speed, a.ratio, a.stationary_prefix, a.first_moving, a.travel
-    );
-}
-
-fn verdict(a: &StartAnalysis) -> bool {
-    if a.count < MIN_FRAMES || a.travel < MIN_TRAVEL {
-        println!(
-            "*** REC-START INCONCLUSIVE: degenerate recording (frames={}, path_len={:.2}) — \
-             need a real run to judge the start. ***",
-            a.count, a.travel
-        );
-        return false;
-    }
-    if passes(a) {
-        println!(
-            "*** REC-START OK: recording begins at the spawn (opening is {:.1}% of run speed, \
-             stationary_prefix={} frames, {} moving frames after the countdown) ***",
-            a.ratio * 100.0,
-            a.stationary_prefix,
-            a.count.saturating_sub(a.first_moving)
-        );
-        return true;
-    }
-    // Spell out which gate(s) failed so a regression is diagnosable, not just red.
+/// Why the recording is not a real run that begins at the stationary spawn;
+/// empty when it is. The ratio alone is fooled by a late-countdown arm that
+/// keeps a few stationary frames, so a real countdown prefix and real motion
+/// after it are required too.
+fn failures(a: &StartAnalysis) -> Vec<String> {
     let mut reasons = Vec::new();
-    if a.ratio >= MAX_START_RATIO {
+    if degenerate(a) {
+        reasons.push(format!(
+            "degenerate recording (frames={}, path_len={:.2})",
+            a.count, a.travel
+        ));
+    }
+    if a.ratio.is_nan() || a.ratio >= MAX_START_RATIO {
         reasons.push(format!(
             "opening is {:.1}% of run speed (>= {:.0}% — rec[0] already moving)",
             a.ratio * 100.0,
@@ -184,6 +152,42 @@ fn verdict(a: &StartAnalysis) -> bool {
             MIN_MOVING_FRAMES
         ));
     }
+    reasons
+}
+
+pub fn passes(a: &StartAnalysis) -> bool {
+    failures(a).is_empty()
+}
+
+fn print_analysis(label: &str, a: &StartAnalysis) {
+    println!(
+        "  {label}: frames={} start_speed={:.5} mid_speed={:.5} ratio={:.3} \
+         stationary_prefix={} first_moving={} path_len={:.2}",
+        a.count, a.start_speed, a.mid_speed, a.ratio, a.stationary_prefix, a.first_moving, a.travel
+    );
+}
+
+fn verdict(a: &StartAnalysis) -> bool {
+    if degenerate(a) {
+        println!(
+            "*** REC-START INCONCLUSIVE: degenerate recording (frames={}, path_len={:.2}) — \
+             need a real run to judge the start. ***",
+            a.count, a.travel
+        );
+        return false;
+    }
+    let reasons = failures(a);
+    if reasons.is_empty() {
+        println!(
+            "*** REC-START OK: recording begins at the spawn (opening is {:.1}% of run speed, \
+             stationary_prefix={} frames, {} moving frames after the countdown) ***",
+            a.ratio * 100.0,
+            a.stationary_prefix,
+            a.count.saturating_sub(a.first_moving)
+        );
+        return true;
+    }
+    // Spell out which gate(s) failed so a regression is diagnosable, not just red.
     println!(
         "*** REC-START FAILED: spawn / countdown / pre-timer inputs NOT captured — {} ***",
         reasons.join("; ")
@@ -208,32 +212,5 @@ pub fn check_file(path: &str) -> bool {
         count,
     );
     print_analysis(path, &a);
-    verdict(&a)
-}
-
-/// Record a fresh run from a restart and assert it begins at the spawn.
-/// Neutral input is fine — gravity provides the run; we only care that the
-/// opening is (near-)stationary relative to the fall.
-pub fn run() -> bool {
-    println!("=== REC-START regression test (live) ===");
-    let mut client = harness::ensure_game_running();
-
-    if !harness::restart_and_stabilize_inprocess(&mut client) {
-        eprintln!("ERROR: game not alive for restart");
-        return false;
-    }
-    harness::focus_game();
-    harness::arm_rec(&mut client);
-    // The countdown prefix is fixed, so a longer capture only adds moving
-    // frames and keeps the total comfortably over MIN_FRAMES.
-    println!("  Recording ~6s from restart (neutral input; gravity drives the run)...");
-    thread::sleep(Duration::from_secs(6));
-    let count = client.state().recorded_count as usize;
-    harness::stop(&mut client);
-
-    let n = count.min(TAS_MAX_TICKS);
-    let coords: Vec<[f32; 3]> = client.state().rec_coords[..n].to_vec();
-    let a = analyze_start(&coords, n);
-    print_analysis("<live REC>", &a);
     verdict(&a)
 }

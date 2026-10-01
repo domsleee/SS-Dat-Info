@@ -9,6 +9,7 @@
 #include "../game_addresses.hpp"
 #include "../renderer_info.hpp"
 #include "../rider_identity.hpp"
+#include "../safe_read.hpp"
 #include "f5_restart_cave.hpp"
 #include "../fpu_safe_hook.hpp"
 #include "../crash_report.hpp"
@@ -35,27 +36,16 @@ inline void UninstallCycleCave() {
 typedef void(__thiscall* BB3B10Fn)(void* thisPtr, uint32_t keyIndex, uint32_t pressed,
                                     uint32_t unk, uint32_t arg4);
 
-// Returns 0 on an access violation (memory freed by an F5 restart).
-static inline uint32_t SafeReadPtr(uint32_t addr) {
-    if (!addr) return 0;
-    __try {
-        return *(uint32_t*)addr;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
-// root = [SG+1D5450], kbobj = [root+0x530]
+// root = [SG+1D5450], kbobj = [root+0x530]. SafeRead32 of a null base plus
+// a small offset reads 0, so the chains need no null checks.
 static inline uint32_t GetKeyboardObject(GameAddresses* addr) {
-    uint32_t root = SafeReadPtr((uint32_t)addr->player_base);
-    if (!root) return 0;
-    return SafeReadPtr(root + GameAddresses::KEYBOARD_OBJ_OFFSET);
+    uint32_t root = SafeRead32((uint32_t)addr->player_base);
+    return SafeRead32(root + GameAddresses::KEYBOARD_OBJ_OFFSET);
 }
 
 // DI buffer = [kbobj+0x30]
 static inline uint32_t GetDIBuffer(uint32_t kbobj) {
-    if (!kbobj) return 0;
-    return SafeReadPtr(kbobj + GameAddresses::DI_BUFFER_PTR_OFFSET);
+    return SafeRead32(kbobj + GameAddresses::DI_BUFFER_PTR_OFFSET);
 }
 
 // The keyboard observer's held-key array (held_keys.hpp), resolved on every
@@ -67,15 +57,23 @@ static uint32_t ExeBase() {
 
 // The keyboard observer, TC_Kbd_Impl: [[[EXE+0x889C4]+0x14]+0x1AC].
 static uint32_t ObserverObject() {
-    uint32_t p = SafeReadPtr(ExeBase() + GameAddresses::APP_STATE_PTR_RVA);
-    p = SafeReadPtr(p ? p + GameAddresses::APP_GAME_OFFSET : 0);
-    return SafeReadPtr(p ? p + GameAddresses::GAME_KEYBOARD_OBSERVER_OFFSET : 0);
+    uint32_t p = SafeRead32(ExeBase() + GameAddresses::APP_STATE_PTR_RVA);
+    p = SafeRead32(p + GameAddresses::APP_GAME_OFFSET);
+    return SafeRead32(p + GameAddresses::GAME_KEYBOARD_OBSERVER_OFFSET);
 }
 
-static volatile uint8_t* HeldArray() {
-    const uint32_t observer = ObserverObject();
-    return (volatile uint8_t*)(uintptr_t)SafeReadPtr(
-        observer ? observer + GameAddresses::OBSERVER_HELD_PTR_OFFSET : 0);
+// Runs op(held) on the held array under SEH. False when it is unreadable.
+template <typename Op>
+static bool WithHeld(Op op) {
+    volatile uint8_t* held = (volatile uint8_t*)(uintptr_t)SafeRead32(
+        ObserverObject() + GameAddresses::OBSERVER_HELD_PTR_OFFSET);
+    if (!held) return false;
+    __try {
+        op(held);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 // Apply every queued key event now (the game's own flush), so none the
@@ -83,36 +81,13 @@ static volatile uint8_t* HeldArray() {
 // is not the expected object.
 static bool FlushObserverQueue() {
     const uint32_t observer = ObserverObject();
-    const uint32_t vtable = SafeReadPtr(observer);
+    const uint32_t vtable = SafeRead32(observer);
     if (!observer || vtable != ExeBase() + GameAddresses::OBSERVER_VTABLE_RVA) return false;
-    const uint32_t flush = SafeReadPtr(vtable + GameAddresses::OBSERVER_FLUSH_SLOT);
+    const uint32_t flush = SafeRead32(vtable + GameAddresses::OBSERVER_FLUSH_SLOT);
     if (flush != ExeBase() + GameAddresses::OBSERVER_FLUSH_RVA) return false;
     crash::ScopedGameCall call(TAS_GAME_CALL_OBSERVER_FLUSH);
     ((void(__fastcall*)(uint32_t, uint32_t))(uintptr_t)flush)(observer, 0);
     return true;
-}
-
-static bool ReadHeldMask(uint8_t* mask) {
-    volatile uint8_t* held = HeldArray();
-    if (!held) return false;
-    __try {
-        *mask = heldkeys::MaskOf(held);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-// REC's start: the held keys a real keyboard in state `mask` would leave.
-static bool WriteHeldReal(uint8_t mask) {
-    volatile uint8_t* held = HeldArray();
-    if (!held) return false;
-    __try {
-        heldkeys::WriteReal(held, mask);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
 }
 
 static void WriteDIBufferReal(uint32_t buffer, uint8_t mask) {
@@ -120,17 +95,6 @@ static void WriteDIBufferReal(uint32_t buffer, uint8_t mask) {
     __try {
         heldkeys::WriteReal((uint8_t*)buffer, mask);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
-}
-
-static bool WriteHeldMask(uint8_t mask) {
-    volatile uint8_t* held = HeldArray();
-    if (!held) return false;
-    __try {
-        heldkeys::Write(held, mask);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
 }
 
 // Keys only reach the game while its window is in front; the keyboard state
@@ -171,14 +135,6 @@ static void WriteDIBuffer(uint32_t buffer, uint8_t mask) {
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
-// BB3B10's 3rd and 4th arguments are the {lo, hi} dwords of the 64-bit
-// Kernel::Time stamped at message-pump dispatch (Win32_Driver::Translate
-// passes it through +3940 unchanged). The observer defers an event stamped
-// later than the time Update is given (injection_stamp.hpp). Injections derive
-// their stamp from Kernel::Time::Current(); this calibrated Time.hi is the
-// fallback if that export fails to resolve.
-inline volatile uint32_t g_bb3b10Arg4 = GameAddresses::BB3B10_ARG4;
-
 // GetTickCount() of the last Supreme::Cycle tick. When the cycle has stopped
 // (pause menu, dialogs, static menus), the input gate passes every key through
 // so the user can operate them while a TAS mode is armed.
@@ -214,26 +170,10 @@ static uint8_t g_convertScratch[TAS_MAX_TICKS];
 inline volatile uint32_t g_execMode = MODE_OFF;
 inline volatile uint32_t g_execTick = 0xFFFFFFFFu;
 
-class ScopedTasInjection {
-public:
-    ScopedTasInjection() { ++g_tasInjectionDepth; }
-    ~ScopedTasInjection() {
-        if (g_tasInjectionDepth > 0) --g_tasInjectionDepth;
-    }
-    ScopedTasInjection(const ScopedTasInjection&) = delete;
-    ScopedTasInjection& operator=(const ScopedTasInjection&) = delete;
-};
-
-// The game's Kernel::Time::Current(). False if unresolved. The callee is
-// x87-balanced.
-static bool GetKernelTimeNow(GameAddresses* addr, KernelTime* out) {
-    if (!addr->time_current) return false;
-    crash::ScopedGameCall call(TAS_GAME_CALL_TIME_CURRENT);
-    addr->time_current(out, nullptr);
-    return true;
-}
-
-// Call BB3B10 for each changed bit.
+// Call BB3B10 for each changed bit, in kRealKeys order. Its 3rd and 4th
+// arguments are the {lo, hi} dwords of the 64-bit Kernel::Time stamped at
+// message-pump dispatch; the observer defers an event stamped later than the
+// time Update is given (injection_stamp.hpp).
 static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
                                      uint32_t kbobj, uint8_t mask, uint8_t transitions) {
     if (!transitions || !kbobj) return;
@@ -241,47 +181,26 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
     auto bb3b10 = (BB3B10Fn)(addr->bb3b10);
     void* thisPtr = (void*)(kbobj + GameAddresses::BB3B10_THIS_OFFSET);
 
-    // Stamp priority: test override (steer-impact test) > Time::Current >
-    // calibrated fallback.
+    // Stamp: the steer-impact test's override, else Kernel::Time::Current()
+    // (x87-balanced).
     KernelTime t = { 0, 0 };
     if (s->test_arg4_override) {
-        t.lo = 0;
         t.hi = s->test_arg4_override;
         s->arg4_source = ARG4_SOURCE_OVERRIDE;
-    } else if (GetKernelTimeNow(addr, &t)) {
+    } else {
+        {
+            crash::ScopedGameCall call(TAS_GAME_CALL_TIME_CURRENT);
+            addr->time_current(&t, nullptr);
+        }
         InjectionStamp(t.hi, &t.lo, &t.hi);
         s->arg4_source = ARG4_SOURCE_TIME_CURRENT;
-    } else {
-        InjectionStamp(g_bb3b10Arg4, &t.lo, &t.hi);
-        s->arg4_source = ARG4_SOURCE_CALIBRATED;
     }
 
-    ScopedTasInjection injectionScope;
-
-    if (transitions & INPUT_LEFT) {
-        bb3b10(thisPtr, GameAddresses::KEY_LEFT, (mask & INPUT_LEFT) ? 1 : 0,
-               t.lo, t.hi);
+    ++g_tasInjectionDepth;
+    for (const auto& k : heldkeys::kRealKeys) {
+        if (transitions & k.bit) bb3b10(thisPtr, k.code, (mask & k.bit) ? 1 : 0, t.lo, t.hi);
     }
-    if (transitions & INPUT_RIGHT) {
-        bb3b10(thisPtr, GameAddresses::KEY_RIGHT, (mask & INPUT_RIGHT) ? 1 : 0,
-               t.lo, t.hi);
-    }
-    if (transitions & INPUT_UP) {
-        bb3b10(thisPtr, GameAddresses::KEY_UP, (mask & INPUT_UP) ? 1 : 0,
-               t.lo, t.hi);
-    }
-    if (transitions & INPUT_DOWN) {
-        bb3b10(thisPtr, GameAddresses::KEY_DOWN, (mask & INPUT_DOWN) ? 1 : 0,
-               t.lo, t.hi);
-    }
-    if (transitions & INPUT_JUMP) {
-        bb3b10(thisPtr, GameAddresses::KEY_JUMP, (mask & INPUT_JUMP) ? 1 : 0,
-               t.lo, t.hi);
-    }
-    if (transitions & INPUT_SHIFT) {
-        bb3b10(thisPtr, GameAddresses::KEY_SHIFT, (mask & INPUT_SHIFT) ? 1 : 0,
-               t.lo, t.hi);
-    }
+    --g_tasInjectionDepth;
 
     s->bb3b10_call_count++;
 }
@@ -295,31 +214,16 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
         return;
     }
 
+    // X, Y, Z are contiguous. PublishLivePosition already wrote player_x/y/z
+    // from the same memory this tick.
     uint32_t raw[3];
-    __try {
-        auto player = (uint8_t*)s->player_ptr;
-        memcpy(&raw[0], player + GameAddresses::PLAYER_X, 4);
-        memcpy(&raw[1], player + GameAddresses::PLAYER_Y, 4);
-        memcpy(&raw[2], player + GameAddresses::PLAYER_Z, 4);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
+    if (!SafeCopy(s->player_ptr + GameAddresses::PLAYER_X, raw, sizeof raw)) {
         s->capture_ok = 0;
         return;
     }
 
-    memcpy(&s->player_x, &raw[0], 4);
-    memcpy(&s->player_y, &raw[1], 4);
-    memcpy(&s->player_z, &raw[2], 4);
-
     if (index < TAS_MAX_TICKS) {
-        if (isRec) {
-            memcpy(&s->rec_coords[index][0], &raw[0], 4);
-            memcpy(&s->rec_coords[index][1], &raw[1], 4);
-            memcpy(&s->rec_coords[index][2], &raw[2], 4);
-        } else {
-            memcpy(&s->play_coords[index][0], &raw[0], 4);
-            memcpy(&s->play_coords[index][1], &raw[1], 4);
-            memcpy(&s->play_coords[index][2], &raw[2], 4);
-        }
+        memcpy(isRec ? s->rec_coords[index] : s->play_coords[index], raw, sizeof raw);
 
         // Gate = first frame whose position differs from frame 0. capture_ok
         // guarantees frame 0 belongs to this session, not the previous one.
@@ -353,19 +257,7 @@ static uint8_t ClearTasInputState(GameAddresses* addr) {
 
 // One key code released in the held array.
 static void ClearHeldCode(uint32_t code) {
-    volatile uint8_t* held = HeldArray();
-    if (!held || code >= 256) return;
-    __try {
-        held[code] = 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-}
-
-static void ClearHeldBits(uint8_t bits) {
-    volatile uint8_t* held = HeldArray();
-    if (!held) return;
-    __try {
-        heldkeys::Clear(held, bits);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (code < 256) WithHeld([=](volatile uint8_t* held) { held[code] = 0; });
 }
 
 // Release every key the TAS holds: zero the key buffer, apply whatever it
@@ -378,7 +270,7 @@ static void ReleaseTasInput(TasSharedState* s, GameAddresses* addr) {
     const uint8_t held = ClearTasInputState(addr);
     if (!held) return;
     FlushObserverQueue();
-    ClearHeldBits(held);
+    WithHeld([=](volatile uint8_t* keys) { heldkeys::Clear(keys, held); });
 }
 
 // Drop gate alignment. The controller stages gate_align_rec right before each
@@ -536,7 +428,7 @@ static bool TryProcessRestartCommand(TasSharedState* s) {
 static void TryProcessTestFault(TasSharedState* s) {
     if (s->command != CMD_TEST_FAULT) return;
     crash::ScopedGameCall call(TAS_GAME_CALL_TEST_FAULT);
-    if (g_cycleCaveAddr && g_cycleCaveAddr->time_current) {
+    if (g_cycleCaveAddr) {
         g_cycleCaveAddr->time_current(nullptr, nullptr);
     }
     *(volatile uint32_t*)nullptr = 0;
@@ -655,26 +547,16 @@ static void CompleteContinueSplice(TasSharedState* s) {
     }
 }
 
-// Publish the live position and velocity in every mode. Holds a __try, so no
-// C++ objects needing unwinding (C2712).
+// Publish the live position and velocity in every mode.
 static void PublishLivePosition(TasSharedState* s) {
-    if (s->player_ptr) {
-        __try {
-            auto player = (uint8_t*)s->player_ptr;
-            float new_x, new_y, new_z;
-            memcpy(&new_x, player + GameAddresses::PLAYER_X, 4);
-            memcpy(&new_y, player + GameAddresses::PLAYER_Y, 4);
-            memcpy(&new_z, player + GameAddresses::PLAYER_Z, 4);
-
-            s->velocity_x = new_x - s->player_x;
-            s->velocity_y = new_y - s->player_y;
-            s->velocity_z = new_z - s->player_z;
-
-            s->player_x = new_x;
-            s->player_y = new_y;
-            s->player_z = new_z;
-        } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    }
+    float p[3];
+    if (!SafeCopy(s->player_ptr + GameAddresses::PLAYER_X, p, sizeof p)) return;
+    s->velocity_x = p[0] - s->player_x;
+    s->velocity_y = p[1] - s->player_y;
+    s->velocity_z = p[2] - s->player_z;
+    s->player_x = p[0];
+    s->player_y = p[1];
+    s->player_z = p[2];
 }
 
 // Runs in every mode; see f5_restart_cave.hpp.
@@ -721,7 +603,7 @@ static void RecTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
             LogRing(s, LOG_WARN, "REC start: could not flush the keyboard observer's queue");
         }
         const uint8_t physical = GameHasFocus() ? SampleGAKS() : (uint8_t)0;
-        WriteHeldReal(physical);
+        WithHeld([=](volatile uint8_t* held) { heldkeys::WriteReal(held, physical); });
         WriteDIBufferReal(GetDIBuffer(kbobj), physical);
         g_prevMask = 0;
         g_ownedBits = 0;
@@ -730,7 +612,7 @@ static void RecTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
     g_execMode = MODE_REC;
     g_execTick = index;
     uint8_t mask = 0;
-    if (!ReadHeldMask(&mask)) {
+    if (!WithHeld([&](volatile uint8_t* held) { mask = heldkeys::MaskOf(held); })) {
         LogRing(s, LOG_ERROR, "REC could not read the keyboard observer's held keys");
         s->capture_ok = 0;
     }
@@ -801,13 +683,14 @@ static void PlayTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
     if (s->input_model == TAS_INPUT_MODEL_HELD) {
         // Held for this tick's physics: written after the observer's Update,
         // so no queue, stamp or one-event-per-tick rule stands in between.
-        if (!WriteHeldMask(mask)) s->capture_ok = 0;
+        if (!WithHeld([=](volatile uint8_t* held) { heldkeys::Write(held, mask); })) s->capture_ok = 0;
         g_heldWritten = true;
     } else {
         // An injected take: keep what this tick's Update applied for a CONT
         // splice's conversion, then queue the transitions for the next tick.
         uint8_t observed = 0;
-        if (valid && src < TAS_MAX_TICKS && ReadHeldMask(&observed)) {
+        if (valid && src < TAS_MAX_TICKS &&
+            WithHeld([&](volatile uint8_t* held) { observed = heldkeys::MaskOf(held); })) {
             g_observedHeld[src] = observed;
             g_observedSeen[src] = 1;
         }
@@ -836,7 +719,7 @@ static void __declspec(noinline) CycleCave_Logic() {
     g_lastCycleMs = GetTickCount();
 
     if (s->replay_ptr) {
-        s->player_ptr = SafeReadPtr(s->replay_ptr + GameAddresses::REPLAY_PLAYER_OFFSET);
+        s->player_ptr = SafeRead32(s->replay_ptr + GameAddresses::REPLAY_PLAYER_OFFSET);
     }
 
     if (g_refreshStamps > 0 && s->player_ptr) {

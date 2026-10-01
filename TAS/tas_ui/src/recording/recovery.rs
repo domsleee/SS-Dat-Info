@@ -41,21 +41,12 @@ pub struct RecoverySessionContext {
     /// The level is known when the checkpoint is written, so it is carried here.
     #[serde(default)]
     pub level: Option<String>,
-    /// Physics and rider stamps captured while recording. The checkpoint
-    /// writer rebuilds a zeroed shared state, so without these the recovered
-    /// take would carry no stamps and mismatch detection would be off for it.
-    #[serde(default)]
-    pub fpu_control_word: Option<u32>,
-    #[serde(default)]
-    pub renderer_id: Option<u32>,
-    #[serde(default)]
-    pub rider_character: Option<u32>,
-    #[serde(default)]
-    pub rider_stance: Option<u32>,
-    /// TAS_INPUT_MODEL_* the take was recorded in; `None` = before the held
-    /// model (injected).
-    #[serde(default)]
-    pub input_model: Option<u32>,
+    /// Physics, rider and input-model stamps captured while recording. The
+    /// checkpoint writer rebuilds a zeroed shared state, so without these the
+    /// recovered take would carry no stamps and mismatch detection would be
+    /// off for it. Flattened: the keys sit beside `level`, as they always have.
+    #[serde(flatten)]
+    pub stamps: IdentityStamps,
 }
 
 impl RecoverySessionContext {
@@ -67,59 +58,27 @@ impl RecoverySessionContext {
             end_tick,
             label,
             level: None,
-            fpu_control_word: None,
-            renderer_id: None,
-            rider_character: None,
-            rider_stance: None,
-            input_model: None,
+            stamps: IdentityStamps::default(),
         })
-    }
-
-    pub fn with_input_model(mut self, model: Option<u32>) -> Self {
-        self.input_model = model;
-        self
-    }
-
-    /// Carry the live physics / rider stamps: `(fpu_control_word, renderer_id,
-    /// (rider_character, rider_stance))` as read coherently from the live
-    /// shared state. Unknown halves stay `None`.
-    pub fn with_stamps(mut self, live: Option<(u32, u32, (u32, u32))>) -> Self {
-        if let Some((fpu, renderer, (character, stance))) = live {
-            self.fpu_control_word = (fpu != 0).then_some(fpu);
-            self.renderer_id = (renderer != tas_shared::TAS_RENDERER_UNKNOWN).then_some(renderer);
-            self.rider_character =
-                (character != tas_shared::TAS_CHARACTER_UNKNOWN).then_some(character);
-            self.rider_stance = (stance != u32::MAX).then_some(stance);
-        }
-        self
-    }
-
-    /// Write the carried stamps into a rebuilt shared state so a save from it
-    /// stamps the file exactly as a live save would.
-    pub fn apply_stamps(&self, state: &mut tas_shared::TasSharedState) {
-        if let Some(v) = self.fpu_control_word {
-            state.fpu_control_word = v;
-        }
-        if let Some(v) = self.renderer_id {
-            state.renderer_id = v;
-        }
-        if let Some(v) = self.rider_character {
-            state.rider_character = v;
-        }
-        if let Some(v) = self.rider_stance {
-            state.rider_stance = v;
-        }
-        state.input_model = self
-            .input_model
-            .unwrap_or(tas_shared::TAS_INPUT_MODEL_INJECTED);
     }
 
     /// The rider stamp as the history entry shows it ("Keith · goofy").
     pub fn rider_label(&self) -> Option<String> {
         tas_shared::rider_label(
-            self.rider_character
+            self.stamps
+                .rider_character
                 .unwrap_or(tas_shared::TAS_CHARACTER_UNKNOWN),
-            self.rider_stance.unwrap_or(u32::MAX),
+            self.stamps.rider_stance.unwrap_or(u32::MAX),
+        )
+    }
+
+    /// The physics-mode stamp as the history entry shows it ("OpenGL/53-bit").
+    pub fn physics_label(&self) -> Option<String> {
+        tas_shared::physics_mode_label(
+            self.stamps
+                .renderer_id
+                .unwrap_or(tas_shared::TAS_RENDERER_UNKNOWN),
+            self.stamps.fpu_control_word.unwrap_or(0),
         )
     }
 
@@ -151,7 +110,7 @@ impl RecoveryStore {
         Self::new_with(root, Duration::from_millis(DEFAULT_RECOVERY_DEBOUNCE_MS))
     }
 
-    fn new_with(root: PathBuf, debounce: Duration) -> Result<Self, String> {
+    pub(crate) fn new_with(root: PathBuf, debounce: Duration) -> Result<Self, String> {
         std::fs::create_dir_all(&root)
             .map_err(|e| format!("failed to create recovery dir {}: {}", root.display(), e))?;
 
@@ -163,11 +122,6 @@ impl RecoveryStore {
             last_write_at: None,
             debounce,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_in_root(root: PathBuf, debounce: Duration) -> Result<Self, String> {
-        Self::new_with(root, debounce)
     }
 
     pub fn root(&self) -> &Path {
@@ -241,16 +195,8 @@ impl RecoveryWriteJob {
         }
         let mut state = tas_shared::zeroed_boxed();
         self.snapshot.restore_to(&mut state);
-        self.session.apply_stamps(&mut state);
-
-        let identity = IdentityStamps {
-            renderer_id: self.session.renderer_id,
-            fpu_control_word: self.session.fpu_control_word,
-            rider_character: self.session.rider_character,
-            rider_stance: self.session.rider_stance,
-            input_model: self.session.input_model,
-            trajectory_ticks: None,
-        };
+        // The session's stamps, not the zeroed state's, go in the header.
+        let identity = self.session.stamps.clone();
         let bytes = RecordingFile::encode(&state, Some(&identity), Some(self.session))?;
         tas_codec::save_atomic(&self.recording_path, &bytes)
     }
@@ -278,11 +224,6 @@ impl RecoveryWriter {
             Ok(writer) => writer.take_errors(),
             Err(error) => vec![error.clone()],
         }
-    }
-}
-impl Default for RecoveryWriter {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -325,11 +266,11 @@ impl RecoveryStore {
                 )
                 .ok_or("Empty recovery recording")?;
                 session.label = "Recovered recording (legacy session unknown)".into();
-                let identity = IdentityStamps::from_metadata(&meta);
-                session.renderer_id = identity.renderer_id;
-                session.fpu_control_word = identity.fpu_control_word;
-                session.rider_character = identity.rider_character;
-                session.rider_stance = identity.rider_stance;
+                session.stamps = IdentityStamps {
+                    input_model: None,
+                    trajectory_ticks: None,
+                    ..IdentityStamps::from_metadata(&meta)
+                };
                 session
             }
         };
@@ -381,10 +322,42 @@ mod tests {
         Ok(true)
     }
 
+    /// A checkpoint written before the stamps moved into `IdentityStamps`
+    /// keeps them as flat keys beside `level`: it still loads, stamps and all.
+    #[test]
+    fn a_flat_checkpoint_session_still_deserializes() {
+        let json = r#"{"kind":"Rec","start_tick":0,"end_tick":406,"label":"Recorded 0:04.06",
+            "level":"FE","fpu_control_word":639,"renderer_id":3,"rider_character":1,
+            "rider_stance":0,"input_model":1}"#;
+        let session: RecoverySessionContext = serde_json::from_str(json).unwrap();
+        assert_eq!(session.level.as_deref(), Some("FE"));
+        assert_eq!(
+            session.stamps,
+            IdentityStamps {
+                renderer_id: Some(3),
+                fpu_control_word: Some(0x027F),
+                rider_character: Some(1),
+                rider_stance: Some(0),
+                input_model: Some(1),
+                trajectory_ticks: None,
+            }
+        );
+        // A pre-stamp checkpoint has none of the keys.
+        let bare: RecoverySessionContext = serde_json::from_str(
+            r#"{"kind":"Continue","start_tick":10,"end_tick":20,"label":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(bare.stamps, IdentityStamps::default());
+        // And the keys are still written flat.
+        let written = serde_json::to_value(&session).unwrap();
+        assert_eq!(written["fpu_control_word"], 639);
+        assert_eq!(written["rider_character"], 1);
+    }
+
     #[test]
     fn recovery_store_persists_and_loads_checkpoint() {
         let root = unique_temp_root("tas_ui_recovery_store_roundtrip");
-        let mut store = RecoveryStore::new_in_root(root.clone(), Duration::ZERO).unwrap();
+        let mut store = RecoveryStore::new_with(root.clone(), Duration::ZERO).unwrap();
         let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 5;
         for i in 0..5 {
@@ -406,7 +379,7 @@ mod tests {
     #[test]
     fn recovery_ignores_unbound_legacy_sidecar_and_recovers_first_recording() {
         let root = unique_temp_root("recovery_legacy_pair");
-        let store = RecoveryStore::new_in_root(root.clone(), Duration::ZERO).unwrap();
+        let store = RecoveryStore::new_with(root.clone(), Duration::ZERO).unwrap();
         let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 2;
         state.input_log[0] = 8;
@@ -428,7 +401,7 @@ mod tests {
     fn failed_checkpoint_publish_preserves_old_complete_session() {
         use std::os::windows::fs::OpenOptionsExt;
         let root = unique_temp_root("recovery_failed_publish");
-        let mut store = RecoveryStore::new_in_root(root.clone(), Duration::ZERO).unwrap();
+        let mut store = RecoveryStore::new_with(root.clone(), Duration::ZERO).unwrap();
         let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 2;
         state.input_log[0] = 1;
@@ -470,7 +443,7 @@ mod tests {
     /// stays unthrottled.
     #[test]
     fn recovery_debounce_grows_with_length() {
-        let prod = RecoveryStore::new_in_root(
+        let prod = RecoveryStore::new_with(
             unique_temp_root("tas_ui_debounce_phases"),
             Duration::from_millis(RECOVERY_DEBOUNCE_EARLY_MS),
         )
@@ -484,7 +457,7 @@ mod tests {
 
         // Test-mode zero base stays unthrottled at every length.
         let test =
-            RecoveryStore::new_in_root(unique_temp_root("tas_ui_debounce_zero"), Duration::ZERO)
+            RecoveryStore::new_with(unique_temp_root("tas_ui_debounce_zero"), Duration::ZERO)
                 .unwrap();
         assert!(test.effective_debounce(0).is_zero());
         assert!(test.effective_debounce(60_000).is_zero());
@@ -496,7 +469,7 @@ mod tests {
     #[test]
     fn recovery_writer_flush_drains_before_clear() {
         let root = unique_temp_root("tas_ui_recovery_writer_drain");
-        let mut store = RecoveryStore::new_in_root(root.clone(), Duration::ZERO).unwrap();
+        let mut store = RecoveryStore::new_with(root.clone(), Duration::ZERO).unwrap();
         let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 3;
         state.input_log[0] = 9;
@@ -520,7 +493,7 @@ mod tests {
     #[test]
     fn recovery_store_skips_unchanged_non_forced_writes() {
         let root = unique_temp_root("tas_ui_recovery_store_skip");
-        let mut store = RecoveryStore::new_in_root(root.clone(), Duration::ZERO).unwrap();
+        let mut store = RecoveryStore::new_with(root.clone(), Duration::ZERO).unwrap();
         let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 3;
         state.input_log[0] = 0x01;
@@ -546,7 +519,7 @@ mod tests {
     #[test]
     fn recovery_store_replaces_checkpoint_atomically() {
         let root = unique_temp_root("tas_ui_recovery_store_atomic");
-        let mut store = RecoveryStore::new_in_root(root.clone(), Duration::ZERO).unwrap();
+        let mut store = RecoveryStore::new_with(root.clone(), Duration::ZERO).unwrap();
         let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 2;
         state.input_log[0] = 0x01;
@@ -587,14 +560,16 @@ mod tests {
         let mut store = RecoveryStore::new_with(dir.clone(), Duration::from_millis(0)).unwrap();
         let state = state_with_ticks(406); // a 4.06s in-progress recording
         let snap = RecordingSnapshot::from_state(&state);
-        let session = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 406)
+        let mut session = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 406)
             .unwrap()
-            .with_level(Some("FE"))
-            .with_stamps(Some((
-                0x027F,
-                tas_shared::TAS_RENDERER_OPENGL,
-                (tas_shared::TAS_CHARACTER_KEITH, 0),
-            )));
+            .with_level(Some("FE"));
+        session.stamps = IdentityStamps {
+            renderer_id: Some(tas_shared::TAS_RENDERER_OPENGL),
+            fpu_control_word: Some(0x027F),
+            rider_character: Some(tas_shared::TAS_CHARACTER_KEITH),
+            rider_stance: Some(0),
+            ..Default::default()
+        };
         store
             .take_write_job(&snap, &session, true)
             .unwrap()
@@ -615,26 +590,8 @@ mod tests {
         // Mirror startup: restore every stamp the checkpoint carries.
         history.set_level(id, cp.session.level.clone());
         history.set_rider(id, cp.session.rider_label());
-        history.set_physics(
-            id,
-            tas_shared::physics_mode_label(
-                cp.session
-                    .renderer_id
-                    .unwrap_or(tas_shared::TAS_RENDERER_UNKNOWN),
-                cp.session.fpu_control_word.unwrap_or(0),
-            ),
-        );
-        history.set_stamps(
-            id,
-            IdentityStamps {
-                renderer_id: cp.session.renderer_id,
-                fpu_control_word: cp.session.fpu_control_word,
-                rider_character: cp.session.rider_character,
-                rider_stance: cp.session.rider_stance,
-                input_model: cp.session.input_model,
-                trajectory_ticks: None,
-            },
-        );
+        history.set_physics(id, cp.session.physics_label());
+        history.set_stamps(id, cp.session.stamps.clone());
         history.set_pinned(id, true);
         history.rename(id, format!("Recovered · {}", cp.session.label));
 

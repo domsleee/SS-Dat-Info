@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::acceptance::AcceptanceResult;
 use crate::regression::CaseResult;
 
-pub fn write_regression(results: &[CaseResult], csv_path: &Path, cert_path: &Path) {
+pub fn write_regression(results: &[CaseResult], cert_path: &Path) {
     let passed = results.iter().filter(|r| r.all_gates_pass).count();
     let max = |value: fn(&CaseResult) -> f64| results.iter().map(value).fold(0.0, f64::max);
     write(
@@ -23,7 +23,6 @@ pub fn write_regression(results: &[CaseResult], csv_path: &Path, cert_path: &Pat
             "failed": results.len() - passed,
             "max_replay_drift_x": max(|r| r.replay_drift_x),
             "max_replay_drift_z": max(|r| r.replay_drift_z),
-            "csv_path": csv_path.display().to_string().replace('\\', "/"),
             "verdict": verdict(passed == results.len()),
             "cases": results,
         }),
@@ -67,16 +66,5 @@ fn write(cert_path: &Path, body: impl Serialize) {
     match written {
         Ok(()) => println!("\nDeterminism certificate: {}", cert_path.display()),
         Err(e) => eprintln!("WARNING: Failed to write certificate: {}", e),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::acceptance::Verdict;
-
-    #[test]
-    fn verdicts_serialize_as_their_printed_form() {
-        assert_eq!(serde_json::to_string(&Verdict::Pass).unwrap(), "\"PASS\"");
-        assert_eq!(serde_json::to_string(&Verdict::Fail).unwrap(), "\"FAIL\"");
     }
 }

@@ -27,18 +27,6 @@ pub fn race_clock(state: &TasSharedState) -> Option<RaceClock> {
     })
 }
 
-/// The last HUD player-line time (centiseconds) with the clock read in the
-/// same call, or None before the first one.
-pub fn race_ab(state: &TasSharedState) -> Option<(u32, f32)> {
-    let (cs, bits) = with_seqlock(&state.race_seq, || unsafe {
-        (
-            std::ptr::read_volatile(&state.race_ab_cs),
-            std::ptr::read_volatile(&state.race_ab_bits),
-        )
-    })?;
-    (cs != 0 || bits != 0).then(|| (cs, f32::from_bits(bits)))
-}
-
 /// The human rider's last finish, from the game's Finish_Point.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RaceFinish {
@@ -57,35 +45,17 @@ pub struct RaceFinish {
 /// The last finish, or None before the first. `seq` counts finishes.
 pub fn race_finish(state: &TasSharedState) -> Option<RaceFinish> {
     use std::sync::atomic::Ordering;
-    for _ in 0..64 {
-        let seq = state.race_finish_seq.load(Ordering::Acquire);
-        if seq == 0 {
-            return None;
+    // SAFETY: shared mapping; the DLL writes the fields inside the sequence window.
+    let finish = with_seqlock(&state.race_finish_seq, || unsafe {
+        RaceFinish {
+            seq: state.race_finish_seq.load(Ordering::Relaxed) / 2,
+            tick: std::ptr::read_volatile(&state.race_finish_tick),
+            mode: std::ptr::read_volatile(&state.race_finish_mode),
+            valid: std::ptr::read_volatile(&state.race_finish_valid) != 0,
+            seconds: f32::from_bits(std::ptr::read_volatile(&state.race_finish_time_bits)),
         }
-        if seq % 2 == 1 {
-            std::hint::spin_loop();
-            continue;
-        }
-        // SAFETY: shared mapping; the DLL writes the fields before the sequence.
-        let (tick, mode, valid, bits) = unsafe {
-            (
-                std::ptr::read_volatile(&state.race_finish_tick),
-                std::ptr::read_volatile(&state.race_finish_mode),
-                std::ptr::read_volatile(&state.race_finish_valid),
-                std::ptr::read_volatile(&state.race_finish_time_bits),
-            )
-        };
-        if state.race_finish_seq.load(Ordering::Acquire) == seq {
-            return Some(RaceFinish {
-                seq: seq / 2,
-                tick,
-                mode,
-                valid: valid != 0,
-                seconds: f32::from_bits(bits),
-            });
-        }
-    }
-    None
+    })?;
+    (finish.seq != 0).then_some(finish)
 }
 
 /// What the HUD shows now, in centiseconds, once the race has started.
@@ -193,6 +163,18 @@ mod tests {
         state.race_clock_flags = TAS_RACE_CLOCK_STARTED;
         state.fpu_control_word = 0x027F;
         assert_eq!(hud_time_cs(&state), Some(5999));
+    }
+
+    #[test]
+    fn race_finish_counts_clean_publications_only() {
+        use std::sync::atomic::Ordering;
+        let mut state = zeroed_boxed();
+        assert_eq!(race_finish(&state), None, "no finish yet");
+        state.race_finish_tick = 7;
+        state.race_finish_seq.store(3, Ordering::Relaxed);
+        assert_eq!(race_finish(&state), None, "writer mid-update");
+        state.race_finish_seq.store(4, Ordering::Relaxed);
+        assert_eq!(race_finish(&state).map(|f| (f.seq, f.tick)), Some((2, 7)));
     }
 
     #[test]

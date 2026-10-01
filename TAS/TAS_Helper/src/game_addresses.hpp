@@ -123,8 +123,7 @@ struct GameAddresses {
     HMODULE hmg = nullptr;   // HMG_Cetsup_Win32.dll
     HMODULE kernel = nullptr; // HMG_Kernel.dll
 
-    // Stamps injected BB3B10 events like a real keypress. nullptr = export
-    // missing (fall back to calibrated arg4).
+    // Stamps injected BB3B10 events like a real keypress. Required.
     KernelTimeCurrentFn time_current = nullptr;
 
     std::uint8_t* tick_cave_site = nullptr;     // exe+0x25C81: after ftol+mov esi,eax (tick override)
@@ -137,10 +136,9 @@ struct GameAddresses {
     std::uint8_t* f5_done_site = nullptr;   // SG+0x14199F: Set_Game_Mode's mode init returned
     std::uint8_t* stop_site = nullptr;      // SG+0x1408F0: Supreme::Stop (the race is being left)
     std::uint8_t* player_base = nullptr;    // SG+0x1D5450: root pointer
-    // Live vtables the replay-capture hook classifies recorder owners with;
-    // 0 until Resolve validated the constructor sites.
+    // Live Player vtable the replay-capture hook identifies the human with;
+    // 0 until Resolve validated the constructor site.
     std::uint32_t player_vtable = 0;
-    std::uint32_t ghost_vtable = 0;
     // SG+0x1D3304: pointer to the current level's resource path. Reliable for
     // area, not difficulty: Village Hard reads ".../Tracks/easy/...".
     std::uint8_t* level_path_ptr = nullptr;
@@ -174,8 +172,8 @@ struct GameAddresses {
     static constexpr uint32_t REPLAY_PLAYER_OFFSET = 0x84;
     // The human rider is a plain `Player`; ghosts are `Ghost_Player`, others
     // `AI_Player` / `Net_Player`. A Player links back to its recorder at +0x14C
-    // (see replay_identity.hpp). Resolve validates both vtable RVAs against the
-    // constructors' `mov [this], offset vtable`.
+    // (see replay_identity.hpp). Resolve validates the Player vtable RVA against
+    // the constructor's `mov [this], offset vtable`.
     // Loadout object [player+0x20] (no RTTI) holds MSVC6 std::strings
     // ({allocator, ptr, size, capacity}, 16 bytes): character folder at +0x10
     // ("vincent"), character config path at +0x30, board config path at +0x60
@@ -185,11 +183,8 @@ struct GameAddresses {
     static constexpr uint32_t PLAYER_CONFIG_OFFSET = 0x48;
     static constexpr uint32_t LOADOUT_FOLDER_STRING = 0x10;
     static constexpr uint32_t PLAYER_CONFIG_NAME_STRING = 0x48;
-    static constexpr uint32_t MSVC6_STRING_PTR = 0x4;
-    static constexpr uint32_t MSVC6_STRING_SIZE = 0x8;
     // Stance, area and difficulty come from the setup object (setup_object.hpp).
     static constexpr uint32_t PLAYER_VTABLE_RVA = 0x169E10;        // .?AVPlayer@Supreme_Snowboarding@Housemarque@@
-    static constexpr uint32_t GHOST_PLAYER_VTABLE_RVA = 0x169B74;  // .?AVGhost_Player@...
     // Countdown object: float t at +0, 0 at the rider's reset, +0.01 per
     // Player::Cycle (SG+0xA50D0); released once t > player_start_time.
     static constexpr uint32_t PLAYER_COUNTDOWN_OFFSET = 0x154;
@@ -209,9 +204,6 @@ struct GameAddresses {
     static constexpr uint32_t PLAYER_Y = 0xFC;
     static constexpr uint32_t PLAYER_Z = 0x100;
 
-    // Fallback Time.hi when Kernel::Time::Current is unavailable: what a real
-    // steering keypress passed in a live capture.
-    static constexpr uint32_t BB3B10_ARG4 = 0x96;
     // BB3B10's this = kbobj + 0x18.
     static constexpr uint32_t BB3B10_THIS_OFFSET = 0x18;
 
@@ -241,14 +233,13 @@ struct GameAddresses {
             return false;
         }
 
-        // Non-fatal if missing: injection falls back to the calibrated arg4.
         if (kernel) {
             time_current = (KernelTimeCurrentFn)GetProcAddress(
                 kernel, "?Current@Time@Kernel@Housemarque@@SI?AV123@XZ");
         }
         if (!time_current) {
-            Log("WARNING: Kernel::Time::Current not resolved — injected input "
-                "falls back to calibrated arg4");
+            Log("ERROR: HMG_Kernel.dll Kernel::Time::Current not resolved");
+            return false;
         }
 
         auto exeBase = (std::uint8_t*)exe;
@@ -290,10 +281,6 @@ struct GameAddresses {
         // mov dword ptr [esi], offset Player vtable (relocated imm32 at +8).
         static constexpr uint8_t kPlayerCtor[] =
             { 0x89, 0x9E, 0xC4, 0x01, 0x00, 0x00, 0xC7, 0x06, 0x10, 0x9E, 0x16, 0x10 };
-        // Ghost_Player::Ghost_Player (SG+0x7FF10) at +0x28:
-        // mov dword ptr [ebp+0], offset Ghost_Player vtable (imm32 at +3).
-        static constexpr uint8_t kGhostCtor[] =
-            { 0xC7, 0x45, 0x00, 0x74, 0x9B, 0x16, 0x10 };
         // The race loop's F5 poll: mov eax,[ecx]; mov edx,0x58 (F5);
         // call [eax+0x14] (Win32_Keyboard::State); test al,al; je +0x29.
         static constexpr uint8_t kF5Poll[] =
@@ -325,26 +312,13 @@ struct GameAddresses {
             !ValidateCodeOrHooked("HMG_Cetsup_Win32.dll+0x3980", key_up_site, kKeyUp) ||
             !ValidateCodeAbs<3>("HMG_Cetsup_Win32.dll+0x3B10", bb3b10, kBb3b10, hmgBase, 0x583A) ||
             !ValidateCodeAbs<8>("Supreme_Game.dll+0x83E4F (Player ctor)", sgBase + 0x83E4F, kPlayerCtor,
-                                sgBase, PLAYER_VTABLE_RVA) ||
-            !ValidateCodeAbs<3>("Supreme_Game.dll+0x7FF38 (Ghost_Player ctor)", sgBase + 0x7FF38,
-                                kGhostCtor, sgBase, GHOST_PLAYER_VTABLE_RVA)) {
+                                sgBase, PLAYER_VTABLE_RVA)) {
             return false;
         }
         player_vtable = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(sgBase + PLAYER_VTABLE_RVA));
-        ghost_vtable = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(sgBase + GHOST_PLAYER_VTABLE_RVA));
-        Log(std::format("Rider class vtables: Player {:#010x}, Ghost_Player {:#010x}", player_vtable, ghost_vtable));
 
-        Log(std::format("EXE base: {:p}", (void*)exeBase));
-        Log(std::format("SG base: {:p}", (void*)sgBase));
-        Log(std::format("HMG base: {:p}", (void*)hmgBase));
-        Log(std::format("the cycle cave site (Supreme::Cycle): {:p} (SG+0x13FE40)", (void*)cycle_cave_site));
-        Log(std::format("the tick cave site (tick override): {:p} (EXE+0x25C81)", (void*)tick_cave_site));
-        Log(std::format("Replay capture site: {:p} (SG+0x9E8F0)", (void*)replay_capture_site));
-        Log(std::format("the key-handler cave down (+3940): {:p}", (void*)key_down_site));
-        Log(std::format("the key-handler cave up (+3980): {:p}", (void*)key_up_site));
-        Log(std::format("BB3B10 (+3B10): {:p}", (void*)bb3b10));
-        Log(std::format("Player base ptr: {:p}", (void*)player_base));
-        Log(std::format("Kernel::Time::Current: {:p}", (void*)time_current));
+        Log(std::format("Bases: EXE {:p}, SG {:p}, HMG {:p}; Player vtable {:#010x}",
+                        (void*)exeBase, (void*)sgBase, (void*)hmgBase, player_vtable));
 
         return true;
     }

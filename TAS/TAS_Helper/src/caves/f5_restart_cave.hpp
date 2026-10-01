@@ -3,6 +3,7 @@
 #include "../log.hpp"
 #include "../game_addresses.hpp"
 #include "../fpu_safe_hook.hpp"
+#include "../safe_read.hpp"
 
 // In-process F5 restart, driven by the game's own F5 handling (DESIGN.md
 // "F5 restart").
@@ -30,21 +31,12 @@ inline LONG g_nextGeneration = 0;
 inline SafetyHookMid g_acceptHook{};
 inline SafetyHookMid g_doneHook{};
 
-static uint32_t ReadU32(uint32_t addr) {
-    if (!addr) return 0;
-    __try {
-        return *(volatile uint32_t*)addr;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
 // [[[SG+1D5450]+0x530]+0x30], resolved on every use.
 static uint32_t KeyBuffer() {
     if (!g_addr) return 0;
-    const uint32_t root = ReadU32((uint32_t)(uintptr_t)g_addr->player_base);
-    const uint32_t keyboard = ReadU32(root ? root + GameAddresses::KEYBOARD_OBJ_OFFSET : 0);
-    return ReadU32(keyboard ? keyboard + GameAddresses::DI_BUFFER_PTR_OFFSET : 0);
+    const uint32_t root = SafeRead32((uint32_t)(uintptr_t)g_addr->player_base);
+    const uint32_t keyboard = SafeRead32(root + GameAddresses::KEYBOARD_OBJ_OFFSET);
+    return SafeRead32(keyboard + GameAddresses::DI_BUFFER_PTR_OFFSET);
 }
 
 static void WriteF5(bool down) {

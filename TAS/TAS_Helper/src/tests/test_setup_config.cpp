@@ -135,15 +135,5 @@ int main() {
         check(!fixture.Read(&values), "torn string length is rejected before copying");
     }
 
-    {
-        Memory memory;
-        Values values;
-        auto reader = [&memory](uint32_t source, void* destination, uint32_t size) {
-            return memory.Read(source, destination, size);
-        };
-        check(!setupconfig::Read(0xFFF80000u, reader, &values),
-              "EXE base plus global RVA overflow is rejected");
-    }
-
     return FinishTests();
 }

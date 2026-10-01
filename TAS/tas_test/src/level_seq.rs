@@ -31,63 +31,6 @@ fn plausible(path: &str) -> bool {
     l.contains("levels") && l.contains("tracks")
 }
 
-/// `tas_test level-seq watch [secs]`: an instrument, not a gate. Logs every
-/// level-context transition with a timestamp and asserts nothing, for when you
-/// are about to change level on purpose.
-pub fn watch(secs: Option<u64>) -> bool {
-    let observe = Duration::from_secs(secs.unwrap_or(30).max(1));
-    // Attach directly, not through ensure_game_running(): the engine cycle
-    // stops at a static menu, so a liveness check would refuse exactly when
-    // this tool is needed.
-    let client = match tas_shared::TasSharedMemoryClient::open() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("ERROR: no TAS shared memory ({}). Is the DLL injected?", e);
-            return false;
-        }
-    };
-    let state = client.state();
-
-    println!(
-        "\n=== level-seq watch: {:?} — change the level now ===",
-        observe
-    );
-    println!("  t(ms)  seq  state");
-
-    let start = Instant::now();
-    let mut last: Option<Option<(u32, String)>> = None;
-    let mut transitions = 0usize;
-    while start.elapsed() < observe {
-        let ctx = tas_shared::level_context(state);
-        if last.as_ref() != Some(&ctx) {
-            let seq = state
-                .level_ctx_seq
-                .load(std::sync::atomic::Ordering::Acquire);
-            match &ctx {
-                Some((id, path)) => println!(
-                    "  {:>6}  {:>3}  RESOLVED id={:#x} {:?}",
-                    start.elapsed().as_millis(),
-                    seq,
-                    id,
-                    path
-                ),
-                None => println!(
-                    "  {:>6}  {:>3}  UNRESOLVED",
-                    start.elapsed().as_millis(),
-                    seq
-                ),
-            }
-            if last.is_some() {
-                transitions += 1;
-            }
-            last = Some(ctx);
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    println!("\n  {} transition(s) observed.", transitions);
-    true
-}
-
 pub fn run(secs: Option<u64>) -> bool {
     let observe = Duration::from_secs(secs.unwrap_or(OBSERVE_DEFAULT_SECS).max(1));
     let client = harness::ensure_game_running();
@@ -120,12 +63,9 @@ pub fn run(secs: Option<u64>) -> bool {
     let mut bad_path: Option<String> = None;
     let mut last_seq = seq0;
     let mut last_ctx: Option<(u32, String)> = None;
-    // On a stable track one id is seen and the context never flips: the DLL
-    // republishes only on a real change and goes unresolved when two scans
-    // contradict each other.
+    // On a stable track one id is seen: the DLL republishes only on a real
+    // change and goes unresolved when two scans contradict each other.
     let mut ids_seen: Vec<u32> = Vec::new();
-    let mut resolved_flips = 0usize;
-    let mut was_resolved: Option<bool> = None;
 
     let start = Instant::now();
     while start.elapsed() < observe {
@@ -141,14 +81,7 @@ pub fn run(secs: Option<u64>) -> bool {
             last_seq = seq;
         }
 
-        let ctx = tas_shared::level_context(state);
-        let resolved_now = ctx.is_some();
-        if was_resolved.is_some_and(|prev| prev != resolved_now) {
-            resolved_flips += 1;
-        }
-        was_resolved = Some(resolved_now);
-
-        match ctx {
+        match tas_shared::level_context(state) {
             Some((id, path)) => {
                 reads_ok += 1;
                 if !ids_seen.contains(&id) {
@@ -169,10 +102,7 @@ pub fn run(secs: Option<u64>) -> bool {
          {} samples caught mid-write",
         samples, observe, reads_ok, reads_none, advances, odd_samples
     );
-    println!(
-        "  ids seen resolved: {:?} | resolved<->unresolved flips: {}",
-        ids_seen, resolved_flips
-    );
+    println!("  ids seen resolved: {:?}", ids_seen);
     match &last_ctx {
         Some((id, path)) => println!("  last context: id={:#x} path={:?}", id, path),
         None => println!("  last context: UNRESOLVED (menu, or the scan has not settled)"),

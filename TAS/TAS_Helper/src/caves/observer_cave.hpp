@@ -31,11 +31,6 @@ void __fastcall Observer_Detour(void* ecx, void* edx, uint32_t keyIndex,
     if (s) {
         s->bb3b10_call_count++;
 
-        // Calibrate the fallback stamp (see g_bb3b10Arg4).
-        if (!IsTasInjectionThread() && !s->test_arg4_override && arg4 != g_bb3b10Arg4) {
-            g_bb3b10Arg4 = arg4;
-        }
-
         if (IsTasInjectionThread()) {
             observerHook.thiscall<void>(ecx, keyIndex, pressed, unk, arg4);
             return;

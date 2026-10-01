@@ -34,47 +34,32 @@ inline void UninstallKeyHandlerCave() {
     g_keyHandlerCaveState = nullptr;
 }
 
-// a1 = Win32 VK (wParam), a3 = Kernel::Time.hi of the event stamp.
-void __fastcall KeyDown_Detour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
+// True (and counted) when a real key event for `vk` must not reach the game.
+// Releases are gated too, so a blocked press never gets an unbalanced up.
+static bool BlockReal(uint32_t vk, bool release) {
     auto* s = g_keyHandlerCaveState;
-    // Calibrate the fallback stamp (see g_bb3b10Arg4).
-    if (s && !IsTasInjectionThread() && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
-        g_bb3b10Arg4 = a3;
-    }
-    if (s && ShouldBlockRealInput({
+    if (!s || !ShouldBlockRealInput({
             s->mode,
             s->cont_suppress_input != 0,
             IsTasInjectionThread(),
             MenuPauseNow(),
-            a1 == VK_ESCAPE,
-            IsTasVirtualKey(a1),
-            false,
+            vk == VK_ESCAPE,
+            IsTasVirtualKey(vk),
+            release,
         })) {
-        s->handler_block_count++;
-        return;
+        return false;
     }
-    keyDownHook.thiscall<void>(ecx, a1, a2, a3);
+    s->handler_block_count++;
+    return true;
+}
+
+// a1 = Win32 VK (wParam), a3 = Kernel::Time.hi of the event stamp.
+void __fastcall KeyDown_Detour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
+    if (!BlockReal(a1, false)) keyDownHook.thiscall<void>(ecx, a1, a2, a3);
 }
 
 void __fastcall KeyUp_Detour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uint32_t a3) {
-    auto* s = g_keyHandlerCaveState;
-    if (s && !IsTasInjectionThread() && !s->test_arg4_override && a3 != g_bb3b10Arg4) {
-        g_bb3b10Arg4 = a3;
-    }
-    // Releases are gated too, so a blocked press never gets an unbalanced up.
-    if (s && ShouldBlockRealInput({
-            s->mode,
-            s->cont_suppress_input != 0,
-            IsTasInjectionThread(),
-            MenuPauseNow(),
-            a1 == VK_ESCAPE,
-            IsTasVirtualKey(a1),
-            true,
-        })) {
-        s->handler_block_count++;
-        return;
-    }
-    keyUpHook.thiscall<void>(ecx, a1, a2, a3);
+    if (!BlockReal(a1, true)) keyUpHook.thiscall<void>(ecx, a1, a2, a3);
 }
 
 bool InstallKeyHandlerCave(GameAddresses& addr, TasSharedState* state) {

@@ -1,9 +1,8 @@
-use chrono::{Datelike, Local, NaiveDate};
+use chrono::{Local, NaiveDate};
 use eframe::egui;
 
-use crate::recording::{
-    format_recording_duration, HistoryEntry, HistoryEntryKind, RecordingHistory,
-};
+use crate::panels::timeline::format_game_time;
+use crate::recording::{HistoryEntry, HistoryEntryKind, RecordingHistory};
 
 pub enum HistoryAction {
     Restore(usize),
@@ -42,17 +41,17 @@ pub fn show(
     // unclassifiable shared spawn) always show so they are never hidden.
     let level_filter = history.live_level().map(str::to_owned);
     let resolving = history.level_is_resolving();
-    if history.level_is_resolving() {
-        if in_menu {
+    let level_label: Option<(String, &str)> = if resolving {
+        Some(if in_menu {
             // Quit-to-menu unresolves the level, but the scan is suppressed at
             // menus, so nothing will resolve it: say where the game is instead
             // of "resolving…". Same split as the status chip: with the in-game
             // flag set, the pause menu, a post-race dialog and the main menu
             // after a level all look identical (the engine keeps the level
             // resident). Only a fresh boot (flag 0) is provably the menu.
-            let (label, hover) = if game_in_game {
+            if game_in_game {
                 (
-                    "Level: Menu / Paused",
+                    "Level: Menu / Paused".into(),
                     "The engine isn't simulating — the pause menu, a post-race \
                      dialog, or the main menu after leaving a level (they look \
                      identical from outside). Rows are hidden until a level is \
@@ -60,34 +59,24 @@ pub fn show(
                 )
             } else {
                 (
-                    "Level: In Menu",
+                    "Level: In Menu".into(),
                     "The game is in a menu. Rows are hidden until a level is \
                      entered — restoring a track's snapshot from the menu would \
                      write over the live buffer.",
                 )
-            };
-            ui.label(
-                egui::RichText::new(label)
-                    .size(10.0)
-                    .color(egui::Color32::from_gray(120)),
-            )
-            .on_hover_text(hover);
+            }
         } else {
             // Between a level change and the scan publishing the new track the
             // level is unknown; say so rather than show the previous track.
-            ui.label(
-                egui::RichText::new("Level: resolving…")
-                    .size(10.0)
-                    .color(egui::Color32::from_gray(120)),
-            )
-            .on_hover_text(
+            (
+                "Level: resolving…".into(),
                 "The level changed and the track hasn't been identified yet \
                  (usually a fraction of a second — the scan polls fast while \
                  unresolved). Rows are hidden until it is — showing the previous \
                  track's entries here would also let you restore one over the \
                  live buffer.",
-            );
-        }
+            )
+        })
     } else if let Some(code) = level_filter.as_deref() {
         // Mention untagged entries only when some exist, so a fully tagged
         // history does not read as an approximate filter.
@@ -99,7 +88,7 @@ pub fn show(
         // menu) so the rows stay usable there — but say the engine is not
         // actually running this level right now.
         let pause_suffix = if in_menu { " · paused" } else { "" };
-        let (text, hover) = if any_untagged {
+        Some(if any_untagged {
             (
                 format!("Level: {}{} · untagged shown", code, pause_suffix),
                 "History is per-level: entries made on this track, plus ones \
@@ -112,7 +101,11 @@ pub fn show(
                 "History is per-level: only entries made on this track are listed. \
                  Switches with the game.",
             )
-        };
+        })
+    } else {
+        None
+    };
+    if let Some((text, hover)) = level_label {
         ui.label(
             egui::RichText::new(text)
                 .size(10.0)
@@ -251,19 +244,13 @@ fn render_day_header(
     yesterday: Option<NaiveDate>,
 ) -> egui::Rect {
     let top = ui.cursor().min;
-    let short = format!("{} {}", date.day(), month_abbr(date.month()));
+    let short = date.format("%-d %b");
     let label = if date == today {
         format!("Today · {}", short)
     } else if Some(date) == yesterday {
         format!("Yesterday · {}", short)
     } else {
-        format!(
-            "{} {} {} {}",
-            weekday_abbr(date.weekday().num_days_from_monday()),
-            date.day(),
-            month_abbr(date.month()),
-            date.year()
-        )
+        date.format("%a %-d %b %Y").to_string()
     };
     ui.add_space(6.0);
     let label = ui.label(
@@ -273,37 +260,6 @@ fn render_day_header(
     );
     ui.add_space(2.0);
     egui::Rect::from_min_max(top, label.rect.max)
-}
-
-fn month_abbr(m: u32) -> &'static str {
-    match m {
-        1 => "Jan",
-        2 => "Feb",
-        3 => "Mar",
-        4 => "Apr",
-        5 => "May",
-        6 => "Jun",
-        7 => "Jul",
-        8 => "Aug",
-        9 => "Sep",
-        10 => "Oct",
-        11 => "Nov",
-        12 => "Dec",
-        _ => "???",
-    }
-}
-
-fn weekday_abbr(d: u32) -> &'static str {
-    match d {
-        0 => "Mon",
-        1 => "Tue",
-        2 => "Wed",
-        3 => "Thu",
-        4 => "Fri",
-        5 => "Sat",
-        6 => "Sun",
-        _ => "???",
-    }
 }
 
 fn render_row(
@@ -408,40 +364,39 @@ fn render_row(
                                 .color(egui::Color32::from_gray(120))
                                 .monospace(),
                         );
-                        // Recorded under a different renderer / x87 precision than
-                        // the game is running now: restoring it replays different
-                        // physics (24-bit DirectX vs 53-bit OpenGL).
-                        if let (Some(stamp), Some(live)) = (entry.physics.as_deref(), live_physics)
-                        {
-                            if stamp != live {
-                                ui.label(
-                                    egui::RichText::new("\u{26A0}")
-                                        .size(11.0)
-                                        .color(egui::Color32::from_rgb(255, 140, 60)),
-                                )
-                                .on_hover_text(format!(
-                                    "Recorded under {}; the game is running {}. Different x87 \
+                        // Recorded under a different renderer / x87 precision
+                        // (24-bit DirectX vs 53-bit OpenGL), or as another
+                        // character / stance, than the game runs now: the
+                        // physics differ, so the take will not line up.
+                        let physics = entry.physics.as_deref().zip(live_physics);
+                        let physics =
+                            physics
+                                .filter(|(stamp, live)| stamp != live)
+                                .map(|(stamp, live)| {
+                                    format!(
+                                        "Recorded under {}; the game is running {}. Different x87 \
                                  precision, so this take will not replay bit-exact.",
-                                    stamp, live
-                                ));
-                            }
-                        }
-                        // Recorded as another character / stance than the one on
-                        // the board now: the physics differ, the take will not
-                        // line up.
-                        if let (Some(stamp), Some(live)) = (entry.rider.as_deref(), live_rider) {
-                            if stamp != live {
-                                ui.label(
-                                    egui::RichText::new("\u{26A0}")
-                                        .size(11.0)
-                                        .color(egui::Color32::from_rgb(255, 140, 60)),
-                                )
-                                .on_hover_text(format!(
+                                        stamp, live
+                                    )
+                                });
+                        let rider = entry.rider.as_deref().zip(live_rider);
+                        let rider =
+                            rider
+                                .filter(|(stamp, live)| stamp != live)
+                                .map(|(stamp, live)| {
+                                    format!(
                                     "Recorded as {}; the rider is {}. A different character or \
                                  stance has different physics, so this take will not line up.",
                                     stamp, live
-                                ));
-                            }
+                                )
+                                });
+                        for hover in [physics, rider].into_iter().flatten() {
+                            ui.label(
+                                egui::RichText::new("\u{26A0}")
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(255, 140, 60)),
+                            )
+                            .on_hover_text(hover);
                         }
                         // Untagged entries show on every track, so mark them or
                         // they look like a broken filter. Dim so it does not
@@ -644,17 +599,6 @@ fn parse_entry(entry: &HistoryEntry) -> Parts {
     }
 }
 
-/// Negative before the clock starts, e.g. a CONT point on the way to the
-/// start line.
-fn in_game_duration(tick: u32, clock_start: Option<u32>) -> String {
-    let offset = clock_start.unwrap_or(0);
-    if tick < offset {
-        format!("-{}", format_recording_duration(offset - tick))
-    } else {
-        format_recording_duration(tick - offset)
-    }
-}
-
 fn finished_parts(cs: u32, exact: bool) -> Parts {
     Parts {
         total: format!("Finish {}", crate::recording::format_finish_time(cs, exact)),
@@ -673,8 +617,10 @@ fn parse_snapshot(entry: &HistoryEntry) -> Parts {
             is_marker: false,
         };
     }
-    let clock_start = entry.clock_start.or(entry.first_moving);
-    let total = in_game_duration(entry.end_tick, clock_start);
+    // Negative before the clock starts, e.g. a CONT point on the way to the
+    // start line.
+    let clock_start = entry.clock_start.or(entry.first_moving).unwrap_or(0);
+    let total = format_game_time(entry.end_tick, clock_start);
     // A finished run has one authoritative visible time. Do not also render
     // its recording duration or continuation origin beside it.
     if let Some(cs) = entry.finish_time_cs {
@@ -686,7 +632,7 @@ fn parse_snapshot(entry: &HistoryEntry) -> Parts {
             context: format!(
                 "from {} · {}",
                 entry.start_tick,
-                in_game_duration(entry.start_tick, clock_start)
+                format_game_time(entry.start_tick, clock_start)
             ),
             is_marker: false,
         };
@@ -819,13 +765,16 @@ mod tests {
         let entry = &history.entries()[0];
         assert_eq!(entry.first_moving, Some(1));
         assert_eq!(entry.clock_start, Some(2));
-        assert_eq!(parse_entry(entry).total, format_recording_duration(1));
+        assert_eq!(
+            parse_entry(entry).total,
+            crate::recording::format_recording_duration(1)
+        );
     }
 
     #[test]
     fn a_tick_before_the_clock_start_reads_negative() {
-        assert_eq!(in_game_duration(1000, Some(1147)), "-0:01.47");
-        assert_eq!(in_game_duration(1147, Some(1147)), "0:00.00");
+        assert_eq!(format_game_time(1000, 1147), "-0:01.47");
+        assert_eq!(format_game_time(1147, 1147), "0:00.00");
     }
 
     /// A timeline edit shows what it did, not a zero duration.

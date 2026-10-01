@@ -76,7 +76,7 @@ impl Settings {
 ///      keeps its own recordings and history. A `data/` subfolder rather than a
 ///      `tas` sibling: that would collide with `TAS` on case-insensitive
 ///      Windows.
-///   3. `~/.ssb-inspector` for un-deployed dev builds.
+///   3. `%USERPROFILE%\.ssb-inspector` for un-deployed dev builds.
 pub fn data_root_dir() -> PathBuf {
     if let Some(over) = std::env::var_os("SSB_INSPECT_DATA_DIR") {
         return PathBuf::from(over);
@@ -84,8 +84,8 @@ pub fn data_root_dir() -> PathBuf {
     if let Some(dir) = game_data_root_from_exe() {
         return dir;
     }
-    user_home_dir()
-        .map(|home| home.join(".ssb-inspector"))
+    std::env::var_os("USERPROFILE")
+        .map(|home| PathBuf::from(home).join(".ssb-inspector"))
         .unwrap_or_else(|| PathBuf::from(".ssb-inspector"))
 }
 
@@ -105,17 +105,4 @@ fn game_data_root_from_exe() -> Option<PathBuf> {
     } else {
         None
     }
-}
-
-fn user_home_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-        .or_else(|| {
-            let drive = std::env::var_os("HOMEDRIVE")?;
-            let path = std::env::var_os("HOMEPATH")?;
-            let mut buf = PathBuf::from(drive);
-            buf.push(path);
-            Some(buf)
-        })
 }

@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 
 use crate::gamemem::GameMemory;
-use crate::{harness, replay};
+use crate::harness;
 
-const FIXTURE: &str = "FE-tremendous.tasrec";
+pub(crate) const FIXTURE: &str = "FE-tremendous.tasrec";
 /// Replay speed while hunting for a held window: fast enough to reach it
 /// quickly, slow enough that a 2 ms poll sees the window.
 const SEARCH_SPEED: f32 = 2.0;
@@ -31,22 +31,6 @@ pub(crate) fn find_held_window(log: &[u8], count: u32, from: u32, len: u32) -> O
     })
 }
 
-pub(crate) fn load_fixture(client: &mut TasSharedMemoryClient) -> Result<u32, String> {
-    let path = harness::fixture_path(FIXTURE)?;
-    let loaded = replay::load_tasrec(&path).map_err(|e| format!("loading {FIXTURE}: {e}"))?;
-    replay::write_to_shared(client, &loaded);
-    Ok(loaded.count)
-}
-
-/// STOP, wait for the DLL to take it, and put the speed back to 1x.
-pub(crate) fn cleanup(client: &mut TasSharedMemoryClient) {
-    harness::stop(client);
-    if !wait_idle(client, Duration::from_secs(3)) {
-        eprintln!("  WARNING: the cleanup STOP was not consumed");
-    }
-    client.state_mut().playback_speed = 1.0;
-}
-
 fn wait_arm(client: &TasSharedMemoryClient, generation: u32) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while client.state().arm_generation == generation {
@@ -54,17 +38,6 @@ fn wait_arm(client: &TasSharedMemoryClient, generation: u32) -> bool {
             return false;
         }
         thread::sleep(Duration::from_millis(2));
-    }
-    true
-}
-
-fn wait_idle(client: &TasSharedMemoryClient, within: Duration) -> bool {
-    let deadline = Instant::now() + within;
-    while !client.command_idle() {
-        if Instant::now() > deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(5));
     }
     true
 }
@@ -78,7 +51,7 @@ pub(crate) fn start_aligned_play(
     harness::stop_competing_tas_ui_writer();
     harness::stop(client);
     let memory = GameMemory::attach().ok_or("cannot read the game's memory")?;
-    load_fixture(client)?;
+    harness::load_fixture(client, FIXTURE)?;
     client.state_mut().playback_speed = SEARCH_SPEED;
     let (rec_gate, live_gate) = harness::restart_play_aligned_unwatched(client)?;
     Ok((memory, rec_gate, live_gate))
@@ -214,24 +187,19 @@ fn judge(
 /// the replay was holding must be released, or the rider keeps steering.
 pub fn run_cont_refuse_release() -> bool {
     println!("=== CONT-REFUSE-RELEASE: a refused CONT must release injected keys ===\n");
-    let mut client = harness::ensure_game_running();
-    let result = arm_over_held_play(&mut client, TasCommand::ArmContinue);
-    cleanup(&mut client);
-    let ok = judge(
-        "CONT-REFUSE-RELEASE",
-        TasCommand::ArmContinue,
-        TasMode::Off,
-        result,
-    );
-    println!(
-        "*** CONT-REFUSE-RELEASE {} ***",
-        if ok {
-            "PASSED: the refusal released every injected key"
+    harness::run_case("CONT-REFUSE-RELEASE", |client| {
+        let result = arm_over_held_play(client, TasCommand::ArmContinue);
+        if judge(
+            "CONT-REFUSE-RELEASE",
+            TasCommand::ArmContinue,
+            TasMode::Off,
+            result,
+        ) {
+            Ok("the refusal released every injected key".into())
         } else {
-            "FAILED"
+            Err(String::new())
         }
-    );
-    ok
+    })
 }
 
 /// ARM_REC and ARM_PLAY sent over a live PLAY (no STOP first) start a new
@@ -240,26 +208,23 @@ pub fn run_cont_refuse_release() -> bool {
 /// presses would otherwise stay down in the observer and keep steering.
 pub fn run_arm_over_live_release() -> bool {
     println!("=== ARM-OVER-LIVE-RELEASE: an arm over a live session releases its keys ===\n");
-    let mut client = harness::ensure_game_running();
-    let mut ok = true;
-    for (arm, mode) in [
-        (TasCommand::ArmRec, TasMode::Rec),
-        (TasCommand::ArmPlay, TasMode::Play),
-    ] {
-        println!("--- {arm:?} over a live PLAY ---");
-        let result = arm_over_held_play(&mut client, arm);
-        cleanup(&mut client);
-        ok &= judge("ARM-OVER-LIVE-RELEASE", arm, mode, result);
-    }
-    println!(
-        "*** ARM-OVER-LIVE-RELEASE {} ***",
-        if ok {
-            "PASSED: ARM_REC and ARM_PLAY released the previous session's keys"
-        } else {
-            "FAILED"
+    harness::run_case("ARM-OVER-LIVE-RELEASE", |client| {
+        let mut ok = true;
+        for (arm, mode) in [
+            (TasCommand::ArmRec, TasMode::Rec),
+            (TasCommand::ArmPlay, TasMode::Play),
+        ] {
+            println!("--- {arm:?} over a live PLAY ---");
+            let result = arm_over_held_play(client, arm);
+            harness::cleanup(client);
+            ok &= judge("ARM-OVER-LIVE-RELEASE", arm, mode, result);
         }
-    );
-    ok
+        if ok {
+            Ok("ARM_REC and ARM_PLAY released the previous session's keys".into())
+        } else {
+            Err(String::new())
+        }
+    })
 }
 
 /// RESTART while an aligned CONT is parked at an unapproved splice. The park
@@ -267,25 +232,12 @@ pub fn run_arm_over_live_release() -> bool {
 /// must complete.
 pub fn run_restart_while_parked() -> bool {
     println!("=== RESTART-WHILE-PARKED: RESTART must be consumed at a parked splice ===\n");
-    let mut client = harness::ensure_game_running();
-    let ok = match restart_while_parked(&mut client) {
-        Ok(()) => true,
-        Err(e) => {
-            println!("*** RESTART-WHILE-PARKED FAILED: {e} ***");
-            false
-        }
-    };
-    cleanup(&mut client);
-    if ok {
-        println!("*** RESTART-WHILE-PARKED PASSED: the parked CONT gave way to the restart ***");
-    }
-    ok
+    harness::run_case("RESTART-WHILE-PARKED", restart_while_parked)
 }
 
-fn restart_while_parked(client: &mut TasSharedMemoryClient) -> Result<(), String> {
-    harness::stop_competing_tas_ui_writer();
+fn restart_while_parked(client: &mut TasSharedMemoryClient) -> Result<String, String> {
     harness::stop(client);
-    let count = load_fixture(client)?;
+    let count = harness::load_fixture(client, FIXTURE)?.count;
     let rec_gate = tas_shared::align::detect_first_moving(&client.state().rec_coords[..], count)
         .ok_or("the fixture never leaves the spawn")?;
     let splice = rec_gate + 400;
@@ -333,7 +285,7 @@ fn restart_while_parked(client: &mut TasSharedMemoryClient) -> Result<(), String
 
     client.reset_restart_state();
     client.send_command(TasCommand::Restart);
-    if !wait_idle(client, Duration::from_secs(3)) {
+    if !harness::wait_idle(client, Duration::from_secs(3)) {
         return Err(format!(
             "RESTART still pending after 3 s (command={}, restart_state={}, playback_pos={})",
             client.state().command,
@@ -361,7 +313,7 @@ fn restart_while_parked(client: &mut TasSharedMemoryClient) -> Result<(), String
             "the restart left the DLL armed (mode={mode}, recorded_count={recorded})"
         ));
     }
-    Ok(())
+    Ok("the parked CONT gave way to the restart".into())
 }
 
 #[cfg(test)]

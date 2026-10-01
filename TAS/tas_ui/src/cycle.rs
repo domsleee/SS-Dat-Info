@@ -291,7 +291,7 @@ impl TasApp {
             if self.resume_speed.is_none() {
                 self.resume_speed = Some(self.playback_speed);
             }
-            self.playback_speed = self.cont_catchup_multiplier;
+            self.playback_speed = self.settings.cont_catchup_speed;
             self.pending_session_kind = Some(RecordingSessionKind::Continue);
             self.pending_continue_start_tick = Some(self.continue_from_frame);
             // The prefix input is indexed from the observed gate, so the
@@ -434,16 +434,13 @@ impl TasApp {
                             phase,
                             CYCLE_BUDGET.as_secs()
                         ));
-                        self.clear_cont_catchup();
                         if let Some(shared) = self.shared.as_mut() {
                             // Straight to the DLL, as the controller does for
-                            // its own abort; reset_continue_runtime_state below
-                            // covers the rest of send_action_command's cleanup.
+                            // its own abort; abort_cycle covers the rest of
+                            // send_action_command's cleanup.
                             shared.send_command(TasCommand::Stop);
-                            shared.state_mut().playback_speed = self.playback_speed;
                         }
-                        self.reset_continue_runtime_state();
-                        self.set_cont_suppress_input(false);
+                        self.abort_cycle();
                         return;
                     }
                     // Spin with ~3ms polls only while the phase feeds arm
@@ -496,19 +493,23 @@ impl TasApp {
                     if reason.contains("diverged") {
                         self.save_divergence_report(&reason);
                     }
-                    self.clear_cont_catchup();
-                    // Push the restored speed through: an aborted PLAY must not
-                    // leave the game fast-forwarding at the catch-up speed.
-                    if let Some(shared) = self.shared.as_mut() {
-                        shared.state_mut().playback_speed = self.playback_speed;
-                    }
-                    // also clears cycle
-                    self.reset_continue_runtime_state();
-                    self.set_cont_suppress_input(false);
+                    self.abort_cycle();
                     return;
                 }
             }
         }
+    }
+
+    /// Tear down a cycle that will not complete: drop the controller and
+    /// release the input block (`reset_continue_runtime_state`), and push the
+    /// restored speed through, so an aborted PLAY does not leave the game
+    /// fast-forwarding at the catch-up speed.
+    fn abort_cycle(&mut self) {
+        self.clear_cont_catchup();
+        if let Some(shared) = self.shared.as_mut() {
+            shared.state_mut().playback_speed = self.playback_speed;
+        }
+        self.reset_continue_runtime_state();
     }
 
     /// Emit one diagnostic line at the CONT splice: where the recording

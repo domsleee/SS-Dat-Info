@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use tas_shared::TasMode;
 
-use crate::{harness, replay};
+use crate::harness;
 
 const SPLICE_AT: u32 = 2000; // a frame well within the recording, ahead of the playhead
 const REPLAY_SPEED: f32 = 32.0;
@@ -25,21 +25,13 @@ pub fn run() -> bool {
     thread::sleep(Duration::from_millis(100));
 
     // Load a real recording so the plain PLAY has frames to replay.
-    let recpath = match harness::fixture_path("FE-10065.tasrec") {
-        Ok(p) => p,
+    let loaded = match harness::load_fixture(&mut client, "FE-10065.tasrec") {
+        Ok(l) => l,
         Err(e) => {
             eprintln!("ERROR: {e}");
             return false;
         }
     };
-    let loaded = match replay::load_tasrec(&recpath) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("ERROR loading recording: {}", e);
-            return false;
-        }
-    };
-    replay::write_to_shared(&mut client, &loaded);
     client.state_mut().playback_speed = REPLAY_SPEED;
     println!("  Loaded {} ticks", loaded.count);
 

@@ -99,26 +99,6 @@ fn dist_sq_xz(a: &[f32; 3], b: &[f32; 3]) -> f32 {
     dx * dx + dz * dz
 }
 
-/// First tick in `[from..n)` whose z rises past any of `points`' z, within the
-/// plane's lateral (x) extent of that point.
-fn cross_tick_z(
-    rec_coords: &[[f32; 3]],
-    n: usize,
-    from: usize,
-    points: &[[f32; 3]],
-) -> Option<u32> {
-    for i in from.max(1)..n {
-        let prev = &rec_coords[i - 1];
-        let cur = &rec_coords[i];
-        for p in points {
-            if prev[2] < p[2] && cur[2] >= p[2] && (cur[0] - p[0]).abs() <= PLANE_RADIUS {
-                return Some(i as u32);
-            }
-        }
-    }
-    None
-}
-
 /// The tick at which the recording crosses the start line, i.e. when the
 /// in-game race timer starts. `None` when the level is unknown, has no start
 /// point, or the recording never crosses (bailed before the gate).
@@ -141,7 +121,14 @@ pub fn start_cross_tick(
             .partial_cmp(&dist_sq_xz(b, spawn))
             .unwrap_or(std::cmp::Ordering::Equal)
     })?;
-    cross_tick_z(rec_coords, n, 1, std::slice::from_ref(sp))
+    // The first tick whose z rises past the gate's z, within the plane's
+    // lateral (x) extent.
+    (1..n)
+        .find(|&i| {
+            let (prev, cur) = (&rec_coords[i - 1], &rec_coords[i]);
+            prev[2] < sp[2] && cur[2] >= sp[2] && (cur[0] - sp[0]).abs() <= PLANE_RADIUS
+        })
+        .map(|i| i as u32)
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@ use super::RecoverySessionContext;
 use serde::{Deserialize, Serialize};
 use tas_shared::{TasSharedState, TAS_MAX_TICKS};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct RecordingMetadata {
     pub version: u32,
     pub recorded_count: u32,
@@ -91,8 +91,7 @@ pub struct IdentityStamps {
 }
 
 impl IdentityStamps {
-    /// Capture the live DLL words, mapping its unknown sentinels to `None`
-    /// (same rule `RecoverySessionContext::with_stamps` uses).
+    /// Capture the live DLL words, mapping its unknown sentinels to `None`.
     pub fn from_live(state: &TasSharedState) -> Self {
         Self {
             renderer_id: (state.renderer_id != tas_shared::TAS_RENDERER_UNKNOWN)
@@ -185,23 +184,17 @@ impl RecordingFile {
             version: state.version,
             recorded_count: state.recorded_count,
             timestamp: chrono::Local::now().to_rfc3339(),
-            notes: String::new(),
             recovery_session,
-            renderer: (state.renderer_id != tas_shared::TAS_RENDERER_UNKNOWN)
-                .then(|| tas_shared::renderer_name(state.renderer_id).to_string()),
-            fpu_control_word: (state.fpu_control_word != 0).then_some(state.fpu_control_word),
-            character: (state.rider_character != tas_shared::TAS_CHARACTER_UNKNOWN)
-                .then(|| tas_shared::character_name(state.rider_character).to_string()),
-            stance: (state.rider_stance != u32::MAX).then_some(state.rider_stance),
-            input_model: Some(state.input_model),
-            trajectory_ticks: None,
+            ..Default::default()
         };
         // A loaded or restored take carries its own identity: stamp the file
         // with the take's words, never the live game's. `None` halves stay
-        // unknown rather than falling back to live.
-        if let Some(identity) = identity {
-            identity.apply_to_metadata(&mut meta);
-        }
+        // unknown rather than falling back to live. A fresh take is stamped
+        // with the live words.
+        identity
+            .cloned()
+            .unwrap_or_else(|| IdentityStamps::from_live(state))
+            .apply_to_metadata(&mut meta);
 
         let meta_json = serde_json::to_string_pretty(&meta).map_err(|e| format!("{}", e))?;
         tas_codec::encode(
@@ -219,12 +212,13 @@ impl RecordingFile {
             .map_err(|e| format!("{}", e))
     }
 
-    /// Load a take; returns its tick count. Files from before segments were
+    /// Load a take; returns its header. Files from before segments were
     /// retired still load: serde skips their `segments` list.
-    pub fn load(state: &mut TasSharedState, path: &std::path::Path) -> Result<u32, String> {
-        let data = tas_codec::read_bounded(path)?;
-        let meta = Self::load_bytes(state, &data)?;
-        Ok(meta.recorded_count)
+    pub fn load(
+        state: &mut TasSharedState,
+        path: &std::path::Path,
+    ) -> Result<RecordingMetadata, String> {
+        Self::load_bytes(state, &tas_codec::read_bounded(path)?)
     }
 
     pub(super) fn load_bytes(
@@ -244,16 +238,12 @@ impl RecordingFile {
 
         // Clear and load input log
         state.input_log[..count].copy_from_slice(&body.input_log);
-        for i in count..TAS_MAX_TICKS {
-            state.input_log[i] = 0;
-        }
+        state.input_log[count..].fill(0);
 
         // Zero the full coord buffer first: a legacy .tasrec with no coord
         // block must not inherit the previous recording's coords, which CONT,
         // drift analysis and re-saves all read.
-        for i in 0..TAS_MAX_TICKS {
-            state.rec_coords[i] = [0.0, 0.0, 0.0];
-        }
+        state.rec_coords.fill([0.0; 3]);
         state.rec_coords[..count].copy_from_slice(&body.rec_coords);
 
         state.recorded_count = meta.recorded_count;
@@ -306,7 +296,9 @@ mod tests {
         RecordingFile::save(&state, &path, None).unwrap();
 
         let mut loaded = tas_shared::zeroed_boxed();
-        let count = RecordingFile::load(&mut loaded, &path).unwrap();
+        let count = RecordingFile::load(&mut loaded, &path)
+            .unwrap()
+            .recorded_count;
         assert_eq!(count, 10);
         assert_eq!(loaded.recorded_count, 10);
 
@@ -351,7 +343,7 @@ mod tests {
         live.rider_character = tas_shared::TAS_CHARACTER_VINCENT;
         live.rider_stance = 0;
         let mut log = UiLog::default();
-        assert!(load_recording_path(&mut live, &mut log, &path));
+        assert!(load_recording_path(&mut live, &mut log, &path).is_some());
         assert!(log.lines().iter().any(|l| l.contains("WARNING")
             && l.contains("Keith · regular")
             && l.contains("Vincent · regular")));
@@ -359,7 +351,7 @@ mod tests {
         other_stance.rider_character = tas_shared::TAS_CHARACTER_KEITH;
         other_stance.rider_stance = 1;
         let mut log2 = UiLog::default();
-        assert!(load_recording_path(&mut other_stance, &mut log2, &path));
+        assert!(load_recording_path(&mut other_stance, &mut log2, &path).is_some());
         assert!(log2
             .lines()
             .iter()
@@ -368,7 +360,7 @@ mod tests {
         same.rider_character = tas_shared::TAS_CHARACTER_KEITH;
         same.rider_stance = 0;
         let mut quiet = UiLog::default();
-        assert!(load_recording_path(&mut same, &mut quiet, &path));
+        assert!(load_recording_path(&mut same, &mut quiet, &path).is_some());
         assert!(!quiet.lines().iter().any(|l| l.contains("WARNING")));
 
         let mut unstamped = tas_shared::zeroed_boxed();
@@ -431,7 +423,7 @@ mod tests {
         let mut live = tas_shared::zeroed_boxed();
         live.renderer_id = tas_shared::TAS_RENDERER_DIRECTX6;
         live.fpu_control_word = 0x007F;
-        assert!(load_recording_path(&mut live, &mut log, &path));
+        assert!(load_recording_path(&mut live, &mut log, &path).is_some());
         assert!(log.lines().iter().any(|l| l.contains("WARNING")
             && l.contains("OpenGL/53-bit")
             && l.contains("DirectX6/24-bit")));
@@ -439,7 +431,7 @@ mod tests {
         same.renderer_id = tas_shared::TAS_RENDERER_OPENGL;
         same.fpu_control_word = 0x027F;
         let mut quiet = UiLog::default();
-        assert!(load_recording_path(&mut same, &mut quiet, &path));
+        assert!(load_recording_path(&mut same, &mut quiet, &path).is_some());
         assert!(!quiet.lines().iter().any(|l| l.contains("WARNING")));
 
         // A file saved before the stamp existed (or before the DLL sampled
@@ -509,7 +501,12 @@ mod tests {
         let path = unique_temp_path("legacy_segments", "tasrec");
         std::fs::write(&path, bytes).unwrap();
         let mut state = tas_shared::zeroed_boxed();
-        assert_eq!(RecordingFile::load(&mut state, &path).unwrap(), 2);
+        assert_eq!(
+            RecordingFile::load(&mut state, &path)
+                .unwrap()
+                .recorded_count,
+            2
+        );
         assert_eq!(state.input_log[..2], [0x04, 0x05]);
 
         RecordingFile::save(&state, &path, None).unwrap();

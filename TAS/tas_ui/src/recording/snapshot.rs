@@ -50,9 +50,7 @@ impl RecordingSnapshot {
         let count = self.recorded_count as usize;
         state.recorded_count = self.recorded_count;
         state.input_log[..count].copy_from_slice(&self.input_log[..count]);
-        for i in count..TAS_MAX_TICKS {
-            state.input_log[i] = 0;
-        }
+        state.input_log[count..].fill(0);
         state.rec_coords[..count].copy_from_slice(&self.rec_coords[..count]);
     }
 

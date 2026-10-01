@@ -49,15 +49,17 @@ function Close-PicoPort($Port) {
     try { $Port.Dispose() } catch { }
 }
 
+function Read-PicoAck($Port) {
+    $Port.DiscardInBuffer()
+    $Port.Write([byte[]]@(255),0,1)
+    $reply = [byte[]]::new(3); $count=0
+    while ($count -lt 3) { $count += $Port.Read($reply,$count,3-$count) }
+    if ([BitConverter]::ToString($reply) -ne '5A-01-01') { throw "Invalid Pico acknowledgement: $([BitConverter]::ToString($reply))" }
+}
+
 function Test-PicoAck($Board) {
     $port = Open-PicoPort $Board.data_port
-    try {
-        $port.DiscardInBuffer()
-        $port.Write([byte[]]@(255),0,1)
-        $reply = [byte[]]::new(3); $count=0
-        while ($count -lt 3) { $count += $port.Read($reply,$count,3-$count) }
-        if ([BitConverter]::ToString($reply) -ne '5A-01-01') { throw "Invalid Pico acknowledgement: $([BitConverter]::ToString($reply))" }
-    } finally { Close-PicoPort $port }
+    try { Read-PicoAck $port } finally { Close-PicoPort $port }
 }
 
 function Test-PicoFiles($Board, [string]$Source) {

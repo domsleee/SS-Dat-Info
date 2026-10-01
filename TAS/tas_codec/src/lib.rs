@@ -28,13 +28,9 @@ pub const MAX_TASREC_BYTES: u64 =
 
 /// A decoded file: the raw JSON header plus the body for `count` ticks.
 pub struct Decoded {
-    /// Byte length of the JSON header (`bytes[4..4 + meta_len]` holds it).
-    pub meta_len: usize,
     pub input_log: Vec<u8>,
+    /// All zero when the file ends after the input log (a legacy recording).
     pub rec_coords: Vec<[f32; 3]>,
-    /// False when the file ends after the input log (a legacy recording):
-    /// inputs are usable, coordinates are zeroed.
-    pub has_coords: bool,
 }
 
 /// Read a whole file with the size cap enforced before allocation.
@@ -116,29 +112,19 @@ pub fn decode_body(
         return Err("Truncated rec_coords".into());
     }
     if has_coords {
-        let mut offset = coords_start;
-        for coord in rec_coords.iter_mut() {
-            for val in coord.iter_mut() {
-                *val = f32::from_le_bytes([
-                    bytes[offset],
-                    bytes[offset + 1],
-                    bytes[offset + 2],
-                    bytes[offset + 3],
-                ]);
-                if !val.is_finite() {
-                    return Err("Non-finite recording coordinate".into());
-                }
-                offset += 4;
+        let (raw, _) = bytes[coords_start..coords_end].as_chunks::<4>();
+        for (val, b) in rec_coords.iter_mut().flatten().zip(raw) {
+            *val = f32::from_le_bytes(*b);
+            if !val.is_finite() {
+                return Err("Non-finite recording coordinate".into());
             }
         }
     } else if require_coords {
         return Err("Truncated rec_coords".into());
     }
     Ok(Decoded {
-        meta_len,
         input_log,
         rec_coords,
-        has_coords,
     })
 }
 
@@ -197,47 +183,45 @@ pub fn save_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
         .open(&tmp)
         .map_err(|e| format!("failed to create {}: {}", tmp.display(), e))?;
     // From here the temp is ours: every failure below removes it, and only it.
-    if let Err(e) = file
+    let written = file
         .write_all(data)
         .map_err(|e| format!("failed to write {}: {}", tmp.display(), e))
-    {
-        drop(file);
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    if let Err(e) = file
-        .sync_all()
-        .map_err(|e| format!("failed to flush {}: {}", tmp.display(), e))
-    {
-        drop(file);
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
+        .and_then(|()| {
+            file.sync_all()
+                .map_err(|e| format!("failed to flush {}: {}", tmp.display(), e))
+        });
     drop(file); // Windows cannot rename an open file.
-    if let Err(e) = std::fs::rename(&tmp, path)
-        .map_err(|e| format!("failed to publish recording {}: {}", path.display(), e))
-    {
+    let result = written.and_then(|()| {
+        std::fs::rename(&tmp, path)
+            .map_err(|e| format!("failed to publish recording {}: {}", path.display(), e))
+    });
+    if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
-        return Err(e);
     }
-    Ok(())
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn concurrent_saves_publish_one_complete_file() {
+    /// A fresh, empty directory unique to this test run.
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "codec_concurrent_{}_{}",
+            "{tag}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn concurrent_saves_publish_one_complete_file() {
+        let dir = temp_dir("codec_concurrent");
         let path = dir.join("run.tasrec");
         let barrier = std::sync::Barrier::new(2);
         std::thread::scope(|scope| {
@@ -322,7 +306,6 @@ mod tests {
         let full = file_for(4, true);
         let len = header_meta_len(&full).unwrap();
         let body = decode_body(&full, len, 4, true).unwrap();
-        assert!(body.has_coords);
         assert_eq!(body.input_log, vec![0, 1, 2, 3]);
         assert_eq!(body.rec_coords[3], [3.0, 0.0, 1.0]);
 
@@ -330,22 +313,13 @@ mod tests {
         let len = header_meta_len(&legacy).unwrap();
         assert!(decode_body(&legacy, len, 4, true).is_err());
         let body = decode_body(&legacy, len, 4, false).unwrap();
-        assert!(!body.has_coords);
         assert_eq!(body.rec_coords, vec![[0.0; 3]; 4]);
         assert_eq!(body.input_log, vec![0, 1, 2, 3]);
     }
 
     #[test]
     fn pre_existing_temp_is_neither_used_nor_removed() {
-        let dir = std::env::temp_dir().join(format!(
-            "tas_codec_tmp_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("tas_codec_tmp");
         let path = dir.join("run.tasrec");
         // A leftover temp with a fixed name.
         std::fs::write(path.with_extension("tasrec.tmp"), b"stale").unwrap();
@@ -363,15 +337,7 @@ mod tests {
 
     #[test]
     fn consecutive_saves_do_not_share_temps() {
-        let dir = std::env::temp_dir().join(format!(
-            "tas_codec_twice_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("tas_codec_twice");
         let path = dir.join("run.tasrec");
         for byte in [1u8, 2u8] {
             let bytes = encode(b"{}", &[byte], &[[0.0; 3]]).unwrap();
@@ -404,24 +370,5 @@ mod tests {
         let len = header_meta_len(&bytes).unwrap();
         assert!(decode_body(&bytes, len, TAS_MAX_TICKS + 1, true).is_err());
         assert!(decode_body(&bytes, len, 999_999_999, true).is_err());
-    }
-
-    #[test]
-    fn atomic_save_round_trips() {
-        let dir = std::env::temp_dir().join(format!(
-            "tas_codec_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("a.tasrec");
-        let bytes = encode(b"{\"recorded_count\":2}", &[7, 8], &[[0.0; 3], [1.0; 3]]).unwrap();
-        save_atomic(&path, &bytes).unwrap();
-        let back = read_bounded(&path).unwrap();
-        assert_eq!(back, bytes);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

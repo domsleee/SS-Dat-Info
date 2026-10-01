@@ -45,23 +45,12 @@ pub fn describe_divergence(
 /// `rec_coords[0]`: when the recorded player leaves the spawn. `None` if it
 /// never moves within `recorded_count`.
 pub fn detect_first_moving(rec_coords: &[[f32; 3]], recorded_count: u32) -> Option<u32> {
-    if recorded_count == 0 || rec_coords.is_empty() {
-        return None;
-    }
+    let start = rec_coords.first()?.map(f32::to_bits);
     let n = (recorded_count as usize).min(rec_coords.len());
-    if n < 2 {
-        return None;
-    }
-    let start = rec_coords[0];
-    for (j, c) in rec_coords.iter().copied().enumerate().take(n).skip(1) {
-        if c[0].to_bits() != start[0].to_bits()
-            || c[1].to_bits() != start[1].to_bits()
-            || c[2].to_bits() != start[2].to_bits()
-        {
-            return Some(j as u32);
-        }
-    }
-    None
+    rec_coords[..n]
+        .iter()
+        .position(|c| c.map(f32::to_bits) != start)
+        .map(|j| j as u32)
 }
 
 /// How many recorded input frames inside the pre-gate hold window differ from
@@ -100,7 +89,7 @@ pub enum AlignVerdict {
 /// the coordinates must be bit-exact; a hidden difference in the spawn state
 /// shows up here and is rerolled rather than becoming the run.
 ///
-/// `max_depth_rel` caps the check at a CONT splice (0 = uncapped): the DLL
+/// `max_depth_rel` caps the check at a CONT splice or edited tick: the DLL
 /// parks playback at the splice until approved, so the verdict must be
 /// decidable from the prefix that exists by then.
 #[allow(clippy::too_many_arguments)] // reads many independent shared-state fields
@@ -128,14 +117,9 @@ pub fn check_aligned_trajectory(
         return AlignVerdict::MissingTrajectory;
     }
 
-    let depth_cap = if max_depth_rel == 0 {
-        usize::MAX
-    } else {
-        max_depth_rel as usize
-    };
     let depth = (rec_end - rec_gate)
         .min(ALIGN_VERIFY_FRAMES as usize)
-        .min(depth_cap);
+        .min(max_depth_rel as usize);
     if depth == 0 {
         return AlignVerdict::MissingTrajectory;
     }
@@ -149,9 +133,7 @@ pub fn check_aligned_trajectory(
         let r = rec_coords[rec_gate + k];
         if !p.iter().all(|v| v.is_finite())
             || !r.iter().all(|v| v.is_finite())
-            || p[0].to_bits() != r[0].to_bits()
-            || p[1].to_bits() != r[1].to_bits()
-            || p[2].to_bits() != r[2].to_bits()
+            || p.map(f32::to_bits) != r.map(f32::to_bits)
         {
             return AlignVerdict::Diverged { at: Some(k as u32) };
         }
@@ -207,7 +189,7 @@ mod tests {
         // watcher must see ALL of it before declaring Matched.
         let (play, rec) = aligned_trajectory(299, 297, 101);
         assert_eq!(
-            check_aligned_trajectory(&play, &rec, 400, 398, 297, 299, true, 0),
+            check_aligned_trajectory(&play, &rec, 400, 398, 297, 299, true, u32::MAX),
             AlignVerdict::Matched
         );
     }
@@ -218,7 +200,7 @@ mod tests {
         let (mut play, rec) = aligned_trajectory(299, 297, 101);
         play[297 + 80][2] += 0.5;
         assert_eq!(
-            check_aligned_trajectory(&play, &rec, 400, 398, 297, 299, true, 0),
+            check_aligned_trajectory(&play, &rec, 400, 398, 297, 299, true, u32::MAX),
             AlignVerdict::Diverged { at: Some(80) }
         );
     }
@@ -239,7 +221,7 @@ mod tests {
         let (mut play, rec) = aligned_trajectory(299, 297, 101);
         play[297][0] = f32::from_bits(play[297][0].to_bits() + 1);
         assert_eq!(
-            check_aligned_trajectory(&play, &rec, 400, 298, 297, 299, true, 0),
+            check_aligned_trajectory(&play, &rec, 400, 298, 297, 299, true, u32::MAX),
             AlignVerdict::Diverged { at: Some(0) }
         );
     }
@@ -249,11 +231,11 @@ mod tests {
         let (play, rec) = aligned_trajectory(299, 297, 101);
         // One frame short of the full 101-frame depth: keep waiting.
         assert_eq!(
-            check_aligned_trajectory(&play, &rec, 400, 397, 297, 299, true, 0),
+            check_aligned_trajectory(&play, &rec, 400, 397, 297, 299, true, u32::MAX),
             AlignVerdict::Pending
         );
         assert_eq!(
-            check_aligned_trajectory(&play, &rec, 400, 398, 297, 299, false, 0),
+            check_aligned_trajectory(&play, &rec, 400, 398, 297, 299, false, u32::MAX),
             AlignVerdict::CaptureFailed
         );
     }

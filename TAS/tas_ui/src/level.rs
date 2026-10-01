@@ -1,15 +1,6 @@
 //! Level codes (`FE` = Forest Easy, `AM` = Alpine Medium, `PE` = Practice)
 //! and the `<code>-<race time>` default recording name built from them.
 
-/// Level code from the DLL's published `level_id`: 0..8 = area*3 +
-/// difficulty (area 0=Forest, 1=Alpine, 2=Village; diff 0=Easy, 1=Medium,
-/// 2=Hard), 9 = Practice. `u32::MAX` = unknown/menu → None. Delegates to
-/// tas_shared so the encoding has ONE definition — tas_test's pre-flight track
-/// guard reads the same table.
-pub fn level_code_from_id(level_id: u32) -> Option<&'static str> {
-    tas_shared::level::code_from_id(level_id)
-}
-
 /// The live track code (e.g. `"FE"`), or `None` when the game has not (yet)
 /// identified the level.
 ///
@@ -18,7 +9,7 @@ pub fn level_code_from_id(level_id: u32) -> Option<&'static str> {
 /// holds the previous track until the scan catches up, so a raw read names the
 /// level you just left (wrong save folder, wrong start-line geometry).
 pub fn resolved_level_code(state: &tas_shared::TasSharedState) -> Option<&'static str> {
-    tas_shared::resolved_level_id(state).and_then(level_code_from_id)
+    tas_shared::resolved_level_id(state).and_then(tas_shared::level::code_from_id)
 }
 
 /// Which track a recording being SAVED belongs to.
@@ -105,16 +96,6 @@ mod tests {
             default_recording_name(level_for_save(None, None), Some(5876)),
             "5876.tasrec"
         );
-    }
-
-    #[test]
-    fn level_code_from_id_maps_all_ten_levels() {
-        assert_eq!(level_code_from_id(0), Some("FE"));
-        assert_eq!(level_code_from_id(4), Some("AM"));
-        assert_eq!(level_code_from_id(8), Some("VH"));
-        assert_eq!(level_code_from_id(9), Some("PE"));
-        assert_eq!(level_code_from_id(10), None);
-        assert_eq!(level_code_from_id(0xFFFF_FFFF), None);
     }
 
     #[test]

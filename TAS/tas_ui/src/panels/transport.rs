@@ -1,5 +1,4 @@
 use eframe::egui;
-use tas_shared::align::detect_first_moving;
 use tas_shared::{TasCommand, TasMode, TasSharedState};
 
 use crate::recording::{format_recording_duration, RecordingHistory};
@@ -39,11 +38,6 @@ pub struct TransportProps<'a> {
     pub arming_allowed: bool,
 }
 
-/// With nothing recorded, CONT records from frame 0 (`queue_restart_then`).
-fn can_arm_continue(mode: TasMode) -> bool {
-    matches!(mode, TasMode::Off | TasMode::Rec | TasMode::Play)
-}
-
 /// Why an arm would be refused right now, or `None` when it may go ahead.
 /// The ONE rule behind the REC / PLAY / CONT buttons' enablement and the
 /// F9 / F10 / F12 shortcuts (in-window and global): a key must never do what
@@ -59,7 +53,6 @@ pub(crate) fn arm_refusal(
             Some("a recording or replay is running — STOP first")
         }
         TasCommand::ArmPlay if recorded == 0 => Some("nothing is recorded"),
-        TasCommand::ArmContinue if !can_arm_continue(mode) => Some("nothing to continue from"),
         TasCommand::ArmRec | TasCommand::ArmPlay | TasCommand::ArmContinue if !arming_allowed => {
             Some("enter a level first")
         }
@@ -90,6 +83,16 @@ pub(crate) fn resolve_continue_frame(
     }
 }
 
+/// Button text, coloured and bold while that transport is active.
+fn lit(text: &str, active: bool, color: egui::Color32) -> egui::RichText {
+    let text = egui::RichText::new(text);
+    if active {
+        text.color(color).strong()
+    } else {
+        text
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
     let TransportProps {
         mode,
@@ -112,14 +115,7 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
         let is_play = mode == TasMode::Play;
 
         // F-key labels live in tooltips so the buttons stay narrow.
-        let rec_text = egui::RichText::new("\u{23FA} REC");
-        let rec_text = if is_rec {
-            rec_text
-                .color(egui::Color32::from_rgb(255, 60, 60))
-                .strong()
-        } else {
-            rec_text
-        };
+        let rec_text = lit("\u{23FA} REC", is_rec, egui::Color32::from_rgb(255, 60, 60));
         if ui
             .add_enabled(
                 arm_refusal(TasCommand::ArmRec, mode, recorded, arming_allowed).is_none(),
@@ -133,14 +129,11 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
         }
 
         // PLAY button (green when playing, but not during CONT catch-up)
-        let play_text = egui::RichText::new("\u{25B6} PLAY");
-        let play_text = if is_play && !catchup_active {
-            play_text
-                .color(egui::Color32::from_rgb(60, 200, 60))
-                .strong()
-        } else {
-            play_text
-        };
+        let play_text = lit(
+            "\u{25B6} PLAY",
+            is_play && !catchup_active,
+            egui::Color32::from_rgb(60, 200, 60),
+        );
         if ui
             .add_enabled(
                 arm_refusal(TasCommand::ArmPlay, mode, recorded, arming_allowed).is_none(),
@@ -164,14 +157,11 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
         ui.separator();
 
         // Continue Record (green when CONT catch-up is active)
-        let cont_text = egui::RichText::new("\u{23ED} CONT");
-        let cont_text = if catchup_active {
-            cont_text
-                .color(egui::Color32::from_rgb(60, 200, 60))
-                .strong()
-        } else {
-            cont_text
-        };
+        let cont_text = lit(
+            "\u{23ED} CONT",
+            catchup_active,
+            egui::Color32::from_rgb(60, 200, 60),
+        );
         if ui
             .add_enabled(
                 arm_refusal(TasCommand::ArmContinue, mode, recorded, arming_allowed).is_none(),
@@ -203,13 +193,7 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
             // be checked against the race clock. The race timer starts at the
             // START-LINE cross, not at first motion; anchor on the line when
             // the track is known, else on first_moving.
-            let first_moving = detect_first_moving(&state.rec_coords, recorded);
-            let timer_anchor = crate::start_line::start_cross_tick(
-                &state.rec_coords,
-                recorded,
-                crate::level::resolved_level_code(state),
-            )
-            .or(first_moving);
+            let timer_anchor = crate::panels::timeline::game_timer_anchor(state, None);
             ui.vertical(|ui| {
                 let response = ui.add_sized(
                     [72.0, 22.0],
@@ -220,15 +204,16 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
                         *continue_from = parsed;
                     }
                 }
+                // On blur a number is clamped and written back; a typo is left
+                // visible (never a silent arm) and the arm paths refuse it.
                 if response.lost_focus() {
-                    normalize_continue_frame_text(continue_from_text, continue_from, recorded);
+                    let _ = resolve_continue_frame(continue_from_text, continue_from, recorded);
                 }
                 let past_end = *continue_from > recorded;
                 let sub_text = if past_end {
                     format!("past end · {}", recorded)
                 } else {
-                    let offset = timer_anchor.unwrap_or(0);
-                    format_recording_duration((*continue_from).saturating_sub(offset))
+                    format_recording_duration((*continue_from).saturating_sub(timer_anchor))
                 };
                 let color = if past_end {
                     egui::Color32::from_rgb(217, 123, 92)
@@ -311,20 +296,8 @@ fn parse_continue_frame(text: &str, recorded: u32) -> Option<u32> {
         .map(|v| if recorded > 0 { v.min(recorded) } else { 0 })
 }
 
-/// On blur: a number is clamped to the recording and written back; text that
-/// is not a number is LEFT ALONE. Replacing it with the last valid frame here
-/// would turn a typo into a silent arm — the next F12 would splice at a frame
-/// the user never saw confirmed. The arm paths refuse the typo instead.
-fn normalize_continue_frame_text(text: &mut String, continue_from: &mut u32, recorded: u32) {
-    if let Some(parsed) = parse_continue_frame(text, recorded) {
-        *continue_from = parsed;
-        *text = parsed.to_string();
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::can_arm_continue;
     use tas_shared::TasMode;
 
     #[test]
@@ -367,23 +340,6 @@ mod tests {
     }
 
     #[test]
-    fn blur_keeps_a_typo_visible_and_clamps_numbers() {
-        use super::normalize_continue_frame_text;
-        let mut text = "abc".to_string();
-        let mut from = 100;
-        normalize_continue_frame_text(&mut text, &mut from, 4696);
-        assert_eq!(
-            (text.as_str(), from),
-            ("abc", 100),
-            "a typo must not become a frame"
-        );
-
-        text = "9000".into();
-        normalize_continue_frame_text(&mut text, &mut from, 4696);
-        assert_eq!((text.as_str(), from), ("4696", 4696));
-    }
-
-    #[test]
     fn resolve_continue_frame_refuses_text_and_clamps_numbers() {
         use super::resolve_continue_frame;
         let mut text = "abc".to_string();
@@ -399,12 +355,5 @@ mod tests {
         text = " 9000 ".into();
         assert_eq!(resolve_continue_frame(&mut text, &mut from, 4696), Ok(4696));
         assert_eq!((text.as_str(), from), ("4696", 4696));
-    }
-
-    #[test]
-    fn continue_allowed_in_off_rec_and_play() {
-        assert!(can_arm_continue(TasMode::Off));
-        assert!(can_arm_continue(TasMode::Rec));
-        assert!(can_arm_continue(TasMode::Play));
     }
 }

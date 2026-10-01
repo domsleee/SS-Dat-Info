@@ -26,9 +26,9 @@ use tas_shared::{
     TasCommand, TasMode, TasSharedMemoryClient, TAS_INPUT_MODEL_HELD, TAS_INPUT_MODEL_INJECTED,
 };
 
-use crate::command_edges::{cleanup, load_fixture};
+use crate::command_edges::FIXTURE;
 use crate::gamemem::GameMemory;
-use crate::harness;
+use crate::{drift, harness};
 
 const TAILS: [&[u8]; 2] = [
     &[0, 0, 0, 0x02, 0x01, 0x02, 0x00],
@@ -40,20 +40,15 @@ pub fn run_pending() -> bool {
     println!(
         "=== RELEASE-PENDING: nothing stays held when a replay ends with queued presses ===\n"
     );
-    let mut client = harness::ensure_game_running();
-    harness::stop_competing_tas_ui_writer();
-    let result = GameMemory::attach()
-        .ok_or_else(|| "cannot read the game's memory".to_string())
-        .and_then(|memory| {
-            for tail in TAILS {
-                for model in [TAS_INPUT_MODEL_INJECTED, TAS_INPUT_MODEL_HELD] {
-                    play_tail(&mut client, &memory, model, tail)?;
-                }
+    harness::run_case("RELEASE-PENDING", |client| {
+        let memory = GameMemory::attach().ok_or("cannot read the game's memory")?;
+        for tail in TAILS {
+            for model in [TAS_INPUT_MODEL_INJECTED, TAS_INPUT_MODEL_HELD] {
+                play_tail(client, &memory, model, tail)?;
             }
-            Ok(())
-        });
-    cleanup(&mut client);
-    report("RELEASE-PENDING", result)
+        }
+        Ok(String::new())
+    })
 }
 
 fn play_tail(
@@ -63,7 +58,7 @@ fn play_tail(
     tail: &[u8],
 ) -> Result<(), String> {
     harness::stop(client);
-    load_fixture(client)?;
+    harness::load_fixture(client, FIXTURE)?;
     {
         let s = client.state_mut();
         let start = LENGTH as usize - tail.len();
@@ -100,18 +95,13 @@ pub fn run_on_arm() -> bool {
     println!(
         "=== RELEASE-ON-ARM: an arm on the tick a press is still queued leaves nothing held ===\n"
     );
-    let mut client = harness::ensure_game_running();
-    harness::stop_competing_tas_ui_writer();
-    let result = GameMemory::attach()
-        .ok_or_else(|| "cannot read the game's memory".to_string())
-        .and_then(|memory| {
-            for arm in [TasCommand::ArmContinue, TasCommand::ArmRec] {
-                arm_on_pending(&mut client, &memory, arm)?;
-            }
-            Ok(())
-        });
-    cleanup(&mut client);
-    report("RELEASE-ON-ARM", result)
+    harness::run_case("RELEASE-ON-ARM", |client| {
+        let memory = GameMemory::attach().ok_or("cannot read the game's memory")?;
+        for arm in [TasCommand::ArmContinue, TasCommand::ArmRec] {
+            arm_on_pending(client, &memory, arm)?;
+        }
+        Ok(String::new())
+    })
 }
 
 /// RIGHT, LEFT, RIGHT, neutral at ticks T..T+3 leaves RIGHT's press queued
@@ -125,7 +115,7 @@ fn arm_on_pending(
 ) -> Result<(), String> {
     const T: u32 = 900;
     harness::stop(client);
-    load_fixture(client)?;
+    harness::load_fixture(client, FIXTURE)?;
     {
         let s = client.state_mut();
         for i in T as usize - 20..LENGTH as usize {
@@ -177,16 +167,12 @@ fn arm_on_pending(
 
 pub fn run_enter_spam() -> bool {
     println!("=== PLAY-ENTER-SPAM: real Enter taps leave an injected replay bit for bit ===\n");
-    let mut client = harness::ensure_game_running();
-    harness::stop_competing_tas_ui_writer();
-    let result = enter_spam(&mut client);
-    cleanup(&mut client);
-    report("PLAY-ENTER-SPAM", result)
+    harness::run_case("PLAY-ENTER-SPAM", enter_spam)
 }
 
-fn enter_spam(client: &mut TasSharedMemoryClient) -> Result<(), String> {
+fn enter_spam(client: &mut TasSharedMemoryClient) -> Result<String, String> {
     harness::stop(client);
-    load_fixture(client)?;
+    harness::load_fixture(client, FIXTURE)?;
     let count = client.state().recorded_count.min(2000);
     client.state_mut().recorded_count = count;
     client.state_mut().input_model = TAS_INPUT_MODEL_INJECTED;
@@ -220,14 +206,13 @@ fn enter_spam(client: &mut TasSharedMemoryClient) -> Result<(), String> {
     if !finished {
         return Err("the replay did not finish".into());
     }
-    let play = &client.state().play_coords;
-    let recorded = &rec[rec_gate as usize..count as usize];
-    let replayed = &play[live_gate as usize..];
-    let mismatches = recorded
-        .iter()
-        .zip(replayed)
-        .filter(|(r, p)| r.map(f32::to_bits) != p.map(f32::to_bits))
-        .count();
+    let (mismatches, _) = drift::bit_mismatches(
+        &rec,
+        &client.state().play_coords,
+        rec_gate,
+        live_gate,
+        count - rec_gate,
+    );
     if mismatches > 0 {
         return Err(format!(
             "{mismatches} ticks differ with Enter tapped {taps} times"
@@ -237,18 +222,5 @@ fn enter_spam(client: &mut TasSharedMemoryClient) -> Result<(), String> {
         "  {} ticks from the gate replayed bit for bit with Enter tapped {taps} times",
         count - rec_gate
     );
-    Ok(())
-}
-
-fn report(name: &str, result: Result<(), String>) -> bool {
-    match result {
-        Ok(()) => {
-            println!("\n*** {name} PASSED ***");
-            true
-        }
-        Err(e) => {
-            eprintln!("\n*** {name} FAILED: {e} ***");
-            false
-        }
-    }
+    Ok(String::new())
 }

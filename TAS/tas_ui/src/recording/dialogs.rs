@@ -1,5 +1,6 @@
 //! Recording folders and the Save / Load file dialogs.
 
+use super::file::RecordingMetadata;
 use super::{IdentityStamps, RecordingFile};
 use crate::ui_log::UiLog;
 use std::path::PathBuf;
@@ -88,7 +89,7 @@ pub fn save_dialog(
 /// Split from the load so the caller can stop an active recording after the
 /// user commits to a file, not before a dialog they might cancel. `level_id` selects the starting folder. None = the user cancelled.
 pub fn pick_recording_path(level_id: u32) -> Option<PathBuf> {
-    let level = crate::level::level_code_from_id(level_id);
+    let level = tas_shared::level::code_from_id(level_id);
     rfd::FileDialog::new()
         .set_title("Load TAS Recording")
         .set_directory(load_dir_for_level(level))
@@ -96,52 +97,66 @@ pub fn pick_recording_path(level_id: u32) -> Option<PathBuf> {
         .pick_file()
 }
 
-/// Load a previously-picked recording into shared state. The caller must have
-/// already stopped any active REC/PLAY (the DLL must be OFF) — this overwrites
-/// the whole input/coords buffer.
+/// Load a previously-picked recording into shared state and return its
+/// header, `None` when it failed to load. The caller must have already
+/// stopped any active REC/PLAY (the DLL must be OFF) — this overwrites the
+/// whole input/coords buffer.
 pub fn load_recording_path(
     state: &mut TasSharedState,
     log: &mut UiLog,
     path: &std::path::Path,
-) -> bool {
+) -> Option<RecordingMetadata> {
     match RecordingFile::load(state, path) {
-        Ok(count) => {
-            // The take carries the physics mode it was recorded under; the
-            // live one comes from the DLL. Different renderers round the sim
-            // differently (24-bit DirectX vs 53-bit OpenGL), so say so now
-            // rather than letting the replay drift "mysteriously".
-            if let Ok(meta) = RecordingFile::read_metadata(path) {
-                let live =
-                    tas_shared::physics_mode_label(state.renderer_id, state.fpu_control_word);
-                if let (Some(stamp), Some(live)) = (meta.physics_label(), live) {
-                    if stamp != live {
-                        log.push(format!(
-                            "WARNING: recording was made under {} but the game is running {}: \
-                             the physics round differently, this replay will not be bit-exact",
-                            stamp, live
-                        ));
-                    }
-                }
-                // Same for who is riding: a Keith take does not line up under
-                // Vincent, and the stance changes the trajectory as well.
-                let live_rider = tas_shared::rider_label(state.rider_character, state.rider_stance);
-                if let (Some(stamp), Some(live)) = (meta.rider_label(), live_rider) {
-                    if stamp != live {
-                        log.push(format!(
-                            "WARNING: recording was made as {} but the rider is {}: \
-                             a different character or stance has different physics, \
-                             this replay will not line up",
-                            stamp, live
-                        ));
-                    }
-                }
-            }
-            log.push(format!("Loaded {} ticks from {}", count, path.display()));
-            true
+        Ok(meta) => {
+            // The take carries the physics mode and rider it was recorded
+            // under; the live ones come from the DLL. Say so now rather than
+            // letting the replay drift "mysteriously".
+            let live_physics =
+                tas_shared::physics_mode_label(state.renderer_id, state.fpu_control_word);
+            let live_rider = tas_shared::rider_label(state.rider_character, state.rider_stance);
+            warn_identity_mismatch(
+                log,
+                (meta.physics_label().as_deref(), live_physics.as_deref()),
+                (meta.rider_label().as_deref(), live_rider.as_deref()),
+            );
+            log.push(format!(
+                "Loaded {} ticks from {}",
+                meta.recorded_count,
+                path.display()
+            ));
+            Some(meta)
         }
         Err(e) => {
             log.push(format!("Load error: {}", e));
-            false
+            None
+        }
+    }
+}
+
+/// Warn when the take's physics mode or rider differs from the live game's,
+/// each given as `(take, live)`; an unknown side has no opinion. Renderers
+/// round the sim differently (24-bit DirectX vs 53-bit OpenGL), a Keith take
+/// does not line up under Vincent, and the stance changes the trajectory too.
+pub fn warn_identity_mismatch(
+    log: &mut UiLog,
+    physics: (Option<&str>, Option<&str>),
+    rider: (Option<&str>, Option<&str>),
+) {
+    if let (Some(take), Some(live)) = physics {
+        if take != live {
+            log.push(format!(
+                "WARNING: this take was recorded under {take} but the game is running {live}: \
+                 the physics round differently, a replay will not be bit-exact"
+            ));
+        }
+    }
+    if let (Some(take), Some(live)) = rider {
+        if take != live {
+            log.push(format!(
+                "WARNING: this take was recorded as {take} but the rider is {live}: \
+                 a different character or stance has different physics, a replay will not \
+                 line up"
+            ));
         }
     }
 }

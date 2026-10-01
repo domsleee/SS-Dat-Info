@@ -4,61 +4,18 @@
 #include "../game_addresses.hpp"
 #include "../fpu_safe_hook.hpp"
 #include "../shared_state.hpp"
-#include "../race_timer_table.hpp"
 #include "menu_cave.hpp"
 
-// Race timer: reads the on-screen player race time from the HUD string, since
-// the game computes it each frame (clock - start_ts) rather than storing it.
-//
-// HUD times render through SR_UIT.dll (exported symbols):
-//   Housemarque::SR_UIT::Sr_Plane_Text_Line::Append_Text   (SR_UIT + 0xED40)
-//   fastcall: ecx = the text-line object, edx = textObj (+0x04 char* data,
-//             +0x08 int length).
-// Each "MM:SS:CC" append is classified by race_timer_table.hpp, keyed by line.
-// Publishes:
-//   race_time_cs  = on-screen race time, centiseconds (u32::MAX = idle)
-//   race_start_ts = 16-bit game clock value at the gate cross
-//   clock         = SG + 0x1D5334 (16-bit centiseconds, wraps at 65536)
-//
-// TAS_RACE_DIAG=1 logs transitions, slot claims and a periodic line dump.
+// Race timer: publishes the game's own race clock (DESIGN.md "Race time")
+// from the clock-tick hook, Supreme_Game+0xB4B80 (inc word [SG+0x1D5334];
+// 100/sec while a level runs). race_time_cs, race_start_ts and race_ab_* are
+// no longer written; they keep their reset values.
 
 namespace racetimer {
 
-inline uint8_t* g_clock = nullptr;
 inline TasSharedState* g_state = nullptr;
-inline Table g_table{};
-inline uint32_t g_tickNow = 0;        // monotonic clock ticks since install (staleness)
-inline int      g_wasInGame = -1;     // game_in_game edge tracker for epoch reset
-
-// Diagnostics (TAS_RACE_DIAG=1)
-inline bool     g_diag = false;
-inline uint32_t g_diagTick = 0;
-inline uint32_t g_lastPub = MAXU;     // last published cs (MAXU = blanked)
-inline int      g_lastUsed = 0;
 
 static SafetyHookMid g_tickHook{};
-static SafetyHookMid g_aptHook{};
-
-static inline uint16_t ReadClk() {
-    return g_clock ? *(volatile uint16_t*)g_clock : 0;
-}
-
-// Publishes the pair under race_seq. Game thread only.
-static void Publish(uint32_t cs, uint32_t start, const char* reason) {
-    if (!g_state) return;
-    if (g_state->race_time_cs != cs || g_state->race_start_ts != start) {
-        InterlockedIncrement((volatile LONG*)&g_state->race_seq);   // odd: writing
-        g_state->race_time_cs = cs;
-        g_state->race_start_ts = start;
-        InterlockedIncrement((volatile LONG*)&g_state->race_seq);   // even: stable
-    }
-    if (g_diag && (g_lastPub == MAXU) != (cs == MAXU)) {
-        Log(std::format("[racetimer] {} ({}) clk={} cs={} start={}",
-            cs == MAXU ? "BLANK" : "SHOW", reason, (int)ReadClk(),
-            cs == MAXU ? -1 : (int)cs, start == MAXU ? -1 : (int)start));
-    }
-    g_lastPub = cs;
-}
 
 // The game's own race clock: [player+0xB8] is the player's timer object;
 // +0x0C its elapsed seconds (float, +0.01 per Player update), +0x10 started,
@@ -77,162 +34,54 @@ static bool ReadRaceClock(uint32_t player, uint32_t* bits, uint32_t* flags) {
     }
 }
 
-// Writes one or two fields under race_seq. Game thread only.
-static void PublishPair(volatile uint32_t* a, uint32_t va, volatile uint32_t* b, uint32_t vb) {
-    if (*a == va && *b == vb) return;
+// Writes the clock pair under race_seq. Game thread only.
+static void PublishClock(bool inGame) {
+    uint32_t bits = 0xFFFFFFFFu, flags = 0;
+    if (!inGame || !ReadRaceClock(g_state->player_ptr, &bits, &flags)) {
+        bits = 0xFFFFFFFFu;
+        flags = 0;
+    }
+    if (g_state->race_clock_bits == bits && g_state->race_clock_flags == flags) return;
     InterlockedIncrement((volatile LONG*)&g_state->race_seq);   // odd: writing
-    *a = va;
-    *b = vb;
+    g_state->race_clock_bits = bits;
+    g_state->race_clock_flags = flags;
     InterlockedIncrement((volatile LONG*)&g_state->race_seq);   // even: stable
 }
 
-static void PublishClock(bool inGame) {
-    uint32_t bits = MAXU, flags = 0;
-    if (!inGame || !ReadRaceClock(g_state->player_ptr, &bits, &flags)) {
-        bits = MAXU;
-        flags = 0;
-    }
-    PublishPair(&g_state->race_clock_bits, bits, &g_state->race_clock_flags, flags);
-}
-
-static void ResetEpoch() {
-    g_table.Reset();
-    Publish(MAXU, MAXU, "epoch-reset");
-}
-
-// "MM:SS:CC" -> centiseconds, or -1. Strict, to reject scores and clock-of-day.
-static int ParseCs(const char* s, int len) {
-    if (len < 8 || s[2] != ':' || s[5] != ':') return -1;
-    for (int i : {0, 1, 3, 4, 6, 7})
-        if (s[i] < '0' || s[i] > '9') return -1;
-    int mm = (s[0] - '0') * 10 + (s[1] - '0');
-    int ss = (s[3] - '0') * 10 + (s[4] - '0');
-    int cc = (s[6] - '0') * 10 + (s[7] - '0');
-    if (ss >= 60 || cc >= 100) return -1;
-    return mm * 6000 + ss * 100 + cc;
-}
-
-// textObj+0x04 = char*, +0x08 = int len.
-static bool ReadText(uint32_t textObj, char out[24], int& len) {
-    out[0] = 0; len = 0;
-    __try {
-        int l = *(int*)(textObj + 8);
-        char* d = *(char**)(textObj + 4);
-        if (l < 1 || l > 22 || d == nullptr) return false;
-        for (int i = 0; i < l; i++) out[i] = d[i];
-        out[l] = 0; len = l;
-        return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-static void AptCb(SafetyHookContext& ctx) {
-    char buf[24]; int len;
-    if (!ReadText((uint32_t)ctx.edx, buf, len)) return;
-
-    int cs = ParseCs(buf, len);
-    if (cs < 0) return;
-    Verdict v = g_table.Sample((uint32_t)ctx.ecx, cs, ReadClk(), g_tickNow);
-    if (g_diag) {
-        int used = g_table.Used();
-        if (used != g_lastUsed) {
-            Log(std::format("[racetimer] table now holds {} line(s) (was {})", used, g_lastUsed));
-            g_lastUsed = used;
-        }
-    }
-    Publish(v.cs, v.start, v.reason);
-    uint32_t bits = 0, flags = 0;
-    if (v.cs != MAXU && (uint32_t)ctx.ecx == g_table.playerLine &&
-        ReadRaceClock(g_state->player_ptr, &bits, &flags)) {
-        PublishPair(&g_state->race_ab_cs, (uint32_t)cs, &g_state->race_ab_bits, bits);
-    }
-}
-
-// Once per clock tick: staleness clock, epoch reset when game_in_game drops.
+// Once per clock tick.
 static void TickCb(SafetyHookContext&) {
     if (!g_state) return;
-    g_tickNow++;
     // The clock only ticks while a level runs, so no menu is on screen.
     if (g_state->game_in_game) menustate::ClearForLevel();
-    int inGame = g_state->game_in_game ? 1 : 0;
-    if (inGame == 0) {
-        if (g_wasInGame != 0) ResetEpoch();
-        else Publish(MAXU, MAXU, "menu");
-    }
-    g_wasInGame = inGame;
-    PublishClock(inGame != 0);
-
-    // Evict here too: once the HUD is torn down nothing samples, and the last
-    // time would otherwise stay published until the race is left.
-    if (inGame && g_table.Evict(g_tickNow) > 0 && g_table.playerLine == 0 && g_lastPub != MAXU) {
-        Publish(MAXU, MAXU, "stale");
-    }
-
-    if (g_diag && inGame && (++g_diagTick % 128) == 0) {
-        int clk = ReadClk();
-        std::string s = std::format("[racetimer] clk={} tick={} player={:#x} pub={}",
-            clk, g_tickNow, g_table.playerLine, g_lastPub == MAXU ? -1 : (int)g_lastPub);
-        for (int i = 0; i < SLOTS; i++) {
-            if (g_table.line[i] == 0) continue;
-            s += std::format(" | L{:#x} cs={} adv={} sg={} stbl={} age={}", g_table.line[i],
-                g_table.cs[i], g_table.adv[i], g_table.start[i], g_table.stable[i],
-                g_tickNow - g_table.seen[i]);
-        }
-        Log(s);
-    }
+    PublishClock(g_state->game_in_game != 0);
 }
 
 inline bool Install(GameAddresses& addr, TasSharedState* state) {
     if (!addr.sg) { Log("Race timer: no SG base"); return false; }
     auto sg = (uint8_t*)addr.sg;
-    HMODULE uit = GetModuleHandleA("SR_UIT.dll");
-    static constexpr GameAddresses::ModuleIdentity kUitIdentity{
-        "SR_UIT.dll v1.035", 0x381DA317u, 0x00022000u
-    };
     // On-disk bytes; the imm32 at +3 is compared after rebasing (ValidateCodeAbs).
     static constexpr uint8_t kRaceTick[] =                    // inc word [SG+0x1D5334]; ret
         { 0x66, 0xFF, 0x05, 0x34, 0x53, 0x1D, 0x10, 0xC3 };
-    static constexpr uint8_t kAppendText[] =                  // push -1; push UIT+0x12E87
-        { 0x6A, 0xFF, 0x68, 0x87, 0x2E, 0x01, 0x10 };
     // Optional feature: a mismatch disables it rather than failing TAS_Initialize.
-    bool sitesOk =
-        GameAddresses::ValidateCodeAbs<3>("Supreme_Game.dll+0xB4B80", sg + 0xB4B80,
-                                          kRaceTick, sg, 0x1D5334) &&
-        GameAddresses::ValidateModule(uit, kUitIdentity) &&
-        GameAddresses::ValidateCodeAbs<3>("SR_UIT.dll+0xED40", (uint8_t*)uit + 0xED40,
-                                          kAppendText, (uint8_t*)uit, 0x12E87);
-    if (!sitesOk) {
-        Log(std::format("Race timer: unavailable - site validation failed (SR_UIT {:p})", (void*)uit));
+    if (!GameAddresses::ValidateCodeAbs<3>("Supreme_Game.dll+0xB4B80", sg + 0xB4B80,
+                                           kRaceTick, sg, 0x1D5334)) {
+        Log("Race timer: unavailable - site validation failed");
         return false;
     }
 
     g_state = state;
-    char buf[8] = {};
-    g_diag = (GetEnvironmentVariableA("TAS_RACE_DIAG", buf, sizeof(buf)) > 0 && buf[0] == '1');
-    g_tickNow = STALE_TICKS + 1;  // so a brand-new table never looks "just sampled"
     // Shared memory survives reinjection: an odd race_seq left by a DLL killed
     // mid-publish would block readers forever.
     if (g_state->race_seq & 1) InterlockedIncrement((volatile LONG*)&g_state->race_seq);
-    ResetEpoch();
-    g_clock = sg + 0x1D5334;
     g_tickHook = CreateMidHook<TickCb>(sg + 0xB4B80);  // clock tick (100/sec)
-    g_aptHook = CreateMidHook<AptCb>((uint8_t*)uit + 0xED40);
-    if (!g_tickHook || !g_aptHook) {
-        // All or none.
-        g_tickHook = {};
-        g_aptHook = {};
-        g_state = nullptr;
-    }
-    Log(std::format("Race timer: tick={} append={} diag={} stale={} ticks (SR_UIT {:p})",
-        (bool)g_tickHook, (bool)g_aptHook, g_diag, STALE_TICKS, (void*)uit));
-    return (bool)g_tickHook && (bool)g_aptHook;
+    if (!g_tickHook) g_state = nullptr;
+    Log(std::format("Race timer: tick={}", (bool)g_tickHook));
+    return (bool)g_tickHook;
 }
 
 // Initialization rollback.
 inline void Uninstall() {
     g_tickHook = {};
-    g_aptHook = {};
     g_state = nullptr;
 }
 

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use tas_shared::TasSharedMemoryClient;
 
-use crate::command_edges::{cleanup, start_aligned_play, wait_for_recorded_index};
+use crate::command_edges::{start_aligned_play, wait_for_recorded_index};
 use crate::harness;
 
 const LEFT: u8 = 0x01;
@@ -42,28 +42,10 @@ pub(crate) fn find_free_window(
 
 pub fn run() -> bool {
     println!("=== HITCH-INPUT-LEAK: a frozen frame must not let live keys into PLAY ===\n");
-    let mut client = harness::ensure_game_running();
-    let result = hitch_during_play(&mut client);
-    cleanup(&mut client);
-    match result {
-        Ok(None) => {
-            println!("*** HITCH-INPUT-LEAK PASSED: the observer never saw the live LEFT ***");
-            true
-        }
-        Ok(Some(detail)) => {
-            println!("*** HITCH-INPUT-LEAK FAILED: {detail} ***");
-            false
-        }
-        Err(e) => {
-            eprintln!("ERROR: {e}");
-            false
-        }
-    }
+    harness::run_case("HITCH-INPUT-LEAK", hitch_during_play)
 }
 
-/// `Ok(None)` when nothing leaked, `Ok(Some(what))` when LEFT reached the
-/// observer.
-fn hitch_during_play(client: &mut TasSharedMemoryClient) -> Result<Option<String>, String> {
+fn hitch_during_play(client: &mut TasSharedMemoryClient) -> Result<String, String> {
     // Keys only reach a foreground window.
     harness::focus_game();
     let (memory, rec_gate, live_gate) = start_aligned_play(client)?;
@@ -115,13 +97,14 @@ fn hitch_during_play(client: &mut TasSharedMemoryClient) -> Result<Option<String
     thread::sleep(Duration::from_millis(200));
     let after = memory.observer_tas_mask()?;
     println!("  Observer after release: {after:#04x}");
-    Ok(leaked_at.map(|t| {
-        format!(
+    match leaked_at {
+        None => Ok("the observer never saw the live LEFT".into()),
+        Some(t) => Err(format!(
             "the observer held the live LEFT {} ms after the game resumed (still {:#04x} after release)",
             t.as_millis(),
             after
-        )
-    }))
+        )),
+    }
 }
 
 #[cfg(test)]

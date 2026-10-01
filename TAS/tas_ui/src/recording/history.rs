@@ -103,17 +103,19 @@ pub struct HistoryEntry {
 }
 
 impl HistoryEntry {
-    fn from_snapshot(label: String, kind: HistoryEntryKind, snapshot: RecordingSnapshot) -> Self {
-        let now = chrono::Local::now();
-        let end_tick = snapshot.recorded_count;
-        let first_moving =
-            tas_shared::align::detect_first_moving(snapshot.rec_coords.as_ref(), end_tick);
+    /// A new entry for `snapshot`: a resident take, or `Marker`. Its length
+    /// and first-moving tick come from the take (0 / None on a marker).
+    fn new(label: String, kind: HistoryEntryKind, snapshot: SnapshotSlot) -> Self {
+        let end_tick = snapshot.loaded().map_or(0, |s| s.recorded_count);
+        let first_moving = snapshot
+            .loaded()
+            .and_then(|s| tas_shared::align::detect_first_moving(s.rec_coords.as_ref(), end_tick));
         Self {
             entry_id: 0, // assigned by RecordingHistory on push
             pinned: false,
             custom_name: None,
             label,
-            created_at: now,
+            created_at: chrono::Local::now(),
             kind,
             // start_tick is overwritten by `with_session` for CONT entries
             // that know their resume point; REC entries leave it at 0.
@@ -127,33 +129,7 @@ impl HistoryEntry {
             physics: None, // stamped from live_physics by RecordingHistory on push
             rider: None,   // stamped from live_rider by RecordingHistory on push
             stamps: IdentityStamps::default(), // stamped from live_stamps on push
-            snapshot: SnapshotSlot::Loaded {
-                snapshot,
-                on_disk: None,
-            },
-        }
-    }
-
-    fn marker(label: String, kind: HistoryEntryKind) -> Self {
-        let now = chrono::Local::now();
-        Self {
-            entry_id: 0, // assigned by RecordingHistory on push
-            pinned: false,
-            custom_name: None,
-            label,
-            created_at: now,
-            kind,
-            start_tick: 0,
-            end_tick: 0,
-            first_moving: None,
-            clock_start: None,
-            finish_time_cs: None,
-            finish_time_exact: false,
-            level: None,   // stamped from live_level by RecordingHistory on push
-            physics: None, // stamped from live_physics by RecordingHistory on push
-            rider: None,   // stamped from live_rider by RecordingHistory on push
-            stamps: IdentityStamps::default(),
-            snapshot: SnapshotSlot::Marker,
+            snapshot,
         }
     }
 
@@ -571,7 +547,8 @@ impl RecordingHistory {
             self.set_stamps(id, stamps);
         }
         let label = format!("Save: {}", short_file_label(path));
-        let mut marker = HistoryEntry::marker(label, HistoryEntryKind::SaveMarker);
+        let mut marker =
+            HistoryEntry::new(label, HistoryEntryKind::SaveMarker, SnapshotSlot::Marker);
         marker.entry_id = self.alloc_id();
         marker.level = self.live_level.clone();
         if let Some(current) = self.current_index {
@@ -610,29 +587,33 @@ impl RecordingHistory {
         }
     }
 
+    /// Whether undo / redo may land on entry `i`: it holds a take, and that
+    /// take belongs to the current track.
+    fn restorable_here(&self, i: usize) -> bool {
+        self.entries[i].can_restore() && self.entry_on_current_level(i)
+    }
+
+    /// Make entry `i` current and return its take. Loads BEFORE moving the
+    /// cursor: an unreadable blob must not leave the selection on an entry
+    /// that just turned inert.
+    fn select(&mut self, i: usize) -> Option<&RecordingSnapshot> {
+        self.load_slot(i)?;
+        self.current_index = Some(i);
+        self.demote_resident_except(i);
+        self.bump();
+        self.entries[i].snapshot.loaded()
+    }
+
     pub fn undo(&mut self) -> Option<&RecordingSnapshot> {
         let current = self.current_index?;
-        let prev = (0..current)
-            .rev()
-            .find(|&i| self.entries[i].can_restore() && self.entry_on_current_level(i))?;
-        // Load BEFORE moving the cursor: an unreadable blob must not leave the
-        // selection on an entry that just turned inert.
-        self.load_slot(prev)?;
-        self.current_index = Some(prev);
-        self.demote_resident_except(prev);
-        self.bump();
-        self.entries[prev].snapshot.loaded()
+        let prev = (0..current).rev().find(|&i| self.restorable_here(i))?;
+        self.select(prev)
     }
 
     pub fn redo(&mut self) -> Option<&RecordingSnapshot> {
         let current = self.current_index?;
-        let next = ((current + 1)..self.entries.len())
-            .find(|&i| self.entries[i].can_restore() && self.entry_on_current_level(i))?;
-        self.load_slot(next)?;
-        self.current_index = Some(next);
-        self.demote_resident_except(next);
-        self.bump();
-        self.entries[next].snapshot.loaded()
+        let next = ((current + 1)..self.entries.len()).find(|&i| self.restorable_here(i))?;
+        self.select(next)
     }
 
     pub fn restore_index(&mut self, index: usize) -> Option<&RecordingSnapshot> {
@@ -644,11 +625,7 @@ impl RecordingHistory {
         if !self.entry_on_current_level(index) {
             return None;
         }
-        self.load_slot(index)?;
-        self.current_index = Some(index);
-        self.demote_resident_except(index);
-        self.bump();
-        self.entries[index].snapshot.loaded()
+        self.select(index)
     }
 
     pub fn current_index(&self) -> Option<usize> {
@@ -730,57 +707,45 @@ impl RecordingHistory {
     /// recorded on; the live level is unknown at startup. `None` leaves the
     /// entry untagged, i.e. visible on every track.
     pub fn set_level(&mut self, entry_id: u64, level: Option<String>) -> bool {
-        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
-            return false;
-        };
-        if e.level == level {
-            return false;
-        }
-        e.level = level;
-        self.bump();
-        true
+        self.update_entry(entry_id, level, |e| &mut e.level)
     }
 
     /// Stamp the rider a recovered entry was recorded as (the checkpoint
     /// carries it; the live rider is unknown during startup). See set_level.
     pub fn set_rider(&mut self, entry_id: u64, rider: Option<String>) -> bool {
-        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
-            return false;
-        };
-        if e.rider == rider {
-            return false;
-        }
-        e.rider = rider;
-        self.bump();
-        true
+        self.update_entry(entry_id, rider, |e| &mut e.rider)
     }
 
     /// Stamp the physics mode a recovered entry was recorded under (the
     /// checkpoint carries it; the live physics is unknown during startup).
     /// See set_level.
     pub fn set_physics(&mut self, entry_id: u64, physics: Option<String>) -> bool {
-        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
-            return false;
-        };
-        if e.physics == physics {
-            return false;
-        }
-        e.physics = physics;
-        self.bump();
-        true
+        self.update_entry(entry_id, physics, |e| &mut e.physics)
     }
 
     /// Stamp the raw identity words a recovered entry was recorded with (the
     /// checkpoint carries them; the live words are unknown during startup).
     /// See set_level.
     pub fn set_stamps(&mut self, entry_id: u64, stamps: IdentityStamps) -> bool {
+        self.update_entry(entry_id, stamps, |e| &mut e.stamps)
+    }
+
+    /// Set one field of entry `entry_id`, bumping the revision only on a
+    /// change. False when the entry is gone or already holds `value`.
+    fn update_entry<T: PartialEq>(
+        &mut self,
+        entry_id: u64,
+        value: T,
+        field: impl FnOnce(&mut HistoryEntry) -> &mut T,
+    ) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             return false;
         };
-        if e.stamps == stamps {
+        let slot = field(e);
+        if *slot == value {
             return false;
         }
-        e.stamps = stamps;
+        *slot = value;
         self.bump();
         true
     }
@@ -913,9 +878,7 @@ impl RecordingHistory {
         let Some(current) = self.current_index else {
             return 0;
         };
-        (0..current)
-            .filter(|&i| self.entries[i].can_restore() && self.entry_on_current_level(i))
-            .count()
+        (0..current).filter(|&i| self.restorable_here(i)).count()
     }
 
     pub fn redo_depth(&self) -> usize {
@@ -923,7 +886,7 @@ impl RecordingHistory {
             return 0;
         };
         ((current + 1)..self.entries.len())
-            .filter(|&i| self.entries[i].can_restore() && self.entry_on_current_level(i))
+            .filter(|&i| self.restorable_here(i))
             .count()
     }
 
@@ -1004,7 +967,14 @@ impl RecordingHistory {
             snapshot.recorded_count,
             self.live_level.as_deref(),
         );
-        let mut entry = HistoryEntry::from_snapshot(label, kind, snapshot);
+        let mut entry = HistoryEntry::new(
+            label,
+            kind,
+            SnapshotSlot::Loaded {
+                snapshot,
+                on_disk: None,
+            },
+        );
         entry.entry_id = self.alloc_id();
         entry.clock_start = clock_start;
         entry.level = self.live_level.clone();

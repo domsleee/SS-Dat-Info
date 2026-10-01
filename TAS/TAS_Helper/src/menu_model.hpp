@@ -3,6 +3,7 @@
 // tests/test_menu_model.cpp. No allocation: the DLL builds the document
 // inside a hook.
 #include <cstdint>
+#include <string.h>
 
 namespace menumodel {
 
@@ -30,16 +31,6 @@ struct MenuSnapshot {
     MenuItem items[kMaxItems];
 };
 
-inline bool EqualsIgnoreCase(const char* a, const char* b) {
-    for (;; a++, b++) {
-        const unsigned char ca = (unsigned char)*a, cb = (unsigned char)*b;
-        const unsigned char fa = (ca >= 'A' && ca <= 'Z') ? (unsigned char)(ca + 32) : ca;
-        const unsigned char fb = (cb >= 'A' && cb <= 'Z') ? (unsigned char)(cb + 32) : cb;
-        if (fa != fb) return false;
-        if (!ca) return true;
-    }
-}
-
 // Bounded, allocation-free text writer: appends past the end are dropped and
 // flagged; Finish() NUL-terminates.
 struct TextWriter {
@@ -63,6 +54,10 @@ struct TextWriter {
             v /= 10;
         } while (v);
         while (n) Put(digits[--n]);
+    }
+    // Eight uppercase hex digits.
+    void PutHex(uint32_t v) {
+        for (int shift = 28; shift >= 0; shift -= 4) Put("0123456789ABCDEF"[(v >> shift) & 0xF]);
     }
     // Labels and names are printable ASCII (the reader enforces it), so only
     // the two JSON metacharacters need escaping.
@@ -121,10 +116,10 @@ inline uint32_t BuildDoc(const MenuSnapshot& s, const char* screen, char* out, u
 inline int FindTarget(const MenuSnapshot& s, const char* target) {
     if (!target || !target[0]) return -1;
     for (uint32_t i = 0; i < s.count; i++)
-        if (s.items[i].name[0] && EqualsIgnoreCase(s.items[i].name, target)) return (int)i;
+        if (s.items[i].name[0] && _stricmp(s.items[i].name, target) == 0) return (int)i;
     if ((target[0] == 'I' || target[0] == 'i') && (target[1] == 'D' || target[1] == 'd') && target[2] == '_') return -1;
     for (uint32_t i = 0; i < s.count; i++)
-        if (s.items[i].label[0] && EqualsIgnoreCase(s.items[i].label, target)) return (int)i;
+        if (s.items[i].label[0] && _stricmp(s.items[i].label, target) == 0) return (int)i;
     return -1;
 }
 

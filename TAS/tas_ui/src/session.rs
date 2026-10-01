@@ -2,7 +2,6 @@
 //! background history persistence, and the crash-recovery checkpoint.
 
 use crate::recording::{self, RecordingSessionKind};
-use crate::relaunch::CheckpointOwner;
 use crate::{ActiveRecordingSession, TasApp};
 
 /// Whether the recovery checkpoint may be deleted: only when the recovered
@@ -201,12 +200,15 @@ impl TasApp {
         // Stamp the track now, while it is visible. A checkpoint is recovered
         // at startup, before anything has read the live level.
         let level = self.level_for_save().map(str::to_string);
-        let live_stamps = self.shared.as_ref().map(|s| {
-            (
-                s.fpu_control_word(),
-                s.renderer_id(),
-                tas_shared::rider_pair(s.state()),
-            )
+        // The rider pair is read coherently, through its seqlock.
+        let live_stamps = self.shared.as_ref().map_or_else(Default::default, |s| {
+            let (character, stance) = tas_shared::rider_pair(s.state());
+            recording::IdentityStamps {
+                rider_character: (character != tas_shared::TAS_CHARACTER_UNKNOWN)
+                    .then_some(character),
+                rider_stance: (stance != u32::MAX).then_some(stance),
+                ..recording::IdentityStamps::from_live(s.state())
+            }
         });
         let maybe_session = {
             let Some(session) = self.active_recording_session.as_mut() else {
@@ -221,10 +223,8 @@ impl TasApp {
         };
 
         if let Some(session_context) = maybe_session {
-            let session_context = session_context
-                .with_level(level.as_deref())
-                .with_stamps(live_stamps)
-                .with_input_model(self.shared.as_ref().map(|s| s.state().input_model));
+            let mut session_context = session_context.with_level(level.as_deref());
+            session_context.stamps = live_stamps;
             self.persist_recovery_snapshot_if_needed(snapshot, &session_context, false);
         }
     }
@@ -264,7 +264,7 @@ impl TasApp {
                     .shared
                     .as_ref()
                     .and_then(|s| tas_shared::resolved_level_id(s.state()))
-                    .and_then(crate::level::level_code_from_id);
+                    .and_then(tas_shared::level::code_from_id);
                 let start = crate::start_line::start_cross_tick(
                     snapshot.rec_coords.as_ref(),
                     end_tick,
@@ -300,7 +300,7 @@ impl TasApp {
                  recovering its checkpoint instead",
                 session_context.label
             ));
-            if self.recover_pending_checkpoint_matching(Some(CheckpointOwner::from(&session))) {
+            if self.recover_pending_checkpoint_matching(Some(session)) {
                 self.clear_recovery_after_durable_persist();
             }
             return;

@@ -10,7 +10,6 @@ use crate::state::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerAnswer {
     Owned,
-    Released,
     /// Another live process owns the TAS.
     Busy {
         owner_pid: u32,
@@ -77,7 +76,6 @@ pub fn owner_request_answer(state: &TasSharedState, seq: u32, pid: u32) -> Optio
 fn decode(result: u32, owner_pid: u32) -> OwnerAnswer {
     match result {
         TAS_OWNER_RESULT_OWNED => OwnerAnswer::Owned,
-        TAS_OWNER_RESULT_RELEASED => OwnerAnswer::Released,
         TAS_OWNER_RESULT_BUSY => OwnerAnswer::Busy { owner_pid },
         other => OwnerAnswer::Refused(other),
     }
@@ -87,7 +85,6 @@ impl std::fmt::Display for OwnerAnswer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OwnerAnswer::Owned => write!(f, "owned"),
-            OwnerAnswer::Released => write!(f, "released"),
             OwnerAnswer::Busy { owner_pid } => {
                 write!(f, "another controller (pid {owner_pid}) is driving the TAS")
             }
@@ -145,10 +142,6 @@ pub fn current_process_identity() -> ProcessIdentity {
 mod tests {
     use super::*;
 
-    fn zeroed() -> Box<TasSharedState> {
-        zeroed_boxed()
-    }
-
     const ME: ProcessIdentity = ProcessIdentity {
         pid: 42,
         created: 0x0123_4567_89AB_CDEF,
@@ -156,7 +149,7 @@ mod tests {
 
     #[test]
     fn submit_writes_identity_then_sequence() {
-        let mut s = zeroed();
+        let mut s = zeroed_boxed();
         let seq = owner_request_submit(&mut s, TAS_OWNER_ACQUIRE, ME);
         assert_eq!(seq, 1);
         assert_eq!(s.owner_request_kind, TAS_OWNER_ACQUIRE);
@@ -168,7 +161,7 @@ mod tests {
 
     #[test]
     fn answer_decodes_the_dll_result() {
-        let mut s = zeroed();
+        let mut s = zeroed_boxed();
         let seq = owner_request_submit(&mut s, TAS_OWNER_ACQUIRE, ME);
         s.owner_result = TAS_OWNER_RESULT_BUSY;
         s.owner_pid = 7;
@@ -181,7 +174,7 @@ mod tests {
 
     #[test]
     fn a_later_request_answered_first_supersedes_ours() {
-        let mut s = zeroed();
+        let mut s = zeroed_boxed();
         let mine = owner_request_submit(&mut s, TAS_OWNER_ACQUIRE, ME);
         let theirs = owner_request_submit(
             &mut s,
@@ -199,7 +192,7 @@ mod tests {
 
     #[test]
     fn an_older_ack_is_not_an_answer() {
-        let mut s = zeroed();
+        let mut s = zeroed_boxed();
         let first = owner_request_submit(&mut s, TAS_OWNER_ACQUIRE, ME);
         s.owner_ack_seq.store(first, Ordering::Release);
         let second = owner_request_submit(&mut s, TAS_OWNER_RELEASE, ME);

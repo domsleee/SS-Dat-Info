@@ -118,7 +118,7 @@ enum TasInputBit : uint8_t {
 enum TasArg4Source : uint32_t {
     ARG4_SOURCE_NONE         = 0,  // no injection yet
     ARG4_SOURCE_TIME_CURRENT = 1,  // Kernel::Time::Current(), the normal path
-    ARG4_SOURCE_CALIBRATED   = 2,  // fallback: Time.hi observed from real keypresses
+    ARG4_SOURCE_CALIBRATED   = 2,  // retired fallback; no longer written
     ARG4_SOURCE_OVERRIDE     = 3,  // test_arg4_override
 };
 
@@ -207,15 +207,13 @@ struct TasSharedState {
     // while level_scan_epoch == level_epoch. Written by level_context.hpp.
     uint32_t level_id;
 
-    // Race timer, read from the HUD time line via SR_UIT Append_Text.
-    // race_time_cs:  player race time in centiseconds; 0xFFFFFFFF = not racing.
-    // race_start_ts: 16-bit game clock at the gate cross (clock - race_time).
+    // Unused (the retired HUD race-time scraper); kept for the layout and
+    // left at 0xFFFFFFFF. The race time is race_clock_bits.
     uint32_t race_time_cs;
     uint32_t race_start_ts;
 
     // Test hook. 0 = inject the live Kernel::Time::Current() stamp as BB3B10 arg4.
-    // Nonzero = inject this value as Time.hi (lo=0) with calibration off; used
-    // by the steer-impact test.
+    // Nonzero = inject this value as Time.hi (lo=0); used by the steer-impact test.
     uint32_t test_arg4_override;
 
     // TasArg4Source of the last injection batch (DLL writes).
@@ -271,7 +269,7 @@ struct TasSharedState {
     volatile uint32_t rider_stance;
 
     // Seqlocks (odd = mid-update): rider_seq covers the rider pair,
-    // race_seq covers race_time_cs/race_start_ts.
+    // race_seq covers race_clock_bits/race_clock_flags.
     volatile uint32_t rider_seq;
     volatile uint32_t race_seq;
 
@@ -330,8 +328,8 @@ struct TasSharedState {
     // The game's own race clock (race_timer_cave.hpp), under race_seq:
     // race_clock_bits = the timer float at [[player+0xB8]+0x0C] as bits
     // (0xFFFFFFFF = none), race_clock_flags = TAS_RACE_CLOCK_*. Published
-    // every clock tick. race_ab_cs / race_ab_bits pair the HUD time scraped
-    // from one player-line append with the timer read in that same call.
+    // every clock tick. race_ab_cs / race_ab_bits are unused (the retired
+    // scraper's cross-check), kept for the layout and left at 0.
     volatile uint32_t race_clock_bits;
     volatile uint32_t race_clock_flags;
     volatile uint32_t race_ab_cs;

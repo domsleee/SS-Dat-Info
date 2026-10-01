@@ -15,25 +15,22 @@ struct Options {
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
-    let mut result = Options {
+    use crate::cli::flag;
+    let flags = crate::cli::parse(
+        args,
+        &[
+            flag("--recording", None),
+            flag("--splice", None),
+            flag("--iterations", None),
+        ],
+        0,
+    )?;
+    let result = Options {
         log: PathBuf::new(),
-        recording: None,
-        splice: 4500,
-        iterations: 5,
+        recording: flags.value("--recording").map(PathBuf::from),
+        splice: flags.num("--splice", 4500)?,
+        iterations: flags.num("--iterations", 5)?,
     };
-    for pair in args.chunks(2) {
-        if pair.len() != 2 {
-            return Err("Each option needs a value".into());
-        }
-        match pair[0].as_str() {
-            "--recording" => result.recording = Some(pair[1].as_str().into()),
-            "--splice" => result.splice = pair[1].parse().map_err(|_| "Invalid splice")?,
-            "--iterations" => {
-                result.iterations = pair[1].parse().map_err(|_| "Invalid iterations")?
-            }
-            other => return Err(format!("Unknown option: {other}")),
-        }
-    }
     if !(1..=65535).contains(&result.splice) || !(1..=100).contains(&result.iterations) {
         return Err("Use --recording <tasrec> --splice <1..65535> --iterations <1..100>".into());
     }
@@ -261,12 +258,9 @@ mod live {
         }
         Ok(())
     }
-    pub(super) fn run_from_zero(config: &Options) -> Result<(), String> {
-        let client = TasSharedMemoryClient::open()?;
-        let loaded = client.state().recorded_count;
-        if client.mode_volatile() != TasMode::Off as u32 || loaded == 0 {
-            return Err("UI setup did not leave a stopped recording".into());
-        }
+    /// Focus the game with both windows alive; returns them and the UI log's
+    /// current length, where this trial's lines begin.
+    fn begin(config: &Options) -> Result<([win32::Hwnd; 2], u64), String> {
         let windows = game_and_ui_windows()?;
         win32::bring_to_front(windows[0]);
         thread::sleep(Duration::from_millis(300));
@@ -274,6 +268,15 @@ mod live {
         let offset = std::fs::metadata(&config.log)
             .map_err(|e| e.to_string())?
             .len();
+        Ok((windows, offset))
+    }
+    pub(super) fn run_from_zero(config: &Options) -> Result<(), String> {
+        let client = TasSharedMemoryClient::open()?;
+        let loaded = client.state().recorded_count;
+        if client.mode_volatile() != TasMode::Off as u32 || loaded == 0 {
+            return Err("UI setup did not leave a stopped recording".into());
+        }
+        let (windows, offset) = begin(config)?;
         let stop = StopOnExit(windows[0]);
         press(win32::VK_F12);
         let start = Instant::now();
@@ -317,13 +320,7 @@ mod live {
             return Err("UI setup did not leave a stopped recording past the splice".into());
         }
         let before = tas_shared::race_clock::race_finish(client.state()).map_or(0, |f| f.seq);
-        let windows = game_and_ui_windows()?;
-        win32::bring_to_front(windows[0]);
-        thread::sleep(Duration::from_millis(300));
-        healthy(&windows)?;
-        let offset = std::fs::metadata(&config.log)
-            .map_err(|e| e.to_string())?
-            .len();
+        let (windows, offset) = begin(config)?;
         let stop = StopOnExit(windows[0]);
         press(win32::VK_F12);
         // CONT, the splice, then the UI's own stop at the finish.
@@ -399,13 +396,8 @@ mod live {
                     .into(),
             );
         }
-        let windows = game_and_ui_windows()?;
-        std::fs::metadata(&config.log).map_err(|e| e.to_string())?;
-        win32::bring_to_front(windows[0]);
-        thread::sleep(Duration::from_millis(300));
-        healthy(&windows)?;
-        let mut pico = crate::harness::PicoKeys::open()
-            .ok_or("Verified Pico data port required (TAS_PICO_PORT)")?;
+        let (windows, _) = begin(config)?;
+        let mut pico = crate::harness::PicoKeys::open_checked()?;
         println!(
             "Live UI LEFT-spam: {} iterations, splice {}, Pico {}",
             config.iterations,

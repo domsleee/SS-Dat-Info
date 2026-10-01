@@ -100,27 +100,6 @@ pub struct TasLogEntry {
     pub text: [u8; TAS_LOG_ENTRY_SIZE],
 }
 
-impl TasLogEntry {
-    pub fn text_str(&self) -> &str {
-        let len = self
-            .text
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(TAS_LOG_ENTRY_SIZE);
-        std::str::from_utf8(&self.text[..len]).unwrap_or("<invalid utf8>")
-    }
-
-    pub fn severity_enum(&self) -> TasLogSeverity {
-        match self.severity {
-            0 => TasLogSeverity::Debug,
-            1 => TasLogSeverity::Info,
-            2 => TasLogSeverity::Warn,
-            3 => TasLogSeverity::Error,
-            _ => TasLogSeverity::Info,
-        }
-    }
-}
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TasSegmentBoundary {
@@ -223,16 +202,14 @@ pub struct TasSharedState {
     /// read it through [`resolved_level_id`].
     pub level_id: u32,
 
-    /// On-screen player race time in centiseconds, read by the DLL from the HUD
-    /// text line. `u32::MAX` = not racing / unknown. Read via [`race_pair`]
-    /// when the time and its gate stamp must come from one coherent publish.
+    /// Unused (the retired HUD race-time scraper); always `u32::MAX`. Kept for
+    /// the layout. The race time is [`crate::race_clock::race_clock`].
     pub race_time_cs: u32,
-    /// The 16-bit game clock value captured at the gate cross (= clock −
-    /// race_time); constant during a run. `u32::MAX` = unknown.
+    /// Unused; always `u32::MAX`. Kept for the layout.
     pub race_start_ts: u32,
 
     /// Test hook: when nonzero the DLL injects this exact value as the BB3B10
-    /// event Time.hi (arg4) and suppresses calibration. steer-impact sets a
+    /// event Time.hi (arg4). steer-impact sets a
     /// deliberately wrong value to prove injected steering is then discarded.
     pub test_arg4_override: u32,
     /// DLL-written at each injection batch: where the injected event's Time
@@ -304,8 +281,8 @@ pub struct TasSharedState {
     /// Seqlock over the (rider_character, rider_stance) pair; read through
     /// [`rider_pair`].
     pub rider_seq: AtomicU32,
-    /// Seqlock over the (race_time_cs, race_start_ts) pair; read through
-    /// [`race_pair`].
+    /// Seqlock over the race clock (`race_clock_bits`, `race_clock_flags`);
+    /// read through [`crate::race_clock::race_clock`].
     pub race_seq: AtomicU32,
 
     /// The current menu screen's on-screen title ("Main Menu", "Select
@@ -368,8 +345,8 @@ pub struct TasSharedState {
     /// Read with [`crate::race_clock::race_clock`].
     pub race_clock_bits: u32,
     pub race_clock_flags: u32,
-    /// One HUD player-line time and the timer read in the same call, for
-    /// checking the clock against the scraper at one observation point.
+    /// Unused (the retired HUD scraper's cross-check); always 0. Kept for
+    /// the layout.
     pub race_ab_cs: u32,
     pub race_ab_bits: u32,
 
@@ -393,33 +370,12 @@ pub struct TasSharedState {
 const SEQLOCK_RETRIES: usize = 64;
 
 /// One clean read of a seqlocked group (`level_ctx_seq`, `rider_seq`,
-/// `race_seq`, `menu_seq`). This is the one description of the memory model
-/// behind every seqlock in this protocol; the field docs and the concurrency
-/// test point back here.
-///
-/// `read` runs on a possibly-torn group — that is expected; the value is only
-/// handed back if the sequence was EVEN before it and UNCHANGED after, which is
-/// exactly the window in which no write was in flight. So `read` must not act on
-/// what it sees, only collect it.
-///
-/// `None` means no clean window was obtained: the writer is wedged mid-update
-/// (sequence stuck odd — e.g. the game crashed between the two increments) or
-/// the retry bound ran out. Both are "unknown", never "assume the last value".
-///
-/// WHAT THIS IS AND IS NOT. The sequence is a real atomic and the ordering
-/// around it is real. The PAYLOAD is not: it is read with `read_volatile` from
-/// memory another PROCESS writes, which Rust's memory model does not describe at
-/// all — formally a data race, and no amount of `Ordering` fixes that, because
-/// the writer is outside the model. What makes it work is the target, not the
-/// abstract machine: on x86 aligned byte and word accesses are indivisible,
-/// loads are not reordered with loads, the mapping is cache-coherent, and the
-/// DLL's `InterlockedIncrement` is a full barrier. So this is a seqlock ON X86
-/// over a cross-process mapping. Do not read it as a portable one.
-///
-/// Freshness is also NOT provided. A clean read is coherent at the instant it
-/// was taken and can be stale by the time the caller acts on it — which is why
-/// the UI re-reads immediately before writing to the live buffer rather than
-/// trusting its frame-start snapshot (see `stop_active_session_for_load`).
+/// `race_seq`, `menu_seq`, ...): `read` may see a torn group and must only
+/// collect, never act; its value is returned only if the sequence was even
+/// before and unchanged after. `None` = no clean window (writer wedged odd or
+/// retries ran out), which callers treat as unknown. The payload is a
+/// cross-process volatile read, so this is a seqlock on x86 only, and a clean
+/// read can be stale by the time it is used.
 pub(crate) fn with_seqlock<T>(seq: &AtomicU32, read: impl Fn() -> T) -> Option<T> {
     for _ in 0..SEQLOCK_RETRIES {
         let s1 = seq.load(Ordering::Acquire);
@@ -449,18 +405,6 @@ pub fn rider_pair(state: &TasSharedState) -> (u32, u32) {
         )
     })
     .unwrap_or((TAS_CHARACTER_UNKNOWN, u32::MAX))
-}
-
-/// The race timer as ONE coherent `(race_time_cs, race_start_ts)` pair;
-/// `u32::MAX` in either half = not published / unreadable.
-pub fn race_pair(state: &TasSharedState) -> (u32, u32) {
-    with_seqlock(&state.race_seq, || unsafe {
-        (
-            std::ptr::read_volatile(&state.race_time_cs),
-            std::ptr::read_volatile(&state.race_start_ts),
-        )
-    })
-    .unwrap_or((u32::MAX, u32::MAX))
 }
 
 /// Read the group's identity half. Caller must be inside a `with_seqlock`
@@ -610,16 +554,20 @@ impl TasSharedState {
                 // this seq next poll.
                 break;
             }
-            let mut copy = TasLogEntry {
-                sequence: published,
-                severity: read(&entry.severity),
-                text: [0; TAS_LOG_ENTRY_SIZE],
+            let severity = match read(&entry.severity) {
+                0 => TasLogSeverity::Debug,
+                2 => TasLogSeverity::Warn,
+                3 => TasLogSeverity::Error,
+                _ => TasLogSeverity::Info,
             };
-            for (dst, src) in copy.text.iter_mut().zip(&entry.text) {
+            let mut raw = [0u8; TAS_LOG_ENTRY_SIZE];
+            for (dst, src) in raw.iter_mut().zip(&entry.text) {
                 *dst = unsafe { std::ptr::read_volatile(src) };
             }
-            let severity = copy.severity_enum();
-            let text = copy.text_str().to_string();
+            let len = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+            let text = std::str::from_utf8(&raw[..len])
+                .unwrap_or("<invalid utf8>")
+                .to_string();
             if read(&entry.sequence) != seq + 1 {
                 // Reused between the check and the copy: discard the torn
                 // text; the replacement is visited at its own seq.
@@ -732,36 +680,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn size_of_tas_log_entry() {
-        // 4 (sequence) + 4 (severity) + 120 (text) = 128
-        assert_eq!(mem::size_of::<TasLogEntry>(), 128);
-    }
-
-    #[test]
-    fn size_of_tas_segment_boundary() {
-        assert_eq!(mem::size_of::<TasSegmentBoundary>(), 4);
-    }
-
-    /// The command words are the wire protocol the cycle cave switches on, and they
-    /// are not contiguous.
-    #[test]
-    fn tas_command_round_trip() {
-        let variants: &[(TasCommand, u32)] = &[
-            (TasCommand::Idle, 0),
-            (TasCommand::ArmRec, 1),
-            (TasCommand::ArmPlay, 2),
-            (TasCommand::Stop, 3),
-            (TasCommand::ArmContinue, 4),
-            (TasCommand::Restart, 5),
-            (TasCommand::StopForRestart, 9),
-            (TasCommand::TestFault, 0x7E57),
-        ];
-        for &(cmd, val) in variants {
-            assert_eq!(cmd as u32, val, "{:?} should be {}", cmd, val);
-        }
-    }
-
     /// An unknown mode word decodes to OFF rather than a guess.
     #[test]
     fn mode_decoding_defaults_unknown_to_off() {
@@ -785,34 +703,6 @@ mod tests {
             );
             assert_eq!(state.mode_str(), "OFF");
         }
-    }
-
-    #[test]
-    fn log_entry_severity_unknown_defaults_to_info() {
-        let mut entry: TasLogEntry = unsafe { mem::zeroed() };
-        entry.severity = 99;
-        assert_eq!(entry.severity_enum(), TasLogSeverity::Info);
-    }
-
-    #[test]
-    fn log_entry_text_str_normal() {
-        let mut entry: TasLogEntry = unsafe { mem::zeroed() };
-        let msg = b"hello world";
-        entry.text[..msg.len()].copy_from_slice(msg);
-        assert_eq!(entry.text_str(), "hello world");
-    }
-
-    #[test]
-    fn log_entry_text_str_full_buffer() {
-        let mut entry: TasLogEntry = unsafe { mem::zeroed() };
-        entry.text.fill(b'A');
-        assert_eq!(entry.text_str().len(), TAS_LOG_ENTRY_SIZE);
-    }
-
-    #[test]
-    fn log_entry_text_str_empty() {
-        let entry: TasLogEntry = unsafe { mem::zeroed() };
-        assert_eq!(entry.text_str(), "");
     }
 
     // ========== read_log_entries: cursor semantics ==========

@@ -77,7 +77,7 @@ safety release, so a hold lasts as long as the pattern says.
 | `ui-f12-from-zero` | no | `*** UI F12 FROM ZERO PASSED: ...` | Launches an isolated `tas_ui` with From at 0 and presses the real F12: the UI must record a fresh take (DLL in REC, a new take growing). |
 | `cont-ui-left-spam [--recording PATH] [--splice N] [--iterations N]` | yes | `CONT UI LEFT-SPAM PASSED` | Launches an isolated `tas_ui.exe`, loads the captured 4500 recording, sends F12 and physical LEFT taps, checks first-attempt resume and zero splice mismatch on each of N splices, stops with F11. `just test_cont_ui_left_spam`. |
 | `acceptance [N]` | yes | `*** ACCEPTANCE TEST PASSED ***` per run, `=== Acceptance: N/N runs passed ===` | Three phases: unsteered baseline REC, Pico-steered REC that must differ from it, PLAY that must match the steered REC. `just test_acceptance`. |
-| `regression` | yes | `=== Regression Summary: 7/7 passed ===` | Seven distinct input contracts: captured edges must match the intended schedule, then REC/PLAY must have zero drift; writes the CSV and certificate. `just test_regression`. |
+| `regression` | yes | `=== Regression Summary: 7/7 passed ===` | Seven distinct input contracts: captured edges must match the intended schedule, then REC/PLAY must have zero drift; writes the certificate. `just test_regression`. |
 
 ### Drift and replay
 
@@ -90,7 +90,7 @@ safety release, so a hold lasts as long as the pattern says.
 | `save-reload` | yes | `*** SAVE/RELOAD/REPLAY PASSED: complete gate-relative comparison across game restart ***` | Verify steered REC, save to disk, kill/relaunch, reclaim Pico and command ownership, require exact input/coordinate round-trip and complete product-aligned zero-drift replay. |
 | `pause-resume` | yes | `*** PAUSE/RESUME REPLAY PASSED: ...` | Escape pause and resume during PLAY; the first 1000 frames stay bit-identical. |
 | `stop-play-flake [--iterations N]` | no | `*** STOP+PLAY FLAKE TEST PASSED: N/N iterations matched the recording ***` | PLAY, STOP at varying frames, PLAY again; the second playback must match the recording bit for bit for 1000 frames from its gate. Default ten stop points, functional suite two. |
-| `rec-start [--file PATH]` | no | `*** REC-START OK: recording begins at the spawn ...` | A fresh recording starts at the stationary spawn with the countdown, not mid-fall; `--file` judges a saved `.tasrec` instead. |
+| `rec-start --file PATH` | no | `*** REC-START OK: recording begins at the spawn ...` | A saved `.tasrec` starts at the stationary spawn with the countdown, not mid-fall. `rec-repro` applies the same check to both of its live captures. |
 | `rec-repro` | yes | `*** REC-REPRO OK: N transitions match in order+mask ...` | The same driven input recorded twice yields the same transitions within tolerance. |
 | `steer-impact` | no | `*** STEER-IMPACT OK: ...` | Injected steering moves the player, and only with a live Kernel::Time stamp on the injection. |
 | `restart-stress` | no | `*** RESTART-STRESS PASSED ***` | 40 in-process F5 restarts (suite) at varied spacing all complete; reports how long each took. |
@@ -111,7 +111,7 @@ safety release, so a hold lasts as long as the pattern says.
 
 | Mode | Pico | Pass signature | What it checks |
 |---|---|---|---|
-| `cont-reliability [--iterations N] [--speed X] [--splice N] [--file PATH \| --synthetic] [--profile taps\|sweep] [--tap-ticks N]` | synthetic baseline only | `*** CONT RELIABILITY PASSED: N/N splice cycles clean ***` | Repeated CONT splices at the given frame: zero drift in the replayed prefix, replay coverage and forward progress. Defaults to FE-tremendous at splice 2200; `--synthetic` records a fresh Pico-driven baseline instead. |
+| `cont-reliability [--iterations N] [--speed X] [--splice N] [--file PATH]` | no | `*** CONT RELIABILITY PASSED: N/N splice cycles clean ***` | Repeated CONT splices at the given frame: zero drift in the replayed prefix, replay coverage and forward progress. Defaults to FE-tremendous at splice 2200. |
 | `fe-cont-reliability [--iterations N]` | no | `*** FE-CONT-RELIABILITY PASSED ***` | FE-tremendous, splices at 2200 at 12x. Default five cycles, functional suite two. |
 | `fe10065-cont [--iterations N]` | no | `*** FE-10065 CONT PASSED ***` | FE-10065, splices at 6200 at each of 64x and 256x, resume overshoot at most one frame and every resume at most 3000 ms. Default eight cycles per speed, functional suite two. |
 | `cont-hijack` | no | `*** BUG #2 PASSED: replay crossed frame N still in PLAY — no REC hijack ***` | A `continue_from_frame` written during a plain PLAY leaves it in PLAY. |
@@ -141,7 +141,7 @@ These run on whatever track is loaded; the track guard below is skipped.
 | `load <file.tasrec>` | `loaded N ticks from PATH` | Writes a recording into shared memory and exits, for arming through the real UI afterwards; refuses while the DLL is in REC or PLAY. |
 | `menu [activate <id\|label> \| focus <id\|label> \| up \| down \| left \| right \| trigger]` | one JSON line `{"result":..,"doc":..}`, exit 0 on ok | Prints the menu document (page, selector, focusable items with labels and ids) or executes one command on the menu thread through the game's own entry points and prints the settled document. |
 | `gamestate` | six status prints | Launches or reuses the game and prints `game_in_game` with the rest of the status. |
-| `level-seq [secs]`, `level-seq watch [secs]` | `*** level-seq PASSED: the seqlock is engaged and reads are coherent ***` | The DLL publishes level context through the seqlock; `watch` logs transitions instead of asserting. |
+| `level-seq [secs]` | `*** level-seq PASSED: the seqlock is engaged and reads are coherent ***` | The DLL publishes level context through the seqlock. |
 
 ### Track guard
 
@@ -175,15 +175,12 @@ not classify.
 | `TAS_PICO_PORT` | `tas_test`, `tas_ui` | Pico CDC data port (default `COM7`). |
 | `TAS_PICO_SERIAL` | Pico updater and live-suite preflight | Select a physical board by USB serial. Discovery joins its disk and both CDC ports by PnP ancestry; multiple boards without a selector fail. Live preflight verifies files/ACK and forwards the discovered data port to children. |
 | `SSB_INSPECT_DATA_DIR` | `tas_ui` | Root for history, recovery, recordings, settings and the session log. Without it, settings sit next to the exe in every build, and the rest defaults to `data/` next to a deployed exe, or `~/.ssb-inspector` for a dev build. |
-| `TAS_RACE_DIAG` | `TAS_Helper.dll` | `1` before launch: log every race-timer HUD line event. |
-| `TAS_MENU_DIAG` | `TAS_Helper.dll` | `1` before launch: log the menu item list on every change. |
 | `SSB_INSPECT_E2E_RECORDING`, `SSB_INSPECT_E2E_SPLICE` | `tas_ui` | Harness-only. `cont-ui-left-spam` sets them on the UI it launches: load this recording and set From to this splice at startup. The UI refuses them without an isolated `SSB_INSPECT_DATA_DIR`. |
 
 ## Artifacts
 
 `TAS_TEST_OUTPUT` (default: beside `tas_test.exe`) receives
-`regression_results.csv`, `regression_certificate.json` and
-`regression_cache/` from `regression`; `acceptance_certificate.json` from
+`regression_certificate.json` from `regression`; `acceptance_certificate.json` from
 `acceptance`; `cont-ui-<timestamp>-<pid>/` from `cont-ui-left-spam` with the
 child UI's isolated data directory and logs; and `live-<timestamp>-<pid>/`
 from `live`/`live-full` with `summary.json` and a per-stage `output.log`, each stage's
@@ -200,7 +197,7 @@ CONT reliability against the default FE-tremendous baseline, one cycle at 32x,
 from `TAS/`:
 
 ```powershell
-cargo run --release --bin tas_test -- cont-reliability --iterations 1 --splice 2400 --speed 32 --profile taps --tap-ticks 8
+cargo run --release --bin tas_test -- cont-reliability --iterations 1 --splice 2400 --speed 32
 ```
 
 Use `--iterations 10` for repeated coverage and `--speed 64` or `--speed 100`
@@ -240,8 +237,8 @@ configuration; timing medians still require three samples. Both full lanes inclu
 save/reload and end at the main menu after dialog navigation, so save your work
 first and do not run them alongside another controller. They require a Pico, all
 three committed FE fixtures, the deployed
-game/injector/DLL, and a `tas_ui.exe` beside the harness. `NO_REVIVE=1` and
-`TAS_TEST_CASE_FILTER` are refused for this lane. Preflight checks the on-disk
+game/injector/DLL, and a `tas_ui.exe` beside the harness. `NO_REVIVE=1` is
+refused for this lane. Preflight checks the on-disk
 DLL against the local build; this cannot identify an older DLL already injected
 in a running game. Deploy and restart before testing a native change.
 

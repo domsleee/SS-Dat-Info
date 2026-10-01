@@ -146,27 +146,18 @@ pub fn run() -> bool {
         SLOW_SPEED, FAST_SPEED, VERIFY_FRAMES
     );
 
-    let path = match harness::fixture_path(RECORDING) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("ERROR: {e}");
-            return false;
-        }
-    };
-    println!("  Recording: {}", path.display());
-    let rec = match replay::load_tasrec(&path) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("ERROR: load failed: {}", e);
-            return false;
-        }
-    };
-
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
     // tas_ui writes playback_speed=1.0 every frame, which would collapse the
     // 64x run back to 1x.
     harness::ensure_exclusive_runtime_ownership(&mut client, "catchup-speed scaling");
+    let rec = match harness::load_fixture(&mut client, RECORDING) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            return false;
+        }
+    };
 
     let slow = measure_speed(&mut client, &rec, SLOW_SPEED);
     let fast = measure_speed(&mut client, &rec, FAST_SPEED);

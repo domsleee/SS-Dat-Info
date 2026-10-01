@@ -73,18 +73,13 @@ pub fn run() -> bool {
         PACE_TARGET
     );
 
-    let path = match harness::fixture_path(RECORDING) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("ERROR: {e}");
-            return false;
-        }
-    };
-    println!("  Recording: {}", path.display());
-    let rec = match replay::load_tasrec(&path) {
+    let mut client = harness::ensure_game_running();
+    harness::print_status(&client);
+    harness::ensure_exclusive_runtime_ownership(&mut client, "play-pace timing");
+    let rec = match harness::load_fixture(&mut client, RECORDING) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("ERROR: load failed: {}", e);
+            eprintln!("ERROR: {e}");
             return false;
         }
     };
@@ -95,10 +90,6 @@ pub fn run() -> bool {
         );
         return false;
     }
-
-    let mut client = harness::ensure_game_running();
-    harness::print_status(&client);
-    harness::ensure_exclusive_runtime_ownership(&mut client, "play-pace timing");
 
     let mut samples: Vec<f64> = Vec::with_capacity(TRIALS as usize);
     for t in 0..TRIALS {

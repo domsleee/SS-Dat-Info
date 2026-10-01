@@ -19,9 +19,9 @@ use crate::patterns;
 #[derive(Debug, Serialize)]
 pub struct AcceptanceResult {
     pub baseline_neutral: bool,
-    pub steering: Verdict,
-    pub replay_steered: Verdict,
-    pub zero_drift: Verdict,
+    pub steering: bool,
+    pub replay_steered: bool,
+    pub zero_drift: bool,
     pub baseline_count: u32,
     pub rec_count: u32,
     pub max_drift_x: f64,
@@ -36,39 +36,13 @@ pub struct AcceptanceResult {
     pub play_gate: u32,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum Verdict {
-    Pass,
-    Fail,
-}
-
-impl Verdict {
-    fn from_bool(pass: bool) -> Verdict {
-        if pass {
-            Verdict::Pass
-        } else {
-            Verdict::Fail
-        }
-    }
-}
-
-impl std::fmt::Display for Verdict {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Verdict::Pass => write!(f, "PASS"),
-            Verdict::Fail => write!(f, "FAIL"),
-        }
-    }
-}
-
 impl AcceptanceResult {
     pub fn all_pass(&self) -> bool {
         self.baseline_neutral
-            && self.steering == Verdict::Pass
-            && self.replay_steered == Verdict::Pass
+            && self.steering
+            && self.replay_steered
             && self.gates_pass
-            && self.zero_drift == Verdict::Pass
+            && self.zero_drift
             && self.playback_complete
     }
 }
@@ -150,12 +124,14 @@ pub fn run() -> AcceptanceResult {
     harness::arm_rec(&mut client);
 
     println!("  Steering via Pico HID for {}s...", REC_DURATION_SECS);
-    let steps = patterns::build_from_pattern(STEER_PATTERN, STEER_HOLD_TICKS, 0);
-    if let Err(error) = drive_pico_acceptance(&steps) {
-        harness::stop(&mut client);
-        eprintln!("ACCEPTANCE INPUT FAILED: {error}");
+    let steps = patterns::build_from_pattern(STEER_PATTERN, STEER_HOLD_TICKS);
+    if !harness::drive_or_stop(&mut client, &steps) {
         std::process::exit(1);
     }
+    // Let the release be recorded.
+    std::thread::sleep(std::time::Duration::from_millis(
+        STEER_RELEASE_TICKS as u64 * 10,
+    ));
 
     let rec_count = client.state().recorded_count;
     harness::stop(&mut client);
@@ -196,12 +172,12 @@ pub fn run() -> AcceptanceResult {
     // shows up in Y/Z before it shows in X.
     let compare_count = baseline_count.min(rec_count) as usize;
     let max_base_vs_rec_x = max_distance(&baseline_coords[..compare_count], &rec_coords);
-    let steering = Verdict::from_bool(max_base_vs_rec_x > 1.0);
+    let steering = max_base_vs_rec_x > 1.0;
 
     // Replay steered verdict: PLAY vs BASELINE must differ the same way.
     let play_compare = baseline_count.min(state.playback_pos) as usize;
     let max_play_vs_base_x = max_distance(&baseline_coords[..play_compare], &state.play_coords);
-    let replay_steered = Verdict::from_bool(max_play_vs_base_x > 1.0);
+    let replay_steered = max_play_vs_base_x > 1.0;
 
     // Zero drift: equal offsets from the independently observed gates.
     let compared = state
@@ -209,14 +185,14 @@ pub fn run() -> AcceptanceResult {
         .saturating_sub(play_gate)
         .min(rec_count.saturating_sub(rec_gate));
     let drift_result = drift::compute_gate_relative_drift(state, rec_gate, play_gate, compared);
-    let first_bit_mismatch = (0..compared).find(|offset| {
-        let rec = state.rec_coords[(rec_gate + offset) as usize];
-        let play = state.play_coords[(play_gate + offset) as usize];
-        rec.iter()
-            .zip(play.iter())
-            .any(|(r, p)| r.to_bits() != p.to_bits())
-    });
-    let zero_drift = Verdict::from_bool(drift_result.is_zero());
+    let (_, first_bit_mismatch) = drift::bit_mismatches(
+        &state.rec_coords,
+        &state.play_coords,
+        rec_gate,
+        play_gate,
+        compared,
+    );
+    let zero_drift = drift_result.is_zero();
 
     // 4-gate assessment
     let assessment = gates::run_gates(state, rec_count, rec_gate, play_gate);
@@ -277,14 +253,4 @@ fn max_distance(a: &[[f32; 3]], b: &[[f32; 3]]) -> f64 {
                 .sqrt()
         })
         .fold(0.0, f64::max)
-}
-
-/// Drive Pico HID for acceptance test Phase 2, then wait for the release to
-/// be recorded.
-fn drive_pico_acceptance(steps: &[patterns::PatternStep]) -> Result<(), String> {
-    harness::drive_pico_steps(steps)?;
-    std::thread::sleep(std::time::Duration::from_millis(
-        STEER_RELEASE_TICKS as u64 * 10,
-    ));
-    Ok(())
 }

@@ -110,7 +110,7 @@ const MODES: &[Mode] = &[
     Mode {
         name: "regression",
         usage: "",
-        summary: "Seven input contracts: verify captured keys, then REC/PLAY zero drift; CSV + certificate",
+        summary: "Seven input contracts: verify captured keys, then REC/PLAY zero drift; certificate",
         run: run_regression,
     },
     Mode {
@@ -169,13 +169,13 @@ const MODES: &[Mode] = &[
     },
     Mode {
         name: "rec-start",
-        usage: "[--file PATH]",
-        summary: "A fresh recording starts at the stationary spawn; --file judges a saved .tasrec",
+        usage: "--file PATH",
+        summary: "A saved .tasrec starts at the stationary spawn (rec-repro checks live captures)",
         run: |args| {
             let flags = parse(args, &[flag("--file", None)], 0);
             match flags.value("--file") {
                 Some(file) => rec_start::check_file(file),
-                None => rec_start::run(),
+                None => usage_error("rec-start needs --file PATH"),
             }
         },
     },
@@ -252,7 +252,7 @@ const MODES: &[Mode] = &[
     },
     Mode {
         name: "cont-reliability",
-        usage: "[--iterations N] [--speed X] [--splice N] [--file PATH | --synthetic] [--profile taps|sweep] [--tap-ticks N]",
+        usage: "[--iterations N] [--speed X] [--splice N] [--file PATH]",
         summary: "Repeated CONT splices: zero prefix drift, coverage and forward progress (default FE-tremendous @2200)",
         run: run_cont_reliability,
     },
@@ -260,13 +260,13 @@ const MODES: &[Mode] = &[
         name: "fe-cont-reliability",
         usage: "[--iterations N]",
         summary: "FE-tremendous, five splices at 2200 at 12x",
-        run: |args| { let flags = parse(args, &[flag("--iterations", None)], 0); cont_cases::run_iterations(&cont_cases::FE_TREMENDOUS, num(&flags, "--iterations", 5)) },
+        run: |args| { let flags = parse(args, &[flag("--iterations", None)], 0); cont_cases::run(&cont_cases::FE_TREMENDOUS, num(&flags, "--iterations", 5)) },
     },
     Mode {
         name: "fe10065-cont",
         usage: "[--iterations N]",
         summary: "FE-10065, eight splices at 6200 at 64x and 256x with resume-timing limits",
-        run: |args| { let flags = parse(args, &[flag("--iterations", None)], 0); cont_cases::run_iterations(&cont_cases::FE_10065, num(&flags, "--iterations", 8)) },
+        run: |args| { let flags = parse(args, &[flag("--iterations", None)], 0); cont_cases::run(&cont_cases::FE_10065, num(&flags, "--iterations", 8)) },
     },
     Mode {
         name: "cont-hijack",
@@ -434,7 +434,7 @@ const MODES: &[Mode] = &[
     Mode {
         name: "race-clock",
         usage: "",
-        summary: "The game's race clock, put through the HUD formula, equals every scraped HUD time (1x and 8x)",
+        summary: "The game's race clock starts, never runs backward and finishes on a tick sum (1x and 8x)",
         run: |args| no_args(args) && race_clock::run(),
     },
     Mode {
@@ -451,18 +451,12 @@ const MODES: &[Mode] = &[
     },
     Mode {
         name: "level-seq",
-        usage: "[secs] | watch [secs]",
-        summary: "The DLL publishes level context through the seqlock; watch logs transitions instead",
+        usage: "[secs]",
+        summary: "The DLL publishes level context through the seqlock",
         run: |args| {
             allow_any_level();
-            let flags = parse(args, &[], 2);
-            if flags.positional.first().map(String::as_str) == Some("watch") {
-                level_seq::watch(positional_num(&flags, 1))
-            } else if flags.positional.len() > 1 {
-                usage_error("level-seq takes [secs] or watch [secs]");
-            } else {
-                level_seq::run(positional_num(&flags, 0))
-            }
+            let flags = parse(args, &[], 1);
+            level_seq::run(positional_num(&flags, 0))
         },
     },
 ];
@@ -550,11 +544,8 @@ fn output_dir() -> PathBuf {
 
 fn run_regression(args: &[String]) -> bool {
     no_args(args);
-    let out = output_dir();
-    let csv_path = out.join("regression_results.csv");
-    let cert_path = out.join("regression_certificate.json");
-    let results = regression::run(&csv_path);
-    certificate::write_regression(&results, &csv_path, &cert_path);
+    let results = regression::run();
+    certificate::write_regression(&results, &output_dir().join("regression_certificate.json"));
     !results.is_empty() && results.iter().all(|r| r.all_gates_pass)
 }
 
@@ -629,50 +620,24 @@ fn run_cont_reliability(args: &[String]) -> bool {
             flag("--speed", Some("-s")),
             flag("--splice", None),
             flag("--file", None),
-            switch("--synthetic", None),
-            flag("--profile", None),
-            flag("--tap-ticks", None),
         ],
         0,
     );
     let iterations = num(&flags, "--iterations", 10u32);
     let speed = num(&flags, "--speed", 12.0f32);
     let splice = num(&flags, "--splice", 2200u32);
-    let profile = match flags.value("--profile") {
-        None => cont_reliability::BaselineInputProfile::Taps,
-        Some(raw) => cont_reliability::BaselineInputProfile::parse(raw).unwrap_or_else(|| {
-            usage_error(format!(
-                "invalid --profile '{raw}'; expected 'taps' or 'sweep'"
-            ))
-        }),
+    // A real steered recording makes the drift check meaningful.
+    let file = match flags.value("--file") {
+        Some(file) => file.to_string(),
+        None => match harness::fixture_path("FE-tremendous.tasrec") {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(error) => {
+                eprintln!("ERROR: {error}");
+                return false;
+            }
+        },
     };
-    let tap_ticks = flags
-        .value("--tap-ticks")
-        .map(|_| num(&flags, "--tap-ticks", 8u32).max(1));
-    // A real steered recording makes the drift check meaningful, so the
-    // default baseline is FE-tremendous; `--synthetic` records a fresh one.
-    let file = if flags.is_set("--synthetic") {
-        None
-    } else {
-        flags.value("--file").map(str::to_string).or_else(|| {
-            harness::fixture_path("FE-tremendous.tasrec")
-                .ok()
-                .map(|p| p.to_string_lossy().into_owned())
-        })
-    };
-    match &file {
-        Some(p) => println!("  Baseline: real recording {}", p),
-        None => println!("  Baseline: synthetic"),
-    }
-    let report = cont_reliability::run(
-        iterations,
-        speed,
-        splice,
-        file.as_deref(),
-        profile,
-        tap_ticks,
-    );
-    report.all_pass()
+    cont_reliability::run(iterations, speed, splice, &file).all_pass()
 }
 
 #[cfg(test)]

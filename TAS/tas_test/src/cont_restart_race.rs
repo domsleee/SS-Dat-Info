@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 
 use crate::harness;
-use crate::replay;
 
 const RECORDING: &str = "FE-tremendous.tasrec";
 const SPLICE_FRAME: u32 = 2200;
@@ -137,25 +136,14 @@ pub fn run_input_protection() -> bool {
 pub fn run() -> bool {
     println!("=== Product STOP/restart controller against live DLL ===\n");
 
-    let path = match harness::fixture_path(RECORDING) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("ERROR: {e}");
-            return false;
-        }
-    };
-    let rec = match replay::load_tasrec(&path) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("ERROR: load failed: {}", e);
-            return false;
-        }
-    };
     let mut client = harness::ensure_game_running();
     harness::print_status(&client);
     harness::ensure_exclusive_runtime_ownership(&mut client, "cont-restart-race");
 
-    replay::write_to_shared(&mut client, &rec);
+    if let Err(e) = harness::load_fixture(&mut client, RECORDING) {
+        eprintln!("ERROR: {e}");
+        return false;
+    }
 
     println!("Serialised: Stop → wait mode==OFF → Restart, expect acceptance");
     if !drive_to_rec_mode(&mut client) {

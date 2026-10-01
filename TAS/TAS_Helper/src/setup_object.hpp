@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "game_addresses.hpp"
 #include "setup_config_parse.hpp"
+#include "safe_read.hpp"
 #include "log.hpp"
 #include <format>
 
@@ -13,24 +14,12 @@ namespace gamesetup {
 
 using Setup = setupconfig::Values;
 
-static bool SafeCopy(uint32_t src, void* dst, uint32_t n) {
-    if (src < 0x10000) return false;
-    __try {
-        memcpy(dst, (const void*)(uintptr_t)src, n);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
 // Returns false when the chain or any string field is unreadable. The stance
 // is UNKNOWN on a failed read, never 0 (regular). Logs each resolved/unresolved
 // transition so a broken chain shows up on the first race.
 inline bool Read(Setup* out) {
     const HMODULE exe = GetModuleHandleA(nullptr);
-    auto reader = [](uint32_t address, void* destination, uint32_t size) {
-        return SafeCopy(address, destination, size);
-    };
+    auto reader = SafeCopy;
     uint32_t config = 0;
     const bool ok = exe && setupconfig::Read(
         (uint32_t)(uintptr_t)exe, reader, out, &config);

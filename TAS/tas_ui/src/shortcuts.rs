@@ -7,20 +7,9 @@ use tas_shared::TasCommand;
 use crate::panels::transport;
 use crate::{recording, win32, TasApp};
 
-/// Identifiers for the four TAS shortcut keys, used both for
-/// `poll_global_shortcuts` and for the pure edge-detector unit tests
-/// (which can't link Win32). Order matches `GLOBAL_SHORTCUT_KEYS`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GlobalShortcutSlot {
-    F9 = 0,
-    F10 = 1,
-    F11 = 2,
-    F12 = 3,
-}
-
-/// Compute press-edge transitions for the four shortcut keys. Pure
-/// function so we can unit-test the edge logic without faking Win32.
-/// Mutates `prev` to current so the caller's state stays in sync.
+/// Compute press-edge transitions for the four shortcut keys (F9, F10, F11,
+/// F12). Pure function so we can unit-test the edge logic without faking
+/// Win32. Mutates `prev` to current so the caller's state stays in sync.
 pub(crate) fn compute_global_key_edges(now: [bool; 4], prev: &mut [bool; 4]) -> [bool; 4] {
     let mut edges = [false; 4];
     for i in 0..4 {
@@ -42,8 +31,8 @@ impl TasApp {
     pub(crate) fn poll_global_shortcuts(&mut self) -> Vec<transport::Action> {
         let now: [bool; 4] =
             [win32::VK_F9, win32::VK_F10, win32::VK_F11, win32::VK_F12].map(win32::key_is_down);
-        let edges = compute_global_key_edges(now, &mut self.prev_global_keys);
-        if !edges.iter().any(|&e| e) {
+        let [f9, f10, f11, f12] = compute_global_key_edges(now, &mut self.prev_global_keys);
+        if !(f9 || f10 || f11 || f12) {
             return Vec::new();
         }
 
@@ -63,17 +52,17 @@ impl TasApp {
         }
 
         let mut actions = Vec::new();
-        if edges[GlobalShortcutSlot::F9 as usize] {
+        if f9 {
             actions.extend(self.shortcut_arm("Global F9 (in-game): REC", TasCommand::ArmRec));
         }
-        if edges[GlobalShortcutSlot::F10 as usize] {
+        if f10 {
             actions.extend(self.shortcut_arm("Global F10 (in-game): PLAY", TasCommand::ArmPlay));
         }
-        if edges[GlobalShortcutSlot::F11 as usize] {
+        if f11 {
             actions.push(transport::Action::Send(TasCommand::Stop));
             actions.push(transport::Action::Log("Global F11 (in-game): STOP".into()));
         }
-        if edges[GlobalShortcutSlot::F12 as usize] {
+        if f12 {
             actions
                 .extend(self.shortcut_arm("Global F12 (in-game): CONT", TasCommand::ArmContinue));
         }
@@ -126,8 +115,13 @@ impl TasApp {
         // Don't consume shortcuts when a text field has focus
         let any_text_focus = ctx.memory(|m| m.focused().is_some());
 
-        ctx.input(|input| {
+        // One pass over the input. Zoom and the file dialogs run after it:
+        // a modal dialog must not open while the input lock is held.
+        let (zoom_in, zoom_out, save, open) = ctx.input(|input| {
             let ctrl = input.modifiers.ctrl || input.modifiers.mac_cmd;
+            // Ctrl+S / Ctrl+O act even while a text field has focus.
+            let save = ctrl && input.key_pressed(egui::Key::S);
+            let open = ctrl && input.key_pressed(egui::Key::O);
 
             // F5: Restart game (Pico F5)
             if input.key_pressed(egui::Key::F5) {
@@ -167,7 +161,7 @@ impl TasApp {
 
             // Skip remaining shortcuts if text input has focus
             if any_text_focus {
-                return;
+                return (false, false, save, open);
             }
 
             // Space: STOP (toggle off)
@@ -203,8 +197,8 @@ impl TasApp {
                         continue;
                     }
                     match key {
-                        egui::Key::H => self.show_history = !self.show_history,
-                        egui::Key::L => self.show_log = !self.show_log,
+                        egui::Key::H => self.settings.show_history = !self.settings.show_history,
+                        egui::Key::L => self.settings.show_log = !self.settings.show_log,
                         _ => {}
                     }
                 }
@@ -228,35 +222,21 @@ impl TasApp {
             }
 
             // Ctrl+S: Save recording
-            if ctrl && input.key_pressed(egui::Key::S) {
+            if save {
                 actions.push(transport::Action::Log("Shortcut: Ctrl+S Save".into()));
             }
 
             // Ctrl+O: Open recording
-            if ctrl && input.key_pressed(egui::Key::O) {
+            if open {
                 actions.push(transport::Action::Log("Shortcut: Ctrl+O Open".into()));
             }
 
-            // Plus/Equals: Zoom in timeline
-            if input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals) {
-                // handled below outside closure
-            }
-
-            // Minus: Zoom out timeline
-            if input.key_pressed(egui::Key::Minus) {
-                // handled below outside closure
-            }
-        });
-
-        // Handle zoom and file operations outside the input closure to avoid borrow issues
-        let (zoom_in, zoom_out, save, open) = ctx.input(|input| {
-            let ctrl = input.modifiers.ctrl || input.modifiers.mac_cmd;
+            // Plus/Equals: zoom in the timeline; Minus: zoom out.
             (
-                !any_text_focus
-                    && (input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals)),
-                !any_text_focus && input.key_pressed(egui::Key::Minus),
-                ctrl && input.key_pressed(egui::Key::S),
-                ctrl && input.key_pressed(egui::Key::O),
+                input.key_pressed(egui::Key::Plus) || input.key_pressed(egui::Key::Equals),
+                input.key_pressed(egui::Key::Minus),
+                save,
+                open,
             )
         });
 

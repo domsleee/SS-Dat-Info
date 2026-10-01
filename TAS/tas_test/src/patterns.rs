@@ -5,7 +5,6 @@
 //!   J = JUMP (0x10), S = SHIFT (0x20), N = neutral (0x00)
 //!
 //! Each character becomes a "hold" phase of `hold_ticks` duration.
-//! Optional `gap_ticks` neutral phases are inserted between holds.
 
 use tas_shared::input_bits;
 
@@ -19,8 +18,6 @@ pub struct PatternStep {
 
 /// Default hold duration per pattern character (ticks).
 pub const DEFAULT_HOLD_TICKS: u32 = 56;
-/// Default gap duration between pattern characters (ticks).
-pub const DEFAULT_GAP_TICKS: u32 = 0;
 
 fn char_to_mask(ch: char) -> u8 {
     match ch {
@@ -35,25 +32,18 @@ fn char_to_mask(ch: char) -> u8 {
     }
 }
 
-/// Build steps from a pattern string with configurable hold/gap ticks.
-pub fn build_from_pattern(pattern: &str, hold_ticks: u32, gap_ticks: u32) -> Vec<PatternStep> {
+/// Build steps from a pattern string, `hold_ticks` per character.
+pub fn build_from_pattern(pattern: &str, hold_ticks: u32) -> Vec<PatternStep> {
     let mut steps = Vec::new();
     let mut stop = 0u32;
 
-    for (i, ch) in pattern.chars().enumerate() {
+    for ch in pattern.chars() {
         let mask = char_to_mask(ch);
         stop += hold_ticks;
         steps.push(PatternStep {
             mask,
             stop_tick: stop,
         });
-        if gap_ticks > 0 && i + 1 < pattern.len() {
-            stop += gap_ticks;
-            steps.push(PatternStep {
-                mask: 0x00,
-                stop_tick: stop,
-            });
-        }
     }
     steps
 }
@@ -193,21 +183,12 @@ mod tests {
 
     #[test]
     fn test_simple_pattern() {
-        let steps = build_from_pattern("LR", 56, 0);
+        let steps = build_from_pattern("LR", 56);
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].mask, input_bits::LEFT);
         assert_eq!(steps[0].stop_tick, 56);
         assert_eq!(steps[1].mask, input_bits::RIGHT);
         assert_eq!(steps[1].stop_tick, 112);
-    }
-
-    #[test]
-    fn test_pattern_with_gap() {
-        let steps = build_from_pattern("LR", 56, 10);
-        assert_eq!(steps.len(), 3); // L, GAP, R
-        assert_eq!(steps[1].mask, 0);
-        assert_eq!(steps[1].stop_tick, 66);
-        assert_eq!(steps[2].stop_tick, 122);
     }
 
     #[test]
@@ -221,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_neutral_tail_extends_the_sequence() {
-        let steps = with_neutral_tail(build_from_pattern("LR", 56, 0), 100);
+        let steps = with_neutral_tail(build_from_pattern("LR", 56), 100);
         assert_eq!(steps.len(), 3);
         assert_eq!(steps[2].mask, 0);
         assert_eq!(total_ticks(&steps), 212);
@@ -235,27 +216,20 @@ mod tests {
 
     #[test]
     fn test_total_ticks_matches_last_stop() {
-        let steps = build_from_pattern("LRL", 56, 0);
+        let steps = build_from_pattern("LRL", 56);
         assert_eq!(total_ticks(&steps), 168); // 3 * 56
     }
 
     #[test]
-    fn test_total_ticks_with_gaps() {
-        let steps = build_from_pattern("LR", 56, 10);
-        // L(56) + GAP(10) + R(56) = 122
-        assert_eq!(total_ticks(&steps), 122);
-    }
-
-    #[test]
     fn test_neutral_pattern() {
-        let steps = build_from_pattern("N", 10, 0);
+        let steps = build_from_pattern("N", 10);
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].mask, 0x00);
     }
 
     #[test]
     fn test_all_directions() {
-        let steps = build_from_pattern("LUDRSJ", 1, 0);
+        let steps = build_from_pattern("LUDRSJ", 1);
         assert_eq!(steps.len(), 6);
         assert_eq!(steps[0].mask, input_bits::LEFT);
         assert_eq!(steps[1].mask, input_bits::UP);
@@ -266,14 +240,8 @@ mod tests {
     }
 
     #[test]
-    fn test_gap_not_after_last() {
-        let steps = build_from_pattern("L", 56, 10);
-        assert_eq!(steps.len(), 1);
-    }
-
-    #[test]
     #[should_panic(expected = "unsupported pattern token")]
     fn test_invalid_token_panics() {
-        build_from_pattern("X", 10, 0);
+        build_from_pattern("X", 10);
     }
 }

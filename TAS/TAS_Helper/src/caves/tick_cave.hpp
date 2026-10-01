@@ -20,15 +20,12 @@
 inline TasSharedState* g_tickCaveState = nullptr;
 static SafetyHookMid tickCaveHook{};
 
-// The advance the tick cave writes: g_privateTickAdvance, or the game's
-// constant in the fallback.
-static float* g_tickAdvancePtr = nullptr;
-
-// 0x46DB08 is read by sixteen `fmul dword ptr [0x46db08]`: four in the
-// game cycle, twelve in the menu (Menu::Paint's animation dt). The tick cave
-// doesn't run in the menu, so a scaled shared value would run the menu video
-// fast. The four in-game operands are pointed here instead (same-length
-// rewrite of a 4-byte absolute address).
+// The advance the tick cave writes. 0x46DB08 is read by sixteen
+// `fmul dword ptr [0x46db08]`: four in the game cycle, twelve in the menu
+// (Menu::Paint's animation dt). The tick cave doesn't run in the menu, so a
+// scaled shared value would run the menu video fast. The four in-game
+// operands are pointed here instead (same-length rewrite of a 4-byte absolute
+// address); the install fails if they cannot be.
 // inline, not static: the patched instructions hold one fixed address.
 inline float g_privateTickAdvance = 0.01f;
 
@@ -44,69 +41,34 @@ static constexpr uint32_t TICK_ADVANCE_OPERANDS[] = {
     0x25CE2, 0x25D8B, 0x25DB4, 0x25E2D,
 };
 
-// Original protection of every .text page the tick cave patches, recorded on
-// first sight. Shared by all patches because they overlap: three fmul operands
-// and the clamp byte are on page 0x425000, and a second VirtualProtect there
-// would report our own RWX as the "old" protection.
-struct TickCaveCodePages {
-    static constexpr size_t kMax = 8;
-    uintptr_t base[kMax] = {};
-    DWORD original[kMax] = {};
-    size_t count = 0;
-    size_t pageSize = 0;
+// Every patch (the clamp immediates and the four fmul operands) lies in
+// EXE+0x25C83..0x26002, all on .text pages of one protection.
+static constexpr uint32_t TICK_CAVE_PATCH_FIRST = 0x25C83;
+static constexpr uint32_t TICK_CAVE_PATCH_END = 0x26002;
 
-    size_t PageSize() {
-        if (!pageSize) {
-            SYSTEM_INFO si{};
-            GetSystemInfo(&si);
-            pageSize = si.dwPageSize ? si.dwPageSize : 0x1000;
-        }
-        return pageSize;
+// Runs patch() with the span writable, then flushes the icache (VirtualProtect
+// does not) and restores the protection.
+template <typename Patch>
+static bool PatchTickCaveCode(uint8_t* exeBase, Patch patch) {
+    void* span = exeBase + TICK_CAVE_PATCH_FIRST;
+    const size_t len = TICK_CAVE_PATCH_END - TICK_CAVE_PATCH_FIRST;
+    DWORD old = 0;
+    if (!VirtualProtect(span, len, PAGE_EXECUTE_READWRITE, &old)) {
+        Log(std::format("Tick cave: VirtualProtect on EXE+0x{:X}..0x{:X} FAILED (err={})",
+                        TICK_CAVE_PATCH_FIRST, TICK_CAVE_PATCH_END, GetLastError()));
+        return false;
     }
-
-    // Make [addr, addr+len) RWX.
-    bool Open(void* addr, size_t len) {
-        const size_t ps = PageSize();
-        uintptr_t first = (uintptr_t)addr & ~(uintptr_t)(ps - 1);
-        uintptr_t last = ((uintptr_t)addr + len - 1) & ~(uintptr_t)(ps - 1);
-        for (uintptr_t pg = first; pg <= last; pg += ps) {
-            bool seen = false;
-            for (size_t i = 0; i < count; ++i) {
-                if (base[i] == pg) { seen = true; break; }
-            }
-            if (!seen && count >= kMax) return false;
-            DWORD old = 0;
-            if (!VirtualProtect((void*)pg, ps, PAGE_EXECUTE_READWRITE, &old)) return false;
-            if (!seen) {
-                base[count] = pg;
-                original[count] = old;
-                ++count;
-            }
-        }
-        return true;
-    }
-
-    // Flush the icache (VirtualProtect does not) and put every page back.
-    void CloseAll() {
-        const size_t ps = PageSize();
-        for (size_t i = 0; i < count; ++i) {
-            FlushInstructionCache(GetCurrentProcess(), (void*)base[i], ps);
-            DWORD ignored = 0;
-            VirtualProtect((void*)base[i], ps, original[i], &ignored);
-        }
-        count = 0;
-    }
-};
-
-inline TickCaveCodePages g_tickCaveCodePages{};
+    patch();
+    FlushInstructionCache(GetCurrentProcess(), span, len);
+    VirtualProtect(span, len, old, &old);
+    return true;
+}
 
 // The redirected operands point into this DLL, so they must be restored
 // before it could unload.
 inline bool g_tickCaveRedirectApplied = false;
 inline uint8_t* g_tickCaveExeBase = nullptr;
 inline bool g_tickCaveClampApplied = false;
-inline bool g_tickAdvanceProtectionChanged = false;
-inline DWORD g_tickAdvanceOriginalProtect = 0;
 
 static constexpr float TICK_ADVANCE_DEFAULT = 0.01f;
 
@@ -180,9 +142,7 @@ static void ChooseTickCount(SafetyHookContext& ctx, TasSharedState* s, int32_t o
     if (catchup_drain) {
         // One tick drains the whole wall-time gap, even when the splice
         // limited this frame's ticks.
-        if (g_tickAdvancePtr) {
-            *g_tickAdvancePtr = (float)owed * g_nativeTickAdvance;
-        }
+        g_privateTickAdvance = (float)owed * g_nativeTickAdvance;
         ctx.esi = 1;
     } else {
         // Clamp __ftol garbage to the patched cap.
@@ -203,11 +163,11 @@ static void ChooseTickCount(SafetyHookContext& ctx, TasSharedState* s, int32_t o
 // Scale the advance during REC/PLAY at a non-1x speed, otherwise restore the
 // native value. Skipped on a catch-up drain frame, which set its own value.
 static void ApplyPlaybackSpeed(TasSharedState* s, bool catchup_drain) {
-    if (g_tickAdvancePtr && !catchup_drain) {
+    if (!catchup_drain) {
         if (s->mode != MODE_OFF && s->playback_speed > 0.0f && s->playback_speed != 1.0f) {
-            *g_tickAdvancePtr = g_nativeTickAdvance / s->playback_speed;
+            g_privateTickAdvance = g_nativeTickAdvance / s->playback_speed;
         } else {
-            *g_tickAdvancePtr = g_nativeTickAdvance;
+            g_privateTickAdvance = g_nativeTickAdvance;
         }
     }
 }
@@ -265,69 +225,18 @@ bool InstallTickCave(GameAddresses& addr, TasSharedState* state) {
         return false;
     }
 
-    g_tickCaveState = state;
-
     auto* exeBase = (uint8_t*)addr.exe;
-    g_tickCaveExeBase = exeBase;
-    g_tickAdvancePtr = (float*)(exeBase + 0x6DB08);
-
-    g_nativeTickAdvance = *g_tickAdvancePtr;
+    g_nativeTickAdvance = *(float*)(exeBase + 0x6DB08);
+    g_privateTickAdvance = g_nativeTickAdvance;
     Log(std::format("Tick cave: native tick advance constant = {}", g_nativeTickAdvance));
 
-    // Redirect the four in-game readers, all or none: after a partial
-    // redirect the fallback would leave some sites reading a float nothing
-    // updates. kFmulTickAdvance = fmul dword ptr [0x46DB08].
-    g_privateTickAdvance = g_nativeTickAdvance;
+    // Redirect the four in-game readers, all or none, else install fails.
+    // kFmulTickAdvance = fmul dword ptr [0x46DB08].
     static const uint8_t kFmulTickAdvance[6] = { 0xD8, 0x0D, 0x08, 0xDB, 0x46, 0x00 };
-    bool redirected = true;
-
-    const size_t kSiteCount = sizeof(TICK_ADVANCE_OPERANDS) / sizeof(uint32_t);
-    for (size_t i = 0; i < kSiteCount && redirected; ++i) {
-        uint32_t rva = TICK_ADVANCE_OPERANDS[i];
-        uint8_t* insn = exeBase + rva - 2;
-        if (!g_tickCaveCodePages.Open(insn, sizeof(kFmulTickAdvance))) {
-            Log(std::format("Tick cave: VirtualProtect on fmul at EXE+0x{:X} FAILED (err={})",
-                            rva - 2, GetLastError()));
-            redirected = false;
-            break;
-        }
-        if (memcmp(insn, kFmulTickAdvance, sizeof(kFmulTickAdvance)) != 0) {
-            Log(std::format("Tick cave: fmul at EXE+0x{:X} is not the expected instruction; not redirecting",
-                            rva - 2));
-            redirected = false;
-            break;
-        }
-    }
-
-    // The game thread may be running these instructions. The operands are
-    // unaligned, so use a locked exchange, which is atomic at any alignment
-    // (none crosses a cache line). Old and new addresses hold the same value.
-    if (redirected) {
-        LONG target = (LONG)(uintptr_t)&g_privateTickAdvance;
-        for (uint32_t rva : TICK_ADVANCE_OPERANDS) {
-            InterlockedExchange((volatile LONG*)(exeBase + rva), target);
-        }
-        g_tickCaveRedirectApplied = true;
-    }
-
-    if (redirected) {
-        g_tickAdvancePtr = &g_privateTickAdvance;
-        Log(std::format("Tick cave: {} in-game tick-advance readers redirected to DLL float at {:p} "
-                        "(game constant at EXE+0x6DB08 left untouched for the menu)",
-                        (int)(sizeof(TICK_ADVANCE_OPERANDS) / sizeof(uint32_t)),
-                        (void*)&g_privateTickAdvance));
-    } else {
-        DWORD oldProtect = 0;
-        if (!VirtualProtect(g_tickAdvancePtr, sizeof(float), PAGE_READWRITE, &oldProtect)) {
-            Log(std::format("Tick cave: VirtualProtect on tick advance constant FAILED (err={})", GetLastError()));
-            // Non-fatal: no speed scaling. Drop the pointer so the callback
-            // doesn't write to a read-only page.
-            g_tickAdvancePtr = nullptr;
-        } else {
-            g_tickAdvanceOriginalProtect = oldProtect;
-            g_tickAdvanceProtectionChanged = true;
-            Log(std::format("Tick cave: FALLBACK - writing the game's shared constant at {:p} (was 0x{:X}); "
-                            "the menu video will speed up after a level", (void*)g_tickAdvancePtr, oldProtect));
+    for (uint32_t rva : TICK_ADVANCE_OPERANDS) {
+        if (memcmp(exeBase + rva - 2, kFmulTickAdvance, sizeof(kFmulTickAdvance)) != 0) {
+            Log(std::format("Tick cave: fmul at EXE+0x{:X} is not the expected instruction", rva - 2));
+            return false;
         }
     }
 
@@ -336,33 +245,37 @@ bool InstallTickCave(GameAddresses& addr, TasSharedState* state) {
     //   EXE+0x25C83: immediate of `cmp esi, 14h`
     //   EXE+0x26001: immediate of `mov ebx, 14h`
     // Before the mid-hook, so SafetyHook's trampoline copies the new cmp.
-    {
-        uint8_t* cmp_imm = exeBase + 0x25C83;
-        uint8_t* mov_imm = exeBase + 0x26001;
-        bool cmp_ok = g_tickCaveCodePages.Open(cmp_imm, 1);
-        bool mov_ok = g_tickCaveCodePages.Open(mov_imm, 1);
-        if (cmp_ok && mov_ok) {
-            if (*cmp_imm == 0x14 && *mov_imm == 0x14) {
+    uint8_t* cmp_imm = exeBase + 0x25C83;
+    uint8_t* mov_imm = exeBase + 0x26001;
+    const bool clampOk = *cmp_imm == 0x14 && *mov_imm == 0x14;
+    if (!clampOk) {
+        Log(std::format("Tick cave: tick clamp bytes unexpected (cmp_imm=0x{:02X} mov_imm=0x{:02X}); not patching",
+                        *cmp_imm, *mov_imm));
+    }
+
+    // The game thread may be running these instructions. The operands are
+    // unaligned, so use a locked exchange, which is atomic at any alignment
+    // (none crosses a cache line). Old and new addresses hold the same value.
+    g_tickCaveExeBase = exeBase;
+    if (!PatchTickCaveCode(exeBase, [&] {
+            const LONG target = (LONG)(uintptr_t)&g_privateTickAdvance;
+            for (uint32_t rva : TICK_ADVANCE_OPERANDS) {
+                InterlockedExchange((volatile LONG*)(exeBase + rva), target);
+            }
+            g_tickCaveRedirectApplied = true;
+            if (clampOk) {
                 *cmp_imm = (uint8_t)TICK_CAVE_PER_FRAME_CAP;
                 *mov_imm = (uint8_t)TICK_CAVE_PER_FRAME_CAP;
                 g_tickCaveClampApplied = true;
-                Log(std::format(
-                    "Tick cave: raised tick clamp 0x14 -> 0x{:02X} at EXE+0x25C83 and EXE+0x26001",
-                    TICK_CAVE_PER_FRAME_CAP));
-            } else {
-                Log(std::format(
-                    "Tick cave: tick clamp bytes unexpected (cmp_imm=0x{:02X} mov_imm=0x{:02X}); not patching",
-                    *cmp_imm, *mov_imm));
             }
-        } else {
-            Log(std::format(
-                "Tick cave: VirtualProtect on tick clamp bytes FAILED (cmp_ok={} mov_ok={} err={})",
-                cmp_ok, mov_ok, GetLastError()));
-        }
+        })) {
+        return false;
     }
+    Log(std::format("Tick cave: {} in-game tick-advance readers redirected to DLL float at {:p}{}",
+                    (int)(sizeof(TICK_ADVANCE_OPERANDS) / sizeof(uint32_t)), (void*)&g_privateTickAdvance,
+                    clampOk ? std::format("; tick clamp 0x14 -> 0x{:02X}", TICK_CAVE_PER_FRAME_CAP) : ""));
 
-    // Restore page protection before SafetyHook does its own patching.
-    g_tickCaveCodePages.CloseAll();
+    g_tickCaveState = state;
 
     Log(std::format("Tick cave: hooking tick override at {:p} (EXE+0x25C81)", (void*)addr.tick_cave_site));
 
@@ -385,39 +298,22 @@ inline void UninstallTickCave() {
     tickCaveHook = {};
     if (!g_tickCaveExeBase) return;
 
-    auto* gameTickAdvance = (float*)(g_tickCaveExeBase + 0x6DB08);
-    g_tickAdvancePtr = gameTickAdvance;
-
-    if (g_tickCaveRedirectApplied) {
-        const LONG original = (LONG)(uintptr_t)gameTickAdvance;
-        for (uint32_t rva : TICK_ADVANCE_OPERANDS) {
-            uint8_t* operand = g_tickCaveExeBase + rva;
-            if (!g_tickCaveCodePages.Open(operand, sizeof(LONG))) continue;
-            InterlockedExchange((volatile LONG*)operand, original);
+    uint8_t* exeBase = g_tickCaveExeBase;
+    PatchTickCaveCode(exeBase, [&] {
+        if (g_tickCaveRedirectApplied) {
+            const LONG original = (LONG)(uintptr_t)(exeBase + 0x6DB08);
+            for (uint32_t rva : TICK_ADVANCE_OPERANDS) {
+                InterlockedExchange((volatile LONG*)(exeBase + rva), original);
+            }
+            g_tickCaveRedirectApplied = false;
         }
-        g_tickCaveRedirectApplied = false;
-    }
-
-    if (g_tickCaveClampApplied) {
-        uint8_t* cmp_imm = g_tickCaveExeBase + 0x25C83;
-        uint8_t* mov_imm = g_tickCaveExeBase + 0x26001;
-        if (g_tickCaveCodePages.Open(cmp_imm, 1) &&
-            g_tickCaveCodePages.Open(mov_imm, 1)) {
-            if (*cmp_imm == (uint8_t)TICK_CAVE_PER_FRAME_CAP) *cmp_imm = 0x14;
-            if (*mov_imm == (uint8_t)TICK_CAVE_PER_FRAME_CAP) *mov_imm = 0x14;
+        if (g_tickCaveClampApplied) {
+            exeBase[0x25C83] = 0x14;
+            exeBase[0x26001] = 0x14;
+            g_tickCaveClampApplied = false;
         }
-        g_tickCaveClampApplied = false;
-    }
+    });
 
-    g_tickCaveCodePages.CloseAll();
-
-    if (g_tickAdvanceProtectionChanged) {
-        *gameTickAdvance = g_nativeTickAdvance;
-        DWORD ignored = 0;
-        VirtualProtect(gameTickAdvance, sizeof(float),
-                       g_tickAdvanceOriginalProtect, &ignored);
-        g_tickAdvanceProtectionChanged = false;
-    }
     if (g_tickCaveState) g_tickCaveState->tick_cave_hooked = 0;
     g_tickCaveState = nullptr;
     Log("Tick cave: hook and all supporting patches removed");

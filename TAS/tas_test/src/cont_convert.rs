@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use tas_shared::{TasMode, TasSharedMemoryClient, TAS_INPUT_MODEL_HELD, TAS_INPUT_MODEL_INJECTED};
 
-use crate::command_edges::{cleanup, load_fixture};
+use crate::command_edges::FIXTURE;
 use crate::gamemem::GameMemory;
-use crate::{harness, patterns};
+use crate::{drift, harness, patterns};
 
 /// LEFT + jump + shift: an arrow and both modifiers with alias codes.
 const HELD: u8 = 0x01 | 0x10 | 0x20;
@@ -23,26 +23,12 @@ const CATCHUP_SPEED: f32 = 12.0;
 
 pub fn run() -> bool {
     println!("=== CONT-CONVERT: a CONT from an injected take replays exactly as a held take ===\n");
-    let mut client = harness::ensure_game_running();
-    harness::stop_competing_tas_ui_writer();
-    let result = convert_and_replay(&mut client);
-    cleanup(&mut client);
-    match result {
-        Ok(summary) => {
-            println!("  {summary}");
-            println!("\n*** CONT-CONVERT PASSED ***");
-            true
-        }
-        Err(e) => {
-            eprintln!("\n*** CONT-CONVERT FAILED: {e} ***");
-            false
-        }
-    }
+    harness::run_case("CONT-CONVERT", convert_and_replay)
 }
 
 fn convert_and_replay(client: &mut TasSharedMemoryClient) -> Result<String, String> {
     harness::stop(client);
-    load_fixture(client)?;
+    harness::load_fixture(client, FIXTURE)?;
     if client.state().input_model != TAS_INPUT_MODEL_INJECTED {
         return Err("the fixture should load as an injected take".into());
     }
@@ -111,27 +97,24 @@ fn convert_and_replay(client: &mut TasSharedMemoryClient) -> Result<String, Stri
         return Err("the replay did not finish".into());
     }
     client.state_mut().playback_speed = 1.0;
-    let play = &client.state().play_coords;
-    let mut mismatches = 0;
-    let mut first = None;
-    let recorded = &rec[rec_gate as usize..count as usize];
-    let replayed = &play[play_gate as usize..];
-    for (i, (r, p)) in recorded.iter().zip(replayed).enumerate() {
-        if r.map(f32::to_bits) != p.map(f32::to_bits) {
-            mismatches += 1;
-            first.get_or_insert(i + rec_gate as usize);
-        }
-    }
+    let (mismatches, first) = drift::bit_mismatches(
+        &rec,
+        &client.state().play_coords,
+        rec_gate,
+        play_gate,
+        count - rec_gate,
+    );
     if mismatches > 0 {
         return Err(format!(
             "{mismatches} of {} ticks differ; first at recorded tick {:?} (splice {SPLICE})",
             count - rec_gate,
-            first
+            first.map(|i| i + rec_gate)
         ));
     }
-    Ok(format!(
-        "{} ticks from the gate (prefix to {SPLICE}, suffix {} ticks with {suffix_keys} keyed) replayed bit for bit; conversion changed {staggered} prefix tick(s) beyond the one-tick shift",
+    println!(
+        "  {} ticks from the gate (prefix to {SPLICE}, suffix {} ticks with {suffix_keys} keyed) replayed bit for bit; conversion changed {staggered} prefix tick(s) beyond the one-tick shift",
         count - rec_gate,
         count - SPLICE
-    ))
+    );
+    Ok(String::new())
 }

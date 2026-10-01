@@ -9,43 +9,22 @@
 
 use tas_shared::TasMode;
 
-use crate::recording::{self, RecordingSessionKind};
+use crate::recording;
 use crate::win32;
 use crate::{ActiveRecordingSession, TasApp};
-
-/// The checkpoint a session left behind: same kind and start tick, and no
-/// longer than the session ever was.
-#[derive(Clone, Copy)]
-pub(crate) struct CheckpointOwner {
-    kind: RecordingSessionKind,
-    start_tick: u32,
-    max_recorded_count: u32,
-}
-
-impl From<&ActiveRecordingSession> for CheckpointOwner {
-    fn from(session: &ActiveRecordingSession) -> Self {
-        Self {
-            kind: session.kind,
-            start_tick: session.start_tick,
-            max_recorded_count: session.max_recorded_count,
-        }
-    }
-}
 
 impl TasApp {
     /// Bring a pending checkpoint back as a pinned history entry, tagged with
     /// the track / rider / physics it was recorded under. The caller clears the
     /// checkpoint only after the history flush is confirmed durable.
-    pub(crate) fn recover_pending_checkpoint(&mut self) -> bool {
-        self.recover_pending_checkpoint_matching(None)
-    }
-
-    /// With `owner`, recovers the file only if it belongs to that session: a
+    ///
+    /// With `owner`, recovers the file only if it belongs to that session
+    /// (same kind and start tick, and no longer than the session ever was): a
     /// rejected finalize must not resurrect an older take's checkpoint as a
     /// pinned duplicate of an entry already in history.
     pub(crate) fn recover_pending_checkpoint_matching(
         &mut self,
-        owner: Option<CheckpointOwner>,
+        owner: Option<ActiveRecordingSession>,
     ) -> bool {
         if self.recovery_store.is_none() {
             return false;
@@ -83,26 +62,13 @@ impl TasApp {
         let (start, end) = (cp.session.start_tick, cp.session.end_tick);
         let cp_level = cp.session.level.clone();
         let cp_rider = cp.session.rider_label();
-        let cp_physics = tas_shared::physics_mode_label(
-            cp.session
-                .renderer_id
-                .unwrap_or(tas_shared::TAS_RENDERER_UNKNOWN),
-            cp.session.fpu_control_word.unwrap_or(0),
-        );
-        let cp_stamps = recording::IdentityStamps {
-            renderer_id: cp.session.renderer_id,
-            fpu_control_word: cp.session.fpu_control_word,
-            rider_character: cp.session.rider_character,
-            rider_stance: cp.session.rider_stance,
-            input_model: cp.session.input_model,
-            trajectory_ticks: None,
-        };
+        let cp_physics = cp.session.physics_label();
         if !self.history.push_snapshot_data_with_session(
             cp.snapshot,
             session_label.clone(),
             start,
             end,
-            Some(cp_stamps),
+            Some(cp.session.stamps),
         ) {
             return false;
         }
@@ -261,10 +227,7 @@ impl TasApp {
             } else {
                 // The buffer belongs to the new game now, so the old take's
                 // checkpoint is its only copy.
-                let owner = self
-                    .active_recording_session
-                    .take()
-                    .map(|session| CheckpointOwner::from(&session));
+                let owner = self.active_recording_session.take();
                 self.push_log(
                     "The recording in progress was lost with the old game process; \
                      recovering its last checkpoint",
