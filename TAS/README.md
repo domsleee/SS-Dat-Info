@@ -88,7 +88,7 @@ Run these from the repository root. They read files, not the live game.
 
 | Tool | Purpose |
 | --- | --- |
-| `tools/level_points.py generate start` | Rust start-line table; also `finish` and `spawn` |
+| `tools/level_points.py generate start` | Rust start-line table; also `spawn` |
 | `tools/level_points.py inspect start` | Marker positions/orientations; `finish` includes object counts |
 
 Prefix the tool paths above with `python TAS/`.

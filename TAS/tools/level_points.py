@@ -1,4 +1,4 @@
-"""Inspect level markers or generate the Rust start/finish/spawn tables."""
+"""Inspect level markers or generate the Rust start and spawn tables."""
 import argparse
 from collections import Counter
 from itertools import combinations
@@ -14,7 +14,7 @@ CODE = {
 
 
 def generate(data, kind):
-    marker = {"start": "Start_Point", "finish": "Finish_Point", "spawn": "Player_Start_Location"}[kind]
+    marker = {"start": "Start_Point", "spawn": "Player_Start_Location"}[kind]
     spawn = kind == "spawn"
     name = "SPAWN_CENTROIDS" if spawn else f"{kind.upper()}_POINTS"
     point_type = "[f32; 3]" if spawn else "&[[f32; 3]]"
@@ -66,7 +66,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("generate").add_argument("kind", choices=("start", "finish", "spawn"))
+    commands.add_parser("generate").add_argument("kind", choices=("start", "spawn"))
     commands.add_parser("inspect").add_argument("kind", choices=("start", "finish"))
     args = parser.parse_args()
     with args.input.open(encoding="utf-8") as source:

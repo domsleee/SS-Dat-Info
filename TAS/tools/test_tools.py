@@ -12,7 +12,7 @@ class LevelPointsTests(unittest.TestCase):
     def test_generated_tables_match_production_except_manual_practice_rows(self):
         data = json.loads(DEFAULT_INPUT.read_text(encoding="utf-8"))
         source = (Path(__file__).resolve().parents[1] / "tas_ui/src/start_line.rs").read_text(encoding="utf-8")
-        for kind, name in (("start", "START_POINTS"), ("finish", "FINISH_POINTS"), ("spawn", "SPAWN_CENTROIDS")):
+        for kind, name in (("start", "START_POINTS"), ("spawn", "SPAWN_CENTROIDS")):
             with self.subTest(kind=kind):
                 table = source.split(f"pub const {name}:", 1)[1].split("];", 1)[0]
                 expected = self.rows(table)
