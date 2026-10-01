@@ -208,8 +208,9 @@ pub fn is_window(hwnd: Hwnd) -> bool {
     unsafe { IsWindow(hwnd) != 0 }
 }
 
-pub fn key_is_down(vk: i32) -> bool {
-    unsafe { GetAsyncKeyState(vk) < 0 }
+/// Raw `GetAsyncKeyState`: bit 15 = down now, bit 0 = pressed since the last call.
+pub fn async_key_state(vk: i32) -> i16 {
+    unsafe { GetAsyncKeyState(vk) }
 }
 
 pub fn window_rect(hwnd: Hwnd) -> Option<Rect> {

@@ -241,6 +241,57 @@ mod live {
     fn press(key: u8) {
         win32::tap_key(key, Duration::from_millis(100));
     }
+    /// A trial's timeline of key writes and LEFT samples with the game focus
+    /// and TAS state at each sample, dumped when a transition goes missing.
+    struct Trace<'a> {
+        client: &'a TasSharedMemoryClient,
+        game: win32::Hwnd,
+        start: Instant,
+        lines: Vec<String>,
+        last_down: Option<bool>,
+    }
+    impl<'a> Trace<'a> {
+        fn new(client: &'a TasSharedMemoryClient, game: win32::Hwnd) -> Self {
+            Trace {
+                client,
+                game,
+                start: Instant::now(),
+                lines: Vec::new(),
+                last_down: None,
+            }
+        }
+        fn note(&mut self, event: &str) {
+            let ms = self.start.elapsed().as_secs_f64() * 1000.0;
+            // Bounded: a 3 s trial writes ~150 lines.
+            if self.lines.len() < 2000 {
+                self.lines.push(format!("{ms:8.1} ms  {event}"));
+            }
+        }
+        fn sample(&mut self) -> bool {
+            let raw = win32::async_key_state(win32::VK_LEFT);
+            let down = raw < 0;
+            let s = self.client.state();
+            let event = format!(
+                "LEFT {} (raw {raw:#06x}) game_fg={} mode={} cmd={} restart={} pos={} suppress={}",
+                if down { "down" } else { "up" },
+                win32::is_foreground(self.game),
+                self.client.mode_volatile(),
+                s.command,
+                s.restart_state,
+                s.playback_pos,
+                s.cont_suppress_input
+            );
+            self.note(&event);
+            self.last_down = Some(down);
+            down
+        }
+        fn last_down(&self) -> Option<bool> {
+            self.last_down
+        }
+        fn dump(&self) -> String {
+            self.lines.join("\n")
+        }
+    }
     struct StopOnExit(win32::Hwnd);
     impl Drop for StopOnExit {
         fn drop(&mut self) {
@@ -413,21 +464,47 @@ mod live {
                 return Err("Pico release failed".into());
             }
             let stop = StopOnExit(windows[0]);
+            let mut trace = Trace::new(&client, windows[0]);
+            trace.note("F12 down");
             press(win32::VK_F12); // Actual UI F12 shortcut; never ArmContinue from this process.
+            trace.note("F12 up");
             let start = Instant::now();
+            let mut late_keys = 0;
             while start.elapsed() < Duration::from_secs(3) {
                 healthy(&windows)?;
                 for (mask, down) in [(1, true), (255, false)] {
-                    if !pico.send(mask) {
-                        return Err("Pico write failed".into());
+                    let sent = pico.send(mask);
+                    trace.note(&format!("write {mask} ok={sent}"));
+                    if !sent {
+                        return Err(format!("Pico write failed\n{}", trace.dump()));
                     }
+                    let written = Instant::now();
                     thread::sleep(Duration::from_millis(40));
-                    if win32::key_is_down(win32::VK_LEFT) != down {
+                    if trace.sample() == down {
+                        continue;
+                    }
+                    // Keep the requested state and watch, without resending:
+                    // a late key and a lost one must stay distinguishable.
+                    let edge = if down { "press" } else { "release" };
+                    while written.elapsed() < Duration::from_millis(250) {
+                        thread::sleep(Duration::from_millis(5));
+                        if trace.sample() == down {
+                            break;
+                        }
+                    }
+                    let late = written.elapsed().as_millis();
+                    if trace.last_down() != Some(down) {
                         return Err(format!(
-                            "LEFT HID {} not observed {} ms after F12 (trial {trial})",
-                            if down { "press" } else { "release" },
-                            start.elapsed().as_millis()
+                            "LEFT HID {edge} not observed within 250 ms (trial {trial})\n{}",
+                            trace.dump()
                         ));
+                    }
+                    late_keys += 1;
+                    println!(
+                        "WARNING trial {trial}: LEFT HID {edge} observed {late} ms after its write"
+                    );
+                    if late_keys == 1 {
+                        println!("{}", trace.dump());
                     }
                 }
             }
