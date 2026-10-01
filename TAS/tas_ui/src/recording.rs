@@ -9,8 +9,10 @@ mod snapshot;
 #[cfg(test)]
 mod test_support;
 
-pub use dialogs::{load_recording_path, pick_recording_path, save_dialog, warn_identity_mismatch};
-pub use file::{IdentityStamps, RecordingFile};
+pub use dialogs::{
+    load_recording_path, pick_recording_path, pick_save_path, save_dialog, warn_identity_mismatch,
+};
+pub use file::{IdentityStamps, RecordingFile, RecordingMetadata};
 pub use history::{HistoryEntry, HistoryEntryKind, RecordingHistory};
 pub use recovery::{RecoverySessionContext, RecoveryStore, RecoveryWriter};
 pub use snapshot::{PersistedSnapshot, RecordingSnapshot};

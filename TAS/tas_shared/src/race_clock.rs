@@ -14,10 +14,11 @@ pub struct RaceClock {
 
 /// The clock as last published, or None outside a race.
 pub fn race_clock(state: &TasSharedState) -> Option<RaceClock> {
+    // SAFETY: payload words of the mapping, read under race_seq.
     let (bits, flags) = with_seqlock(&state.race_seq, || unsafe {
         (
-            std::ptr::read_volatile(&state.race_clock_bits),
-            std::ptr::read_volatile(&state.race_clock_flags),
+            load_u32(&state.race_clock_bits),
+            load_u32(&state.race_clock_flags),
         )
     })?;
     (bits != u32::MAX).then(|| RaceClock {
@@ -45,14 +46,14 @@ pub struct RaceFinish {
 /// The last finish, or None before the first. `seq` counts finishes.
 pub fn race_finish(state: &TasSharedState) -> Option<RaceFinish> {
     use std::sync::atomic::Ordering;
-    // SAFETY: shared mapping; the DLL writes the fields inside the sequence window.
+    // SAFETY: payload words of the mapping, read under race_finish_seq.
     let finish = with_seqlock(&state.race_finish_seq, || unsafe {
         RaceFinish {
             seq: state.race_finish_seq.load(Ordering::Relaxed) / 2,
-            tick: std::ptr::read_volatile(&state.race_finish_tick),
-            mode: std::ptr::read_volatile(&state.race_finish_mode),
-            valid: std::ptr::read_volatile(&state.race_finish_valid) != 0,
-            seconds: f32::from_bits(std::ptr::read_volatile(&state.race_finish_time_bits)),
+            tick: load_u32(&state.race_finish_tick),
+            mode: load_u32(&state.race_finish_mode),
+            valid: load_u32(&state.race_finish_valid) != 0,
+            seconds: f32::from_bits(load_u32(&state.race_finish_time_bits)),
         }
     })?;
     (finish.seq != 0).then_some(finish)

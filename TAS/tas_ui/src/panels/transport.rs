@@ -116,15 +116,15 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
 
         // F-key labels live in tooltips so the buttons stay narrow.
         let rec_text = lit("\u{23FA} REC", is_rec, egui::Color32::from_rgb(255, 60, 60));
-        if ui
+        let rec = ui
             .add_enabled(
                 arm_refusal(TasCommand::ArmRec, mode, recorded, arming_allowed).is_none(),
                 egui::Button::new(rec_text),
             )
             .on_disabled_hover_text("Enter a level first - can't record from a menu")
-            .on_hover_text("Record (F9)")
-            .clicked()
-        {
+            .on_hover_text("Record (F9)");
+        crate::probe::tag(&rec, "transport.rec");
+        if rec.clicked() {
             actions.push(Action::RestartThen(TasCommand::ArmRec));
         }
 
@@ -134,23 +134,23 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
             is_play && !catchup_active,
             egui::Color32::from_rgb(60, 200, 60),
         );
-        if ui
+        let play = ui
             .add_enabled(
                 arm_refusal(TasCommand::ArmPlay, mode, recorded, arming_allowed).is_none(),
                 egui::Button::new(play_text),
             )
             .on_disabled_hover_text("Enter a level first - can't replay from a menu")
-            .on_hover_text("Play (F10)")
-            .clicked()
-        {
+            .on_hover_text("Play (F10)");
+        crate::probe::tag(&play, "transport.play");
+        if play.clicked() {
             actions.push(Action::RestartThen(TasCommand::ArmPlay));
         }
 
-        if ui
+        let stop = ui
             .add_enabled(!is_off, egui::Button::new("\u{23F9} STOP"))
-            .on_hover_text("Stop (F11 / Space)")
-            .clicked()
-        {
+            .on_hover_text("Stop (F11 / Space)");
+        crate::probe::tag(&stop, "transport.stop");
+        if stop.clicked() {
             actions.push(Action::Send(TasCommand::Stop));
         }
 
@@ -162,7 +162,7 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
             catchup_active,
             egui::Color32::from_rgb(60, 200, 60),
         );
-        if ui
+        let cont = ui
             .add_enabled(
                 arm_refusal(TasCommand::ArmContinue, mode, recorded, arming_allowed).is_none(),
                 egui::Button::new(cont_text),
@@ -171,9 +171,9 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
             .on_hover_text(format!(
                 "Continue from a specific frame · catch-up ×{}  (F12)",
                 cont_catchup_speed
-            ))
-            .clicked()
-        {
+            ));
+        crate::probe::tag(&cont, "transport.cont");
+        if cont.clicked() {
             match resolve_continue_frame(continue_from_text, continue_from, recorded) {
                 Ok(frame) => {
                     actions.push(Action::Log(format!(
@@ -199,6 +199,7 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
                     [72.0, 22.0],
                     egui::TextEdit::singleline(continue_from_text).hint_text("frame"),
                 );
+                crate::probe::tag(&response, "transport.from");
                 if response.changed() {
                     if let Some(parsed) = parse_continue_frame(continue_from_text, recorded) {
                         *continue_from = parsed;
@@ -233,19 +234,19 @@ pub fn show(ui: &mut egui::Ui, props: TransportProps<'_>) -> Vec<Action> {
 
         // Undo / Redo — icon-only buttons so the row fits beside the history rail.
         let undo_count = history.undo_depth();
-        if ui
+        let undo = ui
             .add_enabled(undo_count > 0, egui::Button::new("\u{21A9}"))
-            .on_hover_text(format!("Undo · {} earlier state(s)  (Ctrl+Z)", undo_count))
-            .clicked()
-        {
+            .on_hover_text(format!("Undo · {} earlier state(s)  (Ctrl+Z)", undo_count));
+        crate::probe::tag(&undo, "transport.undo");
+        if undo.clicked() {
             actions.push(Action::Undo);
         }
         let redo_count = history.redo_depth();
-        if ui
+        let redo = ui
             .add_enabled(redo_count > 0, egui::Button::new("\u{21AA}"))
-            .on_hover_text(format!("Redo · {} later state(s)  (Ctrl+Y)", redo_count))
-            .clicked()
-        {
+            .on_hover_text(format!("Redo · {} later state(s)  (Ctrl+Y)", redo_count));
+        crate::probe::tag(&redo, "transport.redo");
+        if redo.clicked() {
             actions.push(Action::Redo);
         }
 

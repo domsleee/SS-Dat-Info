@@ -50,11 +50,22 @@ fn load_dir_for_level(level: Option<&str>) -> PathBuf {
     recordings_dir()
 }
 
+/// The Save dialog, in `level`'s folder. None = the user cancelled.
+pub fn pick_save_path(level: Option<&str>, default_name: &str) -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Save TAS Recording")
+        .set_directory(recordings_dir_for_level(level))
+        .set_file_name(default_name)
+        .add_filter("TAS Recording", &["tasrec"])
+        .save_file()
+}
+
 /// Show the Save dialog and write the recording. `level` is the track the
 /// recording was made on, supplied by the caller rather than read live: by
 /// the time the user clicks Save the game may be in its post-run dialog,
 /// where the level reads unknown.
 pub fn save_dialog(
+    host: &dyn crate::host::Host,
     state: &TasSharedState,
     log: &mut UiLog,
     level: Option<&str>,
@@ -65,13 +76,7 @@ pub fn save_dialog(
     // time-only name in the root folder rather than guessing.
     let race_cs = crate::level::race_centiseconds(&state.rec_coords, state.recorded_count);
     let default_name = crate::level::default_recording_name(level, race_cs);
-    if let Some(path) = rfd::FileDialog::new()
-        .set_title("Save TAS Recording")
-        .set_directory(recordings_dir_for_level(level))
-        .set_file_name(default_name)
-        .add_filter("TAS Recording", &["tasrec"])
-        .save_file()
-    {
+    if let Some(path) = host.pick_save_path(level, &default_name) {
         match RecordingFile::save(state, &path, identity) {
             Ok(()) => {
                 log.push(format!("Saved recording to {}", path.display()));

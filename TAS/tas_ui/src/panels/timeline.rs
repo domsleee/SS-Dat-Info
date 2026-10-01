@@ -488,6 +488,9 @@ pub fn show(
             let br = ui
                 .interact(body, id.with("b"), egui::Sense::click_and_drag())
                 .on_hover_cursor(egui::CursorIcon::Grab);
+            crate::probe::tag_with(&br, || {
+                format!("timeline.block.{}.{}", ALL[row_idx].1, ev.start)
+            });
 
             if lr.clicked() || rr.clicked() || br.clicked() {
                 edit.selected = Some(ev);
@@ -679,12 +682,13 @@ fn edit_controls(
     let mut delete = false;
     // Typed values apply on Enter or focus loss, dragged ones on release:
     // never an intermediate value (typing "11500" once set a start of 1).
-    let mut field = |ui: &mut egui::Ui, value: &mut u32| {
+    let mut field = |ui: &mut egui::Ui, value: &mut u32, name: &str| {
         let r = ui.add(
             egui::DragValue::new(value)
                 .speed(1.0)
                 .update_while_editing(false),
         );
+        crate::probe::tag(&r, name);
         changed |= r.changed();
         dragging |= r.dragged();
         released |= r.drag_stopped();
@@ -695,11 +699,11 @@ fn edit_controls(
             format!("{} · press {}", ALL[row].1, ALL[row].2.to_ascii_lowercase()),
         );
         ui.label("Start");
-        field(ui, &mut ev.start);
+        field(ui, &mut ev.start, "timeline.start");
         ui.weak("t");
         ui.monospace(format_game_time(ev.start, timer_anchor));
         ui.label("End");
-        field(ui, &mut ev.end);
+        field(ui, &mut ev.end, "timeline.end");
         ui.weak("t");
         ui.monospace(format_game_time(ev.end, timer_anchor));
         let length = ev.end.saturating_sub(ev.start);
@@ -708,7 +712,9 @@ fn edit_controls(
             length,
             format_recording_duration(length)
         ));
-        if ui.button("Delete").clicked() {
+        let delete_button = ui.button("Delete");
+        crate::probe::tag(&delete_button, "timeline.delete");
+        if delete_button.clicked() {
             delete = true;
         }
     });

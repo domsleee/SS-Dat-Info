@@ -2,7 +2,7 @@
 //! `repr(C)` structs that mirror `shared_state.hpp`, plus the seqlocked
 //! readers over the live mapping.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use crate::rider::TAS_CHARACTER_UNKNOWN;
 
@@ -125,9 +125,10 @@ pub mod input_bits {
 }
 
 /// Must match the C++ TasSharedState layout exactly (TAS_Helper/src/shared_state.hpp).
-/// All fields are naturally aligned (u32/f32 = 4 bytes, the perf counters 8),
-/// so repr(C) suffices. Both sides pin the size and the group-boundary offsets
-/// (see the layout tests) and bump `TAS_SHARED_VERSION` on any change.
+/// All fields are naturally aligned, so repr(C) suffices. Every field's type
+/// and offset is pinned in `layout.rs` (and `shared_layout.hpp` on the C++
+/// side), both checked against `shared_layout.txt`; bump
+/// `TAS_SHARED_VERSION` on any change.
 #[repr(C)]
 pub struct TasSharedState {
     pub version: u32,
@@ -369,13 +370,43 @@ pub struct TasSharedState {
 /// treats as "match nothing", rather than spinning a UI frame forever.
 const SEQLOCK_RETRIES: usize = 64;
 
+// Cross-process assumptions. The DLL writes each seqlocked payload with plain
+// stores (menu_doc with memcpy) between two InterlockedIncrements of its
+// sequence, which are full barriers; the readers below load it with Relaxed
+// atomics between an Acquire load of the sequence and an Acquire fence. No
+// language memory model covers another process's plain stores racing these
+// loads, so this relies on Windows/x86: aligned 1- and 4-byte accesses do not
+// tear, stores become visible in program order, and neither compiler splits
+// or moves the accesses across the barriers. The `&TasSharedState` the client
+// hands out is itself a reference to memory another process mutates; only
+// these accessors and the sequence/command words use atomics, other field
+// reads are plain or volatile. In-process, where every concurrent access is
+// atomic (the stress test below), the same code is a standard Rust seqlock.
+
+/// Relaxed atomic load of a payload word.
+///
+/// # Safety
+/// `p` is aligned and points into a live `TasSharedState`, and every
+/// concurrent in-process access to it is atomic.
+pub(crate) unsafe fn load_u32(p: *const u32) -> u32 {
+    AtomicU32::from_ptr(p.cast_mut()).load(Ordering::Relaxed)
+}
+
+/// [`load_u32`] for one byte of a payload string (the writers store bytes).
+///
+/// # Safety
+/// As [`load_u32`].
+pub(crate) unsafe fn load_u8(p: *const u8) -> u8 {
+    AtomicU8::from_ptr(p.cast_mut()).load(Ordering::Relaxed)
+}
+
 /// One clean read of a seqlocked group (`level_ctx_seq`, `rider_seq`,
-/// `race_seq`, `menu_seq`, ...): `read` may see a torn group and must only
-/// collect, never act; its value is returned only if the sequence was even
-/// before and unchanged after. `None` = no clean window (writer wedged odd or
-/// retries ran out), which callers treat as unknown. The payload is a
-/// cross-process volatile read, so this is a seqlock on x86 only, and a clean
-/// read can be stale by the time it is used.
+/// `race_seq`, `menu_seq`, `race_finish_seq`): `read` loads the payload with
+/// [`load_u32`] / [`load_u8`], may see a torn group and must only collect,
+/// never act; its value is returned only if the sequence was even before and
+/// unchanged after. `None` = no clean window (writer wedged odd or retries ran
+/// out), which callers treat as unknown. A clean read can be stale by the time
+/// it is used.
 pub(crate) fn with_seqlock<T>(seq: &AtomicU32, read: impl Fn() -> T) -> Option<T> {
     for _ in 0..SEQLOCK_RETRIES {
         let s1 = seq.load(Ordering::Acquire);
@@ -398,32 +429,47 @@ pub(crate) fn with_seqlock<T>(seq: &AtomicU32, read: impl Fn() -> T) -> Option<T
 /// recording armed in that window would carry the mixed identity for good.
 /// A read that never settles reports unknown, never a guess.
 pub fn rider_pair(state: &TasSharedState) -> (u32, u32) {
+    // SAFETY: payload words of the mapping, read under rider_seq.
     with_seqlock(&state.rider_seq, || unsafe {
         (
-            std::ptr::read_volatile(&state.rider_character),
-            std::ptr::read_volatile(&state.rider_stance),
+            load_u32(&state.rider_character),
+            load_u32(&state.rider_stance),
         )
     })
     .unwrap_or((TAS_CHARACTER_UNKNOWN, u32::MAX))
 }
 
-/// Read the group's identity half. Caller must be inside a `with_seqlock`
-/// window over `level_ctx_seq`.
-///
-/// `None` = the context changed and the scan has not re-identified the track,
-/// so `level_id` still physically holds the PREVIOUS one and must not be used.
-/// Checking `level_id != 0xFFFFFFFF` is NOT equivalent: the scan publishes
-/// unknown for transient reasons unrelated to a level change, and a stale id is
-/// a perfectly concrete number.
-fn read_identity(state: &TasSharedState) -> Option<u32> {
-    // SAFETY: plain u32s in a shared mapping written by the DLL's threads.
-    // Volatile so the compiler cannot cache them across the sequence loads.
-    unsafe {
-        let epoch = std::ptr::read_volatile(&state.level_epoch);
-        let scan_epoch = std::ptr::read_volatile(&state.level_scan_epoch);
-        let id = std::ptr::read_volatile(&state.level_id);
-        (epoch == scan_epoch).then_some(id)
+/// The level-context group (`level_ctx_seq`) from one clean window.
+struct LevelCtx {
+    epoch: u32,
+    scan_epoch: u32,
+    id: u32,
+    path: [u8; TAS_LEVEL_PATH_MAX],
+}
+
+impl LevelCtx {
+    /// `None` = the context changed and the scan has not re-identified the
+    /// track, so `level_id` still physically holds the PREVIOUS one and must
+    /// not be used. Checking `level_id != 0xFFFFFFFF` is NOT equivalent: the
+    /// scan publishes unknown for transient reasons unrelated to a level
+    /// change, and a stale id is a perfectly concrete number.
+    fn resolved_id(&self) -> Option<u32> {
+        (self.epoch == self.scan_epoch).then_some(self.id)
     }
+}
+
+/// The level-context accessor. A raw pointer, so the stress test never holds
+/// a `&TasSharedState` its writer thread mutates.
+///
+/// # Safety
+/// `s` points to a live `TasSharedState`; see [`load_u32`].
+unsafe fn read_level_ctx(s: *const TasSharedState) -> Option<LevelCtx> {
+    with_seqlock(&(*s).level_ctx_seq, || LevelCtx {
+        epoch: load_u32(std::ptr::addr_of!((*s).level_epoch)),
+        scan_epoch: load_u32(std::ptr::addr_of!((*s).level_scan_epoch)),
+        id: load_u32(std::ptr::addr_of!((*s).level_id)),
+        path: std::array::from_fn(|i| load_u8(std::ptr::addr_of!((*s).level_path[i]))),
+    })
 }
 
 /// A coherent read of the current track: `Some(level_id)` only when that id was
@@ -435,7 +481,8 @@ fn read_identity(state: &TasSharedState) -> Option<u32> {
 /// window, so either the whole group is from a single publication or the read is
 /// rejected.
 pub fn resolved_level_id(state: &TasSharedState) -> Option<u32> {
-    with_seqlock(&state.level_ctx_seq, || read_identity(state)).flatten()
+    // SAFETY: a live state.
+    unsafe { read_level_ctx(state) }?.resolved_id()
 }
 
 /// Like [`resolved_level_id`], but also returns the `level_epoch` the id was
@@ -447,40 +494,29 @@ pub fn resolved_level_id(state: &TasSharedState) -> Option<u32> {
 /// epoch, and the stamp then keeps asserting the old track through the very
 /// switch it exists to detect.
 pub fn resolved_level_id_with_epoch(state: &TasSharedState) -> Option<(u32, u32)> {
-    with_seqlock(&state.level_ctx_seq, || {
-        let id = read_identity(state)?;
-        // SAFETY: shared mapping written by the DLL; inside the seqlock window.
-        let epoch = unsafe { std::ptr::read_volatile(&state.level_epoch) };
-        Some((id, epoch))
-    })
-    .flatten()
+    // SAFETY: a live state.
+    let ctx = unsafe { read_level_ctx(state) }?;
+    Some((ctx.resolved_id()?, ctx.epoch))
 }
 
 /// A coherent snapshot of the level context: `(level_id, level_path)` together.
 ///
 /// The path is the harder half: 128 bytes that another process can be halfway
 /// through rewriting, so no amount of care about the counters alone makes it
-/// safe. Same window as [`resolved_level_id`], plus the bytes.
+/// safe. Same window as [`resolved_level_id`].
 ///
 /// Returns `None` while unresolved OR while the writer is mid-update; a caller
 /// that cannot get a clean read must treat the level as unknown, never guess.
 pub fn level_context(state: &TasSharedState) -> Option<(u32, String)> {
-    // Collect into a plain buffer inside the window; decode (which allocates)
-    // outside it, so a retry never pays for a String it is about to discard.
-    let snapshot = with_seqlock(&state.level_ctx_seq, || {
-        let id = read_identity(state)?;
-        let mut path = [0u8; TAS_LEVEL_PATH_MAX];
-        for (i, b) in path.iter_mut().enumerate() {
-            // SAFETY: as read_identity — shared mapping, written by the DLL.
-            *b = unsafe { std::ptr::read_volatile(&state.level_path[i]) };
-        }
-        Some((id, path))
-    })
-    .flatten();
-
-    let (id, path) = snapshot?;
-    let end = path.iter().position(|&c| c == 0).unwrap_or(path.len());
-    Some((id, String::from_utf8_lossy(&path[..end]).into_owned()))
+    // SAFETY: a live state.
+    let ctx = unsafe { read_level_ctx(state) }?;
+    let id = ctx.resolved_id()?;
+    let end = ctx
+        .path
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(ctx.path.len());
+    Some((id, String::from_utf8_lossy(&ctx.path[..end]).into_owned()))
 }
 
 /// Whether the current track is known. Prefer [`resolved_level_id`] when you
@@ -523,10 +559,11 @@ impl TasSharedState {
     /// that dies mid-write stalls the cursor until the cursor resets (the UI
     /// resets it on reconnect), which is preferred to silent loss.
     pub fn read_log_entries(&self, after_seq: u32) -> (Vec<(u32, TasLogSeverity, String)>, u32) {
-        // Every read below is volatile: the DLL rewrites these fields from
-        // another process, and plain loads would let the compiler merge the
-        // two `sequence` reads and drop the torn-copy check.
-        let read = |p: &u32| unsafe { std::ptr::read_volatile(p) };
+        // Each entry is a small seqlock (`sequence` 0 while rewritten), read
+        // like the groups above: atomic loads, so the two `sequence` reads
+        // cannot merge and drop the torn-copy check.
+        // SAFETY: words and bytes of the mapping.
+        let read = |p: &u32| unsafe { load_u32(p) };
         let write_seq = read(&self.log_write_seq);
         if write_seq == 0 || after_seq >= write_seq {
             return (Vec::new(), after_seq);
@@ -543,6 +580,7 @@ impl TasSharedState {
             let entry = &self.log_ring[idx];
             // Sequence in entry is seq+1 (0 means unused)
             let published = read(&entry.sequence);
+            std::sync::atomic::fence(Ordering::Acquire);
             if published != seq + 1 {
                 if published > seq + 1 {
                     // Reused past the retained window (or torn mid-copy below):
@@ -562,8 +600,9 @@ impl TasSharedState {
             };
             let mut raw = [0u8; TAS_LOG_ENTRY_SIZE];
             for (dst, src) in raw.iter_mut().zip(&entry.text) {
-                *dst = unsafe { std::ptr::read_volatile(src) };
+                *dst = unsafe { load_u8(src) };
             }
+            std::sync::atomic::fence(Ordering::Acquire);
             let len = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
             let text = std::str::from_utf8(&raw[..len])
                 .unwrap_or("<invalid utf8>")
@@ -590,95 +629,6 @@ pub fn zeroed_boxed() -> Box<TasSharedState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::mem;
-
-    /// The C++ side (shared_state.hpp) pins the same size and offsets with
-    /// `static_assert`. Both processes map the same bytes, so a field that
-    /// moves on one side only is read as garbage by the other; the offsets
-    /// catch a reorder that leaves the total size unchanged.
-    #[test]
-    fn layout_pinned_to_shared_state_hpp() {
-        use std::mem::offset_of;
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_651_444);
-        let pins = [
-            ("input_log", offset_of!(TasSharedState, input_log), 240),
-            ("rec_coords", offset_of!(TasSharedState, rec_coords), 65_776),
-            (
-                "play_coords",
-                offset_of!(TasSharedState, play_coords),
-                852_208,
-            ),
-            (
-                "log_write_seq",
-                offset_of!(TasSharedState, log_write_seq),
-                1_638_640,
-            ),
-            (
-                "cont_resume_speed",
-                offset_of!(TasSharedState, cont_resume_speed),
-                1_646_836,
-            ),
-            (
-                "level_ctx_seq",
-                offset_of!(TasSharedState, level_ctx_seq),
-                1_647_008,
-            ),
-            (
-                "fpu_control_word",
-                offset_of!(TasSharedState, fpu_control_word),
-                1_647_032,
-            ),
-            ("menu_doc", offset_of!(TasSharedState, menu_doc), 1_647_092),
-            (
-                "menu_cmd_result",
-                offset_of!(TasSharedState, menu_cmd_result),
-                1_651_296,
-            ),
-            (
-                "owner_request_seq",
-                offset_of!(TasSharedState, owner_request_seq),
-                1_651_300,
-            ),
-            (
-                "owner_generation",
-                offset_of!(TasSharedState, owner_generation),
-                1_651_332,
-            ),
-            (
-                "game_call",
-                offset_of!(TasSharedState, game_call),
-                1_651_336,
-            ),
-            (
-                "crash_module",
-                offset_of!(TasSharedState, crash_module),
-                1_651_368,
-            ),
-            (
-                "game_exit_clean",
-                offset_of!(TasSharedState, game_exit_clean),
-                1_651_400,
-            ),
-            (
-                "race_ab_bits",
-                offset_of!(TasSharedState, race_ab_bits),
-                1_651_416,
-            ),
-            (
-                "input_model",
-                offset_of!(TasSharedState, input_model),
-                1_651_420,
-            ),
-            (
-                "race_finish_time_bits",
-                offset_of!(TasSharedState, race_finish_time_bits),
-                1_651_440,
-            ),
-        ];
-        for (name, actual, expected) in pins {
-            assert_eq!(actual, expected, "offset of {name}");
-        }
-    }
 
     /// An unknown mode word decodes to OFF rather than a guess.
     #[test]
@@ -911,26 +861,22 @@ mod level_seqlock_tests {
     /// A reader must never observe a HALF-WRITTEN context — and the id it gets
     /// must belong to the path it gets.
     ///
-    /// The path is a 128-byte array, so another process can be midway through
+    /// The path is a 128-byte array, so a writer can be midway through
     /// rewriting it while the counters still read old; and `level_id` lives
     /// somewhere else entirely, so the two can disagree even when neither is
-    /// itself torn. A writer thread publishes BOTH, byte-by-byte, with the
-    /// sequence held odd, and the reader asserts the pair it gets is always one
-    /// consistent publication.
+    /// itself torn. A writer thread alternates two publications, byte by byte
+    /// with the sequence held odd, while the reader runs the production
+    /// accessor flat out and asserts every clean read is one publication.
     ///
-    /// The payload is written with `write_volatile` and read with
-    /// `read_volatile` from two threads, which is exactly the production
-    /// reader's shape (see `with_seqlock` for why that is a seqlock on x86, not
-    /// a portable one). This test models that, it does not launder it. Only
-    /// `level_ctx_seq` is a real atomic, because that is the one location the
-    /// protocol's correctness depends on.
-    ///
-    /// No `&mut TasSharedState` is ever created while the reader holds `&` —
-    /// the writer goes through raw pointers via `addr_of_mut!`.
+    /// Every concurrent access is atomic (payload through `from_ptr`, the
+    /// sequence through `fetch_add`) and neither thread holds a reference to
+    /// the struct, so this is a sound Rust test. Passing it on x86 is evidence
+    /// for the cross-process pairing, not a proof of it.
     #[test]
     fn seqlock_reader_never_sees_a_spliced_context() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
+        use std::ptr::addr_of_mut;
+        use std::sync::atomic::{fence, AtomicBool};
+        use std::time::{Duration, Instant};
 
         // Two publications with paths of the SAME length differing in every
         // byte, each paired with its own id, so a splice is detectable rather
@@ -940,95 +886,120 @@ mod level_seqlock_tests {
         const ID_A: u32 = 0; // Forest Easy
         const ID_B: u32 = 5; // Alpine Hard
 
-        let mut boxed = zeroed_boxed();
-        boxed.level_epoch = 1;
-        boxed.level_scan_epoch = 1;
-        let ptr = Box::into_raw(boxed) as usize;
-        let stop = Arc::new(AtomicBool::new(false));
+        // Read for at least this long and until the reader has followed this
+        // many publication changes: overlap is sustained, not one lucky pair.
+        const MIN_RUN: Duration = Duration::from_millis(200);
+        const MIN_FLIPS: u32 = 10;
 
-        let w_stop = stop.clone();
-        let writer = std::thread::spawn(move || {
-            let s = ptr as *mut TasSharedState;
-            let mut which = false;
-            while !w_stop.load(Ordering::Relaxed) {
-                let (src, id) = if which {
-                    (PATH_A.as_bytes(), ID_A)
-                } else {
-                    (PATH_B.as_bytes(), ID_B)
-                };
-                which = !which;
-                unsafe {
-                    // Mirror the DLL exactly: InterlockedIncrement to odd,
-                    // mutate, InterlockedIncrement to even. AcqRel is what the
-                    // Interlocked intrinsic gives, so the stand-in writer is not
-                    // weaker than the real one.
-                    (*s).level_ctx_seq.fetch_add(1, Ordering::AcqRel); // -> odd
-                    std::ptr::write_volatile(std::ptr::addr_of_mut!((*s).level_id), id);
-                    for (i, &c) in src.iter().enumerate() {
-                        std::ptr::write_volatile(std::ptr::addr_of_mut!((*s).level_path[i]), c);
-                        if i % 8 == 0 {
-                            std::hint::spin_loop(); // widen the tear window
-                        }
-                    }
-                    std::ptr::write_volatile(std::ptr::addr_of_mut!((*s).level_path[src.len()]), 0);
-                    (*s).level_ctx_seq.fetch_add(1, Ordering::AcqRel); // -> even
-                }
-                // Leave a stable window. The real writer publishes on level
-                // changes only; a back-to-back loop would hold the sequence odd
-                // almost always and starve the reader, which tests nothing.
-                std::thread::sleep(std::time::Duration::from_micros(200));
-            }
-        });
-
-        let s = unsafe { &*(ptr as *const TasSharedState) };
-        let mut clean = 0usize;
-        let mut saw_a = false;
-        let mut saw_b = false;
-        // Deadline, not a fixed iteration budget: a fixed burst can drain
-        // before the spawned writer thread is even scheduled (thread-spawn
-        // latency on a loaded machine), which proves nothing and fails
-        // intermittently. Loop until both publications have been observed
-        // through clean reads; every clean read still asserts coherence.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !(saw_a && saw_b) {
-            if std::time::Instant::now() > deadline {
-                break;
-            }
-            if let Some((id, path)) = level_context(s) {
-                if path.is_empty() {
-                    continue; // pre-first-publication zeros
-                }
-                match (path.as_str(), id) {
-                    (PATH_A, ID_A) => saw_a = true,
-                    (PATH_B, ID_B) => saw_b = true,
-                    other => panic!(
-                        "incoherent context: {:?} — expected exactly one publication, \
-                         i.e. ({:?}, {}) or ({:?}, {})",
-                        other, PATH_A, ID_A, PATH_B, ID_B
-                    ),
-                }
-                clean += 1;
+        /// Stops the writer when the reader returns OR panics, so the scope's
+        /// join never waits on a writer that would loop forever.
+        struct StopOnDrop<'a>(&'a AtomicBool);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
             }
         }
 
-        stop.store(true, Ordering::Relaxed);
-        writer.join().unwrap();
-        unsafe { drop(Box::from_raw(ptr as *mut TasSharedState)) };
+        let mut boxed = zeroed_boxed();
+        boxed.level_epoch = 1;
+        boxed.level_scan_epoch = 1;
+        // Passed as an address (raw pointers are not Send); `boxed` is not
+        // touched again until both threads are done.
+        let addr = addr_of_mut!(*boxed) as usize;
+        let stop = AtomicBool::new(false);
+
+        let (seen_a, seen_b, flips) = std::thread::scope(|scope| {
+            let _stop = StopOnDrop(&stop);
+            scope.spawn(|| {
+                let s = addr as *mut TasSharedState;
+                let mut which = false;
+                while !stop.load(Ordering::Relaxed) {
+                    let (src, id) = if which {
+                        (PATH_A.as_bytes(), ID_A)
+                    } else {
+                        (PATH_B.as_bytes(), ID_B)
+                    };
+                    which = !which;
+                    // SAFETY: `s` outlives the scope, and every concurrent
+                    // access to what it points at is atomic.
+                    unsafe {
+                        let seq = &(*s).level_ctx_seq;
+                        // The DLL's InterlockedIncrement is a full barrier; the
+                        // part a seqlock writer needs is that no payload store
+                        // becomes visible before the odd count: the fence.
+                        seq.fetch_add(1, Ordering::Relaxed); // -> odd
+                        fence(Ordering::Release);
+                        AtomicU32::from_ptr(addr_of_mut!((*s).level_id))
+                            .store(id, Ordering::Relaxed);
+                        for (i, &c) in src.iter().chain(&[0]).enumerate() {
+                            AtomicU8::from_ptr(addr_of_mut!((*s).level_path[i]))
+                                .store(c, Ordering::Relaxed);
+                            if i % 8 == 0 {
+                                std::hint::spin_loop(); // widen the tear window
+                            }
+                        }
+                        seq.fetch_add(1, Ordering::Release); // -> even: published
+                    }
+                    // Leave a stable window. The real writer publishes on level
+                    // changes only; a back-to-back loop would hold the sequence
+                    // odd almost always and starve the reader, which tests
+                    // nothing. Spun, not slept, so the overlap is continuous.
+                    for _ in 0..2_000 {
+                        std::hint::spin_loop();
+                    }
+                }
+            });
+
+            let s = addr as *const TasSharedState;
+            let (mut seen_a, mut seen_b, mut flips) = (0u32, 0u32, 0u32);
+            let mut last = None;
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(10)
+                && (start.elapsed() < MIN_RUN || flips < MIN_FLIPS)
+            {
+                // SAFETY: as the writer. None = odd or torn through every
+                // retry, which is a refusal, not a failure.
+                let Some(ctx) = (unsafe { read_level_ctx(s) }) else {
+                    continue;
+                };
+                let end = ctx
+                    .path
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(ctx.path.len());
+                let path = &ctx.path[..end];
+                let is_a = if path.is_empty() {
+                    continue; // before the first publication
+                } else if (path, ctx.id) == (PATH_A.as_bytes(), ID_A) {
+                    seen_a += 1;
+                    true
+                } else if (path, ctx.id) == (PATH_B.as_bytes(), ID_B) {
+                    seen_b += 1;
+                    false
+                } else {
+                    panic!(
+                        "incoherent context: id {} path {:?} — expected exactly one \
+                         publication, ({PATH_A:?}, {ID_A}) or ({PATH_B:?}, {ID_B})",
+                        ctx.id,
+                        String::from_utf8_lossy(path)
+                    );
+                };
+                if last.replace(is_a).is_some_and(|was_a| was_a != is_a) {
+                    flips += 1;
+                }
+            }
+            (seen_a, seen_b, flips)
+        });
+        drop(boxed);
 
         // Reads must succeed, not merely never splice — a reader that always
-        // returned None would pass every assertion above. And BOTH publications
-        // must have been seen, which is what proves the reader was actually
-        // running concurrently with the writer.
+        // returned None would pass every assertion above. And it must have
+        // followed the writer back and forth many times, which is what proves
+        // the two actually ran concurrently.
         assert!(
-            clean > 0,
-            "no clean read ever completed — reader is starving"
-        );
-        assert!(
-            saw_a && saw_b,
-            "only ever saw one publication (A={} B={}) — the reader never \
-             overlapped the writer, so nothing was actually tested",
-            saw_a,
-            saw_b
+            seen_a > 0 && seen_b > 0 && flips >= MIN_FLIPS,
+            "reader never kept up with the writer (A={seen_a} B={seen_b} \
+             changes={flips}), so nothing was actually tested"
         );
     }
 

@@ -83,7 +83,7 @@ fn shortcut_f11_and_space_stop() {
 #[test]
 fn shortcut_f12_arms_continue() {
     let mut app = idle_in_level_app(100);
-    app.continue_from_text = "50".into();
+    app.view.continue_from_text = "50".into();
     let actions = press_key(&mut app, Key::F12, Modifiers::NONE);
     assert!(matches!(
         actions.first(),
@@ -152,26 +152,26 @@ fn shortcut_shift_z_only_redoes() {
 #[test]
 fn zoom_in_shrinks_window() {
     let mut app = test_app();
-    app.timeline_view = timeline::TimelineView::chosen(100, 1100);
+    app.view.timeline = timeline::TimelineView::chosen(100, 1100);
     press_key(&mut app, Key::Plus, Modifiers::NONE);
-    assert!(app.timeline_view.end - app.timeline_view.start < 1000);
+    assert!(app.view.timeline.end - app.view.timeline.start < 1000);
 }
 
 #[test]
 fn zoom_out_grows_window() {
     let mut app = test_app();
-    app.timeline_view = timeline::TimelineView::chosen(100, 1100);
+    app.view.timeline = timeline::TimelineView::chosen(100, 1100);
     press_key(&mut app, Key::Minus, Modifiers::NONE);
-    assert!(app.timeline_view.end - app.timeline_view.start > 1000);
+    assert!(app.view.timeline.end - app.view.timeline.start > 1000);
 }
 
 #[test]
 fn zoom_in_clamps_to_min_window() {
     let mut app = test_app();
     // 60-tick window is already the minimum; zooming in must not go below.
-    app.timeline_view = timeline::TimelineView::chosen(500, 560);
+    app.view.timeline = timeline::TimelineView::chosen(500, 560);
     press_key(&mut app, Key::Plus, Modifiers::NONE);
-    assert!(app.timeline_view.end - app.timeline_view.start >= 60);
+    assert!(app.view.timeline.end - app.view.timeline.start >= 60);
 }
 
 /// The edge detector fires once per false→true transition, so holding
@@ -205,7 +205,7 @@ fn only_log(actions: &[transport::Action]) -> String {
 #[test]
 fn shortcuts_follow_the_button_rule() {
     let mut app = idle_in_level_app(100);
-    app.shared.as_mut().unwrap().state_mut().mode = TasMode::Rec as u32;
+    app.conn.shared.as_mut().unwrap().state_mut().mode = TasMode::Rec as u32;
 
     // F9 during a REC: the button is grey, so the key refuses too.
     let line = only_log(&app.shortcut_arm("Shortcut: F9 REC", TasCommand::ArmRec));
@@ -214,24 +214,27 @@ fn shortcuts_follow_the_button_rule() {
         "{line}"
     );
 
-    app.shared.as_mut().unwrap().state_mut().mode = TasMode::Off as u32;
-    app.shared.as_mut().unwrap().state_mut().recorded_count = 0;
+    app.conn.shared.as_mut().unwrap().state_mut().mode = TasMode::Off as u32;
+    app.conn.shared.as_mut().unwrap().state_mut().recorded_count = 0;
     let line = only_log(&app.shortcut_arm("Shortcut: F10 PLAY", TasCommand::ArmPlay));
     assert!(line.contains("nothing is recorded"), "{line}");
 
     // F12 with a typo in From: refused, the typo stays for the user to see.
-    app.shared.as_mut().unwrap().state_mut().recorded_count = 100;
-    app.continue_from_text = "abc".into();
-    app.continue_from_frame = 40;
+    app.conn.shared.as_mut().unwrap().state_mut().recorded_count = 100;
+    app.view.continue_from_text = "abc".into();
+    app.view.continue_from_frame = 40;
     let line = only_log(&app.shortcut_arm("Shortcut: F12 CONT", TasCommand::ArmContinue));
     assert!(line.contains("\"abc\""), "{line}");
     assert_eq!(
-        (app.continue_from_text.as_str(), app.continue_from_frame),
+        (
+            app.view.continue_from_text.as_str(),
+            app.view.continue_from_frame
+        ),
         ("abc", 40)
     );
 
     // F12 with a frame past the end: clamped, displayed, and armed.
-    app.continue_from_text = "500".into();
+    app.view.continue_from_text = "500".into();
     let actions = app.shortcut_arm("Shortcut: F12 CONT", TasCommand::ArmContinue);
     assert!(matches!(
         actions.as_slice(),
@@ -242,12 +245,15 @@ fn shortcuts_follow_the_button_rule() {
         ]
     ));
     assert_eq!(
-        (app.continue_from_text.as_str(), app.continue_from_frame),
+        (
+            app.view.continue_from_text.as_str(),
+            app.view.continue_from_frame
+        ),
         ("100", 100)
     );
 
     // At a menu nothing arms.
-    app.cycle_advance_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
+    app.conn.cycle_advance_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
     let line = only_log(&app.shortcut_arm("Global F9 (in-game): REC", TasCommand::ArmRec));
     assert!(line.contains("enter a level first"), "{line}");
 }

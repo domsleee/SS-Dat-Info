@@ -1,9 +1,15 @@
+mod app;
 mod cycle;
 mod drift_scan;
+mod editor;
+mod game_connection;
+mod history_runtime;
 mod history_store;
+mod host;
 mod level;
 mod panels;
 mod pico;
+mod probe;
 mod recording;
 mod relaunch;
 mod script_watch;
@@ -11,1685 +17,16 @@ mod session;
 mod settings;
 mod shortcuts;
 mod start_line;
+mod take_buffer;
+mod transport_runtime;
 mod ui_log;
+mod view;
 mod win32;
 mod worker;
 
 use eframe::egui;
-use std::os::windows::process::CommandExt;
-use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient};
 
-use panels::{config, history, input_script, log_panel, status, timeline, transport};
-use pico::PicoState;
-use recording::{RecordingHistory, RecordingSessionKind};
-
-const DEFAULT_PLAYBACK_SPEED: f32 = 1.0;
-const PLAYBACK_SPEED_PRESETS: [f32; 4] = [0.25, 0.5, 1.0, 2.0];
-
-fn normalize_playback_speed(speed: f32) -> f32 {
-    if !speed.is_finite() {
-        return DEFAULT_PLAYBACK_SPEED;
-    }
-    for preset in PLAYBACK_SPEED_PRESETS {
-        if (speed - preset).abs() < 0.01 {
-            return preset;
-        }
-    }
-    DEFAULT_PLAYBACK_SPEED
-}
-
-fn stop_is_acknowledged(mode: u32, command_idle: bool) -> bool {
-    mode == TasMode::Off as u32 && command_idle
-}
-
-#[derive(Clone, Copy)]
-struct ActiveRecordingSession {
-    kind: RecordingSessionKind,
-    start_tick: u32,
-    max_recorded_count: u32,
-}
-
-struct TasApp {
-    shared: Option<TasSharedMemoryClient>,
-    connect_error: Option<String>,
-
-    // UI state
-    /// Panel toggles, CONT catch-up speed and history cap, edited in place
-    /// and saved on exit. Its `playback_speed` is only written at save time;
-    /// the live speed is the `playback_speed` field below.
-    settings: settings::Settings,
-    pico: PicoState,
-    history: RecordingHistory,
-    history_writer: Option<history_store::HistoryWriter>,
-    /// Highest history revision the worker confirmed durably committed.
-    last_persisted_revision: u64,
-    /// Highest revision currently queued/in flight. Kept separate from durable
-    /// state so a failed background write remains dirty and can be retried.
-    last_queued_revision: u64,
-    last_failed_revision: u64,
-    history_retry_after: Option<std::time::Instant>,
-    /// Last automatic `try_reconnect` while disconnected.
-    last_reconnect_attempt: std::time::Instant,
-    /// Physics-mode stamp (renderer + x87 precision) of the take currently in
-    /// the recording buffer: the last loaded file / restored entry, or the live
-    /// mode when a REC started. Shown next to the live mode; a mismatch means
-    /// the buffer's inputs were recorded under different rounding.
-    loaded_physics: Option<String>,
-    /// Rider stamp (character · stance) of the take in the recording buffer,
-    /// same lifecycle as `loaded_physics`.
-    loaded_rider: Option<String>,
-    /// Raw identity words of the take in the recording buffer, same lifecycle
-    /// as the labels above. Save paths stamp the file with these, never the
-    /// live game — `None` halves stay unknown.
-    loaded_identity: Option<recording::IdentityStamps>,
-    /// Track code (e.g. "FE") of the take in the recording buffer, same
-    /// lifecycle as the labels above. PLAY/CONT refuse a take from another
-    /// track: its spawn is elsewhere, so it can never match.
-    loaded_level: Option<String>,
-    recovery_store: Option<recording::RecoveryStore>,
-    /// Serialized off-thread writer for recovery checkpoints. One writer keeps
-    /// writes ordered, so a late write can't land after `clear_pending` and
-    /// resurrect a stale checkpoint as a duplicate "Recovered" entry.
-    recovery_writer: recording::RecoveryWriter,
-    log_lines: ui_log::UiLog,
-    timeline_view: timeline::TimelineView,
-    timeline_edit: timeline::TimelineEdit,
-    /// Input edit (new full event list, commit-undo flag) produced by the
-    /// timeline this frame, applied to `input_log` at the start of the next.
-    pending_input_edit: Option<(Vec<input_script::InputEvent>, bool, String)>,
-    /// Latch: a pending edit arrived while a run was active, so we issued one
-    /// auto-STOP and are now waiting for mode→Off to apply it. Prevents
-    /// re-sending STOP (and re-logging) every frame while the game settles.
-    pending_edit_autostop: bool,
-    /// Stable-content watcher for this recording's external script.
-    script_watch: Option<script_watch::ScriptWatch>,
-    continue_from_frame: u32,
-    continue_from_text: String,
-    playback_speed: f32,
-    active_recording_session: Option<ActiveRecordingSession>,
-    pending_session_kind: Option<RecordingSessionKind>,
-    pending_continue_start_tick: Option<u32>,
-    last_mode: u32,
-    resume_speed: Option<f32>, // speed to return to when a CONT catch-up ends
-    /// Which transport (PLAY or CONT) the in-flight cycle is for, so retry and
-    /// abort log lines name the right one.
-    cycle_arm: tas_shared::transport::Arm,
-    log_read_cursor: u32,
-    /// Finish-line watcher: the DLL's finish count when REC started, and the
-    /// tick the run finished in (drives the auto-stop + the 🏁 marker; reset
-    /// when REC starts).
-    finish_seq_seen: u32,
-    /// A cycle took `finish_seq_seen` when it started; the REC it arms keeps
-    /// it (the controller may be gone by the time the UI sees REC).
-    finish_baseline_armed: bool,
-    finished_at_tick: Option<u32>,
-    /// The HUD race time latched when the crossing was detected. Re-reading
-    /// the live timer at STOP is unreliable: it may have blanked or moved.
-    finished_hud_cs: Option<u32>,
-
-    drift_tracker: drift_scan::DriftTracker,
-    last_logged_drift_level: u8, // 0=none, 1=any, 2=>=1.0, 3=>=5.0
-
-    /// In-flight restart → arm → watch cycle, driven by the shared
-    /// `tas_shared::transport` controller, the same state machine the tas_test
-    /// harness runs. Stepped from each egui update via `step_cycle`, which may
-    /// run several transitions per update; `None` when idle. The shared
-    /// `command` slot holds one u32, so each command waits for the DLL to
-    /// acknowledge the previous one (Stop → wait OFF → Restart).
-    cycle: Option<tas_shared::transport::TransportController>,
-    /// Wall-clock deadline for the in-flight cycle to make a terminal
-    /// transition. `None` when idle.
-    ///
-    /// The controller has no clock, so a phase that stops progressing (an F5
-    /// restart that never completes, an arm the DLL never processes) returns
-    /// InProgress forever, with `cont_suppress_input` set and the keyboard
-    /// swallowed. This deadline aborts such a cycle.
-    cycle_deadline: Option<std::time::Instant>,
-    /// The last CONT cycle's result (attempts, how it completed), carried from
-    /// controller `Done` to the REC-start transition, where the resume frame is
-    /// known, so one summary line can report both.
-    cont_last_outcome: Option<(u32, tas_shared::transport::CompletedVia)>,
-    /// Previous-frame pressed state for F9, F10, F11, F12, diffed against
-    /// GetAsyncKeyState to detect press edges. Updated every frame regardless
-    /// of focus so a focus change can't leave a key stuck "pressed".
-    prev_global_keys: [bool; 4],
-    /// Cached Supreme.exe PID. Resolved on first poll, invalidated when the
-    /// shared-memory connection drops (game closed or restarted).
-    game_pid_cached: Option<u32>,
-    /// Supreme.exe PID seen by the last 1 Hz health check: a relaunch is
-    /// noticed by identity even when the frame counter cannot show it (a game
-    /// replaced at the main menu goes 0 → 0).
-    game_pid_seen: Option<u32>,
-    /// The PID watcher reset the session for a relaunch whose memset has not
-    /// been seen yet: the coming frame-counter regression only restarts the
-    /// ring, it must not reset (and cancel) whatever started in between.
-    expect_ring_restart: Option<u32>,
-    /// Why the last game process ended, when it crashed or vanished; shown
-    /// until dismissed.
-    game_exit_banner: Option<String>,
-    /// The game process whose exit has been reported.
-    game_exit_reported_pid: Option<u32>,
-    /// The DLL's crash_seq already shown for the live game.
-    crash_seq_seen: u32,
-    // Crash recovery
-    last_frame_count: u32,
-    stale_frame_ticks: u32,
-    last_health_check: std::time::Instant,
-    // Engine-activity tracker. game_in_game says a race is launched (it stays
-    // 1 while paused); frame_count only advances while Supreme::Cycle runs,
-    // so a recent advance means the race is really ticking. Sampled every
-    // frame.
-    cycle_fc: u32,
-    // True once cycle_fc holds a real baseline sample, so the first sample
-    // after launch or reconnect is not mistaken for an advance.
-    cycle_fc_seeded: bool,
-    cycle_advance_at: std::time::Instant,
-
-    // The last track we were confidently on, used only to name a save: the
-    // engine's post-run dialog stops the cycle, so the live level reads
-    // unknown just as the user clicks Save. Never used to decide what may be
-    // restored; that must be live.
-    last_resolved_level: Option<String>,
-    // The level_epoch we were last resolved in. "Unresolved" has two causes
-    // that need opposite handling: a freeze (menu, pause, post-race dialog;
-    // the level is still resident and the epoch unchanged) and a real context
-    // change (level_scan saw the level path change or disappear and bumped the
-    // epoch). Only the second should hide the history panel.
-    last_resolved_epoch: Option<u32>,
-
-    // One-shot: force dark title bar on first frame
-    dark_title_bar_set: bool,
-}
-
-impl TasApp {
-    /// Every field at its starting value, with no game connection, history
-    /// store, recovery store or session log file: `new` attaches those, and
-    /// the tests run on it as is.
-    fn blank(mut settings: settings::Settings) -> Self {
-        settings.history_cap = settings.history_cap.max(1);
-        Self {
-            shared: None,
-            connect_error: None,
-            pico: PicoState::new(),
-            history: RecordingHistory::new(settings.history_cap),
-            history_writer: None,
-            last_persisted_revision: 0,
-            last_queued_revision: 0,
-            last_failed_revision: 0,
-            history_retry_after: None,
-            last_reconnect_attempt: std::time::Instant::now(),
-            loaded_physics: None,
-            loaded_rider: None,
-            loaded_identity: None,
-            loaded_level: None,
-            recovery_store: None,
-            recovery_writer: recording::RecoveryWriter::new(),
-            log_lines: ui_log::UiLog::default(),
-            timeline_view: timeline::TimelineView::default(),
-            timeline_edit: timeline::TimelineEdit::default(),
-            pending_input_edit: None,
-            pending_edit_autostop: false,
-            script_watch: None,
-            continue_from_frame: 0,
-            continue_from_text: "0".to_string(),
-            playback_speed: normalize_playback_speed(settings.playback_speed),
-            settings,
-            active_recording_session: None,
-            pending_session_kind: None,
-            pending_continue_start_tick: None,
-            last_mode: 0,
-            resume_speed: None,
-            cycle_arm: tas_shared::transport::Arm::Continue,
-            log_read_cursor: 0,
-            finish_seq_seen: 0,
-            finish_baseline_armed: false,
-            finished_at_tick: None,
-            finished_hud_cs: None,
-            drift_tracker: drift_scan::DriftTracker::default(),
-            last_logged_drift_level: 0,
-            cycle: None,
-            cycle_deadline: None,
-            cont_last_outcome: None,
-            prev_global_keys: [false; 4],
-            game_pid_cached: None,
-            game_pid_seen: None,
-            expect_ring_restart: None,
-            game_exit_banner: None,
-            game_exit_reported_pid: None,
-            crash_seq_seen: 0,
-            last_frame_count: 0,
-            stale_frame_ticks: 0,
-            last_health_check: std::time::Instant::now(),
-            cycle_fc: 0,
-            cycle_fc_seeded: false,
-            // Ancient, not now(): "ticking" must be FALSE until a real
-            // frame_count advance is observed.
-            cycle_advance_at: std::time::Instant::now()
-                .checked_sub(std::time::Duration::from_secs(600))
-                .unwrap_or_else(std::time::Instant::now),
-            last_resolved_level: None,
-            last_resolved_epoch: None,
-            dark_title_bar_set: false,
-        }
-    }
-
-    fn new() -> Self {
-        let mut app = Self::blank(settings::Settings::load());
-        match TasSharedMemoryClient::open() {
-            Ok(s) => app.shared = Some(s),
-            Err(e) => app.connect_error = Some(e),
-        }
-
-        // File-per-entry history store.
-        let history_dir = history_store::default_history_dir();
-        let mut history_notices: Vec<String> = Vec::new();
-        app.history_writer = match history_store::HistoryWriter::open(history_dir.clone()) {
-            Ok((writer, load)) => {
-                // Entries load lazily: a restore reads its blob from here.
-                app.history.set_blob_dir(history_dir.clone());
-                if load.entries.is_empty() {
-                    // Preserve the computed id floor even for an empty or
-                    // damaged manifest so a new entry cannot reuse a blob id.
-                    app.history.adopt_id_floor(load.next_entry_id);
-                } else {
-                    app.history.apply_loaded(
-                        load.entries,
-                        load.current_entry_id,
-                        load.next_entry_id,
-                    );
-                }
-                for warning in load.warnings {
-                    history_notices.push(format!("History: {}", warning));
-                }
-                history_notices.push(format!("History store: {}", history_dir.display()));
-                Some(writer)
-            }
-            Err(e) => {
-                history_notices.push(format!("History store disabled: {}", e));
-                None
-            }
-        };
-        // One-time level backfill: tag pre-tagging entries by classifying
-        // their snapshot's spawn position (only unambiguous spawns — shared
-        // Alpine / FM-FH clusters stay untagged and remain visible on every
-        // level). Idempotent: already-tagged entries are skipped, so this is
-        // a no-op on every launch after the first.
-        let backfilled = app
-            .history
-            .backfill_levels(start_line::level_code_from_spawn);
-        if backfilled > 0 {
-            history_notices.push(format!(
-                "History: backfilled level tags on {} entries (by spawn position)",
-                backfilled
-            ));
-        }
-        app.recovery_store = recording::RecoveryStore::new().ok();
-        let recovery_store_notice = app
-            .recovery_store
-            .as_ref()
-            .map(|store| format!("Crash recovery: {}", store.root().display()));
-        app.log_lines = ui_log::UiLog::new(&history_dir);
-
-        // Connect the Pico on startup. The live test owns the physical Pico
-        // input, so it is left alone there.
-        if std::env::var_os("SSB_INSPECT_E2E_RECORDING").is_none() {
-            app.pico.connect();
-            let msg = match app.pico.error.as_deref() {
-                None => format!("Pico data interface connected on {}", app.pico.port_name),
-                Some(error) => format!("Pico auto-detect: {error}"),
-            };
-            app.log_lines.push(msg);
-        }
-        for msg in history_notices {
-            app.push_log(&msg);
-        }
-        if let Some(msg) = recovery_store_notice {
-            app.push_log(&msg);
-        }
-        // Recovery-as-history (no banner): an existing checkpoint means an
-        // unsaved recording that never reached history (STOP clears it), i.e.
-        // the app crashed/closed mid-recording. Bring it back as a PINNED entry.
-        let recovered_checkpoint = app.recover_pending_checkpoint_matching(None);
-        app.persist_history_if_needed();
-
-        // Clear the checkpoint only after the recovered entry is confirmed
-        // durable in the history store; on a failed write keep it so the next
-        // launch recovers it again.
-        if recovered_checkpoint {
-            app.clear_recovery_after_durable_persist();
-        }
-
-        app.adopt_buffer_identity();
-        if let Some(path) = std::env::var_os("SSB_INSPECT_E2E_RECORDING") {
-            // main() has already refused to start without SSB_INSPECT_DATA_DIR.
-            let setup = (|| -> Result<(), String> {
-                let splice = std::env::var("SSB_INSPECT_E2E_SPLICE")
-                    .map_err(|e| e.to_string())?
-                    .parse::<u32>()
-                    .map_err(|e| e.to_string())?;
-                app.prepare_e2e_recording(std::path::Path::new(&path), splice)
-            })();
-            if let Err(error) = setup {
-                eprintln!("UI E2E setup failed: {error}");
-                std::process::exit(1);
-            }
-            app.push_log("UI E2E ready");
-        }
-
-        app
-    }
-
-    fn prepare_e2e_recording(&mut self, path: &std::path::Path, splice: u32) -> Result<(), String> {
-        let shared = self.shared.as_mut().ok_or("No game connection")?;
-        if shared.mode_volatile() != TasMode::Off as u32 || !shared.command_idle() {
-            return Err("Game must be stopped before UI fixture loading".into());
-        }
-        if splice > recording::RecordingFile::read_metadata(path)?.recorded_count {
-            return Err("Splice outside recording".into());
-        }
-        tas_shared::level::check_recording_matches_live(
-            &path.to_string_lossy(),
-            shared.state().level_id,
-        )?;
-        let Some(metadata) =
-            recording::load_recording_path(shared.state_mut(), &mut self.log_lines, path)
-        else {
-            return Err("Could not load UI fixture".into());
-        };
-        self.loaded_physics = metadata.physics_label();
-        self.loaded_rider = metadata.rider_label();
-        self.loaded_identity = Some(recording::IdentityStamps::from_metadata(&metadata));
-        self.loaded_level =
-            tas_shared::level::code_from_recording_name(&path.to_string_lossy()).map(Into::into);
-        self.history
-            .push_loaded_snapshot(shared.state(), path, self.loaded_identity.clone());
-        self.apply_transport_action(transport::Action::SetContinueFrame(splice));
-        Ok(())
-    }
-
-    fn playback_speed_for_settings(&self) -> f32 {
-        let base_speed = self.resume_speed.unwrap_or(self.playback_speed);
-        normalize_playback_speed(base_speed)
-    }
-
-    fn try_reconnect(&mut self) {
-        match TasSharedMemoryClient::open() {
-            Ok(s) => {
-                self.detach_input_editor();
-                self.shared = Some(s);
-                self.connect_error = None;
-                // A fresh mapping = a fresh frame_count stream: force the
-                // heartbeat to re-baseline instead of treating the first
-                // sample as an advance (transport gate false-positive).
-                self.cycle_fc_seeded = false;
-                self.push_log("Connected to TAS_Helper.dll shared memory");
-                self.adopt_buffer_identity();
-            }
-            Err(e) => self.connect_error = Some(e),
-        }
-    }
-
-    /// A UI opened on a take the DLL kept knows none of its stamps (track,
-    /// rider, input model, edit limit). When the take is the current history
-    /// entry's, take that entry's.
-    fn adopt_buffer_identity(&mut self) {
-        if self.loaded_identity.is_some() {
-            return;
-        }
-        let Some(shared) = self.shared.as_ref() else {
-            return;
-        };
-        if !self.history.current_holds(shared.state()) {
-            return;
-        }
-        self.note_restored_physics();
-        self.push_log("The game's take is the selected history entry: using its stamps");
-    }
-
-    /// After a history restore: remember the entry's physics-mode stamp for
-    /// the status chip and warn if it differs from the live mode (24-bit
-    /// DirectX vs 53-bit OpenGL round the sim differently).
-    fn note_restored_physics(&mut self) {
-        let Some(entry) = self
-            .history
-            .current_index()
-            .and_then(|i| self.history.entries().get(i))
-        else {
-            return;
-        };
-        // Who rode the take, and under which physics, vs the live game.
-        recording::warn_identity_mismatch(
-            &mut self.log_lines,
-            (entry.physics.as_deref(), self.history.live_physics()),
-            (entry.rider.as_deref(), self.history.live_rider()),
-        );
-        self.loaded_physics = entry.physics.clone();
-        self.loaded_rider = entry.rider.clone();
-        self.loaded_identity = Some(entry.stamps.clone());
-        self.loaded_level = entry.level.clone();
-    }
-
-    fn push_log(&mut self, msg: &str) {
-        self.log_lines.push(msg);
-    }
-
-    fn send_action_command(&mut self, command: TasCommand) {
-        if command == TasCommand::Stop {
-            self.clear_cont_catchup();
-            // Also cancels any in-flight cycle, so STOP after a RestartThen
-            // click can't complete the restart and start REC/PLAY.
-            self.reset_continue_runtime_state();
-        }
-        if let Some(shared) = self.shared.as_mut() {
-            shared.send_command(command);
-        }
-        self.log_lines.push(format!("Sent: {:?}", command));
-    }
-
-    /// Stop any active REC/PLAY and wait (bounded) for the DLL to reach OFF
-    /// before a load or history restore overwrites the recording buffer.
-    /// Otherwise the DLL's cycle hook could append to input_log while the UI
-    /// rewrites it. Returns `false`, leaving the buffer untouched, if STOP is
-    /// not acknowledged in time. The short spin is unnoticeable next to the
-    /// file dialog that precedes a load.
-    fn stop_active_session_for_load(&mut self) -> bool {
-        self.detach_input_editor();
-        let (mode, command_idle) = self
-            .shared
-            .as_ref()
-            .map(|s| (s.mode_volatile(), s.command_idle()))
-            .unwrap_or((TasMode::Off as u32, true));
-        // The DLL can be idle while the UI still has a restart/arm queued.
-        // Cancel that controller through STOP before replacing its recording.
-        if stop_is_acknowledged(mode, command_idle) && self.cycle.is_none() {
-            self.sync_live_level();
-            return true;
-        }
-        let was_rec = mode == TasMode::Rec as u32;
-        self.log_lines.push("Stopping active session before load");
-        self.send_action_command(TasCommand::Stop);
-        // Spin up to ~250ms for the DLL's cycle hook to process CMD_STOP and
-        // flip to OFF (typically 1-2 cycles, ~7-14ms).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
-        let stopped = loop {
-            let stopped = self
-                .shared
-                .as_ref()
-                .map(|s| stop_is_acknowledged(s.mode_volatile(), s.command_idle()))
-                .unwrap_or(true);
-            if stopped || std::time::Instant::now() >= deadline {
-                break stopped;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        };
-        if !stopped {
-            self.log_lines.push(
-                "Load/restore refused: Stop was not acknowledged; recording buffer unchanged",
-            );
-            return false;
-        }
-        // Finalize the stopped take into history now, before the caller
-        // overwrites the buffer; by next frame the mode-transition handler
-        // would snapshot the loaded recording instead. last_mode is then
-        // pinned to OFF so that handler sees no REC→OFF edge and can't
-        // finalize twice.
-        if was_rec {
-            if let Some((recorded, snap)) = self.shared.as_ref().map(|s| {
-                (
-                    s.recorded_count_volatile(),
-                    recording::RecordingSnapshot::from_state(s.state()),
-                )
-            }) {
-                self.finalize_recording_session(&snap, recorded);
-            }
-        }
-        self.last_mode = TasMode::Off as u32;
-        // A fresh recording is about to load — clear the finish-flag marker.
-        self.finished_at_tick = None;
-        self.finished_hud_cs = None;
-        self.finish_seq_seen = self.live_finish_seq();
-        // Re-read the live level: the callers' level filter was read at frame
-        // start, before the wait above, and every caller is about to overwrite
-        // the buffer. A track change during the wait must not let another
-        // track's recording through.
-        self.sync_live_level();
-        true
-    }
-
-    /// Pull the live track from shared memory into the history filter, which is
-    /// what undo / redo / restore all consult before overwriting the buffer.
-    ///
-    /// One coherent seqlock read: id and path together, or nothing. Asking
-    /// "resolved?" and then reading `level_id` separately could hand back "yes"
-    /// plus the previous track. `None` means unknown, and unknown matches
-    /// nothing — never "assume we are still where we were".
-    fn sync_live_level(&mut self) {
-        let Some(shared) = self.shared.as_ref() else {
-            return;
-        };
-        // Renderer + x87 precision and rider (character · stance): stamped onto
-        // every pushed history entry and compared on restore/load.
-        self.history.set_live_physics(shared.physics_mode());
-        self.history.set_live_rider(shared.rider());
-        self.history
-            .set_live_stamps(recording::IdentityStamps::from_live(shared.state()));
-        // id and epoch from one seqlock window: a separate epoch read could
-        // pair the old track's id with the new epoch across a switch.
-        match tas_shared::resolved_level_id_with_epoch(shared.state()) {
-            Some((id, epoch)) => {
-                let code = tas_shared::level::code_from_id(id);
-                if let Some(c) = code {
-                    self.last_resolved_level = Some(c.to_string());
-                }
-                self.last_resolved_epoch = Some(epoch);
-                self.history.set_live_level(code);
-            }
-            None => {
-                // A freeze (menu, pause, post-race dialog) also reads as
-                // unresolved but leaves level_epoch unchanged, and the history
-                // panel must stay. Only a moved epoch hides the rows until the
-                // new track is identified. A plain epoch read is fine here:
-                // this branch stamps nothing, so a torn read costs one frame.
-                let epoch_now = shared.state().level_epoch;
-                if self.last_resolved_epoch != Some(epoch_now) {
-                    self.history.enter_resolving();
-                }
-            }
-        }
-    }
-
-    /// The track a recording being saved right now belongs to: the live level if
-    /// we have it, else the last one we were confidently on. See
-    /// [`recording::save_dialog`] for why this is not read live.
-    fn level_for_save(&self) -> Option<&str> {
-        crate::level::level_for_save(
-            self.shared
-                .as_ref()
-                .and_then(|s| crate::level::resolved_level_code(s.state())),
-            self.last_resolved_level.as_deref(),
-        )
-    }
-
-    /// Single dispatch for a transport `Action`, shared by the keyboard-shortcut
-    /// path and the transport-bar button path so the two can never diverge.
-    fn apply_transport_action(&mut self, cmd: transport::Action) {
-        match cmd {
-            transport::Action::Send(c) => self.send_action_command(c),
-            transport::Action::RestartThen(c) => self.queue_restart_then(c),
-            // Undo/Redo overwrite the whole shared input/coord buffer like a
-            // history restore, so they stop an active REC/PLAY first; the DLL
-            // must not be writing input_log during the copy.
-            transport::Action::Undo | transport::Action::Redo => {
-                if !self.stop_active_session_for_load() {
-                    return;
-                }
-                let undo = matches!(cmd, transport::Action::Undo);
-                let snap = if undo {
-                    self.history.undo()
-                } else {
-                    self.history.redo()
-                };
-                if let Some(snap) = snap {
-                    if let Some(shared) = self.shared.as_mut() {
-                        snap.restore_to(shared.state_mut());
-                    }
-                    self.log_lines.push(if undo {
-                        "Undo: restored previous recording"
-                    } else {
-                        "Redo: restored next recording"
-                    });
-                    self.note_restored_physics();
-                }
-            }
-            transport::Action::SetContinueFrame(frame) => {
-                // Stage the splice frame UI-side only; the TransportController
-                // writes it to shared memory when a cycle starts and on each
-                // reroll, and the DLL clears it. Writing it here mid-replay is
-                // harmless for plain PLAY (the cycle cave splices only an armed CONT)
-                // but would move a running CONT's splice.
-                self.continue_from_frame = frame;
-                self.continue_from_text = frame.to_string();
-            }
-            transport::Action::SetResumeSpeed(spd) => {
-                // Catch-up in flight: keep the saved resume speed and the shared
-                // cont_resume_speed in sync so the DLL drops to the speed the
-                // user just picked at the splice. playback_speed stays the
-                // catch-up multiplier until clear_cont_catchup restores it.
-                self.resume_speed = Some(spd);
-                if let Some(shared) = self.shared.as_mut() {
-                    shared.state_mut().cont_resume_speed = spd;
-                }
-                self.log_lines.push(format!("Resume speed: {}x", spd));
-            }
-            transport::Action::Log(msg) => {
-                self.log_lines.push(msg);
-            }
-        }
-    }
-
-    /// Discard editors and queued gestures when their recording is replaced.
-    fn detach_input_editor(&mut self) {
-        self.script_watch = None;
-        self.pending_input_edit = None;
-        self.pending_edit_autostop = false;
-        self.timeline_edit = timeline::TimelineEdit::default();
-    }
-
-    /// Apply a pending input edit to the stopped recording before rendering,
-    /// pushing one undo snapshot per finished gesture.
-    fn apply_pending_input_edit(&mut self) {
-        // Peek without consuming — if a run is active we keep the edit queued
-        // and apply it once the game stops.
-        if self.pending_input_edit.is_none() {
-            return;
-        }
-        let mode = match self.shared.as_ref() {
-            Some(shared) => shared.state().mode,
-            None => {
-                // No shared memory to write into — drop the queued edit.
-                self.pending_input_edit = None;
-                self.pending_edit_autostop = false;
-                return;
-            }
-        };
-        // Never mutate the buffer the game is replaying or recording. Auto-STOP
-        // the run once (latched) and keep the edit queued until mode is Off.
-        if mode != TasMode::Off as u32 {
-            if !self.pending_edit_autostop {
-                self.pending_edit_autostop = true;
-                self.log_lines.push("[script] stopping run to apply edit…");
-                self.send_action_command(TasCommand::Stop);
-            }
-            return;
-        }
-        if self
-            .shared
-            .as_ref()
-            .is_some_and(|shared| !shared.command_idle())
-        {
-            return;
-        }
-        self.pending_edit_autostop = false;
-        let (events, commit, label) = match self.pending_input_edit.take() {
-            Some(e) => e,
-            None => return,
-        };
-        let shared = match self.shared.as_mut() {
-            Some(shared) => shared,
-            None => return,
-        };
-        let total = shared.state().recorded_count;
-        let len = (total as usize).min(shared.state().input_log.len());
-        let before = shared.state().input_log[..len].to_vec();
-        input_script::apply_events_to_log(&mut shared.state_mut().input_log, total, &events);
-        // Past the first changed tick the recorded trajectory is stale, so
-        // the take's watcher must stop there.
-        let first_changed = before
-            .iter()
-            .zip(shared.state().input_log[..len].iter())
-            .position(|(a, b)| a != b);
-        if let Some(tick) = first_changed {
-            let tick = tick as u32;
-            let model = shared.state().input_model;
-            let identity = self
-                .loaded_identity
-                .get_or_insert_with(|| recording::IdentityStamps {
-                    input_model: Some(model),
-                    ..Default::default()
-                });
-            identity.trajectory_ticks = Some(identity.trajectory_limit().min(tick));
-        }
-        if commit {
-            let snapshot = recording::RecordingSnapshot::from_state(shared.state());
-            // end_tick = 0 routes through the history panel's label parser so
-            // the descriptive action (e.g. "Moved L 324→372t") is what shows.
-            let label = if label.is_empty() {
-                "Edited inputs".to_string()
-            } else {
-                label
-            };
-            self.history.push_snapshot_data_with_session(
-                snapshot,
-                label,
-                0,
-                0,
-                self.loaded_identity.clone(),
-            );
-        }
-    }
-
-    /// Poll the externally-edited `.tas` file; on save, parse it and queue
-    /// the inputs for application (reload-on-save). No-op until a file is
-    /// opened via "Open in external editor".
-    fn poll_script_file(&mut self) {
-        let Some(result) = self.script_watch.as_mut().and_then(|watch| watch.poll()) else {
-            return;
-        };
-        match result {
-            Ok(events) => {
-                let n = events.len();
-                self.pending_input_edit =
-                    Some((events, true, "Loaded inputs from script".to_string()));
-                self.log_lines
-                    .push(format!("[script] reloaded {} inputs", n));
-            }
-            Err(e) => self.log_lines.push(format!("[script] reload failed: {e}")),
-        }
-    }
-
-    /// Check if the game process is still alive by monitoring frame_count advancement.
-    /// If frame_count hasn't changed for ~3 seconds, assume the game crashed.
-    fn check_game_health(&mut self) {
-        // Sample cycle activity every frame (cheap): game_in_game stays 1 in
-        // the pause menu, so a fresh frame_count advance is the "race is
-        // ticking" signal.
-        if let Some(fc) = self
-            .shared
-            .as_ref()
-            .map(|shared| shared.frame_count_volatile())
-        {
-            if !self.cycle_fc_seeded {
-                // Baseline only: a frozen menu has a nonzero frame_count too,
-                // so the first sample is not evidence of ticking.
-                self.cycle_fc_seeded = true;
-                self.cycle_fc = fc;
-            } else if fc < self.cycle_fc {
-                // The counter only increments (once per cycle), so going
-                // backwards means a fresh DLL zeroed the section.
-                self.on_dll_reinitialised(fc);
-            } else if fc != self.cycle_fc {
-                self.cycle_fc = fc;
-                self.cycle_advance_at = std::time::Instant::now();
-            }
-        }
-        if self.last_health_check.elapsed() < std::time::Duration::from_secs(1) {
-            return;
-        }
-        self.last_health_check = std::time::Instant::now();
-
-        // Game identity: a relaunch that reuses our mapped section is only
-        // visible here when the old process never ticked (see
-        // on_game_process_changed). Sampled once a second, so a process
-        // snapshot is affordable.
-        if self.shared.is_some() {
-            let pid = win32::find_supreme_pid();
-            self.on_game_pid_observed(pid);
-            if let Some(pid) = pid {
-                self.poll_crash_record(pid);
-            }
-        }
-
-        if let Some(ref shared) = self.shared {
-            let current_frame = shared.frame_count_volatile();
-            if current_frame == self.last_frame_count {
-                self.stale_frame_ticks += 1;
-                // Re-test liveness every 5 stale seconds, not once: the cycle
-                // also freezes at the menu while the game is alive, and the
-                // game may exit later while still stale.
-                if self.stale_frame_ticks.is_multiple_of(5) && win32::find_supreme_pid().is_none() {
-                    self.disconnect_from_dead_game();
-                }
-            } else {
-                self.last_frame_count = current_frame;
-                self.stale_frame_ticks = 0;
-            }
-        }
-    }
-
-    /// Pick a recording, stop any active session, load it, then auto-play.
-    /// The stop happens AFTER the (cancellable) file pick so cancelling the
-    /// dialog never kills an in-progress recording, and BEFORE the load so the
-    /// buffer overwrite doesn't race the DLL's REC cycle hook.
-    fn load_recording_flow(&mut self) {
-        // Resolved, not raw: the starting folder should be the track we are
-        // actually on. Unknown opens the root recordings dir rather than
-        // confidently opening the previous track's.
-        let level_id = match self.shared.as_ref() {
-            Some(s) => tas_shared::resolved_level_id(s.state()).unwrap_or(u32::MAX),
-            None => return,
-        };
-        let Some(path) = recording::pick_recording_path(level_id) else {
-            return;
-        };
-        if !self.stop_active_session_for_load() {
-            return;
-        }
-        // The dialog only starts in the current track's folder; the user can
-        // pick any file. Recordings are named `<CODE>-<name>`, so check the
-        // file against the level re-read after the stop above. Unknown on
-        // either side cannot prove a mismatch and is allowed, as in tas_test.
-        let live_id = self
-            .shared
-            .as_ref()
-            .and_then(|s| tas_shared::resolved_level_id(s.state()))
-            .unwrap_or(u32::MAX);
-        if let Err(msg) =
-            tas_shared::level::check_recording_matches_live(&path.to_string_lossy(), live_id)
-        {
-            self.log_lines.push(format!("Load refused: {}", msg));
-            return;
-        }
-        if let Some(shared) = self.shared.as_mut() {
-            let loaded =
-                recording::load_recording_path(shared.state_mut(), &mut self.log_lines, &path);
-            if let Some(meta) = loaded {
-                // The file's stamp (load_recording_path already logged a
-                // mismatch warning); the chip shows it next to the live mode.
-                self.loaded_physics = meta.physics_label();
-                self.loaded_rider = meta.rider_label();
-                self.loaded_identity = Some(recording::IdentityStamps::from_metadata(&meta));
-                self.loaded_level =
-                    tas_shared::level::code_from_recording_name(&path.to_string_lossy())
-                        .map(Into::into);
-                let _ = self.history.push_loaded_snapshot(
-                    shared.state(),
-                    &path,
-                    self.loaded_identity.clone(),
-                );
-                if shared.state().recorded_count > 0 {
-                    self.queue_restart_then(TasCommand::ArmPlay);
-                }
-            }
-        }
-    }
-}
-
-impl eframe::App for TasApp {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.094, 0.094, 0.094, 1.0] // gray(24) in 0-1 range
-    }
-
-    fn on_exit(&mut self) {
-        self.settings.playback_speed = self.playback_speed_for_settings();
-        self.settings.save();
-        // Make sure the latest history is flushed to disk before we exit.
-        if let Some(writer) = self.history_writer.as_ref() {
-            let _ = writer.flush();
-        }
-    }
-
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.sync_frame_state();
-        self.track_mode_transitions();
-
-        // handle_shortcuts takes keys delivered to tas_ui by egui;
-        // poll_global_shortcuts takes keys seen while the game has focus.
-        // They are gated on the foreground window, so one press fires once.
-        let mut shortcut_actions = self.handle_shortcuts(ctx);
-        shortcut_actions.extend(self.poll_global_shortcuts());
-
-        self.show_menu_bar(ctx);
-        self.show_game_exit_banner(ctx);
-        self.show_log_panel(ctx);
-        if self.show_connection_error(ctx) {
-            return;
-        }
-
-        // Read current state snapshot for UI
-        let connected = self.shared.is_some();
-        if !connected {
-            return;
-        }
-
-        self.show_left_panel(ctx);
-        let history_actions = self.show_history_panel(ctx);
-        self.apply_history_actions(history_actions);
-
-        // Advance the in-flight restart/arm/watch cycle.
-        self.step_cycle(ctx);
-
-        // Apply shortcut actions to shared state (same dispatch as the buttons).
-        for cmd in shortcut_actions {
-            self.apply_transport_action(cmd);
-        }
-
-        // Apply any input edit the timeline produced last frame.
-        self.poll_script_file();
-        self.apply_pending_input_edit();
-
-        self.show_central_panel(ctx);
-
-        self.drain_dll_log();
-
-        for w in self.history.take_warnings() {
-            self.log_lines.push(format!("History: {}", w));
-        }
-        self.persist_history_if_needed();
-
-        self.schedule_repaint(ctx);
-    }
-}
-
-/// The sections of `update`, in the order it runs them.
-impl TasApp {
-    /// Once-per-frame bookkeeping that must run before anything reads live state.
-    fn sync_frame_state(&mut self) {
-        // Dark title bar (one-shot, first frame: the window must exist).
-        if !self.dark_title_bar_set {
-            self.dark_title_bar_set = true;
-            win32::set_dark_title_bar("SSB Inspect");
-        }
-
-        // Persist any new log lines added since last frame to the on-disk
-        // session log. Done first so a panic later in the frame still
-        // captures the events that led up to it. A no-op when the file could
-        // not be opened at start: the in-memory log is then the only record.
-        self.log_lines.flush_to_file();
-
-        // Synchronise the live level first: the history panel filters and
-        // restores against it later this frame, and must not see the previous
-        // track's value on the frame after a level change.
-        self.sync_live_level();
-
-        // Check game health (crash detection) — also samples cycle activity.
-        self.check_game_health();
-    }
-
-    fn track_mode_transitions(&mut self) {
-        // Track mode transitions for history sessions + recovery checkpoints.
-        let mode_probe = self.shared.as_ref().map(|shared| {
-            (
-                shared.mode_volatile(),
-                shared.recorded_count_volatile(),
-                shared.state().continue_from_frame,
-            )
-        });
-        if let Some((current_mode, recorded, continue_from)) = mode_probe {
-            // A CONT just spliced: before anything snapshots the new take.
-            if current_mode == 1
-                && self.last_mode != 1
-                && self.pending_session_kind == Some(RecordingSessionKind::Continue)
-            {
-                // The DLL clears continue_from_frame once it splices.
-                let splice = self.pending_continue_start_tick.unwrap_or(continue_from);
-                self.adopt_replayed_prefix(splice);
-            }
-            // The snapshot copies ~850 KB (full input_log + rec_coords). Only a
-            // live REC (recovery checkpoints) or a REC that just ended (history
-            // entry) consumes it, so build it only then rather than every frame.
-            let need_snapshot = current_mode == 1 || (self.last_mode == 1 && current_mode == 0);
-            let state_snapshot = if need_snapshot {
-                self.shared
-                    .as_ref()
-                    .map(|shared| recording::RecordingSnapshot::from_state(shared.state()))
-            } else {
-                None
-            };
-            if current_mode != self.last_mode {
-                // REC started
-                if current_mode == 1 {
-                    self.start_recording_session(continue_from, recorded);
-                    // A fresh take is by definition in the live physics mode.
-                    self.loaded_physics = self.history.live_physics().map(str::to_string);
-                    // Same for the rider: the take now in the buffer was recorded as the
-                    // live character / stance, so a later PLAY compares against that.
-                    self.loaded_rider = self.history.live_rider().map(str::to_string);
-                    self.loaded_identity = self
-                        .shared
-                        .as_ref()
-                        .map(|s| recording::IdentityStamps::from_live(s.state()));
-                    self.loaded_level = self
-                        .shared
-                        .as_ref()
-                        .and_then(|s| tas_shared::resolved_level_id(s.state()))
-                        .and_then(tas_shared::level::code_from_id)
-                        .map(Into::into);
-                    self.log_cont_resume_summary();
-                    self.clear_cont_catchup();
-                    // Splice fired (or REC began). This handler runs before
-                    // step_cycle, so REC can be seen before the controller
-                    // reports Done. Drop it here, and release
-                    // cont_suppress_input: the resumed REC records live input.
-                    if let Some(mut cycle) = self.cycle.take() {
-                        if let Some(shared) = self.shared.as_mut() {
-                            cycle.release(shared);
-                        }
-                        self.cycle_deadline = None;
-                        self.set_cont_suppress_input(false);
-                    }
-                    // Fresh finish-line watch. A cycle took its baseline
-                    // when it started; a REC with no cycle takes it now.
-                    if !std::mem::take(&mut self.finish_baseline_armed) {
-                        self.finish_seq_seen = self.live_finish_seq();
-                    }
-                    self.finished_at_tick = None;
-                    self.finished_hud_cs = None;
-                }
-                // REC stopped (mode went from REC to OFF)
-                if self.last_mode == 1 && current_mode == 0 {
-                    if let Some(snap) = state_snapshot.as_ref() {
-                        self.finalize_recording_session(snap, recorded);
-                    }
-                }
-                self.last_mode = current_mode;
-            }
-            if current_mode == 1 {
-                if let Some(snap) = state_snapshot.as_ref() {
-                    self.update_recording_recovery_progress(snap);
-                }
-
-                self.watch_finish_line();
-            }
-        }
-    }
-
-    pub(crate) fn live_finish_seq(&self) -> u32 {
-        self.shared
-            .as_ref()
-            .and_then(|s| tas_shared::race_clock::race_finish(s.state()))
-            .map_or(0, |f| f.seq)
-    }
-
-    /// Finish-line watch: stop REC when the rider finishes, since the
-    /// run-out is never wanted. The finish comes from the game's own
-    /// Finish_Point, through the DLL.
-    fn watch_finish_line(&mut self) {
-        if self.finished_at_tick.is_some() {
-            return;
-        }
-        let Some(shared) = self.shared.as_ref() else {
-            return;
-        };
-        let state = shared.state();
-        let Some(finish) = tas_shared::race_clock::race_finish(state) else {
-            return;
-        };
-        if finish.seq == self.finish_seq_seen || finish.mode != TasMode::Rec as u32 {
-            return;
-        }
-        self.finished_at_tick = Some(finish.tick);
-        self.finished_hud_cs = Some(tas_shared::race_clock::hud_cs(
-            finish.seconds,
-            tas_shared::race_clock::extended_precision(state.fpu_control_word),
-        ));
-        let time = match self.finished_hud_cs {
-            Some(cs) if finish.valid => {
-                format!(" (race time {})", recording::format_recording_duration(cs))
-            }
-            _ => " (a checkpoint was missed: no official time)".to_string(),
-        };
-        if !finish.valid {
-            self.finished_hud_cs = None;
-        }
-        self.log_lines.push(format!(
-            "\u{1F3C1} Finished at tick {}{} — recording stopped",
-            finish.tick, time
-        ));
-        self.apply_transport_action(transport::Action::Send(TasCommand::Stop));
-    }
-
-    fn show_game_exit_banner(&mut self, ctx: &egui::Context) {
-        let Some(banner) = self.game_exit_banner.clone() else {
-            return;
-        };
-        egui::TopBottomPanel::top("game_exit_banner").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.colored_label(egui::Color32::from_rgb(255, 100, 100), banner);
-                if ui.button("Dismiss").clicked() {
-                    self.game_exit_banner = None;
-                }
-            });
-        });
-    }
-
-    fn show_menu_bar(&mut self, ctx: &egui::Context) {
-        // Top menu bar
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Save Recording...  Ctrl+S").clicked() {
-                        ui.close_menu();
-                        let level = self.level_for_save().map(str::to_string);
-                        if let Some(shared) = self.shared.as_ref() {
-                            if let Some(path) = recording::save_dialog(
-                                shared.state(),
-                                &mut self.log_lines,
-                                level.as_deref(),
-                                self.loaded_identity.as_ref(),
-                            ) {
-                                self.history.push_save_marker(
-                                    shared.state(),
-                                    &path,
-                                    self.loaded_identity.clone(),
-                                );
-                            }
-                        }
-                    }
-                    if ui.button("Load Recording...  Ctrl+O").clicked() {
-                        ui.close_menu();
-                        self.load_recording_flow();
-                    }
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new("Settings")
-                            .small()
-                            .color(egui::Color32::from_gray(140)),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label("CONT catch-up");
-                        ui.add(
-                            egui::DragValue::new(&mut self.settings.cont_catchup_speed)
-                                .range(1.0..=384.0)
-                                .prefix("\u{00D7}")
-                                .speed(1.0),
-                        )
-                        .on_hover_text(
-                            "CONT catch-up replay speed. ~256× ≈ the game's physics \
-                             ceiling (~80× effective); the F5 restart is separate and \
-                             unaffected.",
-                        );
-                    });
-                });
-                ui.menu_button("View", |ui| {
-                    // Everyday toggles, grouped under "Panels". The
-                    // hotkey labels are advisory only — actual handling
-                    // is in `handle_shortcuts`.
-                    ui.label(
-                        egui::RichText::new("Panels")
-                            .small()
-                            .color(egui::Color32::from_gray(140)),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.settings.show_history, "History");
-                        ui.weak("Ctrl+H");
-                    });
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.settings.show_log, "Log");
-                        ui.weak("Ctrl+L");
-                    });
-                    ui.separator();
-                    // Debug section — rarely touched diagnostic toggles.
-                    ui.label(
-                        egui::RichText::new("Debug")
-                            .small()
-                            .color(egui::Color32::from_gray(140)),
-                    );
-                    ui.checkbox(&mut self.settings.show_pico_panel, "Pico HID");
-                    ui.checkbox(&mut self.settings.show_config, "Debug Config");
-                });
-            });
-        });
-    }
-
-    fn show_log_panel(&mut self, ctx: &egui::Context) {
-        // Bottom log panel (hidden by default, toggle via View menu).
-        // Declared FIRST so it sits at the very bottom of the window;
-        // egui stacks subsequent bottom panels above it.
-        if self.settings.show_log {
-            egui::TopBottomPanel::bottom("log_panel")
-                .resizable(true)
-                .default_height(100.0)
-                .show(ctx, |ui| {
-                    log_panel::show(ui, &mut self.log_lines);
-                });
-        }
-    }
-
-    /// Retry the connection and, while it is down, draw the error screen.
-    /// Returns true when the rest of the frame must be skipped.
-    fn show_connection_error(&mut self, ctx: &egui::Context) -> bool {
-        // Connection error state
-        if self.connect_error.is_some() {
-            // Retry every 2 s (the repaint floor below): the game is often
-            // launched after tas_ui, and the mapping only exists once
-            // TAS_Helper has initialized.
-            if self.last_reconnect_attempt.elapsed() >= std::time::Duration::from_secs(2) {
-                self.last_reconnect_attempt = std::time::Instant::now();
-                self.try_reconnect();
-            }
-        }
-        if self.connect_error.is_some() {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(40.0);
-                    ui.heading("SSB Inspect");
-                    ui.add_space(20.0);
-                    if let Some(ref err) = self.connect_error {
-                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), err);
-                    }
-                    ui.add_space(10.0);
-                    ui.label("Inject TAS_Helper.dll into Supreme.exe first.");
-                    ui.add_space(10.0);
-                    if ui.button("Retry Connection").clicked() {
-                        self.try_reconnect();
-                    }
-                });
-            });
-            ctx.request_repaint_after(std::time::Duration::from_secs(2));
-            return true;
-        }
-        false
-    }
-
-    fn show_left_panel(&mut self, ctx: &egui::Context) {
-        // Left side panel: only shown if at least one sub-panel is visible
-        let left_panel_visible = self.settings.show_config || self.settings.show_pico_panel;
-        if left_panel_visible {
-            egui::SidePanel::left("config_panel")
-                .resizable(true)
-                .default_width(200.0)
-                .show(ctx, |ui| {
-                    if let Some(ref mut shared) = self.shared {
-                        if self.settings.show_config {
-                            egui::CollapsingHeader::new("Debug Config")
-                                .default_open(false)
-                                .show(ui, |ui| {
-                                    config::show(ui, shared.state());
-                                });
-                            ui.separator();
-                        }
-                        if self.settings.show_pico_panel {
-                            pico::show_panel(ui, &mut self.pico, &mut self.log_lines);
-                        }
-                    }
-                    // History settings — available even when disconnected.
-                    if self.settings.show_config {
-                        egui::CollapsingHeader::new("History")
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label("Undo cap:");
-                                    let mut cap = self.settings.history_cap as u32;
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut cap)
-                                                .range(10..=2000)
-                                                .speed(2.0),
-                                        )
-                                        .on_hover_text(
-                                            "Max UNPINNED entries kept. Pinned + current \
-                                             entries are always kept, so the total can exceed this.",
-                                        )
-                                        .changed()
-                                    {
-                                        self.settings.history_cap = cap.max(1) as usize;
-                                        self.history.set_capacity(self.settings.history_cap);
-                                    }
-                                });
-                                ui.label(
-                                    egui::RichText::new("pinned + current always kept")
-                                        .size(10.0)
-                                        .weak(),
-                                );
-                            });
-                    }
-                });
-        } // left_panel_visible
-    }
-
-    fn show_history_panel(&mut self, ctx: &egui::Context) -> Vec<history::HistoryAction> {
-        // Right-side history panel (optional)
-        let mut history_actions = Vec::new();
-        let history_dir = self
-            .history_writer
-            .as_ref()
-            .map(|_| history_store::default_history_dir());
-        let mut open_history_dir = false;
-        if self.settings.show_history {
-            egui::SidePanel::right("history_panel")
-                .resizable(true)
-                .default_width(280.0)
-                .show(ctx, |ui| {
-                    // Compact header: "History" + count, autosave path in
-                    // the tooltip.
-                    ui.horizontal(|ui| {
-                        let title = ui.label(
-                            egui::RichText::new(format!("History · {}", self.history.len()))
-                                .strong(),
-                        );
-                        if let Some(dir) = history_dir.as_ref() {
-                            title.on_hover_text(format!("Autosave: {}", dir.display()));
-                        }
-                        if history_dir.is_some() {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .small_button("Open…")
-                                        .on_hover_text("Open the autosave folder in Explorer")
-                                        .clicked()
-                                    {
-                                        open_history_dir = true;
-                                    }
-                                },
-                            );
-                        }
-                    });
-
-                    // Same menu signal as the status chip (game_in_game stays
-                    // 1 while paused, so also require the cycle ticking). The
-                    // panel shows "In Menu" rather than "resolving…", since
-                    // nothing is resolved at a menu.
-                    let in_menu = !self.arming_allowed();
-                    let game_flag = self
-                        .shared
-                        .as_ref()
-                        .map(|s| s.state().game_in_game != 0)
-                        .unwrap_or(false);
-                    history_actions = history::show(ui, &self.history, in_menu, game_flag);
-                });
-        }
-
-        if open_history_dir {
-            if let Some(dir) = history_dir.as_deref() {
-                match open_in_file_browser(dir) {
-                    Ok(()) => {
-                        self.push_log(&format!("Opened history folder: {}", dir.display()));
-                    }
-                    Err(err) => {
-                        self.push_log(&format!("Open history folder failed: {}", err));
-                    }
-                }
-            }
-        }
-        history_actions
-    }
-
-    fn apply_history_actions(&mut self, history_actions: Vec<history::HistoryAction>) {
-        // Process history panel restores
-        if !history_actions.is_empty() {
-            for action in history_actions {
-                match action {
-                    history::HistoryAction::Restore(idx) => {
-                        // Restoring overwrites the live buffer, so stop any
-                        // active REC/PLAY first. Resolve the row to its stable
-                        // entry_id before stopping: finalizing the stopped take
-                        // can evict the oldest entry and shift indices.
-                        let target_id = self.history.entries().get(idx).map(|e| e.entry_id);
-                        if !self.stop_active_session_for_load() {
-                            continue;
-                        }
-                        let idx = target_id
-                            .and_then(|id| {
-                                self.history.entries().iter().position(|e| e.entry_id == id)
-                            })
-                            .unwrap_or(idx);
-                        // Checked against the level re-read after the stop.
-                        // Log the refusal: a silent no-op reads as a bug.
-                        if !self.history.entry_on_current_level(idx) {
-                            self.log_lines.push(format!(
-                                "History restore refused: that entry is not for the \
-                                 current track ({})",
-                                self.history.live_level().unwrap_or("resolving")
-                            ));
-                            continue;
-                        }
-                        if let Some(shared) = self.shared.as_mut() {
-                            let restored = self.history.restore_index(idx).map(|snap| {
-                                snap.restore_to(shared.state_mut());
-                                snap.recorded_count
-                            });
-                            if let Some(count) = restored {
-                                let label = self
-                                    .history
-                                    .entries()
-                                    .get(idx)
-                                    .map(|entry| entry.label.clone())
-                                    .unwrap_or_else(|| format!("Entry {}", idx + 1));
-                                self.log_lines.push(format!("History restore: {}", label));
-                                self.note_restored_physics();
-                                // Fit the timeline to the whole loaded recording.
-                                self.timeline_view.fit(count);
-                            }
-                        }
-                    }
-                    history::HistoryAction::ClearSelection => {
-                        self.history.clear_selection();
-                    }
-                    history::HistoryAction::SetPin(id, pinned) => {
-                        self.history.set_pinned(id, pinned);
-                    }
-                    history::HistoryAction::Rename(id, name) => {
-                        self.history.rename(id, name);
-                    }
-                }
-            }
-        }
-    }
-
-    fn show_central_panel(&mut self, ctx: &egui::Context) {
-        // Main central area
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Read before the mutable borrow of `shared` below.
-            let arming_allowed = self.arming_allowed();
-            // Transport bar at top
-            let cmds = if let Some(ref mut shared) = self.shared {
-                let mode = shared.state().mode_enum();
-                let recorded = shared.state().recorded_count;
-                // During catch-up the resume speed lives in resume_speed
-                // (playback_speed is the catch-up multiplier); otherwise it's
-                // the live play speed. The speed buttons highlight and edit it.
-                let resume_speed = self.resume_speed.unwrap_or(self.playback_speed);
-
-                transport::show(
-                    ui,
-                    transport::TransportProps {
-                        mode,
-                        recorded,
-                        continue_from: &mut self.continue_from_frame,
-                        continue_from_text: &mut self.continue_from_text,
-                        playback_speed: &mut self.playback_speed,
-                        cont_catchup_speed: self.settings.cont_catchup_speed,
-                        history: &self.history,
-                        state: shared.state(),
-                        catchup_active: self.resume_speed.is_some(),
-                        resume_speed,
-                        arming_allowed,
-                    },
-                )
-            } else {
-                Vec::new()
-            };
-
-            // Same dispatch as keyboard shortcuts, so the two can't diverge.
-            for cmd in cmds {
-                self.apply_transport_action(cmd);
-            }
-
-            // The take's track, for the timeline's game-clock origin below.
-            let take_level = self.buffer_level();
-            if let Some(ref mut shared) = self.shared {
-                // Re-assert playback_speed every frame. During a CONT catch-up
-                // it is the catch-up multiplier, and continuous re-assertion
-                // overrides the brief speed reset an F5 restart causes. Once
-                // the splice has fired (mode == REC) the DLL has already
-                // dropped to the resume speed, so assert that instead of
-                // pushing the multiplier back before the mode handler runs.
-                let catchup_active = self.resume_speed.is_some();
-                let mode = shared.state().mode;
-                let speed_to_assert = if catchup_active && mode == TasMode::Rec as u32 {
-                    self.resume_speed.unwrap_or(self.playback_speed)
-                } else {
-                    self.playback_speed
-                };
-                shared.state_mut().playback_speed = speed_to_assert;
-
-                ui.separator();
-
-                let state = shared.state();
-                status::status_card(
-                    ui,
-                    state,
-                    &status::StatusProps {
-                        in_game: arming_allowed,
-                        finished_at_tick: self.finished_at_tick,
-                        loaded_physics: self.loaded_physics.as_deref(),
-                        loaded_rider: self.loaded_rider.as_deref(),
-                    },
-                );
-
-                ui.separator();
-
-                status::drift_banner(ui, state, &self.drift_tracker);
-
-                let open_text_script =
-                    status::timeline_header(ui, state, self.script_watch.is_some());
-                // The game-clock origin is the take's track, which can differ
-                // from the live one. The selected history entry and the last
-                // known track are fallbacks once the course unloads.
-                let timeline_level = take_level
-                    .as_deref()
-                    .or(self
-                        .history
-                        .current_index()
-                        .and_then(|i| self.history.entries().get(i))
-                        .and_then(|entry| entry.level.as_deref()))
-                    .or(self.last_resolved_level.as_deref());
-                let tl_outcome = timeline::show(
-                    ui,
-                    state,
-                    timeline_level,
-                    &mut self.timeline_view,
-                    &mut self.continue_from_frame,
-                    &mut self.timeline_edit,
-                );
-                if tl_outcome.continue_changed {
-                    self.continue_from_text = self.continue_from_frame.to_string();
-                }
-                if let Some(events) = tl_outcome.events {
-                    self.pending_input_edit = Some((
-                        events,
-                        tl_outcome.commit_undo,
-                        tl_outcome.action_label.unwrap_or_default(),
-                    ));
-                }
-
-                // Text-script route: poll_script_file reloads it on save.
-                if open_text_script {
-                    let total = state.recorded_count;
-                    let events = input_script::runs_from_log(&state.input_log, total);
-                    // Where the game's race clock reads zero, as on the timeline.
-                    let timer = timeline::game_timer_anchor(state, timeline_level);
-                    let script = input_script::events_to_script(&events, timer);
-                    let path = script_watch::ScriptWatch::fresh_path();
-                    match std::fs::write(&path, &script) {
-                        Ok(()) => {
-                            let _ = std::process::Command::new("cmd")
-                                .arg("/C")
-                                .arg("start")
-                                .arg("")
-                                .arg(&path)
-                                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                                .spawn();
-                            self.script_watch =
-                                Some(script_watch::ScriptWatch::new(path.clone(), script));
-                            self.log_lines.push(format!(
-                                "[script] opened {} ({} inputs); edits reload on save",
-                                path.display(),
-                                events.len()
-                            ));
-                        }
-                        Err(e) => self.log_lines.push(format!("[script] write failed: {e}")),
-                    }
-                }
-
-                // DLL counters, shown only with Debug Config.
-                if self.settings.show_config {
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "Recorded: {} | Playback: {} | BB3B10: {} | Blocks: {}",
-                            state.recorded_count,
-                            state.playback_pos,
-                            state.bb3b10_call_count,
-                            state.handler_block_count
-                        ));
-                    });
-                }
-
-                let previous = (
-                    self.drift_tracker.max_dx,
-                    self.drift_tracker.max_dz,
-                    self.drift_tracker.splice_tick,
-                );
-                let trajectory_ticks = self
-                    .loaded_identity
-                    .as_ref()
-                    .map_or(u32::MAX, recording::IdentityStamps::trajectory_limit);
-                let (count, reset) = self.drift_tracker.scan_up_to(state, trajectory_ticks);
-                if reset {
-                    self.last_logged_drift_level = 0;
-                }
-
-                let max_drift = self.drift_tracker.max_drift();
-                let new_level = if max_drift >= 5.0 {
-                    3
-                } else if max_drift >= 1.0 {
-                    2
-                } else if max_drift > 0.0 {
-                    1
-                } else {
-                    0
-                };
-                if state.mode == TasMode::Play as u32 && new_level > self.last_logged_drift_level {
-                    self.log_lines.push(format!(
-                        "{} first at tick {}: max X={:.9} Z={:.9} (was X={:.9} Z={:.9})",
-                        if state.continue_from_frame != 0 {
-                            "CONT prefix difference"
-                        } else {
-                            "DRIFT"
-                        },
-                        self.drift_tracker.first_drift_tick.unwrap_or(count),
-                        self.drift_tracker.max_dx,
-                        self.drift_tracker.max_dz,
-                        if reset { 0.0 } else { previous.0 },
-                        if reset { 0.0 } else { previous.1 },
-                    ));
-                    self.last_logged_drift_level = new_level;
-                }
-                if (state.mode == TasMode::Play as u32 || state.mode == TasMode::Rec as u32)
-                    && (reset || previous.2.is_none())
-                {
-                    if let Some(tick) = self.drift_tracker.splice_tick {
-                        self.log_lines.push(format!(
-                            "CONT splice {tick}: X={:.9} Z={:.9}",
-                            self.drift_tracker.splice_dx, self.drift_tracker.splice_dz
-                        ));
-                    }
-                }
-
-                // Do not sync continue_from_frame to shared memory here. It
-                // stages the next CONT; the controller writes it when a cycle
-                // starts and on each reroll, and syncing it here would move a
-                // running CONT's splice.
-            }
-        });
-    }
-
-    fn schedule_repaint(&self, ctx: &egui::Context) {
-        // Refresh only as fast as there is something to show. tas_ui's own
-        // rendering at a flat 30 fps costs the game ~10 ms per menu frame
-        // (48 ms vs 58 ms) through GPU contention. Full rate while a TAS mode
-        // is armed or the engine is ticking, a lazy rate at a menu. egui still
-        // repaints immediately on input; this only sets the idle floor.
-        let mode_active = self
-            .shared
-            .as_ref()
-            .map(|s| s.mode_volatile() != TasMode::Off as u32)
-            .unwrap_or(false);
-        let cycle_ticking = self.cycle_advance_at.elapsed() < std::time::Duration::from_millis(400);
-        // eframe still runs update and paint while minimized, and each painted
-        // frame leaks a little renderer memory on DX12/Vulkan (~15 KB/s at
-        // 60 fps), so idle hard when minimized regardless of mode.
-        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
-        let refresh_ms = if minimized {
-            500
-        } else if mode_active || cycle_ticking {
-            33
-        } else {
-            250
-        };
-        ctx.request_repaint_after(std::time::Duration::from_millis(refresh_ms));
-    }
-}
-
-fn open_in_file_browser(path: &std::path::Path) -> Result<(), String> {
-    std::process::Command::new("explorer")
-        .arg(path)
-        .spawn()
-        .map_err(|e| format!("failed to launch explorer: {}", e))?;
-    Ok(())
-}
+use app::TasApp;
 
 fn main() -> eframe::Result {
     // Reject unsafe automation setup before opening any user history/settings.
@@ -1774,6 +111,8 @@ fn main() -> eframe::Result {
 mod tests {
     mod cont_splice;
     mod cycle;
+    mod e2e;
+    mod fake_game;
     mod relaunch;
     mod session;
     mod shortcuts;
@@ -1785,7 +124,7 @@ mod tests {
 
         let mut app = test_app();
         // Live game runs Vincent/DirectX7.
-        app.history.set_live_stamps(recording::IdentityStamps {
+        app.history.list.set_live_stamps(recording::IdentityStamps {
             renderer_id: Some(TAS_RENDERER_DIRECTX7),
             fpu_control_word: Some(0x007F),
             rider_character: Some(TAS_CHARACTER_VINCENT),
@@ -1805,31 +144,32 @@ mod tests {
             input_model: None,
             trajectory_ticks: None,
         };
-        assert!(app.history.push_loaded_snapshot(
+        assert!(app.history.list.push_loaded_snapshot(
             &file_state,
             std::path::Path::new("keith.tasrec"),
             Some(keith.clone()),
         ));
-        assert_eq!(app.history.entries().last().unwrap().stamps, keith);
+        assert_eq!(app.history.list.entries().last().unwrap().stamps, keith);
         // Restore the entry as the UI does, then save a copy: the file must
         // keep saying Keith/OpenGL even though the game runs Vincent/DX7.
-        app.note_restored_physics();
-        assert_eq!(app.loaded_identity, Some(keith.clone()));
+        app.adopt_selected_entry_stamps();
+        assert_eq!(app.take.identity.stamps, Some(keith.clone()));
         let path =
             std::env::temp_dir().join(format!("identity_chain_{}.tasrec", std::process::id()));
-        recording::RecordingFile::save(&file_state, &path, app.loaded_identity.as_ref()).unwrap();
+        recording::RecordingFile::save(&file_state, &path, app.take.identity.stamps.as_ref())
+            .unwrap();
         let meta = recording::RecordingFile::read_metadata(&path).unwrap();
         assert_eq!(meta.renderer.as_deref(), Some("OpenGL"));
         assert_eq!(meta.character.as_deref(), Some("Keith"));
         // An edit derived from the loaded take keeps its identity too.
-        assert!(app.history.push_snapshot_data_with_session(
+        assert!(app.history.list.push_snapshot_data_with_session(
             recording::RecordingSnapshot::from_state(&file_state),
             "Edited inputs",
             0,
             0,
-            app.loaded_identity.clone(),
+            app.take.identity.stamps.clone(),
         ));
-        assert_eq!(app.history.entries().last().unwrap().stamps, keith);
+        assert_eq!(app.history.list.entries().last().unwrap().stamps, keith);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1844,7 +184,7 @@ mod tests {
         shared.state_mut().recorded_count = 100;
         shared.state_mut().input_model = tas_shared::TAS_INPUT_MODEL_HELD;
         shared.state_mut().input_log[30..60].fill(0x04);
-        app.shared = Some(shared);
+        app.conn.shared = Some(shared);
         let up = |start, end| InputEvent {
             bit: 0x04,
             start,
@@ -1856,9 +196,15 @@ mod tests {
             end,
         };
         let mut edit = |events: Vec<InputEvent>| {
-            app.pending_input_edit = Some((events, true, "edit".into()));
+            app.editor.queue(editor::Edit {
+                events,
+                commit: true,
+                label: "edit".into(),
+            });
             app.apply_pending_input_edit();
-            app.loaded_identity
+            app.take
+                .identity
+                .stamps
                 .as_ref()
                 .and_then(|i| i.trajectory_ticks)
         };
@@ -1866,12 +212,17 @@ mod tests {
         assert_eq!(edit(vec![up(40, 60), left(70, 80)]), Some(30));
         assert_eq!(edit(vec![up(40, 60), left(70, 90)]), Some(30));
         assert_eq!(
-            app.loaded_identity.as_ref().and_then(|i| i.input_model),
+            app.take
+                .identity
+                .stamps
+                .as_ref()
+                .and_then(|i| i.input_model),
             Some(tas_shared::TAS_INPUT_MODEL_HELD),
             "the stamp keeps the buffer's model"
         );
         assert_eq!(
             app.history
+                .list
                 .entries()
                 .last()
                 .unwrap()
@@ -1891,8 +242,8 @@ mod tests {
             let mut entry_state = tas_shared::zeroed_boxed();
             entry_state.recorded_count = 100;
             entry_state.input_log[30..60].fill(0x04);
-            app.history.set_live_level(Some("FE"));
-            assert!(app.history.push_snapshot_data_with_session(
+            app.history.list.set_live_level(Some("FE"));
+            assert!(app.history.list.push_snapshot_data_with_session(
                 recording::RecordingSnapshot::from_state(&entry_state),
                 "Deleted D 60-70t",
                 0,
@@ -1909,19 +260,21 @@ mod tests {
             if !same_take {
                 shared.state_mut().input_log[80] = 0x01;
             }
-            app.shared = Some(shared);
-            app.loaded_identity = None;
+            app.conn.shared = Some(shared);
+            app.take.identity.stamps = None;
             app.adopt_buffer_identity();
             let limit = app
-                .loaded_identity
+                .take
+                .identity
+                .stamps
                 .as_ref()
                 .and_then(|i| i.trajectory_ticks);
             if same_take {
                 assert_eq!(limit, Some(60));
-                assert_eq!(app.loaded_level.as_deref(), Some("FE"));
+                assert_eq!(app.take.identity.level.as_deref(), Some("FE"));
             } else {
                 assert_eq!(limit, None);
-                assert!(app.loaded_identity.is_none());
+                assert!(app.take.identity.stamps.is_none());
             }
         }
     }
@@ -1950,12 +303,11 @@ mod tests {
         // The splice fired: REC, and the DLL has cleared continue_from_frame.
         s.mode = TasMode::Rec as u32;
         s.continue_from_frame = 0;
-        app.shared = Some(shared);
-        app.last_mode = TasMode::Play as u32;
-        app.pending_session_kind = Some(RecordingSessionKind::Continue);
-        app.pending_continue_start_tick = Some(80);
+        app.conn.shared = Some(shared);
+        app.session.last_mode = TasMode::Play as u32;
+        app.session.pending = Some(crate::session::StartContext::Continue { splice: 80 });
         app.track_mode_transitions();
-        let s = app.shared.as_ref().unwrap().state();
+        let s = app.conn.shared.as_ref().unwrap().state();
         assert_eq!(s.rec_coords[5], [1.0, 2.0, 3.0], "spawn untouched");
         assert_eq!(s.rec_coords[39], [39.0, 0.0, 0.0]);
         assert_eq!(s.rec_coords[40], [40.0, 1.0, 0.0]);
@@ -1972,24 +324,28 @@ mod tests {
         let mut app = test_app();
         let old_path = crate::script_watch::ScriptWatch::fresh_path();
         std::fs::write(&old_path, "1-5 press left").unwrap();
-        app.script_watch = Some(crate::script_watch::ScriptWatch::new(
-            old_path.clone(),
-            "1-5 press left".into(),
-        ));
-        app.pending_input_edit = Some((Vec::new(), true, "old script".into()));
-        app.pending_edit_autostop = true;
+        app.editor
+            .watch_script(old_path.clone(), "1-5 press left".into());
+        app.editor.pending = editor::PendingEdit::WaitingForStop(editor::Edit {
+            events: Vec::new(),
+            commit: true,
+            label: "old script".into(),
+        });
         assert!(app.stop_active_session_for_load());
         std::fs::write(&old_path, "2-9 press shift").unwrap();
-        app.poll_script_file();
-        assert!(app.script_watch.is_none());
-        assert!(app.pending_input_edit.is_none());
-        assert!(!app.pending_edit_autostop);
+        app.editor.poll_script(&mut app.log_lines);
+        assert!(app.editor.script_watch.is_none());
+        assert_eq!(app.editor.pending, editor::PendingEdit::None);
         std::fs::remove_file(old_path).unwrap();
     }
 
     use super::*;
+    use crate::app::stop_is_acknowledged;
+    use crate::panels::{input_script, timeline, transport};
+    use crate::transport_runtime::normalize_playback_speed;
     use egui::{Event, Key, Modifiers, RawInput};
-    use tas_shared::TasSharedState;
+    use recording::RecordingSessionKind;
+    use tas_shared::{TasCommand, TasMode, TasSharedMemoryClient, TasSharedState};
 
     #[test]
     fn recording_buffer_overwrite_requires_stop_acknowledgement() {
@@ -2001,14 +357,13 @@ mod tests {
 
     /// Test constructor: creates TasApp without shared memory or Pico.
     fn test_app() -> TasApp {
-        TasApp {
-            connect_error: Some("Test mode: no DLL".into()),
-            ..TasApp::blank(settings::Settings {
-                history_cap: 64,
-                cont_catchup_speed: 12.0,
-                ..Default::default()
-            })
-        }
+        let mut app = TasApp::blank(settings::Settings {
+            history_cap: 64,
+            cont_catchup_speed: 12.0,
+            ..Default::default()
+        });
+        app.conn.connect_error = Some("Test mode: no DLL".into());
+        app
     }
 
     /// An app connected to an idle DLL in a ticking level holding `recorded`
@@ -2018,8 +373,8 @@ mod tests {
         let mut shared = TasSharedMemoryClient::new_test_mapping();
         shared.state_mut().game_in_game = 1;
         shared.state_mut().recorded_count = recorded;
-        app.shared = Some(shared);
-        app.cycle_advance_at = std::time::Instant::now();
+        app.conn.shared = Some(shared);
+        app.conn.cycle_advance_at = std::time::Instant::now();
         app
     }
 
@@ -2028,37 +383,53 @@ mod tests {
     #[test]
     fn app_starts_without_dll() {
         let app = test_app();
-        assert!(app.shared.is_none());
-        assert!(app.connect_error.is_some());
-        assert_eq!(app.playback_speed, 1.0);
-        assert_eq!(app.timeline_view, timeline::TimelineView::default());
+        assert!(app.conn.shared.is_none());
+        assert!(app.conn.connect_error.is_some());
+        assert_eq!(app.transport.playback_speed, 1.0);
+        assert_eq!(app.view.timeline, timeline::TimelineView::default());
         assert!(!app.pico.connected);
     }
 
     #[test]
     fn restoring_while_idle_cancels_pending_arm() {
-        use tas_shared::transport::{Arm, ArmConfig, TransportController};
-        for arm in [Arm::Rec, Arm::Play, Arm::Continue] {
+        use tas_shared::transport::{ArmConfig, TransportController};
+        use transport_runtime::{ArmRequest, TransportState};
+        for command in [
+            TasCommand::ArmRec,
+            TasCommand::ArmPlay,
+            TasCommand::ArmContinue,
+        ] {
             let mut app = test_app();
-            app.cycle = Some(TransportController::new(ArmConfig {
-                arm,
-                speed: 256.0,
+            let request = ArmRequest {
+                command,
+                arming_allowed: true,
+                recorded: 500,
                 continue_from_frame: 400,
-                gate_align_rec: 299,
-                max_retries: 1,
+                gate: 299,
                 input_model: tas_shared::TAS_INPUT_MODEL_INJECTED,
                 trajectory_ticks: u32::MAX,
-            }));
-            app.resume_speed = Some(1.0);
-            app.playback_speed = 256.0;
-            app.pending_session_kind = Some(RecordingSessionKind::Continue);
-            app.pending_continue_start_tick = Some(400);
+            };
+            app.transport.state = TransportState::Running {
+                controller: TransportController::new(ArmConfig {
+                    arm: request.arm(),
+                    speed: 256.0,
+                    continue_from_frame: 400,
+                    gate_align_rec: 299,
+                    max_retries: 1,
+                    input_model: tas_shared::TAS_INPUT_MODEL_INJECTED,
+                    trajectory_ticks: u32::MAX,
+                }),
+                deadline: std::time::Instant::now(),
+                request,
+            };
+            app.transport.resume_speed = Some(1.0);
+            app.transport.playback_speed = 256.0;
+            app.session.pending = Some(crate::session::StartContext::Continue { splice: 400 });
             assert!(app.stop_active_session_for_load());
-            assert!(app.cycle.is_none());
-            assert!(app.pending_session_kind.is_none());
-            assert!(app.pending_continue_start_tick.is_none());
-            assert!(app.resume_speed.is_none());
-            assert_eq!(app.playback_speed, 1.0);
+            assert!(!app.transport.is_running());
+            assert!(app.session.pending.is_none());
+            assert!(app.transport.resume_speed.is_none());
+            assert_eq!(app.transport.playback_speed, 1.0);
         }
     }
 
@@ -2067,7 +438,7 @@ mod tests {
     #[test]
     fn playback_speed_defaults_to_1x() {
         let app = test_app();
-        assert!((app.playback_speed - 1.0).abs() < 0.001);
+        assert!((app.transport.playback_speed - 1.0).abs() < 0.001);
     }
 
     #[test]
@@ -2104,7 +475,7 @@ mod tests {
     }
 
     fn finish(app: &mut TasApp, seq: u32, tick: u32, mode: TasMode, valid: bool, seconds: f32) {
-        let state = app.shared.as_mut().unwrap().state_mut();
+        let state = app.conn.shared.as_mut().unwrap().state_mut();
         state.race_finish_tick = tick;
         state.race_finish_mode = mode as u32;
         state.race_finish_valid = valid as u32;
@@ -2119,45 +490,45 @@ mod tests {
     #[test]
     fn only_a_rec_finish_after_rec_began_stops_the_take() {
         let mut app = test_app();
-        app.shared = Some(TasSharedMemoryClient::new_test_mapping());
+        app.conn.shared = Some(TasSharedMemoryClient::new_test_mapping());
         // A finish from before REC began (a CONT prefix's replay).
         finish(&mut app, 1, 900, TasMode::Rec, true, 9.0);
-        app.finish_seq_seen = 1;
+        app.session.finish.seen_seq = 1;
         app.watch_finish_line();
-        assert_eq!(app.finished_at_tick, None);
+        assert_eq!(app.session.finish.at_tick, None);
         // A replay's finish.
         finish(&mut app, 2, 950, TasMode::Play, true, 9.5);
         app.watch_finish_line();
-        assert_eq!(app.finished_at_tick, None);
+        assert_eq!(app.session.finish.at_tick, None);
 
         finish(&mut app, 3, 5843, TasMode::Rec, true, 58.4262);
         app.watch_finish_line();
-        assert_eq!(app.finished_at_tick, Some(5843));
-        assert_eq!(app.finished_hud_cs, Some(5842));
+        assert_eq!(app.session.finish.at_tick, Some(5843));
+        assert_eq!(app.session.finish.hud_cs, Some(5842));
         assert!(app
             .log_lines
             .lines()
             .iter()
             .any(|l| l.contains("Finished at tick 5843") && l.contains("0:58.42")));
         assert_eq!(
-            app.shared.as_ref().unwrap().state().command,
+            app.conn.shared.as_ref().unwrap().state().command,
             TasCommand::Stop as u32
         );
 
         // Latched: a later finish doesn't move it.
         finish(&mut app, 4, 7000, TasMode::Rec, true, 70.0);
         app.watch_finish_line();
-        assert_eq!(app.finished_at_tick, Some(5843));
+        assert_eq!(app.session.finish.at_tick, Some(5843));
     }
 
     #[test]
     fn a_finish_that_missed_a_checkpoint_has_no_official_time() {
         let mut app = test_app();
-        app.shared = Some(TasSharedMemoryClient::new_test_mapping());
+        app.conn.shared = Some(TasSharedMemoryClient::new_test_mapping());
         finish(&mut app, 1, 4000, TasMode::Rec, false, 40.0);
         app.watch_finish_line();
-        assert_eq!(app.finished_at_tick, Some(4000));
-        assert_eq!(app.finished_hud_cs, None);
+        assert_eq!(app.session.finish.at_tick, Some(4000));
+        assert_eq!(app.session.finish.hud_cs, None);
         assert!(app
             .log_lines
             .lines()

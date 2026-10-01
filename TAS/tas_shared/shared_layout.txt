@@ -1,0 +1,201 @@
+# The TasSharedState wire contract. TAS_Helper's test_shared_layout.cpp
+# (from the static_assert pins in shared_layout.hpp) and tas_shared's
+# layout.rs (from its const-assert pins) each build this list from their own
+# declarations and require it to match, so CI fails when the two disagree.
+# Edit it only together with both sides and a TAS_SHARED_VERSION bump; a
+# failing check prints that side's list.
+#
+#   struct <name> <size> <align>
+#   field <struct>.<field> <wire type> <offset> <size> <align>
+#   const <name> <value>
+#
+# Wire types: u8 / u32 / f32 (C++ char, volatile and Rust AtomicU32 are wire
+# u8 / u32), arrays as [element;count], nested structs by name.
+
+struct TasSegmentBoundary 4 4
+struct TasLogEntry 128 4
+struct TasSharedState 1651444 4
+field TasSegmentBoundary.frame u32 0 4 4
+field TasLogEntry.sequence u32 0 4 4
+field TasLogEntry.severity u32 4 4 4
+field TasLogEntry.text [u8;120] 8 120 1
+field TasSharedState.version u32 0 4 4
+field TasSharedState.command u32 4 4 4
+field TasSharedState.continue_from_frame u32 8 4 4
+field TasSharedState.mode u32 12 4 4
+field TasSharedState.recorded_count u32 16 4 4
+field TasSharedState.playback_pos u32 20 4 4
+field TasSharedState.player_x f32 24 4 4
+field TasSharedState.player_y f32 28 4 4
+field TasSharedState.player_z f32 32 4 4
+field TasSharedState.bb3b10_call_count u32 36 4 4
+field TasSharedState.handler_block_count u32 40 4 4
+field TasSharedState.frame_count u32 44 4 4
+field TasSharedState.bb3b10_block_count u32 48 4 4
+field TasSharedState.cycle_cave_hooked u32 52 4 4
+field TasSharedState.key_handler_cave_hooked u32 56 4 4
+field TasSharedState.observer_cave_hooked u32 60 4 4
+field TasSharedState.tick_cave_hooked u32 64 4 4
+field TasSharedState.replay_capture_hooked u32 68 4 4
+field TasSharedState.replay_ptr u32 72 4 4
+field TasSharedState.player_ptr u32 76 4 4
+field TasSharedState.playback_speed f32 80 4 4
+field TasSharedState.restart_state u32 84 4 4
+field TasSharedState.velocity_x f32 88 4 4
+field TasSharedState.velocity_y f32 92 4 4
+field TasSharedState.velocity_z f32 96 4 4
+field TasSharedState.tick_count u32 100 4 4
+field TasSharedState.segment_start_frame u32 104 4 4
+field TasSharedState.segment_count u32 108 4 4
+field TasSharedState.segment_boundaries [TasSegmentBoundary;32] 112 128 4
+field TasSharedState.input_log [u8;65536] 240 65536 1
+field TasSharedState.rec_coords [[f32;3];65536] 65776 786432 4
+field TasSharedState.play_coords [[f32;3];65536] 852208 786432 4
+field TasSharedState.log_write_seq u32 1638640 4 4
+field TasSharedState.log_ring [TasLogEntry;64] 1638644 8192 4
+field TasSharedState.cont_resume_speed f32 1646836 4 4
+field TasSharedState.game_in_game u32 1646840 4 4
+field TasSharedState.level_id u32 1646844 4 4
+field TasSharedState.race_time_cs u32 1646848 4 4
+field TasSharedState.race_start_ts u32 1646852 4 4
+field TasSharedState.test_arg4_override u32 1646856 4 4
+field TasSharedState.arg4_source u32 1646860 4 4
+field TasSharedState.cont_suppress_input u32 1646864 4 4
+field TasSharedState.level_epoch u32 1646868 4 4
+field TasSharedState.level_scan_epoch u32 1646872 4 4
+field TasSharedState.level_path [u8;128] 1646876 128 1
+field TasSharedState.level_path_gen u32 1647004 4 4
+field TasSharedState.level_ctx_seq u32 1647008 4 4
+field TasSharedState.arm_generation u32 1647012 4 4
+field TasSharedState.gate_index u32 1647016 4 4
+field TasSharedState.gate_align_rec u32 1647020 4 4
+field TasSharedState.capture_ok u32 1647024 4 4
+field TasSharedState.cont_splice_approved u32 1647028 4 4
+field TasSharedState.fpu_control_word u32 1647032 4 4
+field TasSharedState.renderer_id u32 1647036 4 4
+field TasSharedState.rider_character u32 1647040 4 4
+field TasSharedState.rider_stance u32 1647044 4 4
+field TasSharedState.rider_seq u32 1647048 4 4
+field TasSharedState.race_seq u32 1647052 4 4
+field TasSharedState.menu_screen [u8;32] 1647056 32 1
+field TasSharedState.menu_seq u32 1647088 4 4
+field TasSharedState.menu_doc [u8;4096] 1647092 4096 1
+field TasSharedState.menu_cmd_seq u32 1651188 4 4
+field TasSharedState.menu_cmd_kind u32 1651192 4 4
+field TasSharedState.menu_cmd_target [u8;64] 1651196 64 1
+field TasSharedState.menu_cmd_screen [u8;32] 1651260 32 1
+field TasSharedState.menu_cmd_ack u32 1651292 4 4
+field TasSharedState.menu_cmd_result u32 1651296 4 4
+field TasSharedState.owner_request_seq u32 1651300 4 4
+field TasSharedState.owner_request_kind u32 1651304 4 4
+field TasSharedState.owner_request_pid u32 1651308 4 4
+field TasSharedState.owner_request_created_lo u32 1651312 4 4
+field TasSharedState.owner_request_created_hi u32 1651316 4 4
+field TasSharedState.owner_ack_seq u32 1651320 4 4
+field TasSharedState.owner_result u32 1651324 4 4
+field TasSharedState.owner_pid u32 1651328 4 4
+field TasSharedState.owner_generation u32 1651332 4 4
+field TasSharedState.game_call u32 1651336 4 4
+field TasSharedState.crash_seq u32 1651340 4 4
+field TasSharedState.crash_pid u32 1651344 4 4
+field TasSharedState.crash_code u32 1651348 4 4
+field TasSharedState.crash_address u32 1651352 4 4
+field TasSharedState.crash_game_call u32 1651356 4 4
+field TasSharedState.crash_thread_id u32 1651360 4 4
+field TasSharedState.crash_module_offset u32 1651364 4 4
+field TasSharedState.crash_module [u8;32] 1651368 32 1
+field TasSharedState.game_exit_clean u32 1651400 4 4
+field TasSharedState.race_clock_bits u32 1651404 4 4
+field TasSharedState.race_clock_flags u32 1651408 4 4
+field TasSharedState.race_ab_cs u32 1651412 4 4
+field TasSharedState.race_ab_bits u32 1651416 4 4
+field TasSharedState.input_model u32 1651420 4 4
+field TasSharedState.race_finish_seq u32 1651424 4 4
+field TasSharedState.race_finish_tick u32 1651428 4 4
+field TasSharedState.race_finish_mode u32 1651432 4 4
+field TasSharedState.race_finish_valid u32 1651436 4 4
+field TasSharedState.race_finish_time_bits u32 1651440 4 4
+const TAS_SHARED_MEMORY_NAME Local\SupremeTAS
+const TAS_SHARED_VERSION 56
+const TAS_MENU_DOC_MAX 4096
+const TAS_MENU_CMD_TARGET_MAX 64
+const TAS_CRASH_MODULE_MAX 32
+const TAS_LEVEL_PATH_MAX 128
+const TAS_MENU_SCREEN_MAX 32
+const TAS_MAX_TICKS 65536
+const TAS_MAX_SEGMENTS 32
+const TAS_LOG_RING_SIZE 64
+const TAS_LOG_ENTRY_SIZE 120
+const CMD_IDLE 0
+const CMD_ARM_REC 1
+const CMD_ARM_PLAY 2
+const CMD_STOP 3
+const CMD_ARM_CONTINUE 4
+const CMD_RESTART 5
+const CMD_STOP_FOR_RESTART 9
+const CMD_TEST_FAULT 32343
+const MODE_OFF 0
+const MODE_REC 1
+const MODE_PLAY 2
+const INPUT_LEFT 1
+const INPUT_RIGHT 2
+const INPUT_UP 4
+const INPUT_DOWN 8
+const INPUT_JUMP 16
+const INPUT_SHIFT 32
+const TAS_INPUT_MODEL_INJECTED 0
+const TAS_INPUT_MODEL_HELD 1
+const TAS_RACE_CLOCK_STARTED 1
+const TAS_RACE_CLOCK_FINISHED 2
+const ARG4_SOURCE_TIME_CURRENT 1
+const LOG_DEBUG 0
+const LOG_INFO 1
+const LOG_WARN 2
+const LOG_ERROR 3
+const TAS_MENU_CMD_ACTIVATE 1
+const TAS_MENU_CMD_FOCUS 2
+const TAS_MENU_CMD_UP 3
+const TAS_MENU_CMD_DOWN 4
+const TAS_MENU_CMD_LEFT 5
+const TAS_MENU_CMD_RIGHT 6
+const TAS_MENU_CMD_TRIGGER 7
+const TAS_MENU_RESULT_OK 0
+const TAS_MENU_RESULT_NO_MENU 1
+const TAS_MENU_RESULT_NOT_FOUND 2
+const TAS_MENU_RESULT_DISABLED 3
+const TAS_MENU_RESULT_BAD_KIND 4
+const TAS_MENU_RESULT_FAULT 5
+const TAS_MENU_RESULT_NOT_FOCUSABLE 6
+const TAS_MENU_RESULT_STALE_PAGE 7
+const TAS_MENU_RESULT_EXPIRED 8
+const TAS_OWNER_ACQUIRE 1
+const TAS_OWNER_RELEASE 2
+const TAS_OWNER_RESULT_OWNED 1
+const TAS_OWNER_RESULT_RELEASED 2
+const TAS_OWNER_RESULT_BUSY 3
+const TAS_OWNER_RESULT_NO_PROCESS 4
+const TAS_OWNER_RESULT_WRONG_PROCESS 5
+const TAS_OWNER_RESULT_NOT_OWNER 6
+const TAS_OWNER_RESULT_BAD_KIND 7
+const TAS_GAME_CALL_NONE 0
+const TAS_GAME_CALL_MENU_TRIGGER 1
+const TAS_GAME_CALL_MENU_MOVE 2
+const TAS_GAME_CALL_MENU_FOCUS 3
+const TAS_GAME_CALL_MENU_ACTIVE 4
+const TAS_GAME_CALL_TIME_CURRENT 5
+const TAS_GAME_CALL_TEST_FAULT 6
+const TAS_GAME_CALL_OBSERVER_FLUSH 7
+const TAS_RENDERER_UNKNOWN 0
+const TAS_RENDERER_DIRECTX6 1
+const TAS_RENDERER_DIRECTX7 2
+const TAS_RENDERER_OPENGL 3
+const TAS_RENDERER_GLIDE3X 4
+const TAS_RENDERER_SOFTWARE2 5
+const TAS_CHARACTER_UNKNOWN 0
+const TAS_CHARACTER_KEITH 1
+const TAS_CHARACTER_VINCENT 2
+const TAS_CHARACTER_AKIKO 3
+const TAS_CHARACTER_KARL 4
+const TAS_CHARACTER_MIKE 5
+const TAS_CHARACTER_ULRIKA 6
+const TAS_CHARACTER_OTHER 7

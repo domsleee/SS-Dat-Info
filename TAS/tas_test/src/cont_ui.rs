@@ -423,7 +423,11 @@ mod live {
                     }
                     thread::sleep(Duration::from_millis(40));
                     if win32::key_is_down(win32::VK_LEFT) != down {
-                        return Err("LEFT HID transition not observed".into());
+                        return Err(format!(
+                            "LEFT HID {} not observed {} ms after F12 (trial {trial})",
+                            if down { "press" } else { "release" },
+                            start.elapsed().as_millis()
+                        ));
                     }
                 }
             }

@@ -38,8 +38,8 @@ fn finalize_with_an_empty_buffer_recovers_the_checkpoint_into_history() {
     assert!(checkpoint.exists());
 
     let mut app = test_app();
-    app.recovery_store = Some(store);
-    app.active_recording_session = Some(ActiveRecordingSession {
+    app.history.recovery_store = Some(store);
+    app.session.active = Some(crate::session::ActiveSession {
         kind: RecordingSessionKind::Rec,
         start_tick: 0,
         max_recorded_count: 300,
@@ -51,8 +51,8 @@ fn finalize_with_an_empty_buffer_recovers_the_checkpoint_into_history() {
     // The empty snapshot is not the take — the checkpoint is, and it lands
     // in history right away (pinned, ⟲) instead of waiting for a restart
     // that a later take's checkpoint could pre-empt.
-    assert_eq!(app.history.len(), 1);
-    let recovered = &app.history.entries()[0];
+    assert_eq!(app.history.list.len(), 1);
+    let recovered = &app.history.list.entries()[0];
     assert_eq!((recovered.end_tick, recovered.pinned), (300, true));
     assert_eq!(recovered.custom_name.as_deref(), Some("⟲"));
     // No history writer in the test app = nothing durable yet, so the
@@ -76,11 +76,13 @@ fn recovery_drains_queued_checkpoint_writes_before_reading() {
     let job = store.take_write_job(&snapshot, &session, true).unwrap();
 
     let mut app = test_app();
-    app.recovery_store = Some(store);
-    assert!(app.recovery_writer.submit(job));
-    assert!(app.recover_pending_checkpoint_matching(None));
+    app.history.recovery_store = Some(store);
+    assert!(app.history.recovery_writer.submit(job));
+    assert!(app
+        .history
+        .recover_pending_checkpoint_matching(None, &mut app.log_lines));
     assert_eq!(
-        app.history.entries()[0].end_tick,
+        app.history.list.entries()[0].end_tick,
         500,
         "the newest checkpoint must be the one recovered"
     );
@@ -99,9 +101,9 @@ fn game_exit_mid_rec_captures_the_take_from_the_dead_mapping() {
         dst.input_log[..450].copy_from_slice(&state.input_log[..450]);
         dst.rec_coords[..450].copy_from_slice(&state.rec_coords[..450]);
     }
-    app.shared = Some(shared);
-    app.last_mode = TasMode::Rec as u32;
-    app.active_recording_session = Some(ActiveRecordingSession {
+    app.conn.shared = Some(shared);
+    app.session.last_mode = TasMode::Rec as u32;
+    app.session.active = Some(crate::session::ActiveSession {
         kind: RecordingSessionKind::Rec,
         start_tick: 0,
         max_recorded_count: 400,
@@ -109,11 +111,11 @@ fn game_exit_mid_rec_captures_the_take_from_the_dead_mapping() {
 
     app.disconnect_from_dead_game();
 
-    assert!(app.shared.is_none());
-    assert_eq!(app.last_mode, TasMode::Off as u32);
-    assert!(app.active_recording_session.is_none());
-    assert_eq!(app.history.len(), 1);
-    assert_eq!(app.history.entries()[0].label, "Recorded 0:04.50");
+    assert!(app.conn.shared.is_none());
+    assert_eq!(app.session.last_mode, TasMode::Off as u32);
+    assert!(app.session.active.is_none());
+    assert_eq!(app.history.list.len(), 1);
+    assert_eq!(app.history.list.entries()[0].label, "Recorded 0:04.50");
 }
 
 #[test]
@@ -121,27 +123,27 @@ fn dll_reinitialisation_resets_the_session_view() {
     let mut app = test_app();
     let mut shared = TasSharedMemoryClient::new_test_mapping();
     shared.state_mut().frame_count = 500_000;
-    app.shared = Some(shared);
-    app.game_pid_cached = Some(1234);
-    app.log_read_cursor = 40;
-    app.last_mode = TasMode::Rec as u32;
+    app.conn.shared = Some(shared);
+    app.conn.game_pid_cached = Some(1234);
+    app.conn.log_read_cursor = 40;
+    app.session.last_mode = TasMode::Rec as u32;
     app.check_game_health(); // seeds the baseline
     app.check_game_health(); // unchanged counter: nothing happens
-    assert_eq!(app.game_pid_cached, Some(1234));
+    assert_eq!(app.conn.game_pid_cached, Some(1234));
 
     // A fresh DLL zeroed the section and started counting again.
-    app.shared.as_mut().unwrap().state_mut().frame_count = 7;
+    app.conn.shared.as_mut().unwrap().state_mut().frame_count = 7;
     app.check_game_health();
 
     assert!(logged(&app, "re-initialised its shared memory"));
-    assert_eq!(app.game_pid_cached, None);
-    assert_eq!(app.log_read_cursor, 0);
-    assert_eq!(app.last_mode, TasMode::Off as u32);
-    assert_eq!(app.cycle_fc, 7);
+    assert_eq!(app.conn.game_pid_cached, None);
+    assert_eq!(app.conn.log_read_cursor, 0);
+    assert_eq!(app.session.last_mode, TasMode::Off as u32);
+    assert_eq!(app.conn.cycle_fc, 7);
     // A later advance is still recognised from the new baseline.
-    app.shared.as_mut().unwrap().state_mut().frame_count = 8;
+    app.conn.shared.as_mut().unwrap().state_mut().frame_count = 8;
     app.check_game_health();
-    assert_eq!(app.cycle_fc, 8);
+    assert_eq!(app.conn.cycle_fc, 8);
 }
 
 /// A mapping that still holds a dead DLL's take: `ticks` of REC, seeded
@@ -158,9 +160,9 @@ fn app_recording_in_dead_mapping(ticks: usize) -> TasApp {
         dst.input_log[..ticks].copy_from_slice(&state.input_log[..ticks]);
         dst.rec_coords[..ticks].copy_from_slice(&state.rec_coords[..ticks]);
     }
-    app.shared = Some(shared);
-    app.last_mode = TasMode::Rec as u32;
-    app.active_recording_session = Some(ActiveRecordingSession {
+    app.conn.shared = Some(shared);
+    app.session.last_mode = TasMode::Rec as u32;
+    app.session.active = Some(crate::session::ActiveSession {
         kind: RecordingSessionKind::Rec,
         start_tick: 0,
         max_recorded_count: 400,
@@ -173,12 +175,12 @@ fn game_process_change_captures_the_take_still_in_the_mapping() {
     let mut app = app_recording_in_dead_mapping(450);
     app.check_game_health(); // seed the heartbeat at 700_000
     app.on_game_process_changed(11, 22);
-    assert_eq!(app.history.len(), 1);
-    assert_eq!(app.history.entries()[0].label, "Recorded 0:04.50");
-    assert!(app.active_recording_session.is_none());
-    assert_eq!(app.expect_ring_restart, Some(22));
+    assert_eq!(app.history.list.len(), 1);
+    assert_eq!(app.history.list.entries()[0].label, "Recorded 0:04.50");
+    assert!(app.session.active.is_none());
+    assert_eq!(app.conn.expect_ring_restart, Some(22));
     assert_eq!(
-        app.last_mode,
+        app.session.last_mode,
         TasMode::Rec as u32,
         "the dead mapping's frozen REC must not read as a fresh REC start"
     );
@@ -191,18 +193,21 @@ fn expected_ring_restart_does_not_reset_the_session_twice() {
     app.check_game_health(); // seed the heartbeat at 700_000
     app.on_game_process_changed(11, 22);
     // The user restored a take and started work before the memset.
-    app.loaded_physics = Some("OpenGL/53-bit".into());
-    app.log_read_cursor = 40;
+    app.take.identity.physics = Some("OpenGL/53-bit".into());
+    app.conn.log_read_cursor = 40;
     app.on_dll_reinitialised_with(3, Some(22));
-    assert_eq!(app.expect_ring_restart, None);
-    assert_eq!(app.cycle_fc, 3);
-    assert_eq!(app.log_read_cursor, 0, "the ring restarted with the memset");
+    assert_eq!(app.conn.expect_ring_restart, None);
+    assert_eq!(app.conn.cycle_fc, 3);
     assert_eq!(
-        app.loaded_physics.as_deref(),
+        app.conn.log_read_cursor, 0,
+        "the ring restarted with the memset"
+    );
+    assert_eq!(
+        app.take.identity.physics.as_deref(),
         Some("OpenGL/53-bit"),
         "the second signal of one relaunch must not reset again"
     );
-    assert_eq!(app.history.len(), 1, "the take was captured once");
+    assert_eq!(app.history.list.len(), 1, "the take was captured once");
 }
 
 #[test]
@@ -210,19 +215,19 @@ fn a_regression_from_a_different_process_is_a_new_relaunch() {
     let mut app = app_recording_in_dead_mapping(450);
     app.check_game_health();
     app.on_game_process_changed(11, 22);
-    assert_eq!(app.expect_ring_restart, Some(22));
+    assert_eq!(app.conn.expect_ring_restart, Some(22));
     // A later relaunch (pid 33) whose memset arrives before its PID poll:
     // the stale expectation for 22 must not turn it into a light reset.
-    app.loaded_physics = Some("OpenGL/53-bit".into());
+    app.take.identity.physics = Some("OpenGL/53-bit".into());
     app.on_dll_reinitialised_with(0, Some(33));
-    assert_eq!(app.expect_ring_restart, None);
+    assert_eq!(app.conn.expect_ring_restart, None);
     assert_eq!(
-        app.game_pid_seen,
+        app.conn.game_pid_seen,
         Some(33),
         "the PID watcher is brought up to date"
     );
     assert_eq!(
-        app.loaded_physics, None,
+        app.take.identity.physics, None,
         "a full reset for the new relaunch"
     );
 }
@@ -234,18 +239,21 @@ fn relaunch_reset_after_the_memset_recovers_the_checkpoint_not_the_new_buffer() 
     // someone else's take in it; our counter was 700_000.
     let mut app = app_recording_in_dead_mapping(450);
     app.check_game_health();
-    app.recovery_store = Some(store);
-    app.shared.as_mut().unwrap().state_mut().frame_count = 5;
+    app.history.recovery_store = Some(store);
+    app.conn.shared.as_mut().unwrap().state_mut().frame_count = 5;
     app.on_game_process_changed(11, 22);
-    assert_eq!(app.history.len(), 1);
-    let recovered = &app.history.entries()[0];
+    assert_eq!(app.history.list.len(), 1);
+    let recovered = &app.history.list.entries()[0];
     assert_eq!(
         (recovered.end_tick, recovered.pinned),
         (300, true),
         "the checkpoint, never the new game's buffer"
     );
-    assert_eq!(app.expect_ring_restart, None, "the memset already happened");
-    assert_eq!(app.log_read_cursor, 0);
+    assert_eq!(
+        app.conn.expect_ring_restart, None,
+        "the memset already happened"
+    );
+    assert_eq!(app.conn.log_read_cursor, 0);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -255,12 +263,12 @@ fn menu_relaunch_rewinds_the_log_cursor_immediately() {
     // start-up lines and no counter regression will ever come.
     let mut app = test_app();
     let shared = TasSharedMemoryClient::new_test_mapping();
-    app.shared = Some(shared);
+    app.conn.shared = Some(shared);
     app.check_game_health(); // seeds cycle_fc = 0
-    app.log_read_cursor = 15;
+    app.conn.log_read_cursor = 15;
     app.on_game_process_changed(11, 22);
-    assert_eq!(app.log_read_cursor, 0);
-    assert_eq!(app.expect_ring_restart, None);
+    assert_eq!(app.conn.log_read_cursor, 0);
+    assert_eq!(app.conn.expect_ring_restart, None);
 }
 
 #[test]
@@ -268,10 +276,15 @@ fn relaunch_reset_never_releases_a_foreign_interlock() {
     let mut app = test_app();
     let mut shared = TasSharedMemoryClient::new_test_mapping();
     shared.state_mut().cont_suppress_input = 1;
-    app.shared = Some(shared);
+    app.conn.shared = Some(shared);
     app.on_game_process_changed(11, 22);
     assert_eq!(
-        app.shared.as_ref().unwrap().state().cont_suppress_input,
+        app.conn
+            .shared
+            .as_ref()
+            .unwrap()
+            .state()
+            .cont_suppress_input,
         1,
         "no cycle of ours was running, so the flag is someone else's"
     );
@@ -294,10 +307,10 @@ fn log_cursor_rewinds_when_the_ring_sequence_drops() {
         }
         state.log_write_seq = 2;
     }
-    app.shared = Some(shared);
-    app.log_read_cursor = 40;
-    app.drain_dll_log();
-    assert_eq!(app.log_read_cursor, 2);
+    app.conn.shared = Some(shared);
+    app.conn.log_read_cursor = 40;
+    app.conn.drain_dll_log(&mut app.log_lines);
+    assert_eq!(app.conn.log_read_cursor, 2);
     assert!(logged(&app, "second line"));
 }
 
@@ -305,34 +318,38 @@ fn log_cursor_rewinds_when_the_ring_sequence_drops() {
 fn a_vanished_game_pid_captures_the_take_at_once() {
     let mut app = app_recording_in_dead_mapping(450);
     app.check_game_health(); // seed the heartbeat
-    app.game_pid_seen = Some(11);
+    app.conn.game_pid_seen = Some(11);
     app.on_game_pid_observed(None);
-    assert_eq!(app.history.len(), 1, "captured from the frozen section");
-    assert_eq!(app.history.entries()[0].label, "Recorded 0:04.50");
-    assert!(app.active_recording_session.is_none());
     assert_eq!(
-        app.last_mode,
+        app.history.list.len(),
+        1,
+        "captured from the frozen section"
+    );
+    assert_eq!(app.history.list.entries()[0].label, "Recorded 0:04.50");
+    assert!(app.session.active.is_none());
+    assert_eq!(
+        app.session.last_mode,
         TasMode::Rec as u32,
         "no phantom session from the frozen REC"
     );
     assert_eq!(
-        app.game_pid_seen,
+        app.conn.game_pid_seen,
         Some(11),
         "a relaunch is still noticed later"
     );
     // The disconnect that follows finds nothing left to capture.
     app.disconnect_from_dead_game();
-    assert_eq!(app.history.len(), 1);
+    assert_eq!(app.history.list.len(), 1);
 }
 
 #[test]
 fn a_vanished_pid_with_no_recording_does_nothing() {
     let mut app = test_app();
-    app.shared = Some(TasSharedMemoryClient::new_test_mapping());
-    app.game_pid_seen = Some(11);
+    app.conn.shared = Some(TasSharedMemoryClient::new_test_mapping());
+    app.conn.game_pid_seen = Some(11);
     app.on_game_pid_observed(None);
-    assert_eq!(app.history.len(), 0);
-    assert_eq!(app.game_pid_seen, Some(11));
+    assert_eq!(app.history.list.len(), 0);
+    assert_eq!(app.conn.game_pid_seen, Some(11));
 }
 
 #[test]
@@ -341,18 +358,18 @@ fn rejected_finalize_recovers_only_its_own_checkpoint() {
     let (root, store) = checkpoint_store("finalize_owner", 300);
     let checkpoint = root.join("recovery_checkpoint.tasrec");
     let mut app = test_app();
-    app.recovery_store = Some(store);
+    app.history.recovery_store = Some(store);
     let empty = recording::RecordingSnapshot::from_state(&state_with_recorded_count(0));
 
     // F9 then F11 before the first tick: a 0-tick session. Not its file.
-    app.active_recording_session = Some(ActiveRecordingSession {
+    app.session.active = Some(crate::session::ActiveSession {
         kind: RecordingSessionKind::Rec,
         start_tick: 0,
         max_recorded_count: 0,
     });
     app.finalize_recording_session(&empty, 0);
     assert_eq!(
-        app.history.len(),
+        app.history.list.len(),
         0,
         "another take's checkpoint is not resurrected"
     );
@@ -362,30 +379,30 @@ fn rejected_finalize_recovers_only_its_own_checkpoint() {
     );
 
     // A CONT session from 100: different start, not its file either.
-    app.active_recording_session = Some(ActiveRecordingSession {
+    app.session.active = Some(crate::session::ActiveSession {
         kind: RecordingSessionKind::Continue,
         start_tick: 100,
         max_recorded_count: 400,
     });
     app.finalize_recording_session(&empty, 0);
-    assert_eq!(app.history.len(), 0);
+    assert_eq!(app.history.list.len(), 0);
 
     // The session the checkpoint came from: recovered.
-    app.active_recording_session = Some(ActiveRecordingSession {
+    app.session.active = Some(crate::session::ActiveSession {
         kind: RecordingSessionKind::Rec,
         start_tick: 0,
         max_recorded_count: 350,
     });
     app.finalize_recording_session(&empty, 0);
-    assert_eq!(app.history.len(), 1);
-    assert_eq!(app.history.entries()[0].end_tick, 300);
+    assert_eq!(app.history.list.len(), 1);
+    assert_eq!(app.history.list.entries()[0].end_tick, 300);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
 fn app_with_dead_game(pid: u32) -> TasApp {
     let mut app = test_app();
-    app.shared = Some(TasSharedMemoryClient::new_test_mapping());
-    app.game_pid_seen = Some(pid);
+    app.conn.shared = Some(TasSharedMemoryClient::new_test_mapping());
+    app.conn.game_pid_seen = Some(pid);
     app
 }
 
@@ -393,7 +410,7 @@ fn app_with_dead_game(pid: u32) -> TasApp {
 fn a_crashed_game_raises_the_banner_with_the_fault_and_the_call() {
     let mut app = app_with_dead_game(11);
     {
-        let state = app.shared.as_mut().unwrap().state_mut();
+        let state = app.conn.shared.as_mut().unwrap().state_mut();
         state.crash_pid = 11;
         state.crash_code = 0xC000_0005;
         state.crash_address = 0x1000_0010;
@@ -405,7 +422,7 @@ fn a_crashed_game_raises_the_banner_with_the_fault_and_the_call() {
             .store(1, std::sync::atomic::Ordering::Release);
     }
     app.on_game_pid_observed(None);
-    let banner = app.game_exit_banner.clone().expect("banner");
+    let banner = app.conn.game_exit_banner.clone().expect("banner");
     assert!(
         banner.contains("access violation") && banner.contains("Kernel::Time::Current"),
         "{banner}"
@@ -416,18 +433,26 @@ fn a_crashed_game_raises_the_banner_with_the_fault_and_the_call() {
 fn a_killed_game_raises_the_no_record_banner_once() {
     let mut app = app_with_dead_game(11);
     app.on_game_pid_observed(None);
-    let banner = app.game_exit_banner.take().expect("banner");
+    let banner = app.conn.game_exit_banner.take().expect("banner");
     assert!(banner.contains("without a crash record"), "{banner}");
     app.on_game_pid_observed(None);
-    assert!(app.game_exit_banner.is_none(), "reported once per process");
+    assert!(
+        app.conn.game_exit_banner.is_none(),
+        "reported once per process"
+    );
 }
 
 #[test]
 fn a_normally_closed_game_raises_no_banner() {
     let mut app = app_with_dead_game(11);
-    app.shared.as_mut().unwrap().state_mut().game_exit_clean = 1;
+    app.conn
+        .shared
+        .as_mut()
+        .unwrap()
+        .state_mut()
+        .game_exit_clean = 1;
     app.on_game_pid_observed(None);
-    assert!(app.game_exit_banner.is_none());
+    assert!(app.conn.game_exit_banner.is_none());
     assert!(logged(&app, "closed normally"));
 }
 
@@ -435,19 +460,19 @@ fn a_normally_closed_game_raises_no_banner() {
 fn a_crash_during_a_recording_says_the_take_was_saved() {
     let mut app = app_recording_in_dead_mapping(450);
     app.check_game_health();
-    app.game_pid_seen = Some(11);
+    app.conn.game_pid_seen = Some(11);
     app.on_game_pid_observed(None);
-    let banner = app.game_exit_banner.clone().expect("banner");
+    let banner = app.conn.game_exit_banner.clone().expect("banner");
     assert!(banner.contains("saved to history"), "{banner}");
 }
 
 #[test]
 fn a_fault_behind_the_games_own_dialog_raises_the_banner_while_it_lives() {
     let mut app = app_with_dead_game(11);
-    app.poll_crash_record(11);
-    assert!(app.game_exit_banner.is_none(), "no record yet");
+    app.conn.poll_crash_record(11, &mut app.log_lines);
+    assert!(app.conn.game_exit_banner.is_none(), "no record yet");
     {
-        let state = app.shared.as_mut().unwrap().state_mut();
+        let state = app.conn.shared.as_mut().unwrap().state_mut();
         state.crash_pid = 11;
         state.crash_code = 0xC000_0005;
         state.crash_game_call = tas_shared::TAS_GAME_CALL_MENU_TRIGGER;
@@ -455,9 +480,9 @@ fn a_fault_behind_the_games_own_dialog_raises_the_banner_while_it_lives() {
             .crash_seq
             .store(1, std::sync::atomic::Ordering::Release);
     }
-    app.poll_crash_record(11);
-    let banner = app.game_exit_banner.take().expect("banner");
+    app.conn.poll_crash_record(11, &mut app.log_lines);
+    let banner = app.conn.game_exit_banner.take().expect("banner");
     assert!(banner.contains("UI_Menu::Trigger"), "{banner}");
-    app.poll_crash_record(11);
-    assert!(app.game_exit_banner.is_none(), "shown once per record");
+    app.conn.poll_crash_record(11, &mut app.log_lines);
+    assert!(app.conn.game_exit_banner.is_none(), "shown once per record");
 }

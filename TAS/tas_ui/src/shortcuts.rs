@@ -29,9 +29,9 @@ impl TasApp {
     /// Edge state is updated every frame regardless of focus so a key held
     /// across a focus change is not left "pressed".
     pub(crate) fn poll_global_shortcuts(&mut self) -> Vec<transport::Action> {
-        let now: [bool; 4] =
-            [win32::VK_F9, win32::VK_F10, win32::VK_F11, win32::VK_F12].map(win32::key_is_down);
-        let [f9, f10, f11, f12] = compute_global_key_edges(now, &mut self.prev_global_keys);
+        let now: [bool; 4] = [win32::VK_F9, win32::VK_F10, win32::VK_F11, win32::VK_F12]
+            .map(|vk| self.host.key_is_down(vk));
+        let [f9, f10, f11, f12] = compute_global_key_edges(now, &mut self.view.prev_global_keys);
         if !(f9 || f10 || f11 || f12) {
             return Vec::new();
         }
@@ -39,15 +39,10 @@ impl TasApp {
         // Only act while Supreme.exe is the foreground window. A stale cached
         // PID (game restarted without dropping shared memory) just fails to
         // match, which is harmless.
-        let game_pid = self.game_pid_cached.or_else(|| {
-            let resolved = win32::find_supreme_pid();
-            self.game_pid_cached = resolved;
-            resolved
-        });
-        let Some(game_pid) = game_pid else {
+        let Some(game_pid) = self.conn.game_pid_for_shortcuts(self.host.as_ref()) else {
             return Vec::new();
         };
-        if win32::foreground_window_pid() != Some(game_pid) {
+        if self.host.foreground_pid() != Some(game_pid) {
             return Vec::new();
         }
 
@@ -74,7 +69,7 @@ impl TasApp {
         source: &str,
         command: TasCommand,
     ) -> Vec<transport::Action> {
-        let (mode, recorded) = match self.shared.as_ref() {
+        let (mode, recorded) = match self.conn.shared.as_ref() {
             Some(shared) => (shared.state().mode_enum(), shared.recorded_count_volatile()),
             None => {
                 return vec![transport::Action::Log(format!(
@@ -91,8 +86,8 @@ impl TasApp {
         let mut actions = Vec::new();
         if command == TasCommand::ArmContinue {
             match transport::resolve_continue_frame(
-                &mut self.continue_from_text,
-                &mut self.continue_from_frame,
+                &mut self.view.continue_from_text,
+                &mut self.view.continue_from_frame,
                 recorded,
             ) {
                 Ok(frame) => actions.push(transport::Action::SetContinueFrame(frame)),
@@ -241,26 +236,27 @@ impl TasApp {
         });
 
         if zoom_in {
-            self.timeline_view.zoom_center(0.8);
+            self.view.timeline.zoom_center(0.8);
         }
         if zoom_out {
-            self.timeline_view.zoom_center(1.25);
+            self.view.timeline.zoom_center(1.25);
         }
         if save {
             // Resolve the track BEFORE the dialog: it belongs to the recording,
             // and the engine may be frozen in its own post-run dialog by now.
-            let level = self.level_for_save().map(str::to_string);
-            if let Some(shared) = self.shared.as_ref() {
+            let level = self.conn.level_for_save().map(str::to_string);
+            if let Some(shared) = self.conn.shared.as_ref() {
                 if let Some(path) = recording::save_dialog(
+                    self.host.as_ref(),
                     shared.state(),
                     &mut self.log_lines,
                     level.as_deref(),
-                    self.loaded_identity.as_ref(),
+                    self.take.stamps(),
                 ) {
-                    self.history.push_save_marker(
+                    self.history.list.push_save_marker(
                         shared.state(),
                         &path,
-                        self.loaded_identity.clone(),
+                        self.take.stamps().cloned(),
                     );
                 }
             }

@@ -513,6 +513,7 @@ fn render_row(
                         .interact(egui::Sense::click())
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                         .on_hover_text("Click to restore · right-click or F2 to rename");
+                    crate::probe::tag_with(&r, || format!("history.row.{}", entry.entry_id));
                     let clicked = r.clicked();
                     // Right-click context menu — the discoverable rename path
                     // (double-click stays "restore/open", per convention).

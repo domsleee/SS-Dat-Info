@@ -3,7 +3,8 @@
 #include "mapping_owner.hpp"
 
 // Shared memory between TAS_Helper.dll and the UI; see TAS/DESIGN.md "Shared memory".
-// Mirrored field for field by tas_shared/src/state.rs; bump TAS_SHARED_VERSION on any change.
+// Mirrored field for field by tas_shared/src/state.rs; bump TAS_SHARED_VERSION on any change
+// and update the pins (shared_layout.hpp, tas_shared/src/layout.rs, tas_shared/shared_layout.txt).
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
 
@@ -351,31 +352,7 @@ struct TasSharedState {
     volatile uint32_t race_finish_time_bits;
 };
 
-// Rust pins the same size and group offsets; a size pin alone misses swapped fields.
-#define TAS_PIN_OFFSET(field, expected) \
-    static_assert(offsetof(TasSharedState, field) == (expected), \
-                  "TasSharedState." #field " moved: bump TAS_SHARED_VERSION and update tas_shared/src/state.rs")
-static_assert(sizeof(TasSharedState) == 1651444,
-              "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
-              "the Rust size pin in tas_shared/src/state.rs");
-TAS_PIN_OFFSET(input_log, 240);
-TAS_PIN_OFFSET(rec_coords, 65776);
-TAS_PIN_OFFSET(play_coords, 852208);
-TAS_PIN_OFFSET(log_write_seq, 1638640);
-TAS_PIN_OFFSET(cont_resume_speed, 1646836);
-TAS_PIN_OFFSET(level_ctx_seq, 1647008);
-TAS_PIN_OFFSET(fpu_control_word, 1647032);
-TAS_PIN_OFFSET(menu_doc, 1647092);
-TAS_PIN_OFFSET(menu_cmd_result, 1651296);
-TAS_PIN_OFFSET(owner_request_seq, 1651300);
-TAS_PIN_OFFSET(owner_generation, 1651332);
-TAS_PIN_OFFSET(game_call, 1651336);
-TAS_PIN_OFFSET(crash_module, 1651368);
-TAS_PIN_OFFSET(game_exit_clean, 1651400);
-TAS_PIN_OFFSET(race_ab_bits, 1651416);
-TAS_PIN_OFFSET(input_model, 1651420);
-TAS_PIN_OFFSET(race_finish_time_bits, 1651440);
-#undef TAS_PIN_OFFSET
+#include "shared_layout.hpp"  // every field pinned; see tas_shared/shared_layout.txt
 
 // Safe from hook callbacks (no I/O, heap, formatting or float ops) and from any thread.
 inline void LogRing(TasSharedState* s, TasLogSeverity severity, const char* text) {

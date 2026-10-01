@@ -4,12 +4,12 @@
 use std::sync::atomic::Ordering;
 
 use crate::state::{
-    with_seqlock, TasSharedState, TAS_MENU_CMD_ACTIVATE, TAS_MENU_CMD_DOWN, TAS_MENU_CMD_FOCUS,
-    TAS_MENU_CMD_LEFT, TAS_MENU_CMD_RIGHT, TAS_MENU_CMD_TARGET_MAX, TAS_MENU_CMD_TRIGGER,
-    TAS_MENU_CMD_UP, TAS_MENU_DOC_MAX, TAS_MENU_RESULT_BAD_KIND, TAS_MENU_RESULT_DISABLED,
-    TAS_MENU_RESULT_EXPIRED, TAS_MENU_RESULT_FAULT, TAS_MENU_RESULT_NOT_FOCUSABLE,
-    TAS_MENU_RESULT_NOT_FOUND, TAS_MENU_RESULT_NO_MENU, TAS_MENU_RESULT_OK,
-    TAS_MENU_RESULT_STALE_PAGE, TAS_MENU_SCREEN_MAX,
+    load_u8, with_seqlock, TasSharedState, TAS_MENU_CMD_ACTIVATE, TAS_MENU_CMD_DOWN,
+    TAS_MENU_CMD_FOCUS, TAS_MENU_CMD_LEFT, TAS_MENU_CMD_RIGHT, TAS_MENU_CMD_TARGET_MAX,
+    TAS_MENU_CMD_TRIGGER, TAS_MENU_CMD_UP, TAS_MENU_DOC_MAX, TAS_MENU_RESULT_BAD_KIND,
+    TAS_MENU_RESULT_DISABLED, TAS_MENU_RESULT_EXPIRED, TAS_MENU_RESULT_FAULT,
+    TAS_MENU_RESULT_NOT_FOCUSABLE, TAS_MENU_RESULT_NOT_FOUND, TAS_MENU_RESULT_NO_MENU,
+    TAS_MENU_RESULT_OK, TAS_MENU_RESULT_STALE_PAGE, TAS_MENU_SCREEN_MAX,
 };
 
 /// The menu document: the current page's items with labels and stable
@@ -19,8 +19,8 @@ pub fn menu_doc(state: &TasSharedState) -> Option<String> {
     let bytes = with_seqlock(&state.menu_seq, || {
         let mut v = Vec::new();
         for i in 0..TAS_MENU_DOC_MAX {
-            // SAFETY: shared mapping written by the DLL's worker thread.
-            let b = unsafe { std::ptr::read_volatile(&state.menu_doc[i]) };
+            // SAFETY: a payload byte of the mapping, read under menu_seq.
+            let b = unsafe { load_u8(&state.menu_doc[i]) };
             if b == 0 {
                 break;
             }

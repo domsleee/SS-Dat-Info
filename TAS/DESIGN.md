@@ -472,10 +472,12 @@ Two more readers:
 The DLL and the Rust programs talk only through one ~1.6 MB named mapping,
 `Local\SupremeTAS`. Its layout is `TasSharedState` in
 `TAS_Helper/src/shared_state.hpp`, mirrored field for field in
-`tas_shared/src/state.rs`. Both sides pin the total size and key offsets (C++
-with `static_assert`, Rust in a unit test), and a version number is bumped on
-any change, so a mismatched DLL/UI pair fails loudly instead of misreading
-memory.
+`tas_shared/src/state.rs`. Both sides pin every field's type and offset at
+compile time (`shared_layout.hpp`, `tas_shared/src/layout.rs`), and each
+side's tests check its layout and the shared constants against one manifest,
+`tas_shared/shared_layout.txt`, so the two lists can't drift apart. A version
+number is bumped on any change, so a mismatched DLL/UI pair fails loudly
+instead of misreading memory.
 
 What's in it:
 
@@ -510,12 +512,14 @@ Two processes share this memory without locks, so it relies on conventions:
   operations, so whoever sees it change also sees the writes before it. This
   orders a command and its results; it doesn't make the other live status
   fields one consistent snapshot.
-- Fields read as a group (level context, rider, race time, menu document) are
-  protected by **seqlocks**: the writer makes a counter odd, writes, then
-  makes it even; a reader retries until it sees the same even value before
-  and after, and reports "unknown" after 64 failed tries. The level id is
-  trusted only when its scan matches the currently loaded level, not the one
-  before.
+- Fields read as a group (level context, rider, race clock, last finish, menu
+  document) are protected by **seqlocks**: the writer makes a counter odd,
+  writes, then makes it even; a reader retries until it sees the same even
+  value before and after, and reports "unknown" after 64 failed tries. The
+  Rust readers load the group with relaxed atomics; that the DLL's plain
+  stores pair with them is a Windows/x86 assumption (see `with_seqlock`).
+  The level id is trusted only when its scan matches the currently loaded
+  level, not the one before.
 - `arm_generation` is bumped as the last write of every arm (REC, PLAY or
   CONT), even a refused one. Until it changes, `mode` and `playback_pos` still
   describe the *previous* session, so the controller waits for it before it
@@ -584,6 +588,16 @@ file. `tas_test crash-report` sends a test-only command that faults inside
 `Kernel::Time::Current` and checks the record.
 
 ## SSB Inspect (tas_ui)
+
+`app.rs` holds `TasApp`, runs one frame in a fixed order and routes events
+between units that each own their state: `game_connection.rs` (mapping,
+heartbeat, relaunch, live identity), `transport_runtime.rs` (the cycle
+controller and speeds), `take_buffer.rs` (the take's identity, edits, splice
+adoption), `editor.rs` (timeline gestures, pending edit, script watch),
+`session.rs` (REC/CONT sessions, finish watch, checkpoints),
+`history_runtime.rs` (history, persistence, recovery) and `view.rs` (panels).
+Platform effects go through `host.rs`, which the headless end-to-end tests
+(`tests/e2e`, against `tests/fake_game.rs`) replace.
 
 The UI's responsibilities:
 

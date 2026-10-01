@@ -4,6 +4,7 @@
 //! both sides must agree on: the gate-aligned replay check (`align`) and the
 //! restart/arm/reroll transport controller (`transport`).
 
+mod layout;
 mod menu;
 #[cfg(windows)]
 mod platform;
