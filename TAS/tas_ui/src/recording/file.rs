@@ -1,18 +1,9 @@
 //! The `.tasrec` file format: its JSON metadata header, the identity stamps it
-//! carries, save/load, and the segment boundaries recorded alongside a take.
+//! carries, and save/load.
 
 use super::RecoverySessionContext;
 use serde::{Deserialize, Serialize};
 use tas_shared::{TasSharedState, TAS_MAX_TICKS};
-
-/// A segment boundary within a multi-segment recording.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Segment {
-    pub name: String,
-    pub start_tick: u32,
-    pub end_tick: u32,
-    pub timestamp: String,
-}
 
 #[derive(Serialize, Deserialize)]
 pub struct RecordingMetadata {
@@ -20,8 +11,6 @@ pub struct RecordingMetadata {
     pub recorded_count: u32,
     pub timestamp: String,
     pub notes: String,
-    #[serde(default)]
-    pub segments: Vec<Segment>,
     /// Renderer plugin the take was recorded under (`OpenGL`, `DirectX6`, ...).
     #[serde(default)]
     pub renderer: Option<String>,
@@ -38,6 +27,15 @@ pub struct RecordingMetadata {
     /// the trajectory too. `None` = unknown / pre-stamp file.
     #[serde(default)]
     pub stance: Option<u32>,
+    /// TAS_INPUT_MODEL_* of the input: 1 = the held keys each tick's physics
+    /// read. `None` = a file from before the held model, whose masks were
+    /// injected a tick ahead.
+    #[serde(default)]
+    pub input_model: Option<u32>,
+    /// Leading ticks whose recorded trajectory the input produced; an input
+    /// edit cuts it at the first changed tick. `None` = the whole take.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trajectory_ticks: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_session: Option<RecoverySessionContext>,
 }
@@ -82,6 +80,14 @@ pub struct IdentityStamps {
     pub rider_character: Option<u32>,
     #[serde(default)]
     pub rider_stance: Option<u32>,
+    /// TAS_INPUT_MODEL_* of the take's input; None = a take from before the
+    /// held model, which is injected.
+    #[serde(default)]
+    pub input_model: Option<u32>,
+    /// Leading ticks whose recorded trajectory the input produced (see
+    /// `RecordingMetadata::trajectory_ticks`). `None` = the whole take.
+    #[serde(default)]
+    pub trajectory_ticks: Option<u32>,
 }
 
 impl IdentityStamps {
@@ -95,7 +101,15 @@ impl IdentityStamps {
             rider_character: (state.rider_character != tas_shared::TAS_CHARACTER_UNKNOWN)
                 .then_some(state.rider_character),
             rider_stance: (state.rider_stance != u32::MAX).then_some(state.rider_stance),
+            input_model: Some(state.input_model),
+            trajectory_ticks: None,
         }
+    }
+
+    /// The model PLAY must replay this take with.
+    pub fn input_model_or_injected(&self) -> u32 {
+        self.input_model
+            .unwrap_or(tas_shared::TAS_INPUT_MODEL_INJECTED)
     }
 
     /// Recover the stamps from a file's metadata header. Exact: the header
@@ -115,6 +129,8 @@ impl IdentityStamps {
                 .map(tas_shared::character_id_from_name)
                 .filter(|&id| id != tas_shared::TAS_CHARACTER_UNKNOWN),
             rider_stance: meta.stance,
+            input_model: meta.input_model,
+            trajectory_ticks: meta.trajectory_ticks,
         }
     }
 
@@ -131,24 +147,29 @@ impl IdentityStamps {
                 .then(|| tas_shared::character_name(id).to_string())
         });
         meta.stance = self.rider_stance.filter(|&v| v != u32::MAX);
+        meta.input_model = self.input_model;
+        meta.trajectory_ticks = self.trajectory_ticks;
+    }
+
+    /// The watcher's limit for this take: u32::MAX = the whole trajectory.
+    pub fn trajectory_limit(&self) -> u32 {
+        self.trajectory_ticks.unwrap_or(u32::MAX)
     }
 }
 pub struct RecordingFile;
 
 impl RecordingFile {
-    pub fn save_with_segments(
+    pub fn save(
         state: &TasSharedState,
         path: &std::path::Path,
-        segments: &[Segment],
         identity: Option<&IdentityStamps>,
     ) -> Result<(), String> {
-        let bytes = Self::encode_with_segments(state, segments, identity, None)?;
+        let bytes = Self::encode(state, identity, None)?;
         tas_codec::save_atomic(path, &bytes)
     }
 
-    pub(super) fn encode_with_segments(
+    pub(super) fn encode(
         state: &TasSharedState,
-        segments: &[Segment],
         identity: Option<&IdentityStamps>,
         recovery_session: Option<RecoverySessionContext>,
     ) -> Result<Vec<u8>, String> {
@@ -165,7 +186,6 @@ impl RecordingFile {
             recorded_count: state.recorded_count,
             timestamp: chrono::Local::now().to_rfc3339(),
             notes: String::new(),
-            segments: segments.to_vec(),
             recovery_session,
             renderer: (state.renderer_id != tas_shared::TAS_RENDERER_UNKNOWN)
                 .then(|| tas_shared::renderer_name(state.renderer_id).to_string()),
@@ -173,6 +193,8 @@ impl RecordingFile {
             character: (state.rider_character != tas_shared::TAS_CHARACTER_UNKNOWN)
                 .then(|| tas_shared::character_name(state.rider_character).to_string()),
             stance: (state.rider_stance != u32::MAX).then_some(state.rider_stance),
+            input_model: Some(state.input_model),
+            trajectory_ticks: None,
         };
         // A loaded or restored take carries its own identity: stamp the file
         // with the take's words, never the live game's. `None` halves stay
@@ -197,13 +219,12 @@ impl RecordingFile {
             .map_err(|e| format!("{}", e))
     }
 
-    pub fn load(
-        state: &mut TasSharedState,
-        path: &std::path::Path,
-    ) -> Result<(u32, Vec<Segment>), String> {
+    /// Load a take; returns its tick count. Files from before segments were
+    /// retired still load: serde skips their `segments` list.
+    pub fn load(state: &mut TasSharedState, path: &std::path::Path) -> Result<u32, String> {
         let data = tas_codec::read_bounded(path)?;
         let meta = Self::load_bytes(state, &data)?;
-        Ok((meta.recorded_count, meta.segments))
+        Ok(meta.recorded_count)
     }
 
     pub(super) fn load_bytes(
@@ -241,57 +262,6 @@ impl RecordingFile {
     }
 }
 
-/// Tracks segment boundaries as the user records and continues.
-pub struct SegmentTracker {
-    pub segments: Vec<Segment>,
-    current_start: Option<u32>,
-    segment_counter: u32,
-}
-
-impl SegmentTracker {
-    pub fn new() -> Self {
-        Self {
-            segments: Vec::new(),
-            current_start: None,
-            segment_counter: 0,
-        }
-    }
-
-    /// Call when REC starts (initial or continue).
-    pub fn on_rec_start(&mut self, from_tick: u32) {
-        self.current_start = Some(from_tick);
-    }
-
-    /// Call when recording stops. Finalizes the current segment.
-    pub fn on_rec_stop(&mut self, end_tick: u32) {
-        if let Some(start) = self.current_start.take() {
-            if end_tick > start {
-                self.segment_counter += 1;
-                self.segments.push(Segment {
-                    name: format!("Segment {}", self.segment_counter),
-                    start_tick: start,
-                    end_tick,
-                    timestamp: chrono::Local::now().to_rfc3339(),
-                });
-            }
-        }
-    }
-
-    /// Restore segments from a loaded file.
-    pub fn restore_from(&mut self, segments: Vec<Segment>) {
-        self.segment_counter = segments.len() as u32;
-        self.segments = segments;
-        self.current_start = None;
-    }
-
-    /// Reset all segments (e.g., when starting a brand-new recording).
-    pub fn clear(&mut self) {
-        self.segments.clear();
-        self.current_start = None;
-        self.segment_counter = 0;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,100 +272,13 @@ mod tests {
     use tas_codec::MAX_TASREC_BYTES;
 
     #[test]
-    fn segment_tracker_new_is_empty() {
-        let tracker = SegmentTracker::new();
-        assert!(tracker.segments.is_empty());
-        assert!(tracker.current_start.is_none());
-        assert_eq!(tracker.segment_counter, 0);
-    }
-
-    #[test]
-    fn segment_tracker_rec_start_stop() {
-        let mut tracker = SegmentTracker::new();
-        tracker.on_rec_start(0);
-        tracker.on_rec_stop(100);
-
-        assert_eq!(tracker.segments.len(), 1);
-        assert_eq!(tracker.segments[0].name, "Segment 1");
-        assert_eq!(tracker.segments[0].start_tick, 0);
-        assert_eq!(tracker.segments[0].end_tick, 100);
-        assert!(!tracker.segments[0].timestamp.is_empty());
-    }
-
-    #[test]
-    fn segment_tracker_multi_segment() {
-        let mut tracker = SegmentTracker::new();
-        tracker.on_rec_start(0);
-        tracker.on_rec_stop(100);
-        tracker.on_rec_start(100);
-        tracker.on_rec_stop(250);
-        tracker.on_rec_start(250);
-        tracker.on_rec_stop(400);
-
-        assert_eq!(tracker.segments.len(), 3);
-        assert_eq!(tracker.segments[0].name, "Segment 1");
-        assert_eq!(tracker.segments[1].name, "Segment 2");
-        assert_eq!(tracker.segments[2].name, "Segment 3");
-        assert_eq!(tracker.segments[2].start_tick, 250);
-        assert_eq!(tracker.segments[2].end_tick, 400);
-    }
-
-    #[test]
-    fn segment_tracker_stop_without_start_is_noop() {
-        let mut tracker = SegmentTracker::new();
-        tracker.on_rec_stop(100);
-        assert!(tracker.segments.is_empty());
-    }
-
-    #[test]
-    fn segment_tracker_zero_length_segment_ignored() {
-        let mut tracker = SegmentTracker::new();
-        tracker.on_rec_start(50);
-        tracker.on_rec_stop(50); // end == start, not >
-        assert!(tracker.segments.is_empty());
-    }
-
-    #[test]
-    fn segment_tracker_clear_resets_all() {
-        let mut tracker = SegmentTracker::new();
-        tracker.on_rec_start(0);
-        tracker.on_rec_stop(100);
-        tracker.on_rec_start(100);
-        tracker.on_rec_stop(200);
-
-        assert_eq!(tracker.segments.len(), 2);
-        assert_eq!(tracker.segment_counter, 2);
-
-        tracker.clear();
-        assert!(tracker.segments.is_empty());
-        assert!(tracker.current_start.is_none());
-        assert_eq!(tracker.segment_counter, 0);
-
-        // New segments after clear start from 1 again
-        tracker.on_rec_start(0);
-        tracker.on_rec_stop(50);
-        assert_eq!(tracker.segments[0].name, "Segment 1");
-    }
-
-    #[test]
-    fn segment_tracker_double_start_overwrites() {
-        let mut tracker = SegmentTracker::new();
-        tracker.on_rec_start(0);
-        tracker.on_rec_start(50); // overwrite without stop
-        tracker.on_rec_stop(100);
-
-        assert_eq!(tracker.segments.len(), 1);
-        assert_eq!(tracker.segments[0].start_tick, 50); // used the second start
-    }
-
-    #[test]
     fn truncated_load_does_not_replace_the_current_recording() {
         let path = unique_temp_path("truncated_coords", "tasrec");
         let mut original = tas_shared::zeroed_boxed();
         original.recorded_count = 2;
         original.input_log[0] = 3;
         original.rec_coords[0] = [1.0, 2.0, 3.0];
-        RecordingFile::save_with_segments(&original, &path, &[], None).unwrap();
+        RecordingFile::save(&original, &path, None).unwrap();
         let mut data = std::fs::read(&path).unwrap();
         data.pop();
         std::fs::write(&path, data).unwrap();
@@ -420,12 +303,11 @@ mod tests {
 
         let path = unique_temp_path("rec_rt", "tasrec");
 
-        RecordingFile::save_with_segments(&state, &path, &[], None).unwrap();
+        RecordingFile::save(&state, &path, None).unwrap();
 
         let mut loaded = tas_shared::zeroed_boxed();
-        let (count, segments) = RecordingFile::load(&mut loaded, &path).unwrap();
+        let count = RecordingFile::load(&mut loaded, &path).unwrap();
         assert_eq!(count, 10);
-        assert!(segments.is_empty());
         assert_eq!(loaded.recorded_count, 10);
 
         for i in 0..10 {
@@ -445,7 +327,7 @@ mod tests {
     fn recording_file_save_empty_errors() {
         let state = tas_shared::zeroed_boxed();
         let path = unique_temp_path("rec_empty", "tasrec");
-        assert!(RecordingFile::save_with_segments(&state, &path, &[], None).is_err());
+        assert!(RecordingFile::save(&state, &path, None).is_err());
     }
 
     /// The rider stamp travels with the file: a Keith take loaded while
@@ -459,23 +341,17 @@ mod tests {
         state.recorded_count = 2;
         state.rider_character = tas_shared::TAS_CHARACTER_KEITH;
         state.rider_stance = 0;
-        RecordingFile::save_with_segments(&state, &path, &[], None).unwrap();
+        RecordingFile::save(&state, &path, None).unwrap();
         let meta = RecordingFile::read_metadata(&path).unwrap();
         assert_eq!(meta.character.as_deref(), Some("Keith"));
         assert_eq!(meta.stance, Some(0));
         assert_eq!(meta.rider_label().as_deref(), Some("Keith · regular"));
 
-        let mut tracker = SegmentTracker::new();
         let mut live = tas_shared::zeroed_boxed();
         live.rider_character = tas_shared::TAS_CHARACTER_VINCENT;
         live.rider_stance = 0;
         let mut log = UiLog::default();
-        assert!(load_recording_path(
-            &mut live,
-            &mut tracker,
-            &mut log,
-            &path
-        ));
+        assert!(load_recording_path(&mut live, &mut log, &path));
         assert!(log.lines().iter().any(|l| l.contains("WARNING")
             && l.contains("Keith · regular")
             && l.contains("Vincent · regular")));
@@ -483,12 +359,7 @@ mod tests {
         other_stance.rider_character = tas_shared::TAS_CHARACTER_KEITH;
         other_stance.rider_stance = 1;
         let mut log2 = UiLog::default();
-        assert!(load_recording_path(
-            &mut other_stance,
-            &mut tracker,
-            &mut log2,
-            &path
-        ));
+        assert!(load_recording_path(&mut other_stance, &mut log2, &path));
         assert!(log2
             .lines()
             .iter()
@@ -497,22 +368,49 @@ mod tests {
         same.rider_character = tas_shared::TAS_CHARACTER_KEITH;
         same.rider_stance = 0;
         let mut quiet = UiLog::default();
-        assert!(load_recording_path(
-            &mut same,
-            &mut tracker,
-            &mut quiet,
-            &path
-        ));
+        assert!(load_recording_path(&mut same, &mut quiet, &path));
         assert!(!quiet.lines().iter().any(|l| l.contains("WARNING")));
 
         let mut unstamped = tas_shared::zeroed_boxed();
         unstamped.recorded_count = 1;
-        RecordingFile::save_with_segments(&unstamped, &path, &[], None).unwrap();
+        RecordingFile::save(&unstamped, &path, None).unwrap();
         assert_eq!(
             RecordingFile::read_metadata(&path).unwrap().rider_label(),
             None
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_input_model_is_stamped_and_absent_means_injected() {
+        let path = unique_temp_path("rec_model", "tasrec");
+        let mut state = tas_shared::zeroed_boxed();
+        state.recorded_count = 2;
+        state.input_model = tas_shared::TAS_INPUT_MODEL_HELD;
+        RecordingFile::save(&state, &path, None).unwrap();
+        let meta = RecordingFile::read_metadata(&path).unwrap();
+        assert_eq!(meta.input_model, Some(tas_shared::TAS_INPUT_MODEL_HELD));
+        let stamps = IdentityStamps::from_metadata(&meta);
+        assert_eq!(
+            stamps.input_model_or_injected(),
+            tas_shared::TAS_INPUT_MODEL_HELD
+        );
+
+        // A loaded take re-saved keeps its own model, not the live one.
+        state.input_model = tas_shared::TAS_INPUT_MODEL_INJECTED;
+        RecordingFile::save(&state, &path, Some(&stamps)).unwrap();
+        let resaved = RecordingFile::read_metadata(&path).unwrap();
+        assert_eq!(resaved.input_model, Some(tas_shared::TAS_INPUT_MODEL_HELD));
+
+        // A file from before the field replays as injected.
+        let legacy: RecordingMetadata =
+            serde_json::from_str(r#"{"version":53,"recorded_count":2,"timestamp":"t","notes":""}"#)
+                .unwrap();
+        assert_eq!(
+            IdentityStamps::from_metadata(&legacy).input_model_or_injected(),
+            tas_shared::TAS_INPUT_MODEL_INJECTED
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -522,24 +420,18 @@ mod tests {
         state.recorded_count = 2;
         state.renderer_id = tas_shared::TAS_RENDERER_OPENGL;
         state.fpu_control_word = 0x027F;
-        RecordingFile::save_with_segments(&state, &path, &[], None).unwrap();
+        RecordingFile::save(&state, &path, None).unwrap();
         let meta = RecordingFile::read_metadata(&path).unwrap();
         assert_eq!(meta.renderer.as_deref(), Some("OpenGL"));
         assert_eq!(meta.fpu_control_word, Some(0x027F));
         assert_eq!(meta.physics_label().as_deref(), Some("OpenGL/53-bit"));
 
         // Loading it into a DirectX/24-bit game warns; the same mode stays quiet.
-        let mut tracker = SegmentTracker::new();
         let mut log = UiLog::default();
         let mut live = tas_shared::zeroed_boxed();
         live.renderer_id = tas_shared::TAS_RENDERER_DIRECTX6;
         live.fpu_control_word = 0x007F;
-        assert!(load_recording_path(
-            &mut live,
-            &mut tracker,
-            &mut log,
-            &path
-        ));
+        assert!(load_recording_path(&mut live, &mut log, &path));
         assert!(log.lines().iter().any(|l| l.contains("WARNING")
             && l.contains("OpenGL/53-bit")
             && l.contains("DirectX6/24-bit")));
@@ -547,19 +439,14 @@ mod tests {
         same.renderer_id = tas_shared::TAS_RENDERER_OPENGL;
         same.fpu_control_word = 0x027F;
         let mut quiet = UiLog::default();
-        assert!(load_recording_path(
-            &mut same,
-            &mut tracker,
-            &mut quiet,
-            &path
-        ));
+        assert!(load_recording_path(&mut same, &mut quiet, &path));
         assert!(!quiet.lines().iter().any(|l| l.contains("WARNING")));
 
         // A file saved before the stamp existed (or before the DLL sampled
         // the game thread) has no opinion.
         let mut unstamped = tas_shared::zeroed_boxed();
         unstamped.recorded_count = 1;
-        RecordingFile::save_with_segments(&unstamped, &path, &[], None).unwrap();
+        RecordingFile::save(&unstamped, &path, None).unwrap();
         assert_eq!(
             RecordingFile::read_metadata(&path).unwrap().physics_label(),
             None
@@ -573,12 +460,12 @@ mod tests {
         let mut first = tas_shared::zeroed_boxed();
         first.recorded_count = 2;
         first.input_log[..2].copy_from_slice(&[1, 2]);
-        RecordingFile::save_with_segments(&first, &path, &[], None).unwrap();
+        RecordingFile::save(&first, &path, None).unwrap();
 
         let mut second = tas_shared::zeroed_boxed();
         second.recorded_count = 3;
         second.input_log[..3].copy_from_slice(&[7, 8, 9]);
-        RecordingFile::save_with_segments(&second, &path, &[], None).unwrap();
+        RecordingFile::save(&second, &path, None).unwrap();
 
         let mut loaded = tas_shared::zeroed_boxed();
         RecordingFile::load(&mut loaded, &path).unwrap();
@@ -611,61 +498,25 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// Files from before segments were retired still load, and a new save
+    /// no longer writes the list.
     #[test]
-    fn recording_file_with_segments_round_trip() {
+    fn a_legacy_segments_list_loads_and_is_not_written() {
+        let header = r#"{"version":56,"recorded_count":2,"timestamp":"","notes":"",
+            "segments":[{"name":"Segment 1","start_tick":0,"end_tick":2,"timestamp":""}]}"#;
+        let bytes =
+            tas_codec::encode(header.as_bytes(), &[0x04, 0x05], &[[1.0, 2.0, 3.0]; 2]).unwrap();
+        let path = unique_temp_path("legacy_segments", "tasrec");
+        std::fs::write(&path, bytes).unwrap();
         let mut state = tas_shared::zeroed_boxed();
-        state.recorded_count = 5;
-        for i in 0..5 {
-            state.input_log[i] = 0x04;
-            state.rec_coords[i] = [i as f32, 0.0, i as f32 * 2.0];
-        }
+        assert_eq!(RecordingFile::load(&mut state, &path).unwrap(), 2);
+        assert_eq!(state.input_log[..2], [0x04, 0x05]);
 
-        let segments = vec![
-            Segment {
-                name: "Seg A".into(),
-                start_tick: 0,
-                end_tick: 3,
-                timestamp: "2026-01-01T00:00:00Z".into(),
-            },
-            Segment {
-                name: "Seg B".into(),
-                start_tick: 3,
-                end_tick: 5,
-                timestamp: "2026-01-01T00:00:01Z".into(),
-            },
-        ];
-
-        let path = unique_temp_path("rec_segments", "tasrec");
-        RecordingFile::save_with_segments(&state, &path, &segments, None).unwrap();
-
-        // Use RecordingFile::load() for a real round-trip (not manual JSON parse)
-        let mut loaded = tas_shared::zeroed_boxed();
-        let (count, loaded_segments) = RecordingFile::load(&mut loaded, &path).unwrap();
-        assert_eq!(count, 5);
-        assert_eq!(loaded_segments.len(), 2);
-        assert_eq!(loaded_segments[0].name, "Seg A");
-        assert_eq!(loaded_segments[0].start_tick, 0);
-        assert_eq!(loaded_segments[0].end_tick, 3);
-        assert_eq!(loaded_segments[1].name, "Seg B");
-        assert_eq!(loaded_segments[1].start_tick, 3);
-        assert_eq!(loaded_segments[1].end_tick, 5);
-        assert_eq!(loaded.recorded_count, 5);
-        for i in 0..5 {
-            assert_eq!(loaded.input_log[i], 0x04);
-            assert_eq!(loaded.rec_coords[i], [i as f32, 0.0, i as f32 * 2.0]);
-        }
-        // Trailing data should be zeroed
-        assert_eq!(loaded.input_log[5], 0);
-
-        // Also verify segment metadata is preserved in the file
+        RecordingFile::save(&state, &path, None).unwrap();
         let data = std::fs::read(&path).unwrap();
-        let meta_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        let meta_json = std::str::from_utf8(&data[4..4 + meta_len]).unwrap();
-        let meta: RecordingMetadata = serde_json::from_str(meta_json).unwrap();
-        assert_eq!(meta.segments.len(), 2);
-        assert_eq!(meta.segments[0].name, "Seg A");
-        assert_eq!(meta.segments[1].name, "Seg B");
-
+        let meta_len = tas_codec::header_meta_len(&data).unwrap();
+        let header = std::str::from_utf8(&data[4..4 + meta_len]).unwrap();
+        assert!(!header.contains("segments"), "{header}");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -684,9 +535,16 @@ mod tests {
             fpu_control_word: Some(0x027F),
             rider_character: Some(tas_shared::TAS_CHARACTER_KEITH),
             rider_stance: None,
+            input_model: None,
+            trajectory_ticks: Some(5),
         };
-        RecordingFile::save_with_segments(&live, &path, &[], Some(&identity)).unwrap();
+        RecordingFile::save(&live, &path, Some(&identity)).unwrap();
         let meta = RecordingFile::read_metadata(&path).unwrap();
+        assert_eq!(
+            meta.trajectory_ticks,
+            Some(5),
+            "an edited take stays edited"
+        );
         assert_eq!(meta.renderer.as_deref(), Some("OpenGL"));
         assert_eq!(meta.fpu_control_word, Some(0x027F));
         assert_eq!(meta.character.as_deref(), Some("Keith"));
@@ -699,7 +557,7 @@ mod tests {
         assert_eq!(IdentityStamps::from_metadata(&meta), identity);
         // Without an override the live words are stamped.
         let live_path = unique_temp_path("rec_identity_live", "tasrec");
-        RecordingFile::save_with_segments(&live, &live_path, &[], None).unwrap();
+        RecordingFile::save(&live, &live_path, None).unwrap();
         let live_meta = RecordingFile::read_metadata(&live_path).unwrap();
         assert_eq!(live_meta.renderer.as_deref(), Some("DirectX7"));
         assert_eq!(live_meta.character.as_deref(), Some("Vincent"));

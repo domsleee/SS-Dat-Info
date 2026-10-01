@@ -14,6 +14,21 @@ inline constexpr uint32_t GATE_ALIGN_SPLICE_PENDING = 0xFFFFFFFFu;
 // window replaces recorded transitions, so it is kept narrow (twice that).
 inline constexpr uint32_t GATE_ALIGN_PRE_GATE_LEAD = 8u;
 
+// Player::Cycle ticks from the rider's reset to its release: the countdown
+// float at [player+0x154] passes player_start_time (3.0) on this tick. The
+// gate is exactly the release tick, with or without ghosts (tas_test
+// countdown-anchor).
+inline constexpr uint32_t COUNTDOWN_RELEASE_TICKS = 302;
+
+// The play index of the gate, from the countdown read at the start of play
+// index pos. 0 once the rider is released: then only the observed gate can
+// anchor the replay.
+inline uint32_t PredictedGate(uint32_t pos, uint32_t countdown_ticks) {
+    return countdown_ticks < COUNTDOWN_RELEASE_TICKS
+               ? pos + (COUNTDOWN_RELEASE_TICKS - countdown_ticks)
+               : 0u;
+}
+
 // The play index at which a CONT splice fires: as many ticks past the live
 // gate as continue_from_frame is past the recording's gate. Unaligned, or a
 // splice inside the countdown, uses continue_from_frame as is. PENDING while

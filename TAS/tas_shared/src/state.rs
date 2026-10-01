@@ -9,7 +9,7 @@ use crate::rider::TAS_CHARACTER_UNKNOWN;
 pub const TAS_SHARED_MEMORY_NAME: &str = "Local\\SupremeTAS";
 
 /// Bumped whenever `TasSharedState` changes layout (mirrors shared_state.hpp).
-pub const TAS_SHARED_VERSION: u32 = 53;
+pub const TAS_SHARED_VERSION: u32 = 56;
 /// Size of the menu document buffer (JSON, NUL-terminated).
 pub const TAS_MENU_DOC_MAX: usize = 4096;
 /// Size of the menu command target (id or label, NUL-terminated).
@@ -30,6 +30,30 @@ pub const TAS_MENU_RESULT_FAULT: u32 = 5;
 pub const TAS_MENU_RESULT_NOT_FOCUSABLE: u32 = 6;
 pub const TAS_MENU_RESULT_STALE_PAGE: u32 = 7;
 pub const TAS_MENU_RESULT_EXPIRED: u32 = 8;
+pub const TAS_OWNER_ACQUIRE: u32 = 1;
+pub const TAS_OWNER_RELEASE: u32 = 2;
+pub const TAS_OWNER_RESULT_OWNED: u32 = 1;
+pub const TAS_OWNER_RESULT_RELEASED: u32 = 2;
+pub const TAS_OWNER_RESULT_BUSY: u32 = 3;
+pub const TAS_OWNER_RESULT_NO_PROCESS: u32 = 4;
+pub const TAS_OWNER_RESULT_WRONG_PROCESS: u32 = 5;
+pub const TAS_OWNER_RESULT_NOT_OWNER: u32 = 6;
+pub const TAS_OWNER_RESULT_BAD_KIND: u32 = 7;
+pub const TAS_GAME_CALL_NONE: u32 = 0;
+pub const TAS_GAME_CALL_MENU_TRIGGER: u32 = 1;
+pub const TAS_GAME_CALL_MENU_MOVE: u32 = 2;
+pub const TAS_GAME_CALL_MENU_FOCUS: u32 = 3;
+pub const TAS_GAME_CALL_MENU_ACTIVE: u32 = 4;
+pub const TAS_GAME_CALL_TIME_CURRENT: u32 = 5;
+pub const TAS_GAME_CALL_TEST_FAULT: u32 = 6;
+pub const TAS_GAME_CALL_OBSERVER_FLUSH: u32 = 7;
+pub const TAS_CRASH_MODULE_MAX: usize = 32;
+/// `input_log` holds masks injected a tick ahead (every take before v56).
+pub const TAS_INPUT_MODEL_INJECTED: u32 = 0;
+/// `input_log` holds the keys each tick's physics read.
+pub const TAS_INPUT_MODEL_HELD: u32 = 1;
+pub const TAS_RACE_CLOCK_STARTED: u32 = 1;
+pub const TAS_RACE_CLOCK_FINISHED: u32 = 2;
 pub const TAS_LEVEL_PATH_MAX: usize = 128;
 pub const TAS_MENU_SCREEN_MAX: usize = 32;
 pub const TAS_MAX_TICKS: usize = 65536;
@@ -48,6 +72,8 @@ pub enum TasCommand {
     Restart = 5,
     /// Stop for an internal restart while retaining live-input protection.
     StopForRestart = 9,
+    /// tas_test crash-report: fault inside a game call.
+    TestFault = 0x7E57,
 }
 
 #[repr(u32)]
@@ -308,6 +334,56 @@ pub struct TasSharedState {
     pub menu_cmd_screen: [u8; TAS_MENU_SCREEN_MAX],
     pub menu_cmd_ack: AtomicU32,
     pub menu_cmd_result: u32,
+
+    /// Controller ownership: register through [`crate::owner`]. The DLL
+    /// holds a handle to the owner and stops the TAS when it exits.
+    pub owner_request_seq: AtomicU32,
+    pub owner_request_kind: u32,
+    pub owner_request_pid: u32,
+    pub owner_request_created_lo: u32,
+    pub owner_request_created_hi: u32,
+    pub owner_ack_seq: AtomicU32,
+    pub owner_result: u32,
+    /// 0 = no owner.
+    pub owner_pid: u32,
+    pub owner_generation: u32,
+
+    /// Crash record: the DLL's call into game code in flight, and the last
+    /// fault recorded during one or by the unhandled-exception filter. Read
+    /// with [`crate::crash::crash_record`] after the game dies (this mapping
+    /// outlives it). `game_exit_clean` is set when the game exits normally.
+    pub game_call: u32,
+    pub crash_seq: AtomicU32,
+    pub crash_pid: u32,
+    pub crash_code: u32,
+    pub crash_address: u32,
+    pub crash_game_call: u32,
+    pub crash_thread_id: u32,
+    pub crash_module_offset: u32,
+    pub crash_module: [u8; TAS_CRASH_MODULE_MAX],
+    pub game_exit_clean: u32,
+
+    /// The game's own race clock, under `race_seq`: the timer float's bits
+    /// (`u32::MAX` = none) and TAS_RACE_CLOCK_* flags, every clock tick.
+    /// Read with [`crate::race_clock::race_clock`].
+    pub race_clock_bits: u32,
+    pub race_clock_flags: u32,
+    /// One HUD player-line time and the timer read in the same call, for
+    /// checking the clock against the scraper at one observation point.
+    pub race_ab_cs: u32,
+    pub race_ab_bits: u32,
+
+    /// TAS_INPUT_MODEL_* of `input_log`: set with the take before a
+    /// PLAY/CONT arm; ARM_REC and a CONT splice set HELD.
+    pub input_model: u32,
+
+    /// The human rider's last finish, from the game's Finish_Point: read with
+    /// [`crate::race_clock::race_finish`].
+    pub race_finish_seq: AtomicU32,
+    pub race_finish_tick: u32,
+    pub race_finish_mode: u32,
+    pub race_finish_valid: u32,
+    pub race_finish_time_bits: u32,
 }
 
 /// Give up after this many torn seqlock reads. The write window is a few
@@ -575,7 +651,7 @@ mod tests {
     #[test]
     fn layout_pinned_to_shared_state_hpp() {
         use std::mem::offset_of;
-        assert_eq!(mem::size_of::<TasSharedState>(), 1_651_300);
+        assert_eq!(mem::size_of::<TasSharedState>(), 1_651_444);
         let pins = [
             ("input_log", offset_of!(TasSharedState, input_log), 240),
             ("rec_coords", offset_of!(TasSharedState, rec_coords), 65_776),
@@ -610,6 +686,46 @@ mod tests {
                 offset_of!(TasSharedState, menu_cmd_result),
                 1_651_296,
             ),
+            (
+                "owner_request_seq",
+                offset_of!(TasSharedState, owner_request_seq),
+                1_651_300,
+            ),
+            (
+                "owner_generation",
+                offset_of!(TasSharedState, owner_generation),
+                1_651_332,
+            ),
+            (
+                "game_call",
+                offset_of!(TasSharedState, game_call),
+                1_651_336,
+            ),
+            (
+                "crash_module",
+                offset_of!(TasSharedState, crash_module),
+                1_651_368,
+            ),
+            (
+                "game_exit_clean",
+                offset_of!(TasSharedState, game_exit_clean),
+                1_651_400,
+            ),
+            (
+                "race_ab_bits",
+                offset_of!(TasSharedState, race_ab_bits),
+                1_651_416,
+            ),
+            (
+                "input_model",
+                offset_of!(TasSharedState, input_model),
+                1_651_420,
+            ),
+            (
+                "race_finish_time_bits",
+                offset_of!(TasSharedState, race_finish_time_bits),
+                1_651_440,
+            ),
         ];
         for (name, actual, expected) in pins {
             assert_eq!(actual, expected, "offset of {name}");
@@ -639,6 +755,7 @@ mod tests {
             (TasCommand::ArmContinue, 4),
             (TasCommand::Restart, 5),
             (TasCommand::StopForRestart, 9),
+            (TasCommand::TestFault, 0x7E57),
         ];
         for &(cmd, val) in variants {
             assert_eq!(cmd as u32, val, "{:?} should be {}", cmd, val);

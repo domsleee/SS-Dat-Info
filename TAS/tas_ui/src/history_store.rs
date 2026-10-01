@@ -51,6 +51,10 @@ pub struct EntryMeta {
     pub start_tick: u32,
     pub end_tick: u32,
     pub first_moving: Option<u32>,
+    /// Recording tick where the game's race clock reads zero (the start-line
+    /// crossing); None = unknown or an entry from before this field.
+    #[serde(default)]
+    pub clock_start: Option<u32>,
     /// Race time (centiseconds) of a session that ended at the finish line.
     #[serde(default)]
     pub finish_time_cs: Option<u32>,
@@ -919,6 +923,7 @@ mod tests {
             start_tick: 0,
             end_tick: count,
             first_moving: None,
+            clock_start: None,
             finish_time_cs: None,
             finish_time_exact: false,
             level: None,

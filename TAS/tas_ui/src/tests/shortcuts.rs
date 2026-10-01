@@ -173,10 +173,7 @@ fn shortcut_shift_z_only_redoes() {
 #[test]
 fn zoom_in_shrinks_window() {
     let mut app = test_app();
-    app.timeline_view = timeline::TimelineView {
-        start: 100,
-        end: 1100,
-    };
+    app.timeline_view = timeline::TimelineView::chosen(100, 1100);
     press_key(&mut app, Key::Plus, Modifiers::NONE);
     assert!(app.timeline_view.end - app.timeline_view.start < 1000);
 }
@@ -184,10 +181,7 @@ fn zoom_in_shrinks_window() {
 #[test]
 fn zoom_out_grows_window() {
     let mut app = test_app();
-    app.timeline_view = timeline::TimelineView {
-        start: 100,
-        end: 1100,
-    };
+    app.timeline_view = timeline::TimelineView::chosen(100, 1100);
     press_key(&mut app, Key::Minus, Modifiers::NONE);
     assert!(app.timeline_view.end - app.timeline_view.start > 1000);
 }
@@ -196,10 +190,7 @@ fn zoom_out_grows_window() {
 fn zoom_in_clamps_to_min_window() {
     let mut app = test_app();
     // 60-tick window is already the minimum; zooming in must not go below.
-    app.timeline_view = timeline::TimelineView {
-        start: 500,
-        end: 560,
-    };
+    app.timeline_view = timeline::TimelineView::chosen(500, 560);
     press_key(&mut app, Key::Plus, Modifiers::NONE);
     assert!(app.timeline_view.end - app.timeline_view.start >= 60);
 }

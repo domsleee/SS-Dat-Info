@@ -7,7 +7,7 @@
 
 constexpr const char* TAS_SHARED_MEMORY_NAME = "Local\\SupremeTAS";
 
-constexpr uint32_t TAS_SHARED_VERSION = 53;
+constexpr uint32_t TAS_SHARED_VERSION = 56;
 constexpr uint32_t TAS_MENU_DOC_MAX = 4096;  // menu document buffer (JSON, NUL-terminated)
 constexpr uint32_t TAS_MENU_CMD_TARGET_MAX = 64;  // menu command target (id or label, NUL-terminated)
 // menu_cmd_kind
@@ -29,6 +29,34 @@ constexpr uint32_t TAS_MENU_RESULT_FAULT = 5;
 constexpr uint32_t TAS_MENU_RESULT_NOT_FOCUSABLE = 6;   // focus did not land on the target
 constexpr uint32_t TAS_MENU_RESULT_STALE_PAGE = 7;      // the page changed since the agent read it
 constexpr uint32_t TAS_MENU_RESULT_EXPIRED = 8;         // no menu ran for 3 s
+// owner_request_kind
+constexpr uint32_t TAS_OWNER_ACQUIRE = 1;
+constexpr uint32_t TAS_OWNER_RELEASE = 2;
+// owner_result
+constexpr uint32_t TAS_OWNER_RESULT_NONE = 0;
+constexpr uint32_t TAS_OWNER_RESULT_OWNED = 1;
+constexpr uint32_t TAS_OWNER_RESULT_RELEASED = 2;
+constexpr uint32_t TAS_OWNER_RESULT_BUSY = 3;          // another live process owns the TAS
+constexpr uint32_t TAS_OWNER_RESULT_NO_PROCESS = 4;    // the pid could not be opened
+constexpr uint32_t TAS_OWNER_RESULT_WRONG_PROCESS = 5; // creation time differs: pid reused
+constexpr uint32_t TAS_OWNER_RESULT_NOT_OWNER = 6;     // release from a process that does not own
+constexpr uint32_t TAS_OWNER_RESULT_BAD_KIND = 7;
+// game_call / crash_game_call: the DLL call into game code in flight
+constexpr uint32_t TAS_GAME_CALL_NONE = 0;
+constexpr uint32_t TAS_GAME_CALL_MENU_TRIGGER = 1;
+constexpr uint32_t TAS_GAME_CALL_MENU_MOVE = 2;        // Up/Down/Left/Right
+constexpr uint32_t TAS_GAME_CALL_MENU_FOCUS = 3;       // Request_Focus / Want_Focus
+constexpr uint32_t TAS_GAME_CALL_MENU_ACTIVE = 4;      // Get_Active_Component
+constexpr uint32_t TAS_GAME_CALL_TIME_CURRENT = 5;     // Kernel::Time::Current
+constexpr uint32_t TAS_GAME_CALL_TEST_FAULT = 6;       // tas_test crash-report
+constexpr uint32_t TAS_GAME_CALL_OBSERVER_FLUSH = 7;   // TC_Kbd_Impl flush, at a CONT splice
+constexpr uint32_t TAS_CRASH_MODULE_MAX = 32;
+// input_model: what input_log holds.
+constexpr uint32_t TAS_INPUT_MODEL_INJECTED = 0;  // masks injected a tick ahead (takes before v56)
+constexpr uint32_t TAS_INPUT_MODEL_HELD = 1;      // the held keys each tick's physics read
+// race_clock_flags
+constexpr uint32_t TAS_RACE_CLOCK_STARTED = 1;
+constexpr uint32_t TAS_RACE_CLOCK_FINISHED = 2;
 constexpr uint32_t TAS_LEVEL_PATH_MAX = 128;
 constexpr uint32_t TAS_MENU_SCREEN_MAX = 32;   // menu-screen title buffer
 constexpr uint32_t TAS_MAX_TICKS = 65536;
@@ -45,6 +73,7 @@ enum TasCommand : uint32_t {
     CMD_ARM_CONTINUE = 4,  // PLAY 0..continue_from_frame, then auto-switch to REC
     CMD_RESTART      = 5,  // in-process F5 restart
     CMD_STOP_FOR_RESTART = 9, // internal stop: protect live input across restart
+    CMD_TEST_FAULT   = 0x7E57, // tas_test crash-report: fault inside a game call
 };
 
 // Renderer plugin loaded by sr.dll (shared-state renderer_id).
@@ -266,13 +295,69 @@ struct TasSharedState {
     char menu_cmd_screen[TAS_MENU_SCREEN_MAX];  // STALE_PAGE if the page changed; empty = no check
     volatile uint32_t menu_cmd_ack;
     volatile uint32_t menu_cmd_result;    // TAS_MENU_RESULT_*
+
+    // Controller ownership (caves/owner_cave.hpp). A controller that sets
+    // cont_suppress_input or runs a transport cycle registers first: it
+    // writes kind, pid and its creation time, then bumps owner_request_seq.
+    // The DLL keeps a handle to that process, answers in owner_result and
+    // sets owner_ack_seq. When the owner exits, the DLL stops the TAS.
+    volatile uint32_t owner_request_seq;
+    volatile uint32_t owner_request_kind;       // TAS_OWNER_*
+    volatile uint32_t owner_request_pid;
+    volatile uint32_t owner_request_created_lo; // FILETIME from GetProcessTimes
+    volatile uint32_t owner_request_created_hi;
+    volatile uint32_t owner_ack_seq;
+    volatile uint32_t owner_result;             // TAS_OWNER_RESULT_*
+    volatile uint32_t owner_pid;                // 0 = no owner
+    volatile uint32_t owner_generation;         // bumps whenever the owner changes
+
+    // Crash record (crash_report.hpp). game_call names the DLL call into game
+    // code in flight. A fault during one, or any fault that reaches the
+    // unhandled-exception filter, is copied into crash_* before crash_seq
+    // bumps; the UI still maps the section after the game dies and reads it
+    // there. game_exit_clean is set when the process exits normally.
+    volatile uint32_t game_call;                // TAS_GAME_CALL_*
+    volatile uint32_t crash_seq;                // 0 = no crash recorded
+    volatile uint32_t crash_pid;                // the game process that crashed
+    volatile uint32_t crash_code;               // exception code
+    volatile uint32_t crash_address;
+    volatile uint32_t crash_game_call;
+    volatile uint32_t crash_thread_id;
+    volatile uint32_t crash_module_offset;      // crash_address - module base
+    char crash_module[TAS_CRASH_MODULE_MAX];    // empty = not in a known module
+    volatile uint32_t game_exit_clean;
+
+    // The game's own race clock (race_timer_cave.hpp), under race_seq:
+    // race_clock_bits = the timer float at [[player+0xB8]+0x0C] as bits
+    // (0xFFFFFFFF = none), race_clock_flags = TAS_RACE_CLOCK_*. Published
+    // every clock tick. race_ab_cs / race_ab_bits pair the HUD time scraped
+    // from one player-line append with the timer read in that same call.
+    volatile uint32_t race_clock_bits;
+    volatile uint32_t race_clock_flags;
+    volatile uint32_t race_ab_cs;
+    volatile uint32_t race_ab_bits;
+
+    // TAS_INPUT_MODEL_* of input_log. The controller sets it with the take
+    // before a PLAY/CONT arm; ARM_REC and a CONT splice set HELD.
+    volatile uint32_t input_model;
+
+    // The human rider's last finish, from the game's Finish_Point
+    // (caves/finish_cave.hpp), under the race_finish_seq seqlock (odd while
+    // written; seq / 2 counts finishes). race_finish_tick = the recorded (REC) or
+    // playback (PLAY) index of the tick it finished in, 0xFFFFFFFF in OFF;
+    // valid = no checkpoint missed; time = the timer's final float.
+    volatile uint32_t race_finish_seq;
+    volatile uint32_t race_finish_tick;
+    volatile uint32_t race_finish_mode;
+    volatile uint32_t race_finish_valid;
+    volatile uint32_t race_finish_time_bits;
 };
 
 // Rust pins the same size and group offsets; a size pin alone misses swapped fields.
 #define TAS_PIN_OFFSET(field, expected) \
     static_assert(offsetof(TasSharedState, field) == (expected), \
                   "TasSharedState." #field " moved: bump TAS_SHARED_VERSION and update tas_shared/src/state.rs")
-static_assert(sizeof(TasSharedState) == 1651300,
+static_assert(sizeof(TasSharedState) == 1651444,
               "TasSharedState layout changed: bump TAS_SHARED_VERSION and update "
               "the Rust size pin in tas_shared/src/state.rs");
 TAS_PIN_OFFSET(input_log, 240);
@@ -284,6 +369,14 @@ TAS_PIN_OFFSET(level_ctx_seq, 1647008);
 TAS_PIN_OFFSET(fpu_control_word, 1647032);
 TAS_PIN_OFFSET(menu_doc, 1647092);
 TAS_PIN_OFFSET(menu_cmd_result, 1651296);
+TAS_PIN_OFFSET(owner_request_seq, 1651300);
+TAS_PIN_OFFSET(owner_generation, 1651332);
+TAS_PIN_OFFSET(game_call, 1651336);
+TAS_PIN_OFFSET(crash_module, 1651368);
+TAS_PIN_OFFSET(game_exit_clean, 1651400);
+TAS_PIN_OFFSET(race_ab_bits, 1651416);
+TAS_PIN_OFFSET(input_model, 1651420);
+TAS_PIN_OFFSET(race_finish_time_bits, 1651440);
 #undef TAS_PIN_OFFSET
 
 // Safe from hook callbacks (no I/O, heap, formatting or float ops) and from any thread.
@@ -292,6 +385,8 @@ inline void LogRing(TasSharedState* s, TasLogSeverity severity, const char* text
     uint32_t seq = (uint32_t)InterlockedIncrement((volatile LONG*)&s->log_write_seq) - 1u;
     uint32_t idx = seq % TAS_LOG_RING_SIZE;
     TasLogEntry* entry = &s->log_ring[idx];
+    // Zeroed during the rewrite, so a reader never pairs a sequence with torn text.
+    InterlockedExchange((volatile LONG*)&entry->sequence, 0);
     entry->severity = severity;
     size_t i = 0;
     while (i < TAS_LOG_ENTRY_SIZE - 1 && text[i] != '\0') {
@@ -299,7 +394,7 @@ inline void LogRing(TasSharedState* s, TasLogSeverity severity, const char* text
         i++;
     }
     entry->text[i] = '\0';
-    entry->sequence = seq + 1;  // written last so readers see a complete entry; 0 = unused
+    InterlockedExchange((volatile LONG*)&entry->sequence, (LONG)(seq + 1));  // 0 = unused
 }
 
 // DLL side: creates the mapping.

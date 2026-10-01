@@ -130,6 +130,25 @@ pub fn run(args: &[String]) -> Result<(), String> {
     live::run(&config)
 }
 
+/// F12 with From at 0 records a fresh take: there is nothing to replay.
+pub fn run_from_zero() -> Result<(), String> {
+    let mut config = options(&[])?;
+    config.splice = 0;
+    let _ui = live::prepare(&mut config)?;
+    live::run_from_zero(&config)
+}
+
+/// The deployed UI stops a REC at the game's finish by itself: F12 CONTs
+/// FE-decent-done from 150 ticks before its finish line and records over it.
+pub fn run_finish() -> Result<(), String> {
+    let mut config = options(&[])?;
+    config.recording = Some(crate::harness::fixture_path("FE-decent-done.tasrec")?);
+    // The fixture's finish is at recorded tick 6498 (finish-line).
+    config.splice = 6348;
+    let _ui = live::prepare(&mut config)?;
+    live::run_finish(&config)
+}
+
 pub fn validate_options(args: &[String]) -> Result<(), String> {
     options(args).map(|_| ())
 }
@@ -242,6 +261,131 @@ mod live {
         }
         Ok(())
     }
+    pub(super) fn run_from_zero(config: &Options) -> Result<(), String> {
+        let client = TasSharedMemoryClient::open()?;
+        let loaded = client.state().recorded_count;
+        if client.mode_volatile() != TasMode::Off as u32 || loaded == 0 {
+            return Err("UI setup did not leave a stopped recording".into());
+        }
+        let windows = game_and_ui_windows()?;
+        win32::bring_to_front(windows[0]);
+        thread::sleep(Duration::from_millis(300));
+        healthy(&windows)?;
+        let offset = std::fs::metadata(&config.log)
+            .map_err(|e| e.to_string())?
+            .len();
+        let stop = StopOnExit(windows[0]);
+        press(win32::VK_F12);
+        let start = Instant::now();
+        let recorded = loop {
+            healthy(&windows)?;
+            let recorded = client.recorded_count_volatile();
+            if client.mode_volatile() == TasMode::Rec as u32 && recorded > 0 && recorded < loaded {
+                break recorded;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                return Err(format!(
+                    "F12 at From 0 did not start a fresh REC (mode={}, recorded={recorded} of {loaded})\n{}",
+                    client.mode_volatile(),
+                    new_log(&config.log, offset)?
+                ));
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        thread::sleep(Duration::from_millis(500));
+        let grown = client.recorded_count_volatile();
+        let text = new_log(&config.log, offset)?;
+        drop(stop); // F11 through the UI.
+        if grown <= recorded {
+            return Err(format!(
+                "the fresh take is not growing ({recorded} -> {grown})"
+            ));
+        }
+        if !text.contains("CONT from frame 0") {
+            return Err(format!("the UI did not report a fresh take\n{text}"));
+        }
+        println!("{text}");
+        println!("*** UI F12 FROM ZERO PASSED: F12 at From 0 recorded a fresh take ({recorded} -> {grown} ticks) ***");
+        Ok(())
+    }
+
+    pub(super) fn run_finish(config: &Options) -> Result<(), String> {
+        let client = TasSharedMemoryClient::open()?;
+        if client.mode_volatile() != TasMode::Off as u32
+            || client.state().recorded_count < config.splice
+        {
+            return Err("UI setup did not leave a stopped recording past the splice".into());
+        }
+        let before = tas_shared::race_clock::race_finish(client.state()).map_or(0, |f| f.seq);
+        let windows = game_and_ui_windows()?;
+        win32::bring_to_front(windows[0]);
+        thread::sleep(Duration::from_millis(300));
+        healthy(&windows)?;
+        let offset = std::fs::metadata(&config.log)
+            .map_err(|e| e.to_string())?
+            .len();
+        let stop = StopOnExit(windows[0]);
+        press(win32::VK_F12);
+        // CONT, the splice, then the UI's own stop at the finish.
+        let start = Instant::now();
+        let mut saw_rec = false;
+        loop {
+            let mode = client.mode_volatile();
+            saw_rec |= mode == TasMode::Rec as u32;
+            if saw_rec && mode == TasMode::Off as u32 {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(60) {
+                return Err(format!(
+                    "the UI did not stop the take at the finish (mode={mode}, REC seen={saw_rec})\n{}",
+                    new_log(&config.log, offset)?
+                ));
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        drop(stop);
+        let finish = tas_shared::race_clock::race_finish(client.state())
+            .filter(|f| f.seq != before)
+            .ok_or("the take stopped without a finish from the game")?;
+        let recorded = client.state().recorded_count;
+        let text = new_log(&config.log, offset)?;
+        let _ = crate::harness::dismiss_finish_prompt();
+        if finish.mode != TasMode::Rec as u32 || finish.tick < config.splice {
+            return Err(format!(
+                "the finish was not in the recorded part: {finish:?}"
+            ));
+        }
+        if !text.contains(&format!("Finished at tick {}", finish.tick)) {
+            return Err(format!(
+                "the UI did not report the game's finish tick {}\n{text}",
+                finish.tick
+            ));
+        }
+        // The UI stops within a few frames of seeing the finish.
+        if recorded <= finish.tick || recorded > finish.tick + 100 {
+            return Err(format!(
+                "the take ends at {recorded}, not just after the finish at {}",
+                finish.tick
+            ));
+        }
+        println!("{text}");
+        println!(
+            "*** UI FINISH AUTO-STOP PASSED: the UI stopped the take at the game's finish (tick {}, take ends at {recorded}) ***",
+            finish.tick
+        );
+        Ok(())
+    }
+
+    fn game_and_ui_windows() -> Result<[win32::Hwnd; 2], String> {
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "$ErrorActionPreference='Stop'; $g=@(Get-Process Supreme); $u=@(Get-Process tas_ui); if($g.Count -ne 1 -or $u.Count -ne 1){throw 'Require exactly one game and UI'}; @($g[0].MainWindowHandle.ToInt64(),$u[0].MainWindowHandle.ToInt64()) | ConvertTo-Json -Compress"])
+            .creation_flags(0x08000000).output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into());
+        }
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())
+    }
+
     pub(super) fn run(config: &Options) -> Result<(), String> {
         // Setup is complete; the child UI is now the controller under test.
         let client = TasSharedMemoryClient::open()?;
@@ -255,14 +399,7 @@ mod live {
                     .into(),
             );
         }
-        let output = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", "$ErrorActionPreference='Stop'; $g=@(Get-Process Supreme); $u=@(Get-Process tas_ui); if($g.Count -ne 1 -or $u.Count -ne 1){throw 'Require exactly one game and UI'}; @($g[0].MainWindowHandle.ToInt64(),$u[0].MainWindowHandle.ToInt64()) | ConvertTo-Json -Compress"])
-            .creation_flags(0x08000000).output().map_err(|e| e.to_string())?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).into());
-        }
-        let windows: [win32::Hwnd; 2] =
-            serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+        let windows = game_and_ui_windows()?;
         std::fs::metadata(&config.log).map_err(|e| e.to_string())?;
         win32::bring_to_front(windows[0]);
         thread::sleep(Duration::from_millis(300));

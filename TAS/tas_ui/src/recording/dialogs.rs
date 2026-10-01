@@ -1,6 +1,6 @@
 //! Recording folders and the Save / Load file dialogs.
 
-use super::{IdentityStamps, RecordingFile, Segment, SegmentTracker};
+use super::{IdentityStamps, RecordingFile};
 use crate::ui_log::UiLog;
 use std::path::PathBuf;
 use tas_shared::TasSharedState;
@@ -53,9 +53,8 @@ fn load_dir_for_level(level: Option<&str>) -> PathBuf {
 /// recording was made on, supplied by the caller rather than read live: by
 /// the time the user clicks Save the game may be in its post-run dialog,
 /// where the level reads unknown.
-pub fn save_dialog_with_segments(
+pub fn save_dialog(
     state: &TasSharedState,
-    segments: &[Segment],
     log: &mut UiLog,
     level: Option<&str>,
     identity: Option<&IdentityStamps>,
@@ -72,7 +71,7 @@ pub fn save_dialog_with_segments(
         .add_filter("TAS Recording", &["tasrec"])
         .save_file()
     {
-        match RecordingFile::save_with_segments(state, &path, segments, identity) {
+        match RecordingFile::save(state, &path, identity) {
             Ok(()) => {
                 log.push(format!("Saved recording to {}", path.display()));
                 return Some(path);
@@ -102,14 +101,11 @@ pub fn pick_recording_path(level_id: u32) -> Option<PathBuf> {
 /// the whole input/coords buffer.
 pub fn load_recording_path(
     state: &mut TasSharedState,
-    tracker: &mut SegmentTracker,
     log: &mut UiLog,
     path: &std::path::Path,
 ) -> bool {
     match RecordingFile::load(state, path) {
-        Ok((count, segments)) => {
-            let seg_count = segments.len();
-            tracker.restore_from(segments);
+        Ok(count) => {
             // The take carries the physics mode it was recorded under; the
             // live one comes from the DLL. Different renderers round the sim
             // differently (24-bit DirectX vs 53-bit OpenGL), so say so now
@@ -140,12 +136,7 @@ pub fn load_recording_path(
                     }
                 }
             }
-            log.push(format!(
-                "Loaded {} ticks, {} segments from {}",
-                count,
-                seg_count,
-                path.display()
-            ));
+            log.push(format!("Loaded {} ticks from {}", count, path.display()));
             true
         }
         Err(e) => {

@@ -12,7 +12,7 @@
 // instruction is `cmp esi, 14h` (clamp to 20).
 //
 // Each frame the game owes (now - its clock) * 100 ticks and advances its
-// clock by ticks * per-tick advance (EXE+0x46DB08, normally 0.01 s). Scaling
+// clock by ticks * per-tick advance (0x46DB08 = EXE+0x6DB08, normally 0.01 s). Scaling
 // the advance by 1/speed sets the speed (0.005 = 2x). Scaling ESI does
 // nothing: the next frame recomputes it from wall time. See DESIGN.md
 // "Speed control".
@@ -24,7 +24,7 @@ static SafetyHookMid tickCaveHook{};
 // constant in the fallback.
 static float* g_tickAdvancePtr = nullptr;
 
-// EXE+0x46DB08 is read by sixteen `fmul dword ptr [0x46db08]`: four in the
+// 0x46DB08 is read by sixteen `fmul dword ptr [0x46db08]`: four in the
 // game cycle, twelve in the menu (Menu::Paint's animation dt). The tick cave
 // doesn't run in the menu, so a scaled shared value would run the menu video
 // fast. The four in-game operands are pointed here instead (same-length
@@ -33,12 +33,13 @@ static float* g_tickAdvancePtr = nullptr;
 inline float g_privateTickAdvance = 0.01f;
 
 // RVAs of the operand in each in-game fmul (the instruction starts 2 bytes
-// earlier):
-//   +0x25CE0  fmul -> per-tick timestamp offset   (i * advance)
-//   +0x25D89  fmul -> Time::Add(clock,  ticks_run * advance)
-//   +0x25DB2  fmul -> Time::Add(clock2, ticks_demanded * advance)
-//   +0x25E2B  fmul -> game-object time [ebp+0x0C] += ticks_demanded * advance
-//                     (not the clock tick demand is computed from)
+// earlier). C1 [esp+0x40] drives tick demand and the keyboard observer's event
+// gate; C2 [esp+0x60] goes to Supreme::Cycle, which ignores it. Physics steps
+// a constant dt, so a catch-up drain tick is physics-neutral.
+//   +0x25CE0  fmul -> i * advance, added to C1 and C2 for tick i
+//   +0x25D89  fmul -> C2 += ticks_run * advance
+//   +0x25DB2  fmul -> C1 += ticks_demanded * advance
+//   +0x25E2B  fmul -> [ebp+0x0C] += ticks_demanded * advance (results timer)
 static constexpr uint32_t TICK_ADVANCE_OPERANDS[] = {
     0x25CE2, 0x25D8B, 0x25DB4, 0x25E2D,
 };
@@ -125,6 +126,15 @@ static constexpr int32_t NATIVE_GAME_CLAMP_AT_1X = 20;
 // or the resume speed, so the new take starts at its own pace. Game thread.
 inline bool g_spliceDrainPending = false;
 
+// Gate predicted from the rider's countdown at the start of an aligned
+// replay (cycle cave); 0 until then. It indexes the replay from its first
+// tick, so no hold window or pending splice is needed.
+inline uint32_t g_predictedGate = 0;
+
+inline uint32_t LiveGate(const TasSharedState* s) {
+    return g_predictedGate ? g_predictedGate : s->gate_index;
+}
+
 // Was the engine frozen (dialog, menu, load) since the last call? The backlog
 // after a freeze is dropped at any speed. CONT catch-up is not a freeze.
 static bool ResumedFromFreeze() {
@@ -144,7 +154,7 @@ static bool IsSpliceParked(TasSharedState* s) {
     if (s->continue_from_frame > 0 && s->mode == MODE_PLAY
         && s->gate_align_rec != 0 && s->cont_splice_approved == 0) {
         uint32_t park_at = GateAlignedSplicePos(
-            s->continue_from_frame, s->gate_index, s->gate_align_rec);
+            s->continue_from_frame, LiveGate(s), s->gate_align_rec);
         splice_parked = s->playback_pos >= park_at;
     }
     return splice_parked;
@@ -154,7 +164,7 @@ static bool IsSpliceParked(TasSharedState* s) {
 // into REC.
 static int32_t LimitTicksToSplice(TasSharedState* s, int32_t realTick) {
     uint32_t aligned_splice = GateAlignedSplicePos(
-        s->continue_from_frame, s->gate_index, s->gate_align_rec);
+        s->continue_from_frame, LiveGate(s), s->gate_align_rec);
     if (s->continue_from_frame > 0 && s->mode == MODE_PLAY) {
         int32_t remaining = (int32_t)ContinueSpliceTickLimit(
             s->playback_pos, aligned_splice,
@@ -165,12 +175,13 @@ static int32_t LimitTicksToSplice(TasSharedState* s, int32_t realTick) {
     return realTick;
 }
 
-static void ChooseTickCount(SafetyHookContext& ctx, TasSharedState* s, int32_t realTick,
-                            bool catchup_drain, bool splice_parked) {
+static void ChooseTickCount(SafetyHookContext& ctx, TasSharedState* s, int32_t owed,
+                            int32_t realTick, bool catchup_drain, bool splice_parked) {
     if (catchup_drain) {
-        // One tick drains the whole wall-time gap.
+        // One tick drains the whole wall-time gap, even when the splice
+        // limited this frame's ticks.
         if (g_tickAdvancePtr) {
-            *g_tickAdvancePtr = (float)realTick * g_nativeTickAdvance;
+            *g_tickAdvancePtr = (float)owed * g_nativeTickAdvance;
         }
         ctx.esi = 1;
     } else {
@@ -178,7 +189,8 @@ static void ChooseTickCount(SafetyHookContext& ctx, TasSharedState* s, int32_t r
         if (realTick < 0) realTick = 0;
         if (realTick > TICK_CAVE_PER_FRAME_CAP) realTick = TICK_CAVE_PER_FRAME_CAP;
 
-        if (s->playback_speed <= 1.0f && realTick > NATIVE_GAME_CLAMP_AT_1X) {
+        // OFF keeps the native clamp whatever speed was left in shared memory.
+        if ((s->mode == MODE_OFF || s->playback_speed <= 1.0f) && realTick > NATIVE_GAME_CLAMP_AT_1X) {
             realTick = NATIVE_GAME_CLAMP_AT_1X;
         }
 
@@ -234,9 +246,10 @@ static void TickCave_Callback(SafetyHookContext& ctx) {
                 || (g_spliceDrainPending && realTick > 1));
         g_spliceDrainPending = false;
 
+        const int32_t owed = realTick;
         realTick = LimitTicksToSplice(s, realTick);
 
-        ChooseTickCount(ctx, s, realTick, catchup_drain, splice_parked);
+        ChooseTickCount(ctx, s, owed, realTick, catchup_drain, splice_parked);
 
         ApplyPlaybackSpeed(s, catchup_drain);
     }

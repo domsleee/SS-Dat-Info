@@ -61,5 +61,22 @@ int main() {
     check(ContinueSpliceTickLimit(305, GATE_ALIGN_SPLICE_PENDING, false, 299) == 1,
           "pending_splice_keeps_stepping_past_a_late_gate");
 
+    // --- PredictedGate: the gate from the rider's countdown -----------------
+    // Armed 4 ticks after the reset (no ghosts) or 15 (ghosts): the gate is the
+    // release tick, 302 ticks after the reset.
+    check(PredictedGate(0, 4) == 298, "countdown_gate_without_ghosts");
+    check(PredictedGate(0, 15) == 287, "countdown_gate_with_ghosts");
+    check(PredictedGate(10, 4) == 308, "countdown_gate_counts_from_the_read_tick");
+    check(PredictedGate(0, 301) == 1, "countdown_gate_on_the_next_tick");
+    check(PredictedGate(0, 302) == 0, "released_rider_has_no_prediction");
+    check(PredictedGate(0, 5000) == 0, "late_arm_has_no_prediction");
+    // With the gate known from tick 0 there is no hold window: early ticks map
+    // straight onto the recording (before it started = no input).
+    check(GateAlignedInputSource(0, 298, 299, 500) == 1, "predicted_gate_maps_countdown_ticks");
+    check(GateAlignedInputSource(0, 300, 299, 500) == GATE_ALIGN_INVALID_SOURCE,
+          "predicted_gate_before_recording_start_is_no_input");
+    check(GateAlignedInputSource(295, 298, 299, 500) == 296, "no_hold_window_before_the_gate");
+    check(GateAlignedSplicePos(500, 287, 299) == 488, "splice_follows_the_predicted_gate");
+
     return FinishTests();
 }

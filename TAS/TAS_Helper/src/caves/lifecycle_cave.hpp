@@ -6,6 +6,7 @@
 #include "../level_context.hpp"
 #include "cycle_cave.hpp"
 #include "menu_cave.hpp"
+#include "owner_cave.hpp"
 #include "../fpu_safe_hook.hpp"
 
 // The race lifecycle hooks (DESIGN.md "The race lifecycle"), all on the game
@@ -30,11 +31,6 @@ inline bool g_sawLaunch = false;
 inline uint32_t g_frameAtInstall = 0;
 inline uint32_t g_frameAtLastIdentify = 0;
 
-// A CONT whose controller died leaves the live-input block set. A restart
-// freezes the cycle for a second or two; longer than this, nothing will
-// clear it.
-static constexpr uint32_t STALE_SUPPRESS_MS = 5000;
-
 static void OnLaunch(SafetyHookContext&) {
     auto* s = g_state;
     if (!s) return;
@@ -55,7 +51,9 @@ static void OnStop(SafetyHookContext&) {
 static void OnPump(SafetyHookContext&) {
     auto* s = g_state;
     if (!s) return;
-    TryProcessStopCommand(s);
+    // First: a gone owner's pending command must not run.
+    owner::Process(s);
+    ProcessFrozenCommands(s);
     if (!g_sawLaunch && s->frame_count != g_frameAtInstall) {
         g_sawLaunch = true;
         levelcontext::PublishRunning(s);
@@ -67,11 +65,8 @@ static void OnPump(SafetyHookContext&) {
         g_frameAtLastIdentify = s->frame_count;
         levelcontext::RetryIfUnresolved(s);
     }
-    if (s->cont_suppress_input && GetTickCount() - g_lastCycleMs > STALE_SUPPRESS_MS) {
-        s->cont_suppress_input = 0;
-        LogRing(s, LOG_WARN, "Cleared a stale live-input block (game loop frozen over 5 s)");
-    }
     menustate::Housekeeping();
+    crash::Maintain();
     FlushPendingLog();
 }
 
@@ -92,6 +87,7 @@ inline bool Install(GameAddresses& addr, TasSharedState* s) {
 
 inline void Uninstall() {
     g_pumpHook = {};
+    owner::Uninstall();
     g_stopHook = {};
     g_launchHook = {};
     g_state = nullptr;

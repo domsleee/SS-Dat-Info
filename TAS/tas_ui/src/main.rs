@@ -81,6 +81,10 @@ struct TasApp {
     /// as the labels above. Save paths stamp the file with these, never the
     /// live game — `None` halves stay unknown.
     loaded_identity: Option<recording::IdentityStamps>,
+    /// Track code (e.g. "FE") of the take in the recording buffer, same
+    /// lifecycle as the labels above. PLAY/CONT refuse a take from another
+    /// track: its spawn is elsewhere, so it can never match.
+    loaded_level: Option<String>,
     /// Soft cap (max unpinned entries) — from settings.
     history_cap: usize,
     recovery_store: Option<recording::RecoveryStore>,
@@ -105,7 +109,6 @@ struct TasApp {
     playback_speed: f32,
     show_history: bool,
     show_log: bool,
-    segment_tracker: recording::SegmentTracker,
     active_recording_session: Option<ActiveRecordingSession>,
     pending_session_kind: Option<RecordingSessionKind>,
     pending_continue_start_tick: Option<u32>,
@@ -116,10 +119,13 @@ struct TasApp {
     /// abort log lines name the right one.
     cycle_arm: tas_shared::transport::Arm,
     log_read_cursor: u32,
-    /// Finish-line watcher: scan cursor into rec_coords during REC so
-    /// each frame only examines new ticks, and the tick the run crossed the
-    /// finish (drives the auto-stop + the 🏁 marker; reset when REC starts).
-    finish_scan_cursor: u32,
+    /// Finish-line watcher: the DLL's finish count when REC started, and the
+    /// tick the run finished in (drives the auto-stop + the 🏁 marker; reset
+    /// when REC starts).
+    finish_seq_seen: u32,
+    /// A cycle took `finish_seq_seen` when it started; the REC it arms keeps
+    /// it (the controller may be gone by the time the UI sees REC).
+    finish_baseline_armed: bool,
     finished_at_tick: Option<u32>,
     /// The HUD race time latched when the crossing was detected. Re-reading
     /// the live timer at STOP is unreliable: it may have blanked or moved.
@@ -162,13 +168,13 @@ struct TasApp {
     /// been seen yet: the coming frame-counter regression only restarts the
     /// ring, it must not reset (and cancel) whatever started in between.
     expect_ring_restart: Option<u32>,
-    /// When `cont_suppress_input` was first seen set with the DLL idle and no
-    /// cycle of ours in flight, plus the arm generation at that moment. The
-    /// flag is released only after it has stayed that way for the grace
-    /// period — a harness cycle's restart/settle phase legitimately holds it
-    /// in OFF for a couple of seconds, and must not lose it to a UI that
-    /// happens to connect then.
-    stale_protection_since: Option<(std::time::Instant, u32)>,
+    /// Why the last game process ended, when it crashed or vanished; shown
+    /// until dismissed.
+    game_exit_banner: Option<String>,
+    /// The game process whose exit has been reported.
+    game_exit_reported_pid: Option<u32>,
+    /// The DLL's crash_seq already shown for the live game.
+    crash_seq_seen: u32,
     // Crash recovery
     last_frame_count: u32,
     stale_frame_ticks: u32,
@@ -267,6 +273,7 @@ impl TasApp {
             loaded_physics: None,
             loaded_rider: None,
             loaded_identity: None,
+            loaded_level: None,
             history_cap,
             recovery_store,
             recovery_writer: recording::RecoveryWriter::new(),
@@ -281,7 +288,6 @@ impl TasApp {
             playback_speed: normalize_playback_speed(settings.playback_speed),
             show_history: settings.show_history,
             show_log: settings.show_log,
-            segment_tracker: recording::SegmentTracker::new(),
             active_recording_session: None,
             pending_session_kind: None,
             pending_continue_start_tick: None,
@@ -290,7 +296,8 @@ impl TasApp {
             cont_catchup_multiplier: settings.cont_catchup_speed,
             cycle_arm: tas_shared::transport::Arm::Continue,
             log_read_cursor: 0,
-            finish_scan_cursor: 0,
+            finish_seq_seen: 0,
+            finish_baseline_armed: false,
             finished_at_tick: None,
             finished_hud_cs: None,
             drift_tracker: drift_scan::DriftTracker::default(),
@@ -302,7 +309,9 @@ impl TasApp {
             game_pid_cached: None,
             game_pid_seen: None,
             expect_ring_restart: None,
-            stale_protection_since: None,
+            game_exit_banner: None,
+            game_exit_reported_pid: None,
+            crash_seq_seen: 0,
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
@@ -346,8 +355,8 @@ impl TasApp {
         if recovered_checkpoint {
             app.clear_recovery_after_durable_persist();
         }
-        app.poll_stale_input_protection();
 
+        app.adopt_buffer_identity();
         if let Some(path) = std::env::var_os("SSB_INSPECT_E2E_RECORDING") {
             let setup = (|| -> Result<(), String> {
                 if std::env::var_os("SSB_INSPECT_DATA_DIR").is_none() {
@@ -375,24 +384,21 @@ impl TasApp {
             return Err("Game must be stopped before UI fixture loading".into());
         }
         let metadata = recording::RecordingFile::read_metadata(path)?;
-        if splice == 0 || splice > metadata.recorded_count {
+        if splice > metadata.recorded_count {
             return Err("Splice outside recording".into());
         }
         tas_shared::level::check_recording_matches_live(
             &path.to_string_lossy(),
             shared.state().level_id,
         )?;
-        if !recording::load_recording_path(
-            shared.state_mut(),
-            &mut self.segment_tracker,
-            &mut self.log_lines,
-            path,
-        ) {
+        if !recording::load_recording_path(shared.state_mut(), &mut self.log_lines, path) {
             return Err("Could not load UI fixture".into());
         }
         self.loaded_physics = metadata.physics_label();
         self.loaded_rider = metadata.rider_label();
         self.loaded_identity = Some(recording::IdentityStamps::from_metadata(&metadata));
+        self.loaded_level =
+            tas_shared::level::code_from_recording_name(&path.to_string_lossy()).map(Into::into);
         self.history.push_loaded_snapshot(
             shared.state(),
             path,
@@ -418,10 +424,27 @@ impl TasApp {
                 // sample as an advance (transport gate false-positive).
                 self.cycle_fc_seeded = false;
                 self.push_log("Connected to TAS_Helper.dll shared memory");
-                self.poll_stale_input_protection();
+                self.adopt_buffer_identity();
             }
             Err(e) => self.connect_error = Some(e),
         }
+    }
+
+    /// A UI opened on a take the DLL kept knows none of its stamps (track,
+    /// rider, input model, edit limit). When the take is the current history
+    /// entry's, take that entry's.
+    fn adopt_buffer_identity(&mut self) {
+        if self.loaded_identity.is_some() {
+            return;
+        }
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        if !self.history.current_holds(shared.state()) {
+            return;
+        }
+        self.note_restored_physics();
+        self.push_log("The game's take is the selected history entry: using its stamps");
     }
 
     /// After a history restore: remember the entry's physics-mode stamp for
@@ -463,6 +486,11 @@ impl TasApp {
         }
         self.loaded_rider = rider;
         self.loaded_identity = self.history.entries().get(idx).map(|e| e.stamps.clone());
+        self.loaded_level = self
+            .history
+            .entries()
+            .get(idx)
+            .and_then(|e| e.level.clone());
     }
 
     fn push_log(&mut self, msg: &str) {
@@ -552,7 +580,6 @@ impl TasApp {
                     recording::RecordingSnapshot::from_state(s.state()),
                 )
             }) {
-                self.segment_tracker.on_rec_stop(recorded);
                 self.finalize_recording_session(&snap, recorded);
             }
         }
@@ -560,7 +587,7 @@ impl TasApp {
         // A fresh recording is about to load — clear the finish-flag marker.
         self.finished_at_tick = None;
         self.finished_hud_cs = None;
-        self.finish_scan_cursor = 0;
+        self.finish_seq_seen = self.live_finish_seq();
         // Re-read the live level: the callers' level filter was read at frame
         // start, before the wait above, and every caller is about to overwrite
         // the buffer. A track change during the wait must not let another
@@ -613,7 +640,7 @@ impl TasApp {
 
     /// The track a recording being saved right now belongs to: the live level if
     /// we have it, else the last one we were confidently on. See
-    /// [`recording::save_dialog_with_segments`] for why this is not read live.
+    /// [`recording::save_dialog`] for why this is not read live.
     fn level_for_save(&self) -> Option<&str> {
         crate::level::level_for_save(
             self.shared
@@ -732,7 +759,26 @@ impl TasApp {
             None => return,
         };
         let total = shared.state().recorded_count;
+        let len = (total as usize).min(shared.state().input_log.len());
+        let before = shared.state().input_log[..len].to_vec();
         input_script::apply_events_to_log(&mut shared.state_mut().input_log, total, &events);
+        // Past the first changed tick the recorded trajectory is stale, so
+        // the take's watcher must stop there.
+        let first_changed = before
+            .iter()
+            .zip(shared.state().input_log[..len].iter())
+            .position(|(a, b)| a != b);
+        if let Some(tick) = first_changed {
+            let tick = tick as u32;
+            let model = shared.state().input_model;
+            let identity = self
+                .loaded_identity
+                .get_or_insert_with(|| recording::IdentityStamps {
+                    input_model: Some(model),
+                    ..Default::default()
+                });
+            identity.trajectory_ticks = Some(identity.trajectory_limit().min(tick));
+        }
         if commit {
             let snapshot = recording::RecordingSnapshot::from_state(shared.state());
             // end_tick = 0 routes through the history panel's label parser so
@@ -808,8 +854,10 @@ impl TasApp {
         if self.shared.is_some() {
             let pid = win32::find_supreme_pid();
             self.on_game_pid_observed(pid);
+            if let Some(pid) = pid {
+                self.poll_crash_record(pid);
+            }
         }
-        self.poll_stale_input_protection();
 
         if let Some(ref shared) = self.shared {
             let current_frame = shared.frame_count_volatile();
@@ -862,12 +910,8 @@ impl TasApp {
             return;
         }
         if let Some(shared) = self.shared.as_mut() {
-            let loaded = recording::load_recording_path(
-                shared.state_mut(),
-                &mut self.segment_tracker,
-                &mut self.log_lines,
-                &path,
-            );
+            let loaded =
+                recording::load_recording_path(shared.state_mut(), &mut self.log_lines, &path);
             if loaded {
                 // The file's stamp (load_recording_path already logged a
                 // mismatch warning); the chip shows it next to the live mode.
@@ -875,6 +919,9 @@ impl TasApp {
                 self.loaded_physics = meta.as_ref().and_then(|m| m.physics_label());
                 self.loaded_rider = meta.as_ref().and_then(|m| m.rider_label());
                 self.loaded_identity = meta.as_ref().map(recording::IdentityStamps::from_metadata);
+                self.loaded_level =
+                    tas_shared::level::code_from_recording_name(&path.to_string_lossy())
+                        .map(Into::into);
                 let _ = self.history.push_loaded_snapshot(
                     shared.state(),
                     &path,
@@ -921,6 +968,7 @@ impl eframe::App for TasApp {
         shortcut_actions.extend(self.poll_global_shortcuts());
 
         self.show_menu_bar(ctx);
+        self.show_game_exit_banner(ctx);
         self.show_log_panel(ctx);
         if self.show_connection_error(ctx) {
             return;
@@ -988,7 +1036,7 @@ impl TasApp {
     }
 
     fn track_mode_transitions(&mut self) {
-        // Track mode transitions for segment history + recovery checkpoints.
+        // Track mode transitions for history sessions + recovery checkpoints.
         let mode_probe = self.shared.as_ref().map(|shared| {
             (
                 shared.mode_volatile(),
@@ -997,6 +1045,15 @@ impl TasApp {
             )
         });
         if let Some((current_mode, recorded, continue_from)) = mode_probe {
+            // A CONT just spliced: before anything snapshots the new take.
+            if current_mode == 1
+                && self.last_mode != 1
+                && self.pending_session_kind == Some(RecordingSessionKind::Continue)
+            {
+                // The DLL clears continue_from_frame once it splices.
+                let splice = self.pending_continue_start_tick.unwrap_or(continue_from);
+                self.adopt_replayed_prefix(splice);
+            }
             // The snapshot copies ~850 KB (full input_log + rec_coords). Only a
             // live REC (recovery checkpoints) or a REC that just ended (history
             // entry) consumes it, so build it only then rather than every frame.
@@ -1021,26 +1078,35 @@ impl TasApp {
                         .shared
                         .as_ref()
                         .map(|s| recording::IdentityStamps::from_live(s.state()));
+                    self.loaded_level = self
+                        .shared
+                        .as_ref()
+                        .and_then(|s| tas_shared::resolved_level_id(s.state()))
+                        .and_then(tas_shared::level::code_from_id)
+                        .map(Into::into);
                     self.log_cont_resume_summary();
                     self.clear_cont_catchup();
                     // Splice fired (or REC began). This handler runs before
                     // step_cycle, so REC can be seen before the controller
                     // reports Done. Drop it here, and release
                     // cont_suppress_input: the resumed REC records live input.
-                    if self.cycle.take().is_some() {
+                    if let Some(mut cycle) = self.cycle.take() {
+                        if let Some(shared) = self.shared.as_mut() {
+                            cycle.release(shared);
+                        }
                         self.cycle_deadline = None;
                         self.set_cont_suppress_input(false);
                     }
-                    // Fresh finish-line watch. A CONT resumes mid-run, so scan
-                    // from the resume tick; the prefix was checked when it was
-                    // recorded.
-                    self.finish_scan_cursor = continue_from.max(1);
+                    // Fresh finish-line watch. A cycle took its baseline
+                    // when it started; a REC with no cycle takes it now.
+                    if !std::mem::take(&mut self.finish_baseline_armed) {
+                        self.finish_seq_seen = self.live_finish_seq();
+                    }
                     self.finished_at_tick = None;
                     self.finished_hud_cs = None;
                 }
                 // REC stopped (mode went from REC to OFF)
                 if self.last_mode == 1 && current_mode == 0 {
-                    self.segment_tracker.on_rec_stop(recorded);
                     if let Some(snap) = state_snapshot.as_ref() {
                         self.finalize_recording_session(snap, recorded);
                     }
@@ -1052,59 +1118,68 @@ impl TasApp {
                     self.update_recording_recovery_progress(snap);
                 }
 
-                self.watch_finish_line(recorded);
+                self.watch_finish_line();
             }
         }
     }
 
-    fn watch_finish_line(&mut self, recorded: u32) {
-        // Finish-line watch: stop REC when the run crosses the finish
-        // line, since the run-out is never wanted. Only ticks since
-        // the last frame are scanned.
-        if self.finished_at_tick.is_none() {
-            let resolved_geometry = self
-                .shared
-                .as_ref()
-                .and_then(|sh| tas_shared::resolved_level_id(sh.state()))
-                .and_then(crate::level::level_code_from_id)
-                .is_some();
-            let cross = self.shared.as_ref().and_then(|shared| {
-                let s = shared.state();
-                // Resolved level only: a stale id would test the run
-                // against another track's finish line. Unresolved
-                // means no crossing is claimed, the safe direction.
-                crate::start_line::finish_cross_tick(
-                    &s.rec_coords,
-                    recorded,
-                    tas_shared::resolved_level_id(s).and_then(crate::level::level_code_from_id),
-                    self.finish_scan_cursor,
-                )
-            });
-            // Advance only past ticks actually scanned; with no
-            // geometry, advancing would skip a crossing permanently.
-            if resolved_geometry {
-                self.finish_scan_cursor = recorded.max(1);
-            }
-            if let Some(tick) = cross {
-                self.finished_at_tick = Some(tick);
-                // Latch the HUD time in the same poll that saw the
-                // crossing, as one coherent pair read.
-                self.finished_hud_cs = self
-                    .shared
-                    .as_ref()
-                    .map(|s| tas_shared::race_pair(s.state()).0)
-                    .filter(|&cs| cs != u32::MAX);
-                let hud = self
-                    .finished_hud_cs
-                    .map(|cs| format!(" (race time {})", recording::format_recording_duration(cs)))
-                    .unwrap_or_default();
-                self.log_lines.push(format!(
-                    "\u{1F3C1} Finish line crossed at tick {}{} — recording stopped",
-                    tick, hud
-                ));
-                self.apply_transport_action(transport::Action::Send(TasCommand::Stop));
-            }
+    pub(crate) fn live_finish_seq(&self) -> u32 {
+        self.shared
+            .as_ref()
+            .and_then(|s| tas_shared::race_clock::race_finish(s.state()))
+            .map_or(0, |f| f.seq)
+    }
+
+    /// Finish-line watch: stop REC when the rider finishes, since the
+    /// run-out is never wanted. The finish comes from the game's own
+    /// Finish_Point, through the DLL.
+    fn watch_finish_line(&mut self) {
+        if self.finished_at_tick.is_some() {
+            return;
         }
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        let state = shared.state();
+        let Some(finish) = tas_shared::race_clock::race_finish(state) else {
+            return;
+        };
+        if finish.seq == self.finish_seq_seen || finish.mode != TasMode::Rec as u32 {
+            return;
+        }
+        self.finished_at_tick = Some(finish.tick);
+        self.finished_hud_cs = Some(tas_shared::race_clock::hud_cs(
+            finish.seconds,
+            tas_shared::race_clock::extended_precision(state.fpu_control_word),
+        ));
+        let time = match self.finished_hud_cs {
+            Some(cs) if finish.valid => {
+                format!(" (race time {})", recording::format_recording_duration(cs))
+            }
+            _ => " (a checkpoint was missed: no official time)".to_string(),
+        };
+        if !finish.valid {
+            self.finished_hud_cs = None;
+        }
+        self.log_lines.push(format!(
+            "\u{1F3C1} Finished at tick {}{} — recording stopped",
+            finish.tick, time
+        ));
+        self.apply_transport_action(transport::Action::Send(TasCommand::Stop));
+    }
+
+    fn show_game_exit_banner(&mut self, ctx: &egui::Context) {
+        let Some(banner) = self.game_exit_banner.clone() else {
+            return;
+        };
+        egui::TopBottomPanel::top("game_exit_banner").show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(egui::Color32::from_rgb(255, 100, 100), banner);
+                if ui.button("Dismiss").clicked() {
+                    self.game_exit_banner = None;
+                }
+            });
+        });
     }
 
     fn show_menu_bar(&mut self, ctx: &egui::Context) {
@@ -1116,9 +1191,8 @@ impl TasApp {
                         ui.close_menu();
                         let level = self.level_for_save().map(str::to_string);
                         if let Some(shared) = self.shared.as_ref() {
-                            if let Some(path) = recording::save_dialog_with_segments(
+                            if let Some(path) = recording::save_dialog(
                                 shared.state(),
-                                &self.segment_tracker.segments,
                                 &mut self.log_lines,
                                 level.as_deref(),
                                 self.loaded_identity.as_ref(),
@@ -1467,6 +1541,8 @@ impl TasApp {
                 self.apply_transport_action(cmd);
             }
 
+            // The take's track, for the timeline's game-clock origin below.
+            let take_level = self.buffer_level();
             if let Some(ref mut shared) = self.shared {
                 // Re-assert playback_speed every frame. During a CONT catch-up
                 // it is the catch-up multiplier, and continuous re-assertion
@@ -1505,14 +1581,16 @@ impl TasApp {
 
                 let open_text_script =
                     status::timeline_header(ui, state, self.script_watch.is_some());
-                // Keep the game-clock origin after the course unloads. The
-                // selected history entry describes the recording itself and
-                // is therefore a better fallback than the current menu state.
-                let timeline_level = self
-                    .history
-                    .current_index()
-                    .and_then(|i| self.history.entries().get(i))
-                    .and_then(|entry| entry.level.as_deref())
+                // The game-clock origin is the take's track, which can differ
+                // from the live one. The selected history entry and the last
+                // known track are fallbacks once the course unloads.
+                let timeline_level = take_level
+                    .as_deref()
+                    .or(self
+                        .history
+                        .current_index()
+                        .and_then(|i| self.history.entries().get(i))
+                        .and_then(|entry| entry.level.as_deref()))
                     .or(self.last_resolved_level.as_deref());
                 let tl_outcome = timeline::show(
                     ui,
@@ -1537,8 +1615,8 @@ impl TasApp {
                 if open_text_script {
                     let total = state.recorded_count;
                     let events = input_script::runs_from_log(&state.input_log, total);
-                    let timer = tas_shared::align::detect_first_moving(&state.rec_coords, total)
-                        .unwrap_or(0);
+                    // Where the game's race clock reads zero, as on the timeline.
+                    let timer = timeline::game_timer_anchor(state, timeline_level);
                     let script = input_script::events_to_script(&events, timer);
                     let path = script_watch::ScriptWatch::fresh_path();
                     match std::fs::write(&path, &script) {
@@ -1584,7 +1662,11 @@ impl TasApp {
                     self.drift_tracker.max_dz,
                     self.drift_tracker.splice_tick,
                 );
-                let (count, reset) = self.drift_tracker.scan(state);
+                let trajectory_ticks = self
+                    .loaded_identity
+                    .as_ref()
+                    .map_or(u32::MAX, recording::IdentityStamps::trajectory_limit);
+                let (count, reset) = self.drift_tracker.scan_up_to(state, trajectory_ticks);
                 if reset {
                     self.last_logged_drift_level = 0;
                 }
@@ -1768,6 +1850,8 @@ mod tests {
             fpu_control_word: Some(0x007F),
             rider_character: Some(TAS_CHARACTER_VINCENT),
             rider_stance: Some(0),
+            input_model: None,
+            trajectory_ticks: None,
         });
         // A Keith/OpenGL file is loaded: the buffer and its history entry
         // carry the file's stamps, not the live game's.
@@ -1778,6 +1862,8 @@ mod tests {
             fpu_control_word: Some(0x027F),
             rider_character: Some(TAS_CHARACTER_KEITH),
             rider_stance: Some(0),
+            input_model: None,
+            trajectory_ticks: None,
         };
         assert!(app.history.push_loaded_snapshot(
             &file_state,
@@ -1791,13 +1877,7 @@ mod tests {
         assert_eq!(app.loaded_identity, Some(keith.clone()));
         let path =
             std::env::temp_dir().join(format!("identity_chain_{}.tasrec", std::process::id()));
-        recording::RecordingFile::save_with_segments(
-            &file_state,
-            &path,
-            &[],
-            app.loaded_identity.as_ref(),
-        )
-        .unwrap();
+        recording::RecordingFile::save(&file_state, &path, app.loaded_identity.as_ref()).unwrap();
         let meta = recording::RecordingFile::read_metadata(&path).unwrap();
         assert_eq!(meta.renderer.as_deref(), Some("OpenGL"));
         assert_eq!(meta.character.as_deref(), Some("Keith"));
@@ -1811,6 +1891,140 @@ mod tests {
         ));
         assert_eq!(app.history.entries().last().unwrap().stamps, keith);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// An input edit cuts the take's judged trajectory at its first changed
+    /// tick; later edits only move it earlier. The history entry and the
+    /// PLAY watcher both get it.
+    #[test]
+    fn an_input_edit_limits_the_judged_trajectory() {
+        use input_script::InputEvent;
+        let mut app = test_app();
+        let mut shared = TasSharedMemoryClient::new_test_mapping();
+        shared.state_mut().recorded_count = 100;
+        shared.state_mut().input_model = tas_shared::TAS_INPUT_MODEL_HELD;
+        shared.state_mut().input_log[30..60].fill(0x04);
+        app.shared = Some(shared);
+        let up = |start, end| InputEvent {
+            bit: 0x04,
+            start,
+            end,
+        };
+        let left = |start, end| InputEvent {
+            bit: 0x01,
+            start,
+            end,
+        };
+        let mut edit = |events: Vec<InputEvent>| {
+            app.pending_input_edit = Some((events, true, "edit".into()));
+            app.apply_pending_input_edit();
+            app.loaded_identity
+                .as_ref()
+                .and_then(|i| i.trajectory_ticks)
+        };
+        assert_eq!(edit(vec![up(30, 60), left(70, 80)]), Some(70));
+        assert_eq!(edit(vec![up(40, 60), left(70, 80)]), Some(30));
+        assert_eq!(edit(vec![up(40, 60), left(70, 90)]), Some(30));
+        assert_eq!(
+            app.loaded_identity.as_ref().and_then(|i| i.input_model),
+            Some(tas_shared::TAS_INPUT_MODEL_HELD),
+            "the stamp keeps the buffer's model"
+        );
+        assert_eq!(
+            app.history
+                .entries()
+                .last()
+                .unwrap()
+                .stamps
+                .trajectory_ticks,
+            Some(30)
+        );
+    }
+
+    /// A UI opened on the take the DLL kept takes the stamps of the history
+    /// entry holding it, edit limit and track included; another take gets
+    /// none.
+    #[test]
+    fn a_reopened_ui_takes_the_stamps_of_the_entry_holding_the_take() {
+        for same_take in [true, false] {
+            let mut app = test_app();
+            let mut entry_state = tas_shared::zeroed_boxed();
+            entry_state.recorded_count = 100;
+            entry_state.input_log[30..60].fill(0x04);
+            app.history.set_live_level(Some("FE"));
+            assert!(app.history.push_snapshot_data_with_session(
+                recording::RecordingSnapshot::from_state(&entry_state),
+                "Deleted D 60-70t",
+                0,
+                0,
+                Some(recording::IdentityStamps {
+                    input_model: Some(tas_shared::TAS_INPUT_MODEL_HELD),
+                    trajectory_ticks: Some(60),
+                    ..Default::default()
+                }),
+            ));
+            let mut shared = TasSharedMemoryClient::new_test_mapping();
+            shared.state_mut().recorded_count = 100;
+            shared.state_mut().input_log[30..60].fill(0x04);
+            if !same_take {
+                shared.state_mut().input_log[80] = 0x01;
+            }
+            app.shared = Some(shared);
+            app.loaded_identity = None;
+            app.adopt_buffer_identity();
+            let limit = app
+                .loaded_identity
+                .as_ref()
+                .and_then(|i| i.trajectory_ticks);
+            if same_take {
+                assert_eq!(limit, Some(60));
+                assert_eq!(app.loaded_level.as_deref(), Some("FE"));
+            } else {
+                assert_eq!(limit, None);
+                assert!(app.loaded_identity.is_none());
+            }
+        }
+    }
+
+    /// At a CONT splice the replayed prefix becomes the new take's
+    /// trajectory, so an edit before the splice leaves nothing stale.
+    #[test]
+    fn a_cont_splice_adopts_the_replayed_prefix() {
+        let mut app = test_app();
+        let mut shared = TasSharedMemoryClient::new_test_mapping();
+        let s = shared.state_mut();
+        s.recorded_count = 100;
+        for t in 0..100 {
+            s.rec_coords[t] = if t < 10 {
+                [1.0, 2.0, 3.0]
+            } else {
+                [t as f32, 0.0, 0.0]
+            };
+        }
+        // Live gate 12; the replay departs from the recording at gate+30.
+        s.gate_index = 12;
+        for k in 0..90 {
+            let y = if k < 30 { 0.0 } else { 1.0 };
+            s.play_coords[12 + k] = [(10 + k) as f32, y, 0.0];
+        }
+        // The splice fired: REC, and the DLL has cleared continue_from_frame.
+        s.mode = TasMode::Rec as u32;
+        s.continue_from_frame = 0;
+        app.shared = Some(shared);
+        app.last_mode = TasMode::Play as u32;
+        app.pending_session_kind = Some(RecordingSessionKind::Continue);
+        app.pending_continue_start_tick = Some(80);
+        app.track_mode_transitions();
+        let s = app.shared.as_ref().unwrap().state();
+        assert_eq!(s.rec_coords[5], [1.0, 2.0, 3.0], "spawn untouched");
+        assert_eq!(s.rec_coords[39], [39.0, 0.0, 0.0]);
+        assert_eq!(s.rec_coords[40], [40.0, 1.0, 0.0]);
+        assert_eq!(s.rec_coords[79], [79.0, 1.0, 0.0]);
+        assert_eq!(
+            s.rec_coords[80],
+            [80.0, 0.0, 0.0],
+            "REC's own part untouched"
+        );
     }
 
     #[test]
@@ -1864,10 +2078,12 @@ mod tests {
             loaded_physics: None,
             loaded_rider: None,
             loaded_identity: None,
+            loaded_level: None,
             history_cap: 64,
             recovery_store: None,
             log_lines: ui_log::UiLog::default(),
-            finish_scan_cursor: 0,
+            finish_seq_seen: 0,
+            finish_baseline_armed: false,
             finished_at_tick: None,
             finished_hud_cs: None,
             timeline_view: timeline::TimelineView::default(),
@@ -1880,7 +2096,6 @@ mod tests {
             playback_speed: 1.0,
             show_history: false,
             show_log: false,
-            segment_tracker: recording::SegmentTracker::new(),
             active_recording_session: None,
             pending_session_kind: None,
             pending_continue_start_tick: None,
@@ -1898,7 +2113,9 @@ mod tests {
             game_pid_cached: None,
             game_pid_seen: None,
             expect_ring_restart: None,
-            stale_protection_since: None,
+            game_exit_banner: None,
+            game_exit_reported_pid: None,
+            crash_seq_seen: 0,
             last_frame_count: 0,
             stale_frame_ticks: 0,
             last_health_check: std::time::Instant::now(),
@@ -1939,6 +2156,8 @@ mod tests {
                 continue_from_frame: 400,
                 gate_align_rec: 299,
                 max_retries: 1,
+                input_model: tas_shared::TAS_INPUT_MODEL_INJECTED,
+                trajectory_ticks: u32::MAX,
             }));
             app.resume_speed = Some(1.0);
             app.playback_speed = 256.0;
@@ -1992,5 +2211,67 @@ mod tests {
             state.rec_coords[i] = [i as f32, 0.0, i as f32];
         }
         state
+    }
+
+    fn finish(app: &mut TasApp, seq: u32, tick: u32, mode: TasMode, valid: bool, seconds: f32) {
+        let state = app.shared.as_mut().unwrap().state_mut();
+        state.race_finish_tick = tick;
+        state.race_finish_mode = mode as u32;
+        state.race_finish_valid = valid as u32;
+        state.race_finish_time_bits = seconds.to_bits();
+        state.fpu_control_word = 0x027F;
+        // The DLL's seqlock: even when stable, two steps per finish.
+        state
+            .race_finish_seq
+            .store(seq * 2, std::sync::atomic::Ordering::Release);
+    }
+
+    #[test]
+    fn only_a_rec_finish_after_rec_began_stops_the_take() {
+        let mut app = test_app();
+        app.shared = Some(TasSharedMemoryClient::new_test_mapping());
+        // A finish from before REC began (a CONT prefix's replay).
+        finish(&mut app, 1, 900, TasMode::Rec, true, 9.0);
+        app.finish_seq_seen = 1;
+        app.watch_finish_line();
+        assert_eq!(app.finished_at_tick, None);
+        // A replay's finish.
+        finish(&mut app, 2, 950, TasMode::Play, true, 9.5);
+        app.watch_finish_line();
+        assert_eq!(app.finished_at_tick, None);
+
+        finish(&mut app, 3, 5843, TasMode::Rec, true, 58.4262);
+        app.watch_finish_line();
+        assert_eq!(app.finished_at_tick, Some(5843));
+        assert_eq!(app.finished_hud_cs, Some(5842));
+        assert!(app
+            .log_lines
+            .lines()
+            .iter()
+            .any(|l| l.contains("Finished at tick 5843") && l.contains("0:58.42")));
+        assert_eq!(
+            app.shared.as_ref().unwrap().state().command,
+            TasCommand::Stop as u32
+        );
+
+        // Latched: a later finish doesn't move it.
+        finish(&mut app, 4, 7000, TasMode::Rec, true, 70.0);
+        app.watch_finish_line();
+        assert_eq!(app.finished_at_tick, Some(5843));
+    }
+
+    #[test]
+    fn a_finish_that_missed_a_checkpoint_has_no_official_time() {
+        let mut app = test_app();
+        app.shared = Some(TasSharedMemoryClient::new_test_mapping());
+        finish(&mut app, 1, 4000, TasMode::Rec, false, 40.0);
+        app.watch_finish_line();
+        assert_eq!(app.finished_at_tick, Some(4000));
+        assert_eq!(app.finished_hud_cs, None);
+        assert!(app
+            .log_lines
+            .lines()
+            .iter()
+            .any(|l| l.contains("a checkpoint was missed")));
     }
 }

@@ -3,8 +3,10 @@
 //! does not matter. tas_ui and tas_test share these helpers so both judge a
 //! replay on exactly the same criteria.
 
-/// Max restarts for an aligned-trajectory mismatch.
-pub const ALIGN_MAX_RETRIES: u32 = 30;
+/// Restarts allowed after an aligned-trajectory mismatch: none. A replay
+/// must match, so a divergence is a bug to report, not bad luck to retry
+/// (live-full: 84 watched replays, 0 rerolls).
+pub const ALIGN_MAX_RETRIES: u32 = 0;
 
 /// Frames past the gate the watcher checks bit-exact before `Matched` (capped
 /// at the splice for CONT). A replay exact through the settle can still veer
@@ -16,6 +18,28 @@ pub const ALIGN_VERIFY_FRAMES: u32 = 1024;
 /// [rec_gate - LEAD, rec_gate) is replaced by the gate mask, so the window is
 /// kept as narrow as the measured gate jitter (at most four cycles) allows.
 pub const GATE_ALIGN_PRE_GATE_LEAD: u32 = 8;
+
+/// "gate+N: recorded (x, y, z) vs replayed (x, y, z)" for a divergence at
+/// gate-relative frame `at`.
+pub fn describe_divergence(
+    play_coords: &[[f32; 3]],
+    rec_coords: &[[f32; 3]],
+    live_gate: u32,
+    rec_gate: u32,
+    at: u32,
+) -> String {
+    let get = |coords: &[[f32; 3]], i: u32| coords.get(i as usize).copied();
+    match (
+        get(rec_coords, rec_gate + at),
+        get(play_coords, live_gate + at),
+    ) {
+        (Some(r), Some(p)) => format!(
+            "gate+{at}: recorded ({}, {}, {}) vs replayed ({}, {}, {})",
+            r[0], r[1], r[2], p[0], p[1], p[2]
+        ),
+        _ => format!("gate+{at}"),
+    }
+}
 
 /// First frame index where `rec_coords` differs (bit-exact) from
 /// `rec_coords[0]`: when the recorded player leaves the spawn. `None` if it

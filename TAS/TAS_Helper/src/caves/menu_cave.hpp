@@ -6,6 +6,7 @@
 #include "../menu_model.hpp"
 #include "../rider_identity_parse.hpp"
 #include "../fpu_safe_hook.hpp"
+#include "../crash_report.hpp"
 #include <format>
 #include "menu_page.hpp"
 
@@ -117,11 +118,13 @@ inline void Clear() { Publish("", 0xFFFFFFFFu, ""); }
 using GetActiveComponent = uint32_t(__fastcall*)(uint32_t);
 using WantFocusFn = uint8_t(__fastcall*)(uint32_t);
 
-static bool ReadItem(uint32_t child, uint32_t focusedComp, MenuItem& it) {
+// The item's fields, and its Want_Focus slot once checked to point into the
+// UI images; 0 if it is not an item.
+static uint32_t ReadItemFields(uint32_t child, MenuItem& it) {
     __try {
-        if (child < 0x10000) return false;
+        if (child < 0x10000) return 0;
         const uint32_t vt = *(uint32_t*)child;
-        if (!g_imgMainMenu.Has(vt) && !g_imgUit.Has(vt)) return false;   // not a UIT component
+        if (!g_imgMainMenu.Has(vt) && !g_imgUit.Has(vt)) return 0;   // not a UIT component
         // A non-Button's +0x44 is off its end, so the text line is trusted
         // only if its vtable is SR_UIT's.
         const uint32_t tl = *(uint32_t*)(child + 0x44);
@@ -130,49 +133,65 @@ static bool ReadItem(uint32_t child, uint32_t focusedComp, MenuItem& it) {
         if (!hasLabel) it.label[0] = 0;
         if (!ReadMenuString(child + 0x10, it.name, sizeof it.name)) it.name[0] = 0;
         // An item has visible text or an ID_* name (the image arrows have no text).
-        if (!hasLabel && !IsIdLike(it.name)) return false;
-        // It must also accept focus: headline Labels carry ID_* names too.
-        // The slot must point into the UI images before it is called.
+        if (!hasLabel && !IsIdLike(it.name)) return 0;
         const uint32_t wantFocus = *(uint32_t*)(vt + 0x2C);
-        if (!g_imgMainMenu.Has(wantFocus) && !g_imgUit.Has(wantFocus)) return false;
-        if (!(((WantFocusFn)(uintptr_t)wantFocus)(child) & 1)) return false;
-        it.comp = child;
+        if (!g_imgMainMenu.Has(wantFocus) && !g_imgUit.Has(wantFocus)) return 0;
         it.enabled = *(uint8_t*)(child + 0x24);
         it.visible = *(uint8_t*)(child + 0x25);
-        it.focused = (child == focusedComp);
+        return wantFocus;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+static bool ReadItem(uint32_t child, uint32_t focusedComp, MenuItem& it) {
+    const uint32_t wantFocus = ReadItemFields(child, it);
+    if (!wantFocus) return false;
+    // It must also accept focus: headline Labels carry ID_* names too.
+    crash::ScopedGameCall call(TAS_GAME_CALL_MENU_FOCUS);
+    if (!(((WantFocusFn)(uintptr_t)wantFocus)(child) & 1)) return false;
+    it.comp = child;
+    it.focused = (child == focusedComp);
+    return true;
+}
+
+// Enumerates the focused item's container. False when nothing is focused
+// (a transition) or the container is unreadable.
+static uint32_t ActiveComponent(uint32_t uiMenu) {
+    crash::ScopedGameCall call(TAS_GAME_CALL_MENU_ACTIVE);
+    return ((GetActiveComponent)(uintptr_t)(g_mainMenuBase + 0x1A6B0))(uiMenu);
+}
+
+static bool ReadU32Guarded(uint32_t addr, uint32_t* out) {
+    __try {
+        *out = *(uint32_t*)addr;
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
 }
 
-// Enumerates the focused item's container. False when nothing is focused
-// (a transition) or the container is unreadable.
 static bool ReadMenu(uint32_t uiMenu, MenuSnapshot& out) {
     out = MenuSnapshot{};
     if (!uiMenu || !g_mainMenuBase) return false;
-    uint32_t comp = 0, begin = 0, end = 0;
-    __try {
-        auto fn = (GetActiveComponent)(uintptr_t)(g_mainMenuBase + 0x1A6B0);
-        comp = fn(uiMenu);
-        if (comp < 0x10000) return false;
-        const uint32_t parent = *(uint32_t*)(comp + 0xC);
-        if (parent < 0x10000) return false;
-        const uint32_t page = *(uint32_t*)(uiMenu + 0x10C);
+    uint32_t parent = 0, page = 0, begin = 0, end = 0;
+    const uint32_t comp = ActiveComponent(uiMenu);
+    if (comp < 0x10000) return false;
+    if (!ReadU32Guarded(comp + 0xC, &parent) || parent < 0x10000) return false;
+    if (!ReadU32Guarded(uiMenu + 0x10C, &page)) return false;
+    {
         // Get_Active_Component still returns the pause-menu item under an
         // "Are you sure?" modal; never expose or activate it.
+        crash::ScopedGameCall call(TAS_GAME_CALL_MENU_ACTIVE);
         if (!g_getModal || !menumodel::UnobscuredMenu(page, parent, g_getModal)) return false;
-        begin = *(uint32_t*)(parent + 0x2C);
-        end = *(uint32_t*)(parent + 0x30);
-        if (begin < 0x10000 || end < begin || (end - begin) > 0x1000) return false;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
     }
-    out.container = *(uint32_t*)(comp + 0xC);
+    if (!ReadU32Guarded(parent + 0x2C, &begin) || !ReadU32Guarded(parent + 0x30, &end)) return false;
+    if (begin < 0x10000 || end < begin || (end - begin) > 0x1000) return false;
+    out.container = parent;
     const uint32_t n = (end - begin) / 4;
     for (uint32_t i = 0; i < n && out.count < kMaxItems; i++) {
         uint32_t child = 0;
-        __try { child = *(uint32_t*)(begin + i * 4); } __except (EXCEPTION_EXECUTE_HANDLER) { break; }
+        if (!ReadU32Guarded(begin + i * 4, &child)) break;
         MenuItem it;
         if (!ReadItem(child, comp, it)) continue;
         if (it.focused) out.selector = out.count;
@@ -314,35 +333,43 @@ static uint32_t RunCommand(uint32_t uiMenu, uint32_t kind, const char* target, c
     if (screenCheck != TAS_MENU_RESULT_OK) return screenCheck;
     MenuSnapshot snap;
     if (!ReadMenu(uiMenu, snap)) return TAS_MENU_RESULT_NO_MENU;
+    MenuAction move = nullptr;
     switch (kind) {
-    case TAS_MENU_CMD_UP: g_up(uiMenu); return TAS_MENU_RESULT_OK;
-    case TAS_MENU_CMD_DOWN: g_down(uiMenu); return TAS_MENU_RESULT_OK;
-    case TAS_MENU_CMD_LEFT: g_left(uiMenu); return TAS_MENU_RESULT_OK;
-    case TAS_MENU_CMD_RIGHT: g_right(uiMenu); return TAS_MENU_RESULT_OK;
-    case TAS_MENU_CMD_TRIGGER: g_trigger(uiMenu); return TAS_MENU_RESULT_OK;
+    case TAS_MENU_CMD_UP: move = g_up; break;
+    case TAS_MENU_CMD_DOWN: move = g_down; break;
+    case TAS_MENU_CMD_LEFT: move = g_left; break;
+    case TAS_MENU_CMD_RIGHT: move = g_right; break;
+    }
+    if (move) {
+        crash::ScopedGameCall call(TAS_GAME_CALL_MENU_MOVE);
+        move(uiMenu);
+        return TAS_MENU_RESULT_OK;
+    }
+    switch (kind) {
+    case TAS_MENU_CMD_TRIGGER: {
+        crash::ScopedGameCall call(TAS_GAME_CALL_MENU_TRIGGER);
+        g_trigger(uiMenu);
+        return TAS_MENU_RESULT_OK;
+    }
     case TAS_MENU_CMD_ACTIVATE:
     case TAS_MENU_CMD_FOCUS: {
         const int i = menumodel::FindTarget(snap, target);
         if (i < 0) return TAS_MENU_RESULT_NOT_FOUND;
         if (!snap.items[i].enabled) return TAS_MENU_RESULT_DISABLED;
-        g_requestFocus(snap.items[i].comp, 1);
+        {
+            crash::ScopedGameCall call(TAS_GAME_CALL_MENU_FOCUS);
+            g_requestFocus(snap.items[i].comp, 1);
+        }
         // If focus did not land, Trigger would fire on the previous item.
-        auto active = (GetActiveComponent)(uintptr_t)(g_mainMenuBase + 0x1A6B0);
-        if (active(uiMenu) != snap.items[i].comp) return TAS_MENU_RESULT_NOT_FOCUSABLE;
-        if (kind == TAS_MENU_CMD_ACTIVATE) g_trigger(uiMenu);
+        if (ActiveComponent(uiMenu) != snap.items[i].comp) return TAS_MENU_RESULT_NOT_FOCUSABLE;
+        if (kind == TAS_MENU_CMD_ACTIVATE) {
+            crash::ScopedGameCall call(TAS_GAME_CALL_MENU_TRIGGER);
+            g_trigger(uiMenu);
+        }
         return TAS_MENU_RESULT_OK;
     }
     default:
         return TAS_MENU_RESULT_BAD_KIND;
-    }
-}
-
-// A page torn down since the agent's read faults here and answers FAULT.
-static uint32_t RunCommandGuarded(uint32_t uiMenu, uint32_t kind, const char* target, const char* screen) {
-    __try {
-        return RunCommand(uiMenu, kind, target, screen);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return TAS_MENU_RESULT_FAULT;
     }
 }
 
@@ -367,7 +394,7 @@ static bool ConsumeCommand(uint32_t uiMenu) {
         // Validate against the current page, not the one cached before the
         // last Change_Page.
         AdoptPendingPage();
-        const uint32_t result = RunCommandGuarded(uiMenu, kind, target, screen);
+        const uint32_t result = RunCommand(uiMenu, kind, target, screen);
         Answer(seq, result);
         // Ring log, not the file log: this runs inside the Execute hook.
         char msg[TAS_LOG_ENTRY_SIZE];
@@ -514,6 +541,11 @@ inline void Install(GameAddresses& /*addr*/, TasSharedState* state) {
     HANDLE t = CreateThread(nullptr, 0, InstallThread, nullptr, 0, nullptr);
     if (t) CloseHandle(t);
     else Log("Menu state: failed to start install thread");
+}
+
+// Initialization rollback; the install thread's hooks then do nothing.
+inline void Disable() {
+    g_state = nullptr;
 }
 
 }  // namespace menustate

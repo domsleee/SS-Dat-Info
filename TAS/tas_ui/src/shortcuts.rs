@@ -271,9 +271,8 @@ impl TasApp {
             // and the engine may be frozen in its own post-run dialog by now.
             let level = self.level_for_save().map(str::to_string);
             if let Some(shared) = self.shared.as_ref() {
-                if let Some(path) = recording::save_dialog_with_segments(
+                if let Some(path) = recording::save_dialog(
                     shared.state(),
-                    &self.segment_tracker.segments,
                     &mut self.log_lines,
                     level.as_deref(),
                     self.loaded_identity.as_ref(),

@@ -4,6 +4,7 @@
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
 #include "../input_gate.hpp"
+#include "key_handler_cave.hpp"
 #include <safetyhook.hpp>
 
 // The observer cave: gate on BB3B10 (HMG+3B10), the keyboard observer
@@ -12,8 +13,8 @@
 //   ecx = keyboard+0x18, args: keyIndex, pressed, Time.lo, Time.hi
 // The __fastcall detour takes a dummy EDX.
 //
-// Injected calls always pass. Real calls are blocked during a CONT and during
-// REC (unless paused); ESC always passes.
+// Injected calls always pass. Real calls are blocked during a CONT; ESC always
+// passes. (PLAY's block is in the key-handler cave; REC blocks nothing.)
 
 inline TasSharedState* g_observerCaveState = nullptr;
 static SafetyHookInline observerHook{};
@@ -40,7 +41,6 @@ void __fastcall Observer_Detour(void* ecx, void* edx, uint32_t keyIndex,
             return;
         }
 
-        bool gamePaused = (GetTickCount() - g_lastCycleMs) > 250;
         // Backstop to the key-handler cave's CONT block. Not pause-exempt:
         // the F5 reload stalls the cycle.
         if (s->cont_suppress_input && keyIndex != GameAddresses::KEY_ESC) {
@@ -48,11 +48,15 @@ void __fastcall Observer_Detour(void* ecx, void* edx, uint32_t keyIndex,
             return;
         }
 
-        // During REC only the cycle cave calls BB3B10. ESC (ki 0x48) and
-        // everything while paused pass, because the pause menu is
-        // observer-driven.
-        if (s->mode == MODE_REC
-            && keyIndex != GameAddresses::KEY_ESC && !gamePaused) {
+        // A running PLAY lets through the release of a key a take cannot
+        // hold (its press may have come in a menu). Queued, it would sit
+        // among the replay's events and, one event per Update, push one of
+        // them a tick later; applied here it leaves the queue alone. Not
+        // Escape: its press always gets through (pause, abort), and the
+        // pause menu must see it come up or the next Escape cannot resume.
+        if (s->mode == MODE_PLAY && (pressed & 0xFF) == 0 && keyIndex != GameAddresses::KEY_ESC &&
+            !heldkeys::IsTasCode(keyIndex) && !MenuPauseNow()) {
+            ClearHeldCode(keyIndex);
             s->bb3b10_block_count++;
             return;
         }

@@ -101,8 +101,17 @@ impl DriftTracker {
         self.last_count = 0;
     }
 
+    /// `scan_up_to` over the whole recording.
+    #[cfg(test)]
+    pub fn scan(&mut self, state: &TasSharedState) -> (usize, bool) {
+        self.scan_up_to(state, u32::MAX)
+    }
+
     /// Compare the pairs not scanned yet and update the maxima and the splice
     /// verdict. Returns `(pairs compared so far, everything was reset)`.
+    /// Only the first `trajectory_ticks` recording ticks are compared: past an
+    /// input edit the recorded trajectory is stale, so a difference there is
+    /// the edit's effect, not drift.
     ///
     /// Only X and Z are compared. The banner is a live "still on the recorded
     /// line" hint calibrated on the ground track (the captured
@@ -110,8 +119,10 @@ impl DriftTracker {
     /// because the certification harness must not pass a height-only
     /// regression on an identical ground track. The harness is the gate, this
     /// scan is the hint, so the two deliberately differ.
-    pub fn scan(&mut self, state: &TasSharedState) -> (usize, bool) {
+    pub fn scan_up_to(&mut self, state: &TasSharedState, trajectory_ticks: u32) -> (usize, bool) {
+        let limit = trajectory_ticks as usize;
         let (count, forced_reset) = self.window.update(state);
+        let count = count.min(limit.saturating_sub(self.window.bases().1));
         if forced_reset {
             self.clear_measurements();
         }
@@ -127,6 +138,7 @@ impl DriftTracker {
                 let splice = state.segment_start_frame as usize;
                 let played = state.playback_pos as usize;
                 if splice > 0
+                    && splice <= limit
                     && splice <= state.recorded_count as usize
                     && splice <= state.rec_coords.len()
                     && played > 0
@@ -168,7 +180,7 @@ impl DriftTracker {
         self.splice_dz = 0.0;
         self.splice_tick = None;
         let splice = state.continue_from_frame as usize;
-        if splice > rec_base && count >= splice - rec_base {
+        if splice > rec_base && splice <= limit && count >= splice - rec_base {
             let i = splice - rec_base - 1;
             let play = state.play_coords[play_base + i];
             let rec = state.rec_coords[rec_base + i];
@@ -262,6 +274,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Past an input edit the replay departs from the stale recording: no
+    /// drift, and no splice verdict for a splice beyond the edit.
+    #[test]
+    fn scan_stops_at_the_first_edited_tick() {
+        let mut state = tas_shared::zeroed_boxed();
+        state.mode = TasMode::Play as u32;
+        state.recorded_count = 20;
+        state.playback_pos = 20;
+        state.continue_from_frame = 15;
+        for i in 12..20usize {
+            state.play_coords[i] = [9.9, 0.0, 8.8];
+        }
+        let mut tracker = DriftTracker::default();
+        let (count, _) = tracker.scan_up_to(&state, 12);
+        assert_eq!(count, 12);
+        assert_eq!(tracker.max_drift(), 0.0);
+        assert_eq!(tracker.first_drift_tick, None);
+        assert_eq!(tracker.splice_tick, None);
+        let (count, _) = tracker.scan(&state);
+        assert_eq!(count, 20);
+        assert_eq!(tracker.first_drift_tick, Some(12));
     }
 
     #[test]

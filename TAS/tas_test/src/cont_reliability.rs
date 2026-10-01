@@ -324,9 +324,13 @@ fn restore_baseline(
     baseline_ticks: u32,
     baseline_input: &[u8],
     baseline_rec_coords: &[[f32; 3]],
+    baseline_model: u32,
 ) {
     let count = baseline_ticks as usize;
     let state = client.state_mut();
+    // A CONT's splice converts the take in place; the next cycle must replay
+    // the baseline in its own model.
+    state.input_model = baseline_model;
     state.input_log[..count].copy_from_slice(baseline_input);
     for i in count..TAS_MAX_TICKS {
         state.input_log[i] = 0;
@@ -592,6 +596,7 @@ pub fn run(
         }
 
         let (baseline_input, baseline_rec_coords) = snapshot_baseline(&client, baseline_ticks);
+        let baseline_model = client.state().input_model;
         let mut results = Vec::new();
         for i in 1..=iterations {
             println!("\n{}", "=".repeat(60));
@@ -603,6 +608,7 @@ pub fn run(
                 baseline_ticks,
                 &baseline_input,
                 &baseline_rec_coords,
+                baseline_model,
             );
             client.state_mut().playback_speed = speed;
             // The DLL drops to this speed atomically at the splice, so the

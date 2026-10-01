@@ -11,10 +11,12 @@
 // fpu_control_word; renderer_id (which srDD_*.dll sr.dll loaded) is set here.
 namespace renderer {
 
-inline uint32_t Detect() {
-    // The plugin cannot change at runtime; cache it to avoid the loader lock.
+// Cached, to keep the loader lock out of the cycle hook. An unknown result is
+// final only once a race runs (`settled`): at init sr.dll may not have loaded it.
+inline uint32_t Detect(bool settled = false) {
     static uint32_t s_cached = TAS_RENDERER_UNKNOWN;
-    if (s_cached != TAS_RENDERER_UNKNOWN) return s_cached;
+    static bool s_final = false;
+    if (s_cached != TAS_RENDERER_UNKNOWN || s_final) return s_cached;
     static const char* const kModules[] = {
         "srDD_DirectX6.dll",  // index + 1 = TasRendererId
         "srDD_DirectX7.dll",
@@ -28,6 +30,7 @@ inline uint32_t Detect() {
             return s_cached;
         }
     }
+    s_final = settled;
     return TAS_RENDERER_UNKNOWN;
 }
 
@@ -47,7 +50,7 @@ inline const char* Name(uint32_t id) {
 inline void Refresh(TasSharedState* s) {
     static uint32_t lastRenderer = 0xFFFFFFFFu;
     static uint32_t lastCw = 0xFFFFFFFFu;
-    const uint32_t id = Detect();
+    const uint32_t id = Detect(true);
     s->renderer_id = id;
     const uint32_t cw = s->fpu_control_word;
     if (cw == 0) return;  // not sampled yet

@@ -33,9 +33,12 @@ fn brush_end(t: i32, start: u32, total: u32) -> u32 {
     t.max((start + MIN_WINDOW) as i32).min(total as i32).max(0) as u32
 }
 
-/// Default window for a fresh view (ticks = 10ms, so 1500 ≈ 15s). Fitting the
-/// whole recording would render multi-minute runs as unreadable slivers.
-const DEFAULT_WINDOW: u32 = 1500;
+/// Default window (ticks = 10ms, so 6000 = 60s). Fitting the whole recording
+/// would render multi-minute runs as unreadable slivers.
+const DEFAULT_WINDOW: u32 = 6000;
+
+/// Pixels either side of a block that still belong to it, not to open space.
+const GRAB_MARGIN: f32 = 4.0;
 
 /// Shortest input a drag/box edit will produce (ticks).
 const MIN_LEN: u32 = 1;
@@ -60,9 +63,10 @@ pub fn format_game_time(tick: u32, timer_anchor: u32) -> String {
 
 /// Recording tick where the game's race timer reads zero. Track geometry is
 /// authoritative; first movement is the fallback for recordings on an
-/// unidentified level.
-pub fn game_timer_anchor(state: &TasSharedState, remembered_level: Option<&str>) -> u32 {
-    let level = crate::level::resolved_level_code(state).or(remembered_level);
+/// unidentified level. `take_level` is the recording's track; the live one
+/// is the fallback.
+pub fn game_timer_anchor(state: &TasSharedState, take_level: Option<&str>) -> u32 {
+    let level = take_level.or(crate::level::resolved_level_code(state));
     crate::start_line::start_cross_tick(&state.rec_coords, state.recorded_count, level)
         .or_else(|| tas_shared::align::detect_first_moving(&state.rec_coords, state.recorded_count))
         .unwrap_or(0)
@@ -77,12 +81,25 @@ fn row_index(bit: u8) -> Option<usize> {
 pub struct TimelineView {
     pub start: u32,
     pub end: u32,
+    /// The user zoomed, panned or fit. Until then the view keeps
+    /// DEFAULT_WINDOW, growing with a recording shorter than that.
+    chosen: bool,
 }
 
 impl TimelineView {
+    #[cfg(test)]
+    pub fn chosen(start: u32, end: u32) -> Self {
+        Self {
+            start,
+            end,
+            chosen: true,
+        }
+    }
+
     pub fn fit(&mut self, total: u32) {
         self.start = 0;
         self.end = total;
+        self.chosen = true;
     }
 
     fn span(&self) -> u32 {
@@ -95,10 +112,14 @@ impl TimelineView {
             self.end = 0;
             return;
         }
-        if self.end == 0 {
-            // Fresh view: open at a readable zoom, not whole-recording fit.
-            self.start = 0;
-            self.end = total.min(DEFAULT_WINDOW);
+        // A new or cut recording shorter than the chosen window starts over.
+        if total < self.span() {
+            self.chosen = false;
+        }
+        if !self.chosen {
+            let want = total.min(DEFAULT_WINDOW);
+            self.end = (self.start + want).min(total);
+            self.start = self.end - want;
             return;
         }
         if self.end > total {
@@ -121,6 +142,7 @@ impl TimelineView {
         if span <= 0.0 {
             return;
         }
+        self.chosen = true;
         let new_span = (span * factor).clamp(MIN_WINDOW.min(total) as f32, total as f32);
         let frac = ((cursor_tick - self.start as f32) / span).clamp(0.0, 1.0);
         let mut s = cursor_tick - frac * new_span;
@@ -142,6 +164,7 @@ impl TimelineView {
         if span <= 0.0 {
             return;
         }
+        self.chosen = true;
         let center = self.start as f32 + span / 2.0;
         let new_span = (span * factor).max(MIN_WINDOW as f32);
         let s = (center - new_span / 2.0).max(0.0);
@@ -150,6 +173,7 @@ impl TimelineView {
     }
 
     fn pan(&mut self, delta: i64, total: u32) {
+        self.chosen = true;
         let span = self.span() as i64;
         let mut s = self.start as i64 + delta;
         if s + span > total as i64 {
@@ -226,6 +250,10 @@ pub struct TimelineEdit {
     pub selected: Option<InputEvent>,
     work: Vec<InputEvent>,
     drag: Option<BlockDrag>,
+    /// A Start/End value being dragged: (the selected block, its new
+    /// extent). Applied on release, like a block drag; applied per frame, a
+    /// value passing another block of the same key would merge into it.
+    field: Option<(InputEvent, InputEvent)>,
 }
 
 /// What `show` wants the app to do this frame.
@@ -254,7 +282,7 @@ fn edit_action_label(mode: DragMode, orig: InputEvent, now: InputEvent) -> Strin
 pub fn show(
     ui: &mut egui::Ui,
     state: &TasSharedState,
-    remembered_level: Option<&str>,
+    take_level: Option<&str>,
     view: &mut TimelineView,
     continue_from: &mut u32,
     edit: &mut TimelineEdit,
@@ -269,7 +297,7 @@ pub fn show(
         return outcome;
     }
     view.clamp(total);
-    let timer_anchor = game_timer_anchor(state, remembered_level);
+    let timer_anchor = game_timer_anchor(state, take_level);
 
     let active_tick = active_timeline_tick(state);
     if let Some((pos, _)) = active_tick {
@@ -430,10 +458,12 @@ pub fn show(
         );
     }
 
+    let mut block_rects: Vec<egui::Rect> = Vec::new();
     if editable {
         // Editable: draw each run as an interactable block.
         let pxpt = bar_width / span_f;
         let work_len = edit.work.len();
+        block_rects.reserve(work_len);
         let mut edited = false;
         for i in 0..work_len {
             let ev = edit.work[i];
@@ -454,6 +484,7 @@ pub fn show(
                 egui::pos2(x1, y + row_height - 1.0),
             );
             painter.rect_filled(block, 1.0, color);
+            block_rects.push(block);
             if edit.selected == Some(ev) {
                 painter.rect_stroke(block, 1.0, egui::Stroke::new(1.5_f32, egui::Color32::WHITE));
             }
@@ -592,21 +623,23 @@ pub fn show(
         );
     }
 
-    // CONT marker: clicking empty lane area sets continue_from. Block widgets
-    // above capture clicks on blocks, so this only fires on empty space.
-    if response.clicked() || (response.dragged() && !editable) {
+    // CONT marker: a click on open lane space sets continue_from (read-only
+    // lanes also scrub by drag). The block widgets do not reliably take every
+    // press near a thin handle, so open space is decided here.
+    let lanes = egui::Rect::from_min_max(
+        egui::pos2(bar_left, rows_top),
+        egui::pos2(bar_left + bar_width, rows_bottom),
+    );
+    let block_gesture = edit.drag.is_some() || outcome.commit_undo;
+    if !block_gesture && (response.clicked() || (response.dragged() && !editable)) {
         if let Some(pos) = response.interact_pointer_pos() {
-            if pos.x >= bar_left
-                && pos.x <= bar_left + bar_width
-                && pos.y >= rows_top
-                && pos.y <= rows_bottom
-            {
-                let rel = ((pos.x - bar_left) / bar_width).clamp(0.0, 1.0);
-                let tick = view.start + (rel * span_f) as u32;
-                let frame = tick.min(total.saturating_sub(1));
-                if frame != *continue_from {
-                    *continue_from = frame;
-                    outcome.continue_changed = true;
+            if open_lane_space(pos, lanes, &block_rects) {
+                if let Some(tick) = lane_tick(pos, lanes, view.start, span_f) {
+                    let frame = tick.min(total.saturating_sub(1));
+                    if frame != *continue_from {
+                        *continue_from = frame;
+                        outcome.continue_changed = true;
+                    }
                 }
             }
         }
@@ -641,6 +674,21 @@ pub fn show(
     outcome
 }
 
+/// Inside the lanes and clear of every block by GRAB_MARGIN.
+fn open_lane_space(pos: egui::Pos2, lanes: egui::Rect, blocks: &[egui::Rect]) -> bool {
+    lanes.contains(pos)
+        && !blocks
+            .iter()
+            .any(|b| b.expand2(egui::vec2(GRAB_MARGIN, 0.0)).contains(pos))
+}
+
+fn lane_tick(pos: egui::Pos2, lanes: egui::Rect, view_start: u32, span: f32) -> Option<u32> {
+    lanes.contains(pos).then(|| {
+        let rel = ((pos.x - lanes.left()) / lanes.width()).clamp(0.0, 1.0);
+        view_start + (rel * span) as u32
+    })
+}
+
 /// The selected-input editor: key label, Start/End tick boxes, Delete.
 fn edit_controls(
     ui: &mut egui::Ui,
@@ -657,25 +705,39 @@ fn edit_controls(
         edit.selected = None;
         return;
     };
-    let mut ev = edit.work[idx];
+    let pending = edit
+        .field
+        .filter(|(orig, _)| *orig == sel)
+        .map(|(_, ev)| ev);
+    let mut ev = pending.unwrap_or(edit.work[idx]);
     let row = row_index(ev.bit).unwrap_or(0);
     let mut changed = false;
+    let mut dragging = false;
+    let mut released = false;
     let mut delete = false;
+    // Typed values apply on Enter or focus loss, dragged ones on release:
+    // never an intermediate value (typing "11500" once set a start of 1).
+    let mut field = |ui: &mut egui::Ui, value: &mut u32| {
+        let r = ui.add(
+            egui::DragValue::new(value)
+                .speed(1.0)
+                .update_while_editing(false),
+        );
+        changed |= r.changed();
+        dragging |= r.dragged();
+        released |= r.drag_stopped();
+    };
     ui.horizontal(|ui| {
         ui.colored_label(
             ROW_COLORS[row].1,
             format!("{} · press {}", ROW_LABELS[row], ROW_ACTIONS[row]),
         );
         ui.label("Start");
-        changed |= ui
-            .add(egui::DragValue::new(&mut ev.start).speed(1.0))
-            .changed();
+        field(ui, &mut ev.start);
         ui.weak("t");
         ui.monospace(format_game_time(ev.start, timer_anchor));
         ui.label("End");
-        changed |= ui
-            .add(egui::DragValue::new(&mut ev.end).speed(1.0))
-            .changed();
+        field(ui, &mut ev.end);
         ui.weak("t");
         ui.monospace(format_game_time(ev.end, timer_anchor));
         let length = ev.end.saturating_sub(ev.start);
@@ -686,7 +748,8 @@ fn edit_controls(
     });
 
     if delete {
-        let label = format!("Deleted {} {}-{}t", ROW_LABELS[row], ev.start, ev.end);
+        edit.field = None;
+        let label = format!("Deleted {} {}-{}t", ROW_LABELS[row], sel.start, sel.end);
         edit.work.remove(idx);
         edit.selected = None;
         outcome.events = Some(edit.work.clone());
@@ -694,13 +757,20 @@ fn edit_controls(
         outcome.action_label = Some(label);
         return;
     }
-    if changed {
+    if changed || released {
         // Clamp and keep start < end.
         ev.start = ev.start.min(total.saturating_sub(MIN_LEN));
         ev.end = ev.end.min(total);
         if ev.end <= ev.start {
             ev.end = (ev.start + MIN_LEN).min(total);
         }
+    }
+    if dragging && !released {
+        edit.field = Some((sel, ev));
+        return;
+    }
+    edit.field = None;
+    if (changed || released) && ev != sel {
         edit.work[idx] = ev;
         edit.selected = Some(ev);
         outcome.events = Some(edit.work.clone());
@@ -789,6 +859,7 @@ fn brush(
         if let Some(p) = l_resp.interact_pointer_pos() {
             let t = ((p.x - inner_left) / ppt).round() as i32;
             view.start = brush_start(t, view.end);
+            view.chosen = true;
         }
     }
     let r_resp = ui
@@ -798,6 +869,7 @@ fn brush(
         if let Some(p) = r_resp.interact_pointer_pos() {
             let t = ((p.x - inner_left) / ppt).round() as i32;
             view.end = brush_end(t, view.start, total);
+            view.chosen = true;
         }
     }
 }
@@ -878,6 +950,68 @@ fn active_timeline_tick(state: &TasSharedState) -> Option<(usize, ActiveTickMode
 mod tests {
     use super::*;
 
+    /// Typing a start applies once, on Enter. Applied per keystroke, the "1"
+    /// of "11500" set a start of 1 and swallowed every block of that key
+    /// before it (the log merges them).
+    #[test]
+    fn a_typed_start_applies_once_on_enter() {
+        let ctx = egui::Context::default();
+        let earlier = InputEvent {
+            bit: 0x02,
+            start: 100,
+            end: 200,
+        };
+        let block = InputEvent {
+            bit: 0x02,
+            start: 11561,
+            end: 11601,
+        };
+        let mut edit = TimelineEdit {
+            selected: Some(block),
+            work: vec![earlier, block],
+            ..Default::default()
+        };
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut outcome = TimelineOutcome::default();
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    edit_controls(ui, &mut edit, 20_000, 0, &mut outcome);
+                });
+            });
+            outcome
+        };
+        frame(vec![]);
+        // Tab focuses the Start field; clear it and type the new value.
+        let mut typing = vec![key(egui::Key::Tab)];
+        typing.extend(std::iter::repeat_with(|| key(egui::Key::Backspace)).take(8));
+        for c in ["1", "1", "5", "0", "0"] {
+            typing.push(egui::Event::Text(c.into()));
+        }
+        for event in typing {
+            let outcome = frame(vec![event]);
+            assert!(outcome.events.is_none(), "applied before Enter");
+        }
+        let outcome = frame(vec![key(egui::Key::Enter)]);
+        let moved = InputEvent {
+            start: 11500,
+            ..block
+        };
+        assert_eq!(outcome.events, Some(vec![earlier, moved]));
+        assert!(outcome.commit_undo);
+        assert_eq!(edit.selected, Some(moved));
+    }
+
     /// A recording shorter than MIN_WINDOW must not invert the handle bounds.
     #[test]
     fn brush_handles_survive_a_recording_shorter_than_the_min_window() {
@@ -944,7 +1078,7 @@ mod tests {
                 let mut state = zeroed_boxed();
                 state.recorded_count = 100;
                 state.input_log[20..60].fill(1);
-                let mut view = TimelineView { start: 0, end: 100 };
+                let mut view = TimelineView::chosen(0, 100);
                 let mut edit = TimelineEdit::default();
                 let mut from = 0;
                 let mut frame = |events| {
@@ -1002,14 +1136,20 @@ mod tests {
                     modifiers: egui::Modifiers::default(),
                 };
                 frame(vec![egui::Event::PointerMoved(press)]);
-                frame(vec![button(press, true)]);
+                assert!(!frame(vec![button(press, true)]).0.continue_changed);
                 for step in 1..=steps {
                     let pos = press + egui::vec2(20.0 * step as f32 / steps as f32, 0.0);
-                    assert!(!frame(vec![egui::Event::PointerMoved(pos)]).0.commit_undo);
+                    let (moved, _) = frame(vec![egui::Event::PointerMoved(pos)]);
+                    assert!(!moved.commit_undo);
+                    assert!(!moved.continue_changed, "a block edit must not move CONT");
                 }
                 let end = press + egui::vec2(25.0, 0.0);
                 let (result, _) = frame(vec![egui::Event::PointerMoved(end), button(end, false)]);
                 assert!(result.commit_undo, "release must commit exactly once");
+                assert!(
+                    !result.continue_changed,
+                    "releasing a block edit must not move CONT"
+                );
                 let expected = dragged_event(
                     &BlockDrag {
                         idx: 0,
@@ -1029,6 +1169,113 @@ mod tests {
                 assert!(!frame(vec![]).0.commit_undo);
             }
         }
+    }
+
+    /// Clicks and drags on an input block (select, resize, move) never move
+    /// the CONT line; a click on open lane space does. Near a block edge the
+    /// grab zone belongs to the block.
+    #[test]
+    fn cont_line_moves_only_on_open_lane_space() {
+        let ctx = egui::Context::default();
+        let mut state = zeroed_boxed();
+        state.recorded_count = 100;
+        state.input_log[20..60].fill(1); // LEFT held 20..60
+        let mut view = TimelineView::chosen(0, 100);
+        let mut edit = TimelineEdit::default();
+        let mut from = 0u32;
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut result = TimelineOutcome::default();
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 400.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        result = show(ui, &state, None, &mut view, &mut from, &mut edit);
+                    });
+                },
+            );
+            (result, output, from)
+        };
+        frame(vec![]);
+        let (_, output, _) = frame(vec![]);
+        let block = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Rect(r)
+                    if r.fill == ROW_COLORS[0].1 && (r.rect.height() - 10.0).abs() < 0.1 =>
+                {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .expect("rendered LEFT block");
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        macro_rules! click {
+            ($pos:expr) => {{
+                let pos: egui::Pos2 = $pos;
+                frame(vec![egui::Event::PointerMoved(pos)]);
+                let (a, _, _) = frame(vec![button(pos, true)]);
+                let (b, _, from) = frame(vec![button(pos, false)]);
+                frame(vec![]);
+                (a.continue_changed || b.continue_changed, from)
+            }};
+        }
+        // On the block: its body, both resize handles, and just outside an edge.
+        for pos in [
+            block.center(),
+            egui::pos2(block.left() + 1.0, block.center().y),
+            egui::pos2(block.right() - 1.0, block.center().y),
+            egui::pos2(block.right() + 2.0, block.center().y),
+        ] {
+            assert_eq!(
+                click!(pos),
+                (false, 0),
+                "click at {pos:?} on a block moved CONT"
+            );
+        }
+        // A resize grabbed just past the edge, the usual way an edge is taken.
+        let grab = egui::pos2(block.right() + 2.0, block.center().y);
+        frame(vec![egui::Event::PointerMoved(grab)]);
+        let mut moved_cont = frame(vec![button(grab, true)]).0.continue_changed;
+        for dx in [5.0, 10.0, 20.0] {
+            moved_cont |= frame(vec![egui::Event::PointerMoved(grab + egui::vec2(dx, 0.0))])
+                .0
+                .continue_changed;
+        }
+        let release = grab + egui::vec2(20.0, 0.0);
+        let (done, _, at) = frame(vec![button(release, false)]);
+        moved_cont |= done.continue_changed;
+        assert!(
+            !moved_cont,
+            "a drag started at a block edge moved CONT to {at}"
+        );
+        frame(vec![]);
+        // Open space: the empty RIGHT lane beside the block, and the LEFT lane
+        // well past the block's end.
+        let right_lane = egui::pos2(block.center().x, block.center().y + 12.0);
+        let (changed, at) = click!(right_lane);
+        assert!(
+            changed && at > 20 && at < 60,
+            "open-space click must move CONT (got {at})"
+        );
+        let past_block = egui::pos2(block.right() + 60.0, block.center().y);
+        let (changed, at) = click!(past_block);
+        assert!(
+            changed && at > 60,
+            "open-space click must move CONT (got {at})"
+        );
     }
 
     #[test]
@@ -1051,6 +1298,20 @@ mod tests {
     fn game_timer_keeps_track_anchor_when_live_level_is_unknown() {
         let mut state = zeroed_boxed();
         state.level_id = u32::MAX;
+        state.recorded_count = 3;
+        state.rec_coords[0] = [519.2, -1401.6, 53.6];
+        state.rec_coords[1] = [519.2, -1401.1, 99.0];
+        state.rec_coords[2] = [519.2, -1400.6, 100.0];
+
+        assert_eq!(game_timer_anchor(&state, Some("FE")), 2);
+    }
+
+    /// A take from another track keeps its own clock origin: an FE take
+    /// shown while the game is on VE still counts from FE's start line.
+    #[test]
+    fn game_timer_uses_the_take_track_over_the_live_one() {
+        let mut state = zeroed_boxed();
+        state.level_id = 6; // VE, resolved
         state.recorded_count = 3;
         state.rec_coords[0] = [519.2, -1401.6, 53.6];
         state.rec_coords[1] = [519.2, -1401.1, 99.0];
@@ -1093,83 +1354,73 @@ mod tests {
     fn view_clamp_snaps_uninit_to_fit() {
         let mut v = TimelineView::default();
         v.clamp(500);
-        assert_eq!(v, TimelineView { start: 0, end: 500 });
+        assert_eq!((v.start, v.end), (0, 500));
     }
 
     #[test]
     fn view_clamp_uninit_opens_at_default_zoom_for_long_recordings() {
         let mut v = TimelineView::default();
         v.clamp(60_000);
+        assert_eq!((v.start, v.end), (0, DEFAULT_WINDOW));
+    }
+
+    #[test]
+    fn default_view_grows_with_a_new_recording_until_the_user_zooms() {
+        let mut v = TimelineView::default();
+        v.clamp(10);
+        assert_eq!((v.start, v.end), (0, 10));
+        v.clamp(3000);
+        assert_eq!((v.start, v.end), (0, 3000));
+        v.clamp(10_000);
+        assert_eq!(v.span(), DEFAULT_WINDOW);
+
+        v.zoom_at(500.0, 0.5, 10_000);
+        let zoomed = v;
+        v.clamp(20_000);
+        assert_eq!(v, zoomed, "a chosen zoom stays as the recording grows");
+
+        v.clamp(20);
         assert_eq!(
-            v,
-            TimelineView {
-                start: 0,
-                end: DEFAULT_WINDOW
-            }
+            (v.start, v.end),
+            (0, 20),
+            "a new, shorter recording starts over"
         );
     }
 
     #[test]
     fn view_clamp_enforces_min_window() {
-        let mut v = TimelineView {
-            start: 100,
-            end: 110,
-        };
+        let mut v = TimelineView::chosen(100, 110);
         v.clamp(1000);
         assert!(v.span() >= MIN_WINDOW);
     }
 
     #[test]
     fn view_zoom_at_keeps_cursor_and_clamps() {
-        let mut v = TimelineView {
-            start: 0,
-            end: 1000,
-        };
+        let mut v = TimelineView::chosen(0, 1000);
         v.zoom_at(500.0, 0.5, 1000);
         assert!(v.span() < 1000);
         assert!(v.start < 500 && v.end > 500);
         v.zoom_at(500.0, 100.0, 1000);
-        assert_eq!(
-            v,
-            TimelineView {
-                start: 0,
-                end: 1000
-            }
-        );
+        assert_eq!(v, TimelineView::chosen(0, 1000));
     }
 
     #[test]
     fn view_zoom_center_shrinks_and_grows() {
-        let mut v = TimelineView {
-            start: 100,
-            end: 1100,
-        };
+        let mut v = TimelineView::chosen(100, 1100);
         v.zoom_center(0.8);
         assert!(v.span() < 1000);
-        let mut v2 = TimelineView {
-            start: 100,
-            end: 1100,
-        };
+        let mut v2 = TimelineView::chosen(100, 1100);
         v2.zoom_center(1.25);
         assert!(v2.span() > 1000);
     }
 
     #[test]
     fn view_pan_preserves_span_and_clamps() {
-        let mut v = TimelineView {
-            start: 100,
-            end: 200,
-        };
+        let mut v = TimelineView::chosen(100, 200);
         v.pan(-1000, 1000);
-        assert_eq!(v, TimelineView { start: 0, end: 100 });
+        assert_eq!(v, TimelineView::chosen(0, 100));
         v.pan(100000, 1000);
-        assert_eq!(
-            v,
-            TimelineView {
-                start: 900,
-                end: 1000
-            }
-        );
+        assert_eq!(v, TimelineView::chosen(900, 1000));
     }
 
     #[test]

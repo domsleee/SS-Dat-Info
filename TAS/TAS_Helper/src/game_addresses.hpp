@@ -88,18 +88,34 @@ struct GameAddresses {
         return ValidateCodeBytes(label, address, rebased, N);
     }
 
-    // Like ValidateCode, but also accepts a JMP (E9): Display_Config_Helper is
-    // injected first and inline-hooks the two HMG key handlers for its F5
-    // debounce. SafetyHook chains onto that hook.
+    // Like ValidateCode, but also accepts a JMP (E9) into Display_Config_Helper.dll:
+    // a helper build with the F5 debounce (branch render-distance-600) is
+    // injected first and inline-hooks the two HMG key handlers, and SafetyHook
+    // chains onto that hook. A jump anywhere else is an unknown hook: refuse it.
     template <size_t N>
     static bool ValidateCodeOrHooked(const char* label, const std::uint8_t* address,
                                      const std::uint8_t (&expected)[N]) {
-        if (address[0] == 0xE9) {
-            Log(std::format("{}: already inline-hooked by another module ({}); chaining",
-                            label, HexBytes(address, 5)));
-            return true;
+        if (address[0] != 0xE9) return ValidateCodeBytes(label, address, expected, N);
+        int32_t rel = 0;
+        std::memcpy(&rel, address + 1, sizeof(rel));
+        const std::uint8_t* target = address + 5 + rel;
+        HMODULE owner = nullptr;
+        char path[MAX_PATH] = {};
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(target), &owner) &&
+            GetModuleFileNameA(owner, path, MAX_PATH)) {
+            const char* slash = std::strrchr(path, '\\');
+            const char* name = slash ? slash + 1 : path;
+            if (_stricmp(name, "Display_Config_Helper.dll") == 0) {
+                Log(std::format("{}: already inline-hooked by {} ({}); chaining", label, name,
+                                HexBytes(address, 5)));
+                return true;
+            }
         }
-        return ValidateCodeBytes(label, address, expected, N);
+        Log(std::format("ERROR: {} is hooked by an unknown module (jump to {:p}, owner '{}')",
+                        label, static_cast<const void*>(target), path));
+        return false;
     }
 
     HMODULE exe = nullptr;   // Supreme.exe
@@ -138,10 +154,10 @@ struct GameAddresses {
     static constexpr uint32_t KEY_DOWN   = 0x39;
     static constexpr uint32_t KEY_LEFT   = 0x3A;
     static constexpr uint32_t KEY_RIGHT  = 0x3B;
-    static constexpr uint32_t KEY_JUMP   = 0x27;  // LCTRL
-    static constexpr uint32_t KEY_JUMP2  = 0x28;  // CTRL (duplicate)
-    static constexpr uint32_t KEY_SHIFT  = 0x24;  // SHIFT
-    static constexpr uint32_t KEY_SHIFT2 = 0x25;  // LSHIFT (duplicate)
+    static constexpr uint32_t KEY_JUMP   = 0x27;  // CTRL (what either Ctrl key sends)
+    static constexpr uint32_t KEY_JUMP2  = 0x28;  // LCTRL (only if VK_LCONTROL is posted)
+    static constexpr uint32_t KEY_SHIFT  = 0x24;  // SHIFT (what either Shift key sends)
+    static constexpr uint32_t KEY_SHIFT2 = 0x25;  // LSHIFT (only if VK_LSHIFT is posted)
     static constexpr uint32_t KEY_F5     = 0x58;  // restart race
     // The pause menu hears ESC through the BB3B10 broadcast, so the REC-mode
     // observer block must exempt it.
@@ -174,6 +190,21 @@ struct GameAddresses {
     // Stance, area and difficulty come from the setup object (setup_object.hpp).
     static constexpr uint32_t PLAYER_VTABLE_RVA = 0x169E10;        // .?AVPlayer@Supreme_Snowboarding@Housemarque@@
     static constexpr uint32_t GHOST_PLAYER_VTABLE_RVA = 0x169B74;  // .?AVGhost_Player@...
+    // Countdown object: float t at +0, 0 at the rider's reset, +0.01 per
+    // Player::Cycle (SG+0xA50D0); released once t > player_start_time.
+    static constexpr uint32_t PLAYER_COUNTDOWN_OFFSET = 0x154;
+    static constexpr uint32_t PLAYER_RACE_TIMER_OFFSET = 0xB8;
+    // Keyboard observer (TC_Kbd_Impl, vtable 0x46D8E8) held-key array:
+    // [[[[EXE+0x889C4]+0x14]+0x1AC]+0x38].
+    static constexpr uint32_t APP_STATE_PTR_RVA = 0x889C4;
+    static constexpr uint32_t APP_GAME_OFFSET = 0x14;
+    static constexpr uint32_t GAME_KEYBOARD_OBSERVER_OFFSET = 0x1AC;
+    static constexpr uint32_t OBSERVER_HELD_PTR_OFFSET = 0x38;
+    // Its vtable, and slot +0x24: flush every queued event into held[]
+    // (0x40FA40, no time check, no listeners).
+    static constexpr uint32_t OBSERVER_VTABLE_RVA = 0x6D8E8;
+    static constexpr uint32_t OBSERVER_FLUSH_RVA = 0xFA40;
+    static constexpr uint32_t OBSERVER_FLUSH_SLOT = 0x24;
     static constexpr uint32_t PLAYER_X = 0xF8;
     static constexpr uint32_t PLAYER_Y = 0xFC;
     static constexpr uint32_t PLAYER_Z = 0x100;

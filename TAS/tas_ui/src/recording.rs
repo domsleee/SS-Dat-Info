@@ -9,8 +9,8 @@ mod snapshot;
 #[cfg(test)]
 mod test_support;
 
-pub use dialogs::{load_recording_path, pick_recording_path, save_dialog_with_segments};
-pub use file::{IdentityStamps, RecordingFile, Segment, SegmentTracker};
+pub use dialogs::{load_recording_path, pick_recording_path, save_dialog};
+pub use file::{IdentityStamps, RecordingFile};
 pub use history::{HistoryEntry, HistoryEntryKind, RecordingHistory};
 pub use recovery::{RecoverySessionContext, RecoveryStore, RecoveryWriter};
 pub use snapshot::{PersistedSnapshot, RecordingSnapshot};

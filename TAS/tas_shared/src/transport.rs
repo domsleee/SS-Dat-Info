@@ -10,7 +10,8 @@
 //! (so the serialization invariants are checked without a running game).
 
 use crate::align::{check_aligned_trajectory, AlignVerdict};
-use crate::{TasCommand, TasMode};
+use crate::owner::OwnerAnswer;
+use crate::{TasCommand, TasMode, TAS_OWNER_ACQUIRE, TAS_OWNER_RELEASE};
 
 /// Which session to arm after the restart completes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,12 @@ pub struct ArmConfig {
     pub gate_align_rec: u32,
     /// Max restart retries for an aligned-trajectory mismatch.
     pub max_retries: u32,
+    /// TAS_INPUT_MODEL_* of the loaded take (ignored by REC).
+    pub input_model: u32,
+    /// Leading recording ticks whose trajectory the take's current input
+    /// produced; u32::MAX = all. An input edit cuts it at the first changed
+    /// tick: past it the recorded trajectory is stale, so the watcher stops.
+    pub trajectory_ticks: u32,
 }
 
 /// The few shared-memory operations the transport machine performs. Returns
@@ -67,6 +74,7 @@ pub trait TransportPort {
     fn gate_index(&self) -> u32;
     fn set_continue_from_frame(&mut self, frame: u32);
     fn set_gate_align_rec(&mut self, frame: u32);
+    fn set_input_model(&mut self, model: u32);
     fn set_playback_speed(&mut self, speed: f32);
     /// Monotonic counter the DLL bumps once per processed arm. Used to tell
     /// this attempt's replay state from the previous one's.
@@ -79,11 +87,21 @@ pub trait TransportPort {
     /// until this is written, so a starved or dead controller can never let an
     /// unchecked prefix be spliced.
     fn approve_cont_splice(&mut self);
+    /// Submit an ownership request (TAS_OWNER_ACQUIRE / RELEASE) for this
+    /// process; returns the sequence to wait on.
+    fn request_ownership(&mut self, kind: u32) -> u32;
+    /// The DLL's answer to request `seq`, once it has one.
+    fn ownership_answer(&self, seq: u32) -> Option<OwnerAnswer>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
+    /// Register this process as the owner before touching anything.
     Start,
+    /// Waiting for the DLL to answer the ownership request.
+    OwnWaitAck,
+    /// Owned: send the first stop.
+    Stop,
     /// Stop sent; wait until the cycle cave has consumed it and published MODE_OFF.
     StopWaitAck,
     /// Restart sent; waiting for restart_state == 2.
@@ -139,6 +157,10 @@ pub struct TransportController {
     /// mitigation applies - the harness calls
     /// `stop_competing_tas_ui_writer()` before it drives anything.
     arm_generation_at_arm: u32,
+    /// The pending ownership request's sequence.
+    owner_seq: u32,
+    /// Registered as the owner and not yet released.
+    owned: bool,
 }
 
 impl TransportController {
@@ -150,6 +172,8 @@ impl TransportController {
             retries_remaining,
             completed_via: CompletedVia::Unjudged,
             arm_generation_at_arm: 0,
+            owner_seq: 0,
+            owned: false,
         }
     }
 
@@ -158,6 +182,8 @@ impl TransportController {
     pub fn phase_name(&self) -> &'static str {
         match self.phase {
             Phase::Start => "Start",
+            Phase::OwnWaitAck => "OwnWaitAck (waiting for the DLL to register this controller)",
+            Phase::Stop => "Stop",
             Phase::StopWaitAck => "StopWaitAck (waiting for the cycle cave to consume Stop)",
             Phase::RestartWaitDone => "RestartWaitDone (waiting for the F5 restart)",
             Phase::ArmWaitAck => "ArmWaitAck (waiting for the DLL to take the arm)",
@@ -178,7 +204,12 @@ impl TransportController {
     pub fn needs_tight_polling(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Start | Phase::StopWaitAck | Phase::RestartWaitDone | Phase::ArmWaitAck
+            Phase::Start
+                | Phase::OwnWaitAck
+                | Phase::Stop
+                | Phase::StopWaitAck
+                | Phase::RestartWaitDone
+                | Phase::ArmWaitAck
         )
     }
 
@@ -186,8 +217,26 @@ impl TransportController {
         self.cfg.max_retries - self.retries_remaining
     }
 
-    /// Perform at most one transition. Never blocks/sleeps.
+    /// Perform at most one transition. Never blocks/sleeps. A terminal
+    /// outcome also releases ownership.
     pub fn step(&mut self, port: &mut impl TransportPort) -> StepOutcome {
+        let outcome = self.step_phase(port);
+        if self.is_terminal() {
+            self.release(port);
+        }
+        outcome
+    }
+
+    /// Give up ownership: a cancelled cycle calls this. The DLL clears the
+    /// live-input block with it. Idempotent.
+    pub fn release(&mut self, port: &mut impl TransportPort) {
+        if self.owned {
+            self.owned = false;
+            port.request_ownership(TAS_OWNER_RELEASE);
+        }
+    }
+
+    fn step_phase(&mut self, port: &mut impl TransportPort) -> StepOutcome {
         let rec = TasMode::Rec as u32;
         let play = TasMode::Play as u32;
         // Re-assert the catch-up speed on EVERY step: the in-process F5
@@ -196,6 +245,26 @@ impl TransportController {
         port.set_playback_speed(self.cfg.speed);
         match self.phase {
             Phase::Start => {
+                self.owner_seq = port.request_ownership(TAS_OWNER_ACQUIRE);
+                self.phase = Phase::OwnWaitAck;
+                // A port that answers at once goes straight on.
+                self.step_phase(port)
+            }
+            Phase::OwnWaitAck => match port.ownership_answer(self.owner_seq) {
+                None => StepOutcome::InProgress,
+                Some(OwnerAnswer::Owned) => {
+                    self.owned = true;
+                    self.phase = Phase::Stop;
+                    self.step_phase(port)
+                }
+                Some(answer) => {
+                    self.phase = Phase::Aborted;
+                    StepOutcome::Aborted {
+                        reason: format!("cannot drive the TAS: {answer}"),
+                    }
+                }
+            },
+            Phase::Stop => {
                 port.set_continue_from_frame(self.cfg.continue_from_frame);
                 // STOP also clears this in the DLL. Clear it here as part of
                 // the controller contract so even a delayed STOP cannot let
@@ -224,6 +293,7 @@ impl TransportController {
                 // The cycle cave reads these at ARM time — re-assert post-restart.
                 port.set_continue_from_frame(self.cfg.continue_from_frame);
                 port.set_gate_align_rec(self.cfg.gate_align_rec);
+                port.set_input_model(self.cfg.input_model);
                 // Snapshot the arm counter before the command goes out, so
                 // this attempt's arm is recognised however the polling lands.
                 self.arm_generation_at_arm = port.arm_generation();
@@ -276,10 +346,18 @@ impl TransportController {
                     };
                 }
                 let is_cont = self.cfg.arm == Arm::Continue;
-                if is_cont && self.cfg.continue_from_frame <= self.cfg.gate_align_rec {
-                    // Spliced inside the countdown: the boarder has not moved
-                    // yet, so the only thing to check is the spawn itself. The
-                    // DLL parks at the splice until approved.
+                // The trajectory can be judged up to the CONT splice (the DLL
+                // parks playback there until approved) and up to the first
+                // edited tick (the recording is stale past it).
+                let judge_end = if is_cont {
+                    self.cfg.continue_from_frame.min(self.cfg.trajectory_ticks)
+                } else {
+                    self.cfg.trajectory_ticks
+                };
+                if judge_end <= self.cfg.gate_align_rec {
+                    // Spliced or edited inside the countdown: the boarder has
+                    // not moved by then, so the only thing to check is the
+                    // spawn itself.
                     if pos == 0 {
                         return StepOutcome::InProgress;
                     }
@@ -298,18 +376,14 @@ impl TransportController {
                             Some(0),
                         );
                     }
-                    port.approve_cont_splice();
+                    if is_cont {
+                        port.approve_cont_splice();
+                    }
                     return self.finish(CompletedVia::Unjudged);
                 }
-                // CONT: the DLL parks playback at the splice until approved,
-                // so the watcher can only see the prefix up to it; cap the
-                // depth there or the verdict could never complete. PLAY is
-                // uncapped.
-                let max_depth_rel = if is_cont {
-                    self.cfg.continue_from_frame - self.cfg.gate_align_rec
-                } else {
-                    0
-                };
+                // Capped at judge_end: for CONT the verdict must be decidable
+                // from the prefix that exists before the splice.
+                let max_depth_rel = judge_end - self.cfg.gate_align_rec;
                 let verdict = check_aligned_trajectory(
                     port.play_coords(),
                     port.rec_coords(),
@@ -336,14 +410,19 @@ impl TransportController {
                         }
                         self.finish(CompletedVia::Matched)
                     }
-                    AlignVerdict::Diverged { at } => self.reroll(
-                        port,
-                        format!(
-                            "aligned trajectory mismatch at gate-relative frame {:?}",
-                            at
-                        ),
-                        at,
-                    ),
+                    AlignVerdict::Diverged { at } => {
+                        let detail = match at {
+                            Some(at) => crate::align::describe_divergence(
+                                port.play_coords(),
+                                port.rec_coords(),
+                                port.gate_index(),
+                                self.cfg.gate_align_rec,
+                                at,
+                            ),
+                            None => "an unknown frame".to_string(),
+                        };
+                        self.reroll(port, format!("replay diverged at {detail}"), at)
+                    }
                     AlignVerdict::CaptureFailed => self.reroll(
                         port,
                         "aligned trajectory capture was incomplete".to_string(),
@@ -393,9 +472,12 @@ impl TransportController {
         if self.retries_remaining == 0 {
             port.send_command(TasCommand::Stop);
             self.phase = Phase::Aborted;
-            return StepOutcome::Aborted {
-                reason: format!("{} after {} retries", detail, self.cfg.max_retries),
+            let reason = if self.cfg.max_retries == 0 {
+                format!("{detail}; a replay must match, so this is a TAS bug (not retried)")
+            } else {
+                format!("{} after {} retries", detail, self.cfg.max_retries)
             };
+            return StepOutcome::Aborted { reason };
         }
         self.retries_remaining -= 1;
         let attempt = self.cfg.max_retries - self.retries_remaining;
@@ -434,6 +516,11 @@ mod tests {
         /// Invariant tracker: Restart must NEVER be sent while mode != OFF.
         restart_while_not_off: bool,
         splice_approved: bool,
+        input_model: u32,
+        /// Ownership requests in order (TAS_OWNER_ACQUIRE / RELEASE).
+        owner_requests: Vec<u32>,
+        /// The DLL's answer to every request; None = answers Owned at once.
+        owner_answer: Option<Option<OwnerAnswer>>,
     }
 
     impl TransportPort for FakePort {
@@ -483,6 +570,9 @@ mod tests {
         fn set_gate_align_rec(&mut self, frame: u32) {
             self.gate_align_rec = frame;
         }
+        fn set_input_model(&mut self, model: u32) {
+            self.input_model = model;
+        }
         fn set_playback_speed(&mut self, speed: f32) {
             self.playback_speed = speed;
         }
@@ -491,6 +581,13 @@ mod tests {
         }
         fn capture_ok(&self) -> bool {
             self.capture_ok_flag
+        }
+        fn request_ownership(&mut self, kind: u32) -> u32 {
+            self.owner_requests.push(kind);
+            self.owner_requests.len() as u32
+        }
+        fn ownership_answer(&self, _seq: u32) -> Option<OwnerAnswer> {
+            self.owner_answer.unwrap_or(Some(OwnerAnswer::Owned))
         }
         fn approve_cont_splice(&mut self) {
             self.splice_approved = true;
@@ -504,6 +601,8 @@ mod tests {
             continue_from_frame: if arm == Arm::Continue { 320 } else { 0 },
             gate_align_rec: 0,
             max_retries,
+            input_model: crate::TAS_INPUT_MODEL_INJECTED,
+            trajectory_ticks: u32::MAX,
         }
     }
 
@@ -794,6 +893,57 @@ mod tests {
         assert!(p.splice_approved);
     }
 
+    /// An edit at tick 320 leaves the recording stale from there: a replay
+    /// that departs from it past the edit is the edit's effect, not a
+    /// divergence. PLAY and CONT judge only up to the edit.
+    #[test]
+    fn an_edited_take_is_judged_up_to_the_edit() {
+        for arm in [Arm::Play, Arm::Continue] {
+            let mut p = aligned_port(101);
+            // gate+30 = recording tick 329, after the edit.
+            p.play_coords[297 + 30][0] += 1.0;
+            let mut config = cfg(arm, 0);
+            config.gate_align_rec = 299;
+            config.continue_from_frame = if arm == Arm::Continue { 380 } else { 0 };
+            config.trajectory_ticks = 320;
+            let mut c = TransportController::new(config);
+            drive_to_judge(&mut c, &mut p);
+            p.playback_pos = 297 + 20;
+            assert_eq!(c.step(&mut p), StepOutcome::InProgress, "{arm:?}");
+            p.playback_pos = 297 + 21;
+            assert_eq!(
+                c.step(&mut p),
+                StepOutcome::Done {
+                    retries_used: 0,
+                    completed_via: CompletedVia::Matched
+                },
+                "{arm:?}"
+            );
+            assert_eq!(p.splice_approved, arm == Arm::Continue);
+        }
+    }
+
+    /// An edit inside the countdown leaves only the spawn to check.
+    #[test]
+    fn a_take_edited_inside_the_countdown_checks_the_spawn() {
+        let mut p = aligned_port(101);
+        p.play_coords[297 + 5][0] += 1.0;
+        let mut config = cfg(Arm::Play, 0);
+        config.gate_align_rec = 299;
+        config.trajectory_ticks = 250;
+        let mut c = TransportController::new(config);
+        drive_to_judge(&mut c, &mut p);
+        p.playback_pos = 10;
+        assert_eq!(
+            c.step(&mut p),
+            StepOutcome::Done {
+                retries_used: 0,
+                completed_via: CompletedVia::Unjudged
+            }
+        );
+        assert!(!p.splice_approved, "PLAY has no splice to approve");
+    }
+
     /// A different spawn is a different starting state: reroll, never splice.
     #[test]
     fn aligned_cont_inside_the_countdown_rerolls_a_wrong_spawn() {
@@ -830,7 +980,7 @@ mod tests {
         drive_reroll_to_judge(&mut c, &mut p);
         p.playback_pos = 298;
         match c.step(&mut p) {
-            StepOutcome::Aborted { reason } => assert!(reason.contains("mismatch")),
+            StepOutcome::Aborted { reason } => assert!(reason.contains("diverged"), "{reason}"),
             other => panic!("expected Aborted, got {:?}", other),
         }
         assert!(!p.splice_approved);
@@ -884,5 +1034,96 @@ mod tests {
         p.playback_pos = 0;
         assert!(matches!(c.step(&mut p), StepOutcome::Aborted { .. }));
         assert!(c.is_terminal());
+    }
+    #[test]
+    fn a_cycle_registers_before_its_first_command() {
+        let mut p = FakePort {
+            owner_answer: Some(None),
+            ..Default::default()
+        };
+        let mut c = TransportController::new(cfg(Arm::Play, 0));
+        assert_eq!(c.step(&mut p), StepOutcome::InProgress);
+        assert_eq!(p.owner_requests, vec![TAS_OWNER_ACQUIRE]);
+        assert!(
+            p.commands.is_empty(),
+            "nothing is sent before the DLL answers"
+        );
+        assert_eq!(c.step(&mut p), StepOutcome::InProgress);
+        assert!(p.commands.is_empty());
+        p.owner_answer = None;
+        c.step(&mut p);
+        assert_eq!(p.commands, vec![TasCommand::Stop]);
+        assert_eq!(
+            p.owner_requests,
+            vec![TAS_OWNER_ACQUIRE],
+            "one request per cycle"
+        );
+    }
+
+    #[test]
+    fn a_busy_owner_aborts_the_cycle_without_touching_the_game() {
+        let mut p = FakePort {
+            owner_answer: Some(Some(OwnerAnswer::Busy { owner_pid: 77 })),
+            ..Default::default()
+        };
+        let mut c = TransportController::new(cfg(Arm::Play, 0));
+        match c.step(&mut p) {
+            StepOutcome::Aborted { reason } => assert!(reason.contains("pid 77"), "{reason}"),
+            other => panic!("expected Aborted, got {other:?}"),
+        }
+        assert!(p.commands.is_empty());
+        assert_eq!(
+            p.owner_requests,
+            vec![TAS_OWNER_ACQUIRE],
+            "a refused request owns nothing to release"
+        );
+    }
+
+    #[test]
+    fn a_finished_cycle_releases_ownership_once() {
+        let mut p = FakePort::default();
+        let mut c = TransportController::new(cfg(Arm::Rec, 0));
+        for _ in 0..20 {
+            if matches!(p.commands.last(), Some(TasCommand::Restart)) {
+                p.restart_state = 2;
+            }
+            if c.is_terminal() {
+                break;
+            }
+            c.step(&mut p);
+        }
+        assert!(c.is_terminal());
+        c.step(&mut p);
+        c.release(&mut p);
+        assert_eq!(p.owner_requests, vec![TAS_OWNER_ACQUIRE, TAS_OWNER_RELEASE]);
+    }
+
+    #[test]
+    fn a_cancelled_cycle_releases_ownership() {
+        let mut p = FakePort::default();
+        let mut c = TransportController::new(cfg(Arm::Play, 0));
+        c.step(&mut p);
+        assert!(!c.is_terminal());
+        c.release(&mut p);
+        c.release(&mut p);
+        assert_eq!(p.owner_requests, vec![TAS_OWNER_ACQUIRE, TAS_OWNER_RELEASE]);
+    }
+
+    #[test]
+    fn the_takes_input_model_is_staged_after_the_restart() {
+        let mut p = FakePort {
+            input_model: crate::TAS_INPUT_MODEL_INJECTED,
+            ..Default::default()
+        };
+        let mut config = cfg(Arm::Play, 0);
+        config.input_model = crate::TAS_INPUT_MODEL_HELD;
+        let mut c = TransportController::new(config);
+        c.step(&mut p); // Stop
+        c.step(&mut p); // Restart
+        assert_eq!(p.input_model, crate::TAS_INPUT_MODEL_INJECTED);
+        p.restart_state = 2;
+        c.step(&mut p); // Arm
+        assert_eq!(p.commands.last(), Some(&TasCommand::ArmPlay));
+        assert_eq!(p.input_model, crate::TAS_INPUT_MODEL_HELD);
     }
 }

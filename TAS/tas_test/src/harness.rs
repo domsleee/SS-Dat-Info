@@ -75,6 +75,19 @@ impl Drop for PicoKeys {
     }
 }
 
+/// Open the Pico, retrying while a just-killed tas_ui still holds the port
+/// (`taskkill /F` returns ~170 ms before the handle closes).
+pub fn open_pico_after_release(within: Duration) -> Result<PicoKeys, String> {
+    let deadline = Instant::now() + within;
+    loop {
+        match PicoKeys::open_checked() {
+            Ok(keys) => return Ok(keys),
+            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(_) => thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
 /// How long to wait after F5 for the game to restart loading.
 const F5_SETTLE_MS: u64 = 4000;
 /// Frames to wait for physics stabilization after an F5 restart.
@@ -451,6 +464,8 @@ pub fn restart_play_aligned_inprocess(client: &mut TasSharedMemoryClient) -> Opt
         continue_from_frame: 0,
         gate_align_rec: rec_gate,
         max_retries: tas_shared::align::ALIGN_MAX_RETRIES,
+        input_model: client.state().input_model,
+        trajectory_ticks: u32::MAX,
     };
     let retries_used = drive_cycle(client, cfg, "PLAY")?;
     // A match requires the live gate, so it is set by now.
@@ -1003,6 +1018,8 @@ pub fn restart_continue_and_splice_inprocess(
         continue_from_frame: splice_frame,
         gate_align_rec,
         max_retries,
+        input_model: client.state().input_model,
+        trajectory_ticks: u32::MAX,
     };
     let retries_used = drive_cycle(client, cfg, "CONT")?;
     println!(
@@ -1015,6 +1032,10 @@ pub fn restart_continue_and_splice_inprocess(
 /// Refresh held keys before the firmware's safety timeout. Timeout behavior is
 /// tested separately by the firmware tests, never implicitly inside a pattern.
 pub fn drive_pico_steps(steps: &[crate::patterns::PatternStep]) -> Result<(), String> {
+    // REC records the keys the game receives, so they must go to its window.
+    if !win32::find_game_window().is_some_and(win32::is_foreground) {
+        focus_game();
+    }
     let port_name = pico_port();
     let mut port = PicoKeys::open_checked()?;
     let total = crate::patterns::total_ticks(steps);

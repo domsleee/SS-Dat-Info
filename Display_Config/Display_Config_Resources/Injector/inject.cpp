@@ -26,7 +26,7 @@ DWORD FindProcess(const wchar_t* name) {
 
     if (Process32FirstW(snap, &entry)) {
         do {
-            if (wcsstr(entry.szExeFile, name)) {
+            if (_wcsicmp(entry.szExeFile, name) == 0) {
                 processId = entry.th32ProcessID;
                 break;
             }

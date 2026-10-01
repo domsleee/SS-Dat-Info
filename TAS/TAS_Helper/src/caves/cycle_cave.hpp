@@ -2,6 +2,8 @@
 #include "../stdafx.h"
 #include "../log.hpp"
 #include "../gate_alignment.hpp"
+#include "../injection_stamp.hpp"
+#include "../held_keys.hpp"
 #include "../input_gate.hpp"
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
@@ -9,6 +11,7 @@
 #include "../rider_identity.hpp"
 #include "f5_restart_cave.hpp"
 #include "../fpu_safe_hook.hpp"
+#include "../crash_report.hpp"
 #include "tick_cave.hpp"
 
 // The cycle cave: Supreme::Cycle hook (SG+0x13FE40), the REC/PLAY engine.
@@ -55,7 +58,92 @@ static inline uint32_t GetDIBuffer(uint32_t kbobj) {
     return SafeReadPtr(kbobj + GameAddresses::DI_BUFFER_PTR_OFFSET);
 }
 
-// REC input. The Pico is a real USB HID device, so GetAsyncKeyState sees it.
+// The keyboard observer's held-key array (held_keys.hpp), resolved on every
+// use: [[[[EXE+0x889C4]+0x14]+0x1AC]+0x38]. Null when unreadable.
+static uint32_t ExeBase() {
+    static const uint32_t exe = (uint32_t)(uintptr_t)GetModuleHandleA(nullptr);
+    return exe;
+}
+
+// The keyboard observer, TC_Kbd_Impl: [[[EXE+0x889C4]+0x14]+0x1AC].
+static uint32_t ObserverObject() {
+    uint32_t p = SafeReadPtr(ExeBase() + GameAddresses::APP_STATE_PTR_RVA);
+    p = SafeReadPtr(p ? p + GameAddresses::APP_GAME_OFFSET : 0);
+    return SafeReadPtr(p ? p + GameAddresses::GAME_KEYBOARD_OBSERVER_OFFSET : 0);
+}
+
+static volatile uint8_t* HeldArray() {
+    const uint32_t observer = ObserverObject();
+    return (volatile uint8_t*)(uintptr_t)SafeReadPtr(
+        observer ? observer + GameAddresses::OBSERVER_HELD_PTR_OFFSET : 0);
+}
+
+// Apply every queued key event now (the game's own flush), so none the
+// replay injected lands after the handoff to REC. False when the observer
+// is not the expected object.
+static bool FlushObserverQueue() {
+    const uint32_t observer = ObserverObject();
+    const uint32_t vtable = SafeReadPtr(observer);
+    if (!observer || vtable != ExeBase() + GameAddresses::OBSERVER_VTABLE_RVA) return false;
+    const uint32_t flush = SafeReadPtr(vtable + GameAddresses::OBSERVER_FLUSH_SLOT);
+    if (flush != ExeBase() + GameAddresses::OBSERVER_FLUSH_RVA) return false;
+    crash::ScopedGameCall call(TAS_GAME_CALL_OBSERVER_FLUSH);
+    ((void(__fastcall*)(uint32_t, uint32_t))(uintptr_t)flush)(observer, 0);
+    return true;
+}
+
+static bool ReadHeldMask(uint8_t* mask) {
+    volatile uint8_t* held = HeldArray();
+    if (!held) return false;
+    __try {
+        *mask = heldkeys::MaskOf(held);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// REC's start: the held keys a real keyboard in state `mask` would leave.
+static bool WriteHeldReal(uint8_t mask) {
+    volatile uint8_t* held = HeldArray();
+    if (!held) return false;
+    __try {
+        heldkeys::WriteReal(held, mask);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static void WriteDIBufferReal(uint32_t buffer, uint8_t mask) {
+    if (!buffer) return;
+    __try {
+        heldkeys::WriteReal((uint8_t*)buffer, mask);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static bool WriteHeldMask(uint8_t mask) {
+    volatile uint8_t* held = HeldArray();
+    if (!held) return false;
+    __try {
+        heldkeys::Write(held, mask);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Keys only reach the game while its window is in front; the keyboard state
+// read below is global.
+static bool GameHasFocus() {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    return pid == GetCurrentProcessId();
+}
+
+// The physical keyboard, for bringing the game's key state up to date where
+// REC starts (arm, CONT splice). The Pico is a real USB HID device, so
+// GetAsyncKeyState sees it.
 static uint8_t SampleGAKS() {
     uint8_t mask = 0;
     if (GetAsyncKeyState(VK_LEFT) & 0x8000)    mask |= INPUT_LEFT;
@@ -85,9 +173,10 @@ static void WriteDIBuffer(uint32_t buffer, uint8_t mask) {
 
 // BB3B10's 3rd and 4th arguments are the {lo, hi} dwords of the 64-bit
 // Kernel::Time stamped at message-pump dispatch (Win32_Driver::Translate
-// passes it through +3940 unchanged). The observer discards events older than
-// the current race. Injections use Kernel::Time::Current(); this calibrated
-// Time.hi is the fallback if that export fails to resolve.
+// passes it through +3940 unchanged). The observer defers an event stamped
+// later than the time Update is given (injection_stamp.hpp). Injections derive
+// their stamp from Kernel::Time::Current(); this calibrated Time.hi is the
+// fallback if that export fails to resolve.
 inline volatile uint32_t g_bb3b10Arg4 = GameAddresses::BB3B10_ARG4;
 
 // GetTickCount() of the last Supreme::Cycle tick. When the cycle has stopped
@@ -95,8 +184,35 @@ inline volatile uint32_t g_bb3b10Arg4 = GameAddresses::BB3B10_ARG4;
 // so the user can operate them while a TAS mode is armed.
 inline volatile uint32_t g_lastCycleMs = 0;
 
-// Last injected input mask (REC and PLAY), for transition detection.
+// Last input mask PLAY injected or wrote, for transitions.
 static uint8_t g_prevMask = 0;
+
+// Every key PLAY has pressed since its arm: an injected take can still have
+// presses queued for keys its last mask no longer holds, so a release covers
+// all of these.
+static uint8_t g_ownedBits = 0;
+
+// PLAY of a held-model take writes the held array directly (g_prevMask is
+// then held there, not queued).
+static bool g_heldWritten = false;
+
+// At a CONT splice the replay's keys are still held and the player's were
+// blocked, so REC's first tick brings the held array and key buffer to the
+// physical keys.
+static bool g_recReconcile = false;
+
+// The held state a replay of an injected take produced, per recorded index,
+// for converting it at a CONT splice.
+static uint8_t g_observedHeld[TAS_MAX_TICKS];
+static uint8_t g_observedSeen[TAS_MAX_TICKS];
+static uint8_t g_convertScratch[TAS_MAX_TICKS];
+
+// The tick Supreme::Cycle is about to run: its mode and index (recorded in
+// REC, playback in PLAY; 0xFFFFFFFF otherwise). Hooks inside that tick's
+// physics (the finish line) attribute events with it, not with the mode in
+// shared memory, which a CONT splice switches before the last PLAY tick runs.
+inline volatile uint32_t g_execMode = MODE_OFF;
+inline volatile uint32_t g_execTick = 0xFFFFFFFFu;
 
 class ScopedTasInjection {
 public:
@@ -108,14 +224,13 @@ public:
     ScopedTasInjection& operator=(const ScopedTasInjection&) = delete;
 };
 
-// The game's Kernel::Time::Current(). False if unresolved or the call faults.
-// The callee is x87-balanced.
+// The game's Kernel::Time::Current(). False if unresolved. The callee is
+// x87-balanced.
 static bool GetKernelTimeNow(GameAddresses* addr, KernelTime* out) {
     if (!addr->time_current) return false;
-    __try {
-        addr->time_current(out, nullptr);
-        return true;
-    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+    crash::ScopedGameCall call(TAS_GAME_CALL_TIME_CURRENT);
+    addr->time_current(out, nullptr);
+    return true;
 }
 
 // Call BB3B10 for each changed bit.
@@ -134,13 +249,10 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
         t.hi = s->test_arg4_override;
         s->arg4_source = ARG4_SOURCE_OVERRIDE;
     } else if (GetKernelTimeNow(addr, &t)) {
-        // The observer only checks hi. Flooring lo makes the stamp identical
-        // between a REC and its replay.
-        t.lo = 0;
+        InjectionStamp(t.hi, &t.lo, &t.hi);
         s->arg4_source = ARG4_SOURCE_TIME_CURRENT;
     } else {
-        t.lo = 0;
-        t.hi = g_bb3b10Arg4;
+        InjectionStamp(g_bb3b10Arg4, &t.lo, &t.hi);
         s->arg4_source = ARG4_SOURCE_CALIBRATED;
     }
 
@@ -216,6 +328,10 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
                                       : (const uint32_t*)&s->play_coords[0][0];
             if (raw[0] != z[0] || raw[1] != z[1] || raw[2] != z[2]) {
                 s->gate_index = index;
+                if (g_predictedGate && index != g_predictedGate) {
+                    LogRing(s, LOG_ERROR, "Observed gate differs from the countdown's prediction");
+                    s->capture_ok = 0;
+                }
             }
         }
     }
@@ -225,30 +341,51 @@ static void CapturePlayerCoords(TasSharedState* s, uint32_t index, bool isRec) {
 // Clear the raw input state and return the mask that still needs observer UP
 // notifications.
 static uint8_t ClearTasInputState(GameAddresses* addr) {
-    uint8_t held = g_prevMask;
+    const uint8_t held = g_prevMask | g_ownedBits;
     g_prevMask = 0;
+    g_ownedBits = 0;
+    if (!held) return 0;
     uint32_t kbobj = GetKeyboardObject(addr);
     if (!kbobj) return held;
     WriteDIBuffer(GetDIBuffer(kbobj), 0);
     return held;
 }
 
-// Release every injected key: zero the DI buffer and send the observer UP
-// events. Must run on every TAS -> OFF transition, or a held key keeps
-// steering. After a level swap it clears the new level; UP events for keys
-// that level never saw pressed are harmless.
-static void ReleaseTasInput(TasSharedState* s, GameAddresses* addr) {
-    uint8_t held = ClearTasInputState(addr);
+// One key code released in the held array.
+static void ClearHeldCode(uint32_t code) {
+    volatile uint8_t* held = HeldArray();
+    if (!held || code >= 256) return;
+    __try {
+        held[code] = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static void ClearHeldBits(uint8_t bits) {
+    volatile uint8_t* held = HeldArray();
     if (!held) return;
-    uint32_t kbobj = GetKeyboardObject(addr);
-    if (!kbobj) return;
-    CallBB3B10OnTransitions(s, addr, kbobj, 0, held);
+    __try {
+        heldkeys::Clear(held, bits);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+// Release every key the TAS holds: zero the key buffer, apply whatever it
+// still has queued (queued key-ups behind pending presses could apply out of
+// order and leave a key down), then clear those keys in the observer. Must
+// run on every TAS -> OFF transition, or a held key keeps steering.
+static void ReleaseTasInput(TasSharedState* s, GameAddresses* addr) {
+    (void)s;
+    g_heldWritten = false;
+    const uint8_t held = ClearTasInputState(addr);
+    if (!held) return;
+    FlushObserverQueue();
+    ClearHeldBits(held);
 }
 
 // Drop gate alignment. The controller stages gate_align_rec right before each
 // arm; a leftover value would re-index a later replay and move its splice.
 static inline void ClearGateAlign(TasSharedState* s) {
     s->gate_align_rec = 0;
+    g_predictedGate = 0;
     s->cont_splice_approved = 0;  // no alignment, nothing to approve
 }
 
@@ -267,8 +404,8 @@ static constexpr LONG REFRESH_STAMP_TICKS = 100;
 // Private, not shared state, so no other process can set it.
 static volatile uint32_t g_contArmed = 0;
 
-// The complete TAS -> OFF transition. Game thread only. No logging,
-// formatting or float arithmetic: it runs inside hooks.
+// The complete TAS -> OFF transition. Game thread only; runs on the per-tick
+// path, so no file log.
 static void ApplyStopTransition(TasSharedState* s, bool protectRestart) {
     // Set before publishing OFF so real keys cannot enter the restart window.
     s->cont_suppress_input = protectRestart ? 1u : 0u;
@@ -306,6 +443,10 @@ static void ResetArmCounters(TasSharedState* s) {
 static void ArmRec(TasSharedState* s) {
     s->recorded_count = 0;
     ResetArmCounters(s);
+    s->input_model = TAS_INPUT_MODEL_HELD;
+    // A fresh REC only observes: after the restart the game holds what real
+    // key events have given it since, exactly as without the TAS.
+    g_recReconcile = false;
     s->segment_count = 1;
     s->segment_start_frame = 0;
     memset(s->segment_boundaries, 0, sizeof(s->segment_boundaries));
@@ -316,9 +457,14 @@ static void ArmRec(TasSharedState* s) {
     g_cyclePendingLog = 1;
 }
 
+static void ResetObservedHeld() {
+    memset(g_observedSeen, 0, sizeof(g_observedSeen));
+}
+
 static void ArmPlay(TasSharedState* s) {
     g_cycleLogParam = s->recorded_count;
     ResetArmCounters(s);
+    ResetObservedHeld();
 
     // A plain PLAY never splices.
     s->continue_from_frame = 0;
@@ -355,6 +501,7 @@ static void ArmContinue(TasSharedState* s) {
     }
     g_cycleLogParam = s->continue_from_frame;
     ResetArmCounters(s);
+    ResetObservedHeld();
     // segment_count is kept; the splice adds one.
     s->mode = MODE_PLAY;
     g_contArmed = 1;  // the only place the splice gate opens
@@ -364,6 +511,10 @@ static void ArmContinue(TasSharedState* s) {
 }
 
 static void BeginRestart(TasSharedState* s) {
+    // Left armed, a CONT would splice into REC on the rebuilt level.
+    if (s->mode != MODE_OFF) {
+        ApplyStopTransition(s, s->cont_suppress_input != 0);
+    }
     f5restart::Cancel();  // a new request replaces an unfinished one
     f5restart::Request();
     s->restart_state = 1;
@@ -372,7 +523,33 @@ static void BeginRestart(TasSharedState* s) {
     g_cyclePendingLog = 7;  // "restart initiated"
 }
 
-// No logging or formatting here: runs inside the mid-hook.
+// The pump calls this too: a CONT parked at its splice runs no ticks.
+static bool TryProcessRestartCommand(TasSharedState* s) {
+    const LONG cmd = InterlockedCompareExchange((volatile LONG*)&s->command, CMD_IDLE, CMD_IDLE);
+    if (cmd != CMD_RESTART) return false;
+    BeginRestart(s);
+    InterlockedCompareExchange((volatile LONG*)&s->command, CMD_IDLE, cmd);
+    return true;
+}
+
+// tas_test crash-report: fault inside a game call, as a real one would.
+static void TryProcessTestFault(TasSharedState* s) {
+    if (s->command != CMD_TEST_FAULT) return;
+    crash::ScopedGameCall call(TAS_GAME_CALL_TEST_FAULT);
+    if (g_cycleCaveAddr && g_cycleCaveAddr->time_current) {
+        g_cycleCaveAddr->time_current(nullptr, nullptr);
+    }
+    *(volatile uint32_t*)nullptr = 0;
+}
+
+// From the message pump, while Supreme::Cycle may be stopped. RESTART only
+// in a race: nothing polls F5 at the menus.
+static void ProcessFrozenCommands(TasSharedState* s) {
+    TryProcessTestFault(s);
+    if (!TryProcessStopCommand(s) && s->game_in_game) TryProcessRestartCommand(s);
+}
+
+// Runs on the per-tick path: ring log only.
 static void ProcessCommand(TasSharedState* s) {
     // Acquire-read of command; the Rust writer stores it last, with Release.
     uint32_t cmd = (uint32_t)InterlockedCompareExchange(
@@ -382,23 +559,35 @@ static void ProcessCommand(TasSharedState* s) {
         TryProcessStopCommand(s);
         return;
     }
+    if (cmd == CMD_RESTART) {
+        TryProcessRestartCommand(s);
+        return;
+    }
+    if (cmd == CMD_TEST_FAULT) return;  // the pump's
+
+    const bool arm = cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE || cmd == CMD_ARM_REC;
+    // Release first, or the observer keeps the keys: ResetArmCounters forgets
+    // them, and a press can still be queued after the last mask went neutral.
+    if (arm) {
+        ReleaseTasInput(s, g_cycleCaveAddr);
+    }
 
     switch (cmd) {
         case CMD_ARM_REC:      ArmRec(s);       break;
         case CMD_ARM_PLAY:     ArmPlay(s);      break;
         case CMD_ARM_CONTINUE: ArmContinue(s);  break;
-        case CMD_RESTART:      BeginRestart(s); break;
     }
 
     // arm_generation is the controller's "arm landed" signal, so it is the
     // arm's last store (x86 keeps store order). Refused arms bump it too.
-    if (cmd == CMD_ARM_PLAY || cmd == CMD_ARM_CONTINUE || cmd == CMD_ARM_REC) {
+    if (arm) {
+        g_predictedGate = 0;
         s->gate_index = 0;
         s->capture_ok = 1;
         s->arm_generation++;
     }
 
-    InterlockedExchange((volatile LONG*)&s->command, CMD_IDLE);
+    InterlockedCompareExchange((volatile LONG*)&s->command, CMD_IDLE, (LONG)cmd);
 }
 
 // Called from the message pump, outside Supreme::Cycle.
@@ -425,12 +614,25 @@ static void FlushPendingLog() {
 // the watcher approves it.
 static void CompleteContinueSplice(TasSharedState* s) {
     uint32_t aligned_splice = GateAlignedSplicePos(
-        s->continue_from_frame, s->gate_index, s->gate_align_rec);
+        s->continue_from_frame, LiveGate(s), s->gate_align_rec);
     if (g_contArmed && s->continue_from_frame > 0
             && s->playback_pos >= aligned_splice
             && (s->gate_align_rec == 0 || s->cont_splice_approved != 0)) {
         uint32_t rec_splice = s->continue_from_frame;
         s->recorded_count = rec_splice;
+        // The new take is one held-model recording: an injected prefix
+        // becomes the held state its replay produced.
+        if (s->input_model != TAS_INPUT_MODEL_HELD && rec_splice <= TAS_MAX_TICKS) {
+            const uint32_t off = heldkeys::ConvertInjectedPrefix(
+                (uint8_t*)s->input_log, g_observedHeld, g_observedSeen, rec_splice,
+                g_convertScratch);
+            if (off) LogRing(s, LOG_WARN, "CONT: the replayed prefix held keys its simulation did not");
+            s->input_model = TAS_INPUT_MODEL_HELD;
+        }
+        // The replay's keys stay the DLL's (a STOP still releases them) until
+        // the first REC tick hands over to the physical keyboard.
+        g_recReconcile = true;
+        s->cont_suppress_input = 0;
         // Switch to the resume speed on the splice tick itself, not when the
         // UI notices, or the take starts at the catch-up rate.
         if (s->cont_resume_speed > 0.0f) {
@@ -509,35 +711,69 @@ static void RecTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
         return;
     }
 
-    // The key-handler cave blocks +3940, so REC injects exactly as PLAY does.
-    uint8_t mask = SampleGAKS();
-    uint8_t transitions = mask ^ g_prevMask;
-
-    uint32_t buffer = GetDIBuffer(kbobj);
-    WriteDIBuffer(buffer, mask);
-
-    if (transitions) {
-        CallBB3B10OnTransitions(s, addr, kbobj, mask, transitions);
+    // Real key events reach the game; REC records the held state the
+    // observer applied for this tick, which is what steering reads.
+    if (g_recReconcile) {
+        g_recReconcile = false;
+        // Nothing a replay queued may land after this, then the game's keys
+        // are the physical ones and the DLL holds none.
+        if (!FlushObserverQueue()) {
+            LogRing(s, LOG_WARN, "REC start: could not flush the keyboard observer's queue");
+        }
+        const uint8_t physical = GameHasFocus() ? SampleGAKS() : (uint8_t)0;
+        WriteHeldReal(physical);
+        WriteDIBufferReal(GetDIBuffer(kbobj), physical);
+        g_prevMask = 0;
+        g_ownedBits = 0;
+        g_heldWritten = false;
     }
-
+    g_execMode = MODE_REC;
+    g_execTick = index;
+    uint8_t mask = 0;
+    if (!ReadHeldMask(&mask)) {
+        LogRing(s, LOG_ERROR, "REC could not read the keyboard observer's held keys");
+        s->capture_ok = 0;
+    }
     s->input_log[index] = mask;
-    g_prevMask = mask;
 
     CapturePlayerCoords(s, index, true);
 
     s->recorded_count = index + 1;
 }
 
+// Ticks since the rider's reset, from its countdown float. False when
+// unreadable.
+static bool ReadCountdownTicks(uint32_t player, uint32_t* ticks) {
+    if (!player) return false;
+    __try {
+        const uint32_t countdown = *(uint32_t*)(player + GameAddresses::PLAYER_COUNTDOWN_OFFSET);
+        if (countdown < 0x10000) return false;
+        const float t = *(float*)countdown;
+        if (!(t >= 0.0f && t < 1000.0f)) return false;
+        *ticks = (uint32_t)(t * 100.0f + 0.5f);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 static void PlayTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
     uint32_t pos = s->playback_pos;
+
+    // An aligned replay takes its gate from the countdown at its first tick.
+    uint32_t countdown = 0;
+    if (s->gate_align_rec > 0 && pos == 0 && ReadCountdownTicks(s->player_ptr, &countdown)) {
+        g_predictedGate = PredictedGate(pos, countdown);
+    }
+    const uint32_t live_gate = LiveGate(s);
 
     // With alignment the end is gate-relative too. recorded_count comes from
     // the UI process, so cap it.
     const uint32_t rec_count =
         s->recorded_count < TAS_MAX_TICKS ? s->recorded_count : TAS_MAX_TICKS;
     uint32_t play_end = rec_count;
-    if (s->gate_align_rec > 0 && s->gate_index > 0 && rec_count > s->gate_align_rec) {
-        play_end = s->gate_index + (rec_count - s->gate_align_rec);
+    if (s->gate_align_rec > 0 && live_gate > 0 && rec_count > s->gate_align_rec) {
+        play_end = live_gate + (rec_count - s->gate_align_rec);
     }
     if (pos >= play_end) {
         s->mode = MODE_OFF;
@@ -552,19 +788,37 @@ static void PlayTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
     // Gate-relative input source; see gate_alignment.hpp.
     uint32_t src = pos;
     if (s->gate_align_rec > 0) {
-        src = GateAlignedInputSource(pos, s->gate_index, s->gate_align_rec, rec_count);
+        src = GateAlignedInputSource(pos, live_gate, s->gate_align_rec, rec_count);
     }
-    uint8_t mask = (src == GATE_ALIGN_INVALID_SOURCE) ? (uint8_t)0 : s->input_log[src];
+    g_execMode = MODE_PLAY;
+    g_execTick = pos;
+    const bool valid = src != GATE_ALIGN_INVALID_SOURCE;
+    uint8_t mask = valid ? s->input_log[src] : (uint8_t)0;
 
     uint32_t buffer = GetDIBuffer(kbobj);
     WriteDIBuffer(buffer, mask);
 
-    uint8_t transitions = mask ^ g_prevMask;
-    if (transitions) {
-        CallBB3B10OnTransitions(s, addr, kbobj, mask, transitions);
+    if (s->input_model == TAS_INPUT_MODEL_HELD) {
+        // Held for this tick's physics: written after the observer's Update,
+        // so no queue, stamp or one-event-per-tick rule stands in between.
+        if (!WriteHeldMask(mask)) s->capture_ok = 0;
+        g_heldWritten = true;
+    } else {
+        // An injected take: keep what this tick's Update applied for a CONT
+        // splice's conversion, then queue the transitions for the next tick.
+        uint8_t observed = 0;
+        if (valid && src < TAS_MAX_TICKS && ReadHeldMask(&observed)) {
+            g_observedHeld[src] = observed;
+            g_observedSeen[src] = 1;
+        }
+        uint8_t transitions = mask ^ g_prevMask;
+        if (transitions) {
+            CallBB3B10OnTransitions(s, addr, kbobj, mask, transitions);
+        }
     }
 
     g_prevMask = mask;
+    g_ownedBits |= mask;
 
     CapturePlayerCoords(s, pos, false);
 
@@ -592,6 +846,9 @@ static void __declspec(noinline) CycleCave_Logic() {
     }
 
     PublishLivePosition(s);
+
+    g_execMode = MODE_OFF;
+    g_execTick = 0xFFFFFFFFu;
 
     ProcessCommand(s);
 

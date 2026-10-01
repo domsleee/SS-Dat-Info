@@ -91,6 +91,8 @@ inline void RetryIfUnresolved(TasSharedState* s) {
     const int32_t id = identify(path);
     if (id < 0) return;
     publishContext(s, [&] {
+        for (size_t i = 0; i < TAS_LEVEL_PATH_MAX; i++) s->level_path[i] = path[i];
+        s->level_path_gen++;
         s->level_id = (uint32_t)id;
         s->level_scan_epoch = s->level_epoch;
     });

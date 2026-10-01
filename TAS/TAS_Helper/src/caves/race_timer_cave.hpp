@@ -60,6 +60,41 @@ static void Publish(uint32_t cs, uint32_t start, const char* reason) {
     g_lastPub = cs;
 }
 
+// The game's own race clock: [player+0xB8] is the player's timer object;
+// +0x0C its elapsed seconds (float, +0.01 per Player update), +0x10 started,
+// +0x11 finished. The HUD formats +0x0C.
+static bool ReadRaceClock(uint32_t player, uint32_t* bits, uint32_t* flags) {
+    if (player < 0x10000) return false;
+    __try {
+        const uint32_t timer = *(uint32_t*)(player + GameAddresses::PLAYER_RACE_TIMER_OFFSET);
+        if (timer < 0x10000) return false;
+        *bits = *(uint32_t*)(timer + 0x0C);
+        *flags = (*(uint8_t*)(timer + 0x10) ? TAS_RACE_CLOCK_STARTED : 0u) |
+                 (*(uint8_t*)(timer + 0x11) ? TAS_RACE_CLOCK_FINISHED : 0u);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Writes one or two fields under race_seq. Game thread only.
+static void PublishPair(volatile uint32_t* a, uint32_t va, volatile uint32_t* b, uint32_t vb) {
+    if (*a == va && *b == vb) return;
+    InterlockedIncrement((volatile LONG*)&g_state->race_seq);   // odd: writing
+    *a = va;
+    *b = vb;
+    InterlockedIncrement((volatile LONG*)&g_state->race_seq);   // even: stable
+}
+
+static void PublishClock(bool inGame) {
+    uint32_t bits = MAXU, flags = 0;
+    if (!inGame || !ReadRaceClock(g_state->player_ptr, &bits, &flags)) {
+        bits = MAXU;
+        flags = 0;
+    }
+    PublishPair(&g_state->race_clock_bits, bits, &g_state->race_clock_flags, flags);
+}
+
 static void ResetEpoch() {
     g_table.Reset();
     Publish(MAXU, MAXU, "epoch-reset");
@@ -107,6 +142,11 @@ static void AptCb(SafetyHookContext& ctx) {
         }
     }
     Publish(v.cs, v.start, v.reason);
+    uint32_t bits = 0, flags = 0;
+    if (v.cs != MAXU && (uint32_t)ctx.ecx == g_table.playerLine &&
+        ReadRaceClock(g_state->player_ptr, &bits, &flags)) {
+        PublishPair(&g_state->race_ab_cs, (uint32_t)cs, &g_state->race_ab_bits, bits);
+    }
 }
 
 // Once per clock tick: staleness clock, epoch reset when game_in_game drops.
@@ -121,6 +161,7 @@ static void TickCb(SafetyHookContext&) {
         else Publish(MAXU, MAXU, "menu");
     }
     g_wasInGame = inGame;
+    PublishClock(inGame != 0);
 
     // Evict here too: once the HUD is torn down nothing samples, and the last
     // time would otherwise stay published until the race is left.
@@ -186,6 +227,13 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
     Log(std::format("Race timer: tick={} append={} diag={} stale={} ticks (SR_UIT {:p})",
         (bool)g_tickHook, (bool)g_aptHook, g_diag, STALE_TICKS, (void*)uit));
     return (bool)g_tickHook && (bool)g_aptHook;
+}
+
+// Initialization rollback.
+inline void Uninstall() {
+    g_tickHook = {};
+    g_aptHook = {};
+    g_state = nullptr;
 }
 
 } // namespace racetimer

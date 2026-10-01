@@ -10,10 +10,28 @@
 #include "caves/race_timer_cave.hpp"
 #include "caves/menu_cave.hpp"
 #include "caves/lifecycle_cave.hpp"
+#include "caves/finish_cave.hpp"
 
 static TasSharedMemory g_sharedMem;
 static GameAddresses g_addr;
 static volatile LONG g_initState = 0; // 0=not started, 1=running, 2=ready, 3=failed
+
+// Remove everything run() may have installed, newest first, while the
+// mapping the hooks write to still exists. Idempotent.
+static void RollbackAll() {
+    finishline::Uninstall();
+    menustate::Disable();
+    racetimer::Uninstall();
+    lifecycle::Uninstall();
+    f5restart::Uninstall();
+    UninstallTickCave();
+    UninstallCycleCave();
+    UninstallKeyHandlerCave();
+    UninstallObserverCave();
+    UninstallReplayCapture();
+    crash::Uninstall();
+    g_sharedMem.Destroy();
+}
 
 bool run() {
     Log("=== TAS_Helper.dll loading ===");
@@ -33,6 +51,7 @@ bool run() {
         TAS_SHARED_MEMORY_NAME, sizeof(TasSharedState)));
 
     auto* state = g_sharedMem.state;
+    crash::Install(state);
 
     // The observer and key-handler caves must precede the cycle cave, which calls BB3B10.
     bool replay_ok = InstallReplayCapture(g_addr, state);
@@ -47,14 +66,7 @@ bool run() {
     // reverse order while shared state is still mapped.
     if (!(replay_ok && observer_ok && key_handler_ok && cycle_ok && tick_ok && f5_ok && lifecycle_ok)) {
         Log("FATAL: required TAS hook installation failed; rolling back all core hooks");
-        lifecycle::Uninstall();
-        f5restart::Uninstall();
-        UninstallTickCave();
-        UninstallCycleCave();
-        UninstallKeyHandlerCave();
-        UninstallObserverCave();
-        UninstallReplayCapture();
-        g_sharedMem.Destroy();
+        RollbackAll();
         return false;
     }
 
@@ -71,6 +83,10 @@ bool run() {
         Log("  Race timer: started");
     } else {
         Log("  Race timer: unavailable");
+    }
+
+    if (!finishline::Install(g_addr, state)) {
+        Log("  Finish line: unavailable");
     }
 
     // Deferred until Main_Menu.dll loads.
@@ -94,9 +110,16 @@ extern "C" __declspec(dllexport) DWORD WINAPI TAS_Initialize(LPVOID) {
             return 0;
         }
     }
-    catch (const std::exception& e) {
-        Log(std::format("FATAL exception: {}", e.what()));
+    catch (...) {
+        RollbackAll();  // hooks may already be live
         InterlockedExchange(&g_initState, 3);
+        try {
+            throw;
+        } catch (const std::exception& e) {
+            Log(std::format("FATAL exception: {}; all hooks rolled back", e.what()));
+        } catch (...) {
+            Log("FATAL: unknown exception; all hooks rolled back");
+        }
         return 0;
     }
 
@@ -115,9 +138,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI TAS_Initialize(LPVOID) {
 #pragma comment(linker, "/EXPORT:TAS_Initialize=_TAS_Initialize@4")
 #endif
 
-BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(module);
+    }
+    // Non-null reserved: ExitProcess, not a crash or a kill.
+    if (reason == DLL_PROCESS_DETACH && reserved) {
+        crash::MarkCleanExit();
     }
     return TRUE;
 }

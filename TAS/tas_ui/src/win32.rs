@@ -58,11 +58,6 @@ pub fn find_supreme_pid() -> Option<u32> {
     find_process_pid(&["Supreme.exe", "Supreme_v1.035.exe"])
 }
 
-/// Whether a process with this image name (e.g. `tas_test.exe`) exists.
-pub fn is_process_running(image_name: &str) -> bool {
-    find_process_pid(&[image_name]).is_some()
-}
-
 /// PID of the first process whose image name matches one of `names`
 /// (exact, case-sensitive UTF-16 compare against the snapshot entry).
 fn find_process_pid(names: &[&str]) -> Option<u32> {

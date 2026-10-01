@@ -614,10 +614,10 @@ struct Parts {
 
 /// Build display parts for a history entry from its structured metadata.
 ///
-/// In-game time is `tick - first_moving` converted to clock format via
-/// `format_recording_duration`. When `first_moving` is `None` we fall
-/// back to raw `tick / 100`, which is recording-elapsed (not in-game)
-/// time — flagged the same way in the panel layout.
+/// In-game time is `tick - clock_start` (where the race clock reads zero)
+/// converted to clock format via `format_recording_duration`. Entries from
+/// before `clock_start` count from `first_moving`; with neither we fall
+/// back to raw `tick / 100`, which is recording-elapsed (not in-game) time.
 fn parse_entry(entry: &HistoryEntry) -> Parts {
     match entry.kind {
         HistoryEntryKind::SaveMarker => Parts {
@@ -644,9 +644,15 @@ fn parse_entry(entry: &HistoryEntry) -> Parts {
     }
 }
 
-fn in_game_duration(tick: u32, first_moving: Option<u32>) -> String {
-    let offset = first_moving.unwrap_or(0);
-    format_recording_duration(tick.saturating_sub(offset))
+/// Negative before the clock starts, e.g. a CONT point on the way to the
+/// start line.
+fn in_game_duration(tick: u32, clock_start: Option<u32>) -> String {
+    let offset = clock_start.unwrap_or(0);
+    if tick < offset {
+        format!("-{}", format_recording_duration(offset - tick))
+    } else {
+        format_recording_duration(tick - offset)
+    }
 }
 
 fn finished_parts(cs: u32, exact: bool) -> Parts {
@@ -658,7 +664,17 @@ fn finished_parts(cs: u32, exact: bool) -> Parts {
 }
 
 fn parse_snapshot(entry: &HistoryEntry) -> Parts {
-    let total = in_game_duration(entry.end_tick, entry.first_moving);
+    // A timeline edit is pushed with no session span (end_tick 0) and names
+    // its action in the label, e.g. "Deleted D 1235-1307t".
+    if entry.end_tick == 0 && !entry.label.is_empty() {
+        return Parts {
+            total: String::new(),
+            context: entry.label.clone(),
+            is_marker: false,
+        };
+    }
+    let clock_start = entry.clock_start.or(entry.first_moving);
+    let total = in_game_duration(entry.end_tick, clock_start);
     // A finished run has one authoritative visible time. Do not also render
     // its recording duration or continuation origin beside it.
     if let Some(cs) = entry.finish_time_cs {
@@ -670,7 +686,7 @@ fn parse_snapshot(entry: &HistoryEntry) -> Parts {
             context: format!(
                 "from {} · {}",
                 entry.start_tick,
-                in_game_duration(entry.start_tick, entry.first_moving)
+                in_game_duration(entry.start_tick, clock_start)
             ),
             is_marker: false,
         };
@@ -785,5 +801,43 @@ mod tests {
         let estimated = finished_parts(4_690, false);
         assert_eq!(estimated.total, "Finish ~0:46.90");
         assert!(estimated.context.is_empty());
+    }
+
+    /// Times count from the race clock's zero (the start-line crossing on
+    /// the entry's track), not from first movement.
+    #[test]
+    fn times_count_from_the_start_line() {
+        let mut state = tas_shared::zeroed_boxed();
+        state.recorded_count = 3;
+        state.rec_coords[0] = [519.2, -1401.6, 53.6];
+        state.rec_coords[1] = [519.2, -1401.1, 99.0];
+        state.rec_coords[2] = [519.2, -1400.6, 100.0];
+        let snapshot = crate::recording::RecordingSnapshot::from_state(&state);
+        let mut history = RecordingHistory::new(4);
+        history.set_live_level(Some("FE"));
+        history.push_snapshot_data(snapshot, "Recorded");
+        let entry = &history.entries()[0];
+        assert_eq!(entry.first_moving, Some(1));
+        assert_eq!(entry.clock_start, Some(2));
+        assert_eq!(parse_entry(entry).total, format_recording_duration(1));
+    }
+
+    #[test]
+    fn a_tick_before_the_clock_start_reads_negative() {
+        assert_eq!(in_game_duration(1000, Some(1147)), "-0:01.47");
+        assert_eq!(in_game_duration(1147, Some(1147)), "0:00.00");
+    }
+
+    /// A timeline edit shows what it did, not a zero duration.
+    #[test]
+    fn an_edit_entry_shows_its_action() {
+        let mut state = tas_shared::zeroed_boxed();
+        state.recorded_count = 1456;
+        let snapshot = crate::recording::RecordingSnapshot::from_state(&state);
+        let mut history = RecordingHistory::new(4);
+        history.push_snapshot_data_with_session(snapshot, "Deleted D 1235-1307t", 0, 0, None);
+        let parts = parse_entry(&history.entries()[0]);
+        assert_eq!(parts.context, "Deleted D 1235-1307t");
+        assert!(parts.total.is_empty(), "not 0:00.00");
     }
 }

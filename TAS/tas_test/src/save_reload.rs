@@ -98,7 +98,7 @@ pub fn run() -> bool {
         "recorded_count": state.recorded_count,
         "timestamp": "save_reload_test",
         "notes": "synthetic recording for save/reload e2e test",
-        "segments": [],
+        "input_model": state.input_model,
     });
 
     if let Err(e) = replay::save_tasrec(&tasrec_path, &meta_value, &input_log, &rec_coords) {

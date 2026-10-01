@@ -73,7 +73,36 @@ unsafe extern "system" {
 #[link(name = "kernel32")]
 unsafe extern "system" {
     pub fn GetCurrentThreadId() -> u32;
+    pub fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+    pub fn CloseHandle(handle: Handle) -> i32;
+    pub fn GetLastError() -> u32;
+    pub fn ReadProcessMemory(
+        process: Handle,
+        address: usize,
+        buffer: *mut u8,
+        size: usize,
+        read: *mut usize,
+    ) -> i32;
+    pub fn K32EnumProcessModulesEx(
+        process: Handle,
+        modules: *mut Handle,
+        bytes: u32,
+        needed: *mut u32,
+        filter: u32,
+    ) -> i32;
+    pub fn K32GetModuleBaseNameA(process: Handle, module: Handle, name: *mut u8, size: u32) -> u32;
 }
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    pub fn NtSuspendProcess(process: Handle) -> i32;
+    pub fn NtResumeProcess(process: Handle) -> i32;
+}
+
+pub const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
+pub const PROCESS_VM_READ: u32 = 0x0010;
+pub const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+pub const LIST_MODULES_32BIT: u32 = 0x01;
 
 #[link(name = "shell32")]
 unsafe extern "system" {

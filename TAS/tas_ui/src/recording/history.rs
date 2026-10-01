@@ -71,6 +71,10 @@ pub struct HistoryEntry {
     /// — the "race-start" landmark. `None` for markers and snapshots with no
     /// detected movement.
     pub first_moving: Option<u32>,
+    /// Tick where the game's race clock reads zero: the start-line crossing
+    /// on the entry's track. `None` = unknown; times then count from
+    /// `first_moving`.
+    pub clock_start: Option<u32>,
     /// Race time in centiseconds when the session ended by crossing the
     /// finish line (the HUD timer the finish-line watch auto-stopped at).
     /// `None` = the session was stopped by hand. Drives the
@@ -116,6 +120,7 @@ impl HistoryEntry {
             start_tick: 0,
             end_tick,
             first_moving,
+            clock_start: None,    // set by RecordingHistory on push
             finish_time_cs: None, // set by push_completed_session for finished runs
             finish_time_exact: false,
             level: None,   // stamped from live_level by RecordingHistory on push
@@ -141,6 +146,7 @@ impl HistoryEntry {
             start_tick: 0,
             end_tick: 0,
             first_moving: None,
+            clock_start: None,
             finish_time_cs: None,
             finish_time_exact: false,
             level: None,   // stamped from live_level by RecordingHistory on push
@@ -249,6 +255,9 @@ impl RecordingHistory {
         }
         if stamps.rider_stance.is_some() {
             cur.rider_stance = stamps.rider_stance;
+        }
+        if stamps.input_model.is_some() {
+            cur.input_model = stamps.input_model;
         }
     }
 
@@ -646,6 +655,23 @@ impl RecordingHistory {
         self.current_index
     }
 
+    /// Whether the current entry holds exactly the take in `state`: the same
+    /// length and input. Reads its blob if it is on disk.
+    pub fn current_holds(&mut self, state: &TasSharedState) -> bool {
+        let Some(index) = self.current_index else {
+            return false;
+        };
+        let n = state.recorded_count as usize;
+        if n == 0 {
+            return false;
+        }
+        self.load_slot(index).is_some_and(|snapshot| {
+            snapshot.recorded_count as usize == n
+                && n <= snapshot.input_log.len()
+                && snapshot.input_log[..n] == state.input_log[..n]
+        })
+    }
+
     /// Clear the "current" pointer so no row is highlighted. Does not
     /// touch any entry data. Used by the panel when the user clicks
     /// empty space to deselect.
@@ -670,6 +696,7 @@ impl RecordingHistory {
                     start_tick: e.start_tick,
                     end_tick: e.end_tick,
                     first_moving: e.first_moving,
+                    clock_start: e.clock_start,
                     finish_time_cs: e.finish_time_cs,
                     finish_time_exact: e.finish_time_exact,
                     level: e.level.clone(),
@@ -856,6 +883,7 @@ impl RecordingHistory {
                 start_tick: meta.start_tick,
                 end_tick: meta.end_tick,
                 first_moving: meta.first_moving,
+                clock_start: meta.clock_start,
                 finish_time_cs: meta.finish_time_cs,
                 finish_time_exact: meta.finish_time_exact,
                 level: meta.level,
@@ -971,8 +999,14 @@ impl RecordingHistory {
             return false;
         }
 
+        let clock_start = crate::start_line::start_cross_tick(
+            snapshot.rec_coords.as_ref(),
+            snapshot.recorded_count,
+            self.live_level.as_deref(),
+        );
         let mut entry = HistoryEntry::from_snapshot(label, kind, snapshot);
         entry.entry_id = self.alloc_id();
+        entry.clock_start = clock_start;
         entry.level = self.live_level.clone();
         entry.physics = self.live_physics.clone();
         entry.rider = self.live_rider.clone();
@@ -1156,6 +1190,7 @@ mod tests {
                     start_tick: 0,
                     end_tick: count,
                     first_moving: None,
+                    clock_start: None,
                     finish_time_cs: None,
                     finish_time_exact: false,
                     level: None,

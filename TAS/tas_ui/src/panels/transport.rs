@@ -39,10 +39,8 @@ pub struct TransportProps<'a> {
     pub arming_allowed: bool,
 }
 
-fn can_arm_continue(mode: TasMode, recorded: u32) -> bool {
-    if recorded == 0 {
-        return false;
-    }
+/// With nothing recorded, CONT records from frame 0 (`queue_restart_then`).
+fn can_arm_continue(mode: TasMode) -> bool {
     matches!(mode, TasMode::Off | TasMode::Rec | TasMode::Play)
 }
 
@@ -61,9 +59,7 @@ pub(crate) fn arm_refusal(
             Some("a recording or replay is running — STOP first")
         }
         TasCommand::ArmPlay if recorded == 0 => Some("nothing is recorded"),
-        TasCommand::ArmContinue if !can_arm_continue(mode, recorded) => {
-            Some("nothing to continue from")
-        }
+        TasCommand::ArmContinue if !can_arm_continue(mode) => Some("nothing to continue from"),
         TasCommand::ArmRec | TasCommand::ArmPlay | TasCommand::ArmContinue if !arming_allowed => {
             Some("enter a level first")
         }
@@ -350,9 +346,12 @@ mod tests {
             arm_refusal(TasCommand::ArmContinue, TasMode::Rec, 100, true),
             None
         );
-        // An empty buffer has nothing to replay or continue, but can record.
+        // An empty buffer has nothing to replay; CONT from it records from 0.
         assert!(arm_refusal(TasCommand::ArmPlay, TasMode::Off, 0, true).is_some());
-        assert!(arm_refusal(TasCommand::ArmContinue, TasMode::Off, 0, true).is_some());
+        assert_eq!(
+            arm_refusal(TasCommand::ArmContinue, TasMode::Off, 0, true),
+            None
+        );
         assert_eq!(arm_refusal(TasCommand::ArmRec, TasMode::Off, 0, true), None);
         // A menu (cycle not ticking) refuses every arm.
         for cmd in [
@@ -403,16 +402,9 @@ mod tests {
     }
 
     #[test]
-    fn continue_requires_recorded_ticks() {
-        assert!(!can_arm_continue(TasMode::Off, 0));
-        assert!(!can_arm_continue(TasMode::Rec, 0));
-        assert!(!can_arm_continue(TasMode::Play, 0));
-    }
-
-    #[test]
-    fn continue_allowed_in_off_rec_and_play_when_recorded() {
-        assert!(can_arm_continue(TasMode::Off, 1));
-        assert!(can_arm_continue(TasMode::Rec, 1));
-        assert!(can_arm_continue(TasMode::Play, 1));
+    fn continue_allowed_in_off_rec_and_play() {
+        assert!(can_arm_continue(TasMode::Off));
+        assert!(can_arm_continue(TasMode::Rec));
+        assert!(can_arm_continue(TasMode::Play));
     }
 }

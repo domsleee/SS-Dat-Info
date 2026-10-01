@@ -7,7 +7,6 @@
 //! either way round.
 
 use super::*;
-use crate::relaunch::STALE_PROTECTION_GRACE;
 
 fn scratch_recovery_root(tag: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!("ssb_inspect_{}_{}", tag, std::process::id()));
@@ -21,7 +20,7 @@ fn write_checkpoint(store: &mut recording::RecoveryStore, ticks: u32) {
     let session =
         recording::RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, ticks).unwrap();
     store
-        .take_write_job(&snapshot, &[], &session, true)
+        .take_write_job(&snapshot, &session, true)
         .unwrap()
         .write()
         .unwrap();
@@ -75,9 +74,7 @@ fn recovery_drains_queued_checkpoint_writes_before_reading() {
     let snapshot = recording::RecordingSnapshot::from_state(&app_state);
     let session =
         recording::RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 500).unwrap();
-    let job = store
-        .take_write_job(&snapshot, &[], &session, true)
-        .unwrap();
+    let job = store.take_write_job(&snapshot, &session, true).unwrap();
 
     let mut app = test_app();
     app.recovery_store = Some(store);
@@ -150,52 +147,6 @@ fn dll_reinitialisation_resets_the_session_view() {
     app.shared.as_mut().unwrap().state_mut().frame_count = 8;
     app.check_game_health();
     assert_eq!(app.cycle_fc, 8);
-}
-
-#[test]
-fn stale_input_protection_is_released_only_after_the_grace_period() {
-    let suppressed = |app: &TasApp| app.shared.as_ref().unwrap().state().cont_suppress_input;
-    let mut app = test_app();
-    let mut shared = TasSharedMemoryClient::new_test_mapping();
-    shared.state_mut().cont_suppress_input = 1;
-    shared.state_mut().mode = TasMode::Rec as u32;
-    app.shared = Some(shared);
-    app.poll_stale_input_protection();
-    assert_eq!(suppressed(&app), 1, "a running REC keeps its protection");
-    assert!(app.stale_protection_since.is_none());
-
-    // Idle in OFF with the flag set: the countdown starts, nothing clears yet
-    // — this is exactly what a live controller's restart/settle looks like.
-    app.shared.as_mut().unwrap().state_mut().mode = TasMode::Off as u32;
-    app.poll_stale_input_protection();
-    app.poll_stale_input_protection();
-    assert_eq!(
-        suppressed(&app),
-        1,
-        "a fresh OFF-mode hold is not stale yet"
-    );
-    let (since, generation) = app.stale_protection_since.unwrap();
-
-    // An arm landing (generation bump) restarts the countdown.
-    app.shared.as_mut().unwrap().state_mut().arm_generation = generation + 1;
-    app.stale_protection_since = Some((since - STALE_PROTECTION_GRACE * 2, generation));
-    app.poll_stale_input_protection();
-    assert_eq!(suppressed(&app), 1, "a new arm means a live controller");
-    assert_eq!(app.stale_protection_since.unwrap().1, generation + 1);
-
-    // Held past the grace period with no arm: abandoned — release it.
-    app.stale_protection_since = Some((
-        std::time::Instant::now() - STALE_PROTECTION_GRACE * 2,
-        generation + 1,
-    ));
-    app.poll_stale_input_protection();
-    assert_eq!(suppressed(&app), 0);
-    assert!(app.stale_protection_since.is_none());
-    assert!(app
-        .log_lines
-        .lines()
-        .iter()
-        .any(|l| l.contains("Cleared stale input protection")));
 }
 
 /// A mapping that still holds a dead DLL's take: `ticks` of REC, seeded
@@ -339,21 +290,6 @@ fn relaunch_reset_never_releases_a_foreign_interlock() {
 }
 
 #[test]
-fn a_live_harness_process_blocks_the_stale_release() {
-    let mut app = test_app();
-    let mut shared = TasSharedMemoryClient::new_test_mapping();
-    shared.state_mut().cont_suppress_input = 1;
-    app.shared = Some(shared);
-    app.stale_protection_since = Some((std::time::Instant::now() - STALE_PROTECTION_GRACE * 2, 0));
-    app.poll_stale_input_protection_with(|| true);
-    assert_eq!(app.shared.as_ref().unwrap().state().cont_suppress_input, 1);
-    assert!(
-        app.stale_protection_since.is_none(),
-        "no countdown while it lives"
-    );
-}
-
-#[test]
 fn log_cursor_rewinds_when_the_ring_sequence_drops() {
     let mut app = test_app();
     let mut shared = TasSharedMemoryClient::new_test_mapping();
@@ -463,4 +399,88 @@ fn rejected_finalize_recovers_only_its_own_checkpoint() {
     assert_eq!(app.history.len(), 1);
     assert_eq!(app.history.entries()[0].end_tick, 300);
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+fn app_with_dead_game(pid: u32) -> TasApp {
+    let mut app = test_app();
+    app.shared = Some(TasSharedMemoryClient::new_test_mapping());
+    app.game_pid_seen = Some(pid);
+    app
+}
+
+#[test]
+fn a_crashed_game_raises_the_banner_with_the_fault_and_the_call() {
+    let mut app = app_with_dead_game(11);
+    {
+        let state = app.shared.as_mut().unwrap().state_mut();
+        state.crash_pid = 11;
+        state.crash_code = 0xC000_0005;
+        state.crash_address = 0x1000_0010;
+        state.crash_module[..10].copy_from_slice(b"Kernel.dll");
+        state.crash_module_offset = 0x10;
+        state.crash_game_call = tas_shared::TAS_GAME_CALL_TIME_CURRENT;
+        state
+            .crash_seq
+            .store(1, std::sync::atomic::Ordering::Release);
+    }
+    app.on_game_pid_observed(None);
+    let banner = app.game_exit_banner.clone().expect("banner");
+    assert!(
+        banner.contains("access violation") && banner.contains("Kernel::Time::Current"),
+        "{banner}"
+    );
+}
+
+#[test]
+fn a_killed_game_raises_the_no_record_banner_once() {
+    let mut app = app_with_dead_game(11);
+    app.on_game_pid_observed(None);
+    let banner = app.game_exit_banner.take().expect("banner");
+    assert!(banner.contains("without a crash record"), "{banner}");
+    app.on_game_pid_observed(None);
+    assert!(app.game_exit_banner.is_none(), "reported once per process");
+}
+
+#[test]
+fn a_normally_closed_game_raises_no_banner() {
+    let mut app = app_with_dead_game(11);
+    app.shared.as_mut().unwrap().state_mut().game_exit_clean = 1;
+    app.on_game_pid_observed(None);
+    assert!(app.game_exit_banner.is_none());
+    assert!(app
+        .log_lines
+        .lines()
+        .iter()
+        .any(|l| l.contains("closed normally")));
+}
+
+#[test]
+fn a_crash_during_a_recording_says_the_take_was_saved() {
+    let mut app = app_recording_in_dead_mapping(450);
+    app.check_game_health();
+    app.game_pid_seen = Some(11);
+    app.on_game_pid_observed(None);
+    let banner = app.game_exit_banner.clone().expect("banner");
+    assert!(banner.contains("saved to history"), "{banner}");
+}
+
+#[test]
+fn a_fault_behind_the_games_own_dialog_raises_the_banner_while_it_lives() {
+    let mut app = app_with_dead_game(11);
+    app.poll_crash_record(11);
+    assert!(app.game_exit_banner.is_none(), "no record yet");
+    {
+        let state = app.shared.as_mut().unwrap().state_mut();
+        state.crash_pid = 11;
+        state.crash_code = 0xC000_0005;
+        state.crash_game_call = tas_shared::TAS_GAME_CALL_MENU_TRIGGER;
+        state
+            .crash_seq
+            .store(1, std::sync::atomic::Ordering::Release);
+    }
+    app.poll_crash_record(11);
+    let banner = app.game_exit_banner.take().expect("banner");
+    assert!(banner.contains("UI_Menu::Trigger"), "{banner}");
+    app.poll_crash_record(11);
+    assert!(app.game_exit_banner.is_none(), "shown once per record");
 }

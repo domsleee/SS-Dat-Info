@@ -13,11 +13,6 @@ use crate::recording::{self, RecordingSessionKind};
 use crate::win32;
 use crate::{ActiveRecordingSession, TasApp};
 
-/// How long `cont_suppress_input` may stay set with the DLL idle in OFF and no
-/// arm landing before it counts as abandoned. A live cycle's restart/settle
-/// arms within a few seconds; the DLL's own menu-side retirement is 5 s.
-pub(crate) const STALE_PROTECTION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
-
 /// The checkpoint a session left behind: same kind and start tick, and no
 /// longer than the session ever was.
 #[derive(Clone, Copy)]
@@ -99,6 +94,8 @@ impl TasApp {
             fpu_control_word: cp.session.fpu_control_word,
             rider_character: cp.session.rider_character,
             rider_stance: cp.session.rider_stance,
+            input_model: cp.session.input_model,
+            trajectory_ticks: None,
         };
         if !self.history.push_snapshot_data_with_session(
             cp.snapshot,
@@ -127,55 +124,6 @@ impl TasApp {
             session_label
         ));
         true
-    }
-
-    /// A controller that died mid-cycle leaves `cont_suppress_input` set, so
-    /// every live key but ESC is swallowed with nothing to explain why. Release
-    /// it once it has stayed set for `STALE_PROTECTION_GRACE` with the DLL idle
-    /// in OFF, no cycle of ours in flight and no arm landing.
-    pub(crate) fn poll_stale_input_protection(&mut self) {
-        // While a `tas_test` exists the flag may be its interlock, held through
-        // a slow restart: never touch it. Asked lazily — the flag is almost
-        // never set, and this is a process-list walk at 1 Hz.
-        self.poll_stale_input_protection_with(|| win32::is_process_running("tas_test.exe"));
-    }
-
-    pub(crate) fn poll_stale_input_protection_with(
-        &mut self,
-        external_controller_alive: impl FnOnce() -> bool,
-    ) {
-        let observed = self.shared.as_ref().and_then(|shared| {
-            let state = shared.state();
-            (self.cycle.is_none()
-                && state.mode == TasMode::Off as u32
-                && state.cont_suppress_input != 0)
-                .then_some(state.arm_generation)
-        });
-        let Some(arm_generation) = observed else {
-            self.stale_protection_since = None;
-            return;
-        };
-        if external_controller_alive() {
-            self.stale_protection_since = None;
-            return;
-        }
-        match self.stale_protection_since {
-            Some((since, generation)) if generation == arm_generation => {
-                if since.elapsed() < STALE_PROTECTION_GRACE {
-                    return;
-                }
-                if let Some(shared) = self.shared.as_mut() {
-                    shared.state_mut().cont_suppress_input = 0;
-                }
-                self.stale_protection_since = None;
-                self.push_log(&format!(
-                    "Cleared stale input protection (cont_suppress_input) left by a previous \
-                     controller: live keys were being swallowed for {} s",
-                    STALE_PROTECTION_GRACE.as_secs()
-                ));
-            }
-            _ => self.stale_protection_since = Some((std::time::Instant::now(), arm_generation)),
-        }
     }
 
     /// A fresh `TAS_Helper.dll` reused the section this process still maps, so
@@ -244,6 +192,10 @@ impl TasApp {
             .shared
             .as_ref()
             .map_or(TasMode::Off as u32, |shared| shared.mode_volatile());
+        if mapping_is_old {
+            // Relaunched between two samples: the dead DLL's record is still here.
+            self.report_game_exit(old_pid, false);
+        }
         let why = format!(
             "Supreme.exe was replaced (pid {old_pid} → {new_pid}) with tas_ui still mapped: \
              resetting the session view"
@@ -325,7 +277,6 @@ impl TasApp {
         self.cycle_fc = fc;
         self.last_frame_count = fc;
         self.stale_frame_ticks = 0;
-        self.stale_protection_since = None;
         self.game_pid_cached = None;
         self.clear_cont_catchup();
         // Only a cycle of ours may release the interlock, and only while the
@@ -343,6 +294,7 @@ impl TasApp {
         self.loaded_physics = None;
         self.loaded_rider = None;
         self.loaded_identity = None;
+        self.loaded_level = None;
         self.last_mode = TasMode::Off as u32;
     }
 
@@ -353,9 +305,9 @@ impl TasApp {
     /// can only arrive from a fresh, empty mapping, which pushes an empty
     /// snapshot and then deletes the checkpoint. No-ops without a session, so
     /// callers on the relaunch path need no guard.
-    fn capture_take_from_mapping(&mut self, why: &str) {
+    fn capture_take_from_mapping(&mut self, why: &str) -> bool {
         if self.active_recording_session.is_none() {
-            return;
+            return false;
         }
         let capture = self.shared.as_ref().map(|shared| {
             let snapshot = recording::RecordingSnapshot::from_state(shared.state());
@@ -367,7 +319,64 @@ impl TasApp {
                 "{why} — captured its {recorded} ticks from shared memory"
             ));
             self.finalize_recording_session(&snapshot, recorded);
+            return true;
         }
+        false
+    }
+
+    /// The game's own error handler can catch a fault and hold the process
+    /// open behind its dialog, so a new crash record is shown while the game
+    /// is still alive.
+    pub(crate) fn poll_crash_record(&mut self, pid: u32) {
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        let seq = shared
+            .state()
+            .crash_seq
+            .load(std::sync::atomic::Ordering::Acquire);
+        if seq == self.crash_seq_seen {
+            return;
+        }
+        self.crash_seq_seen = seq;
+        if let Some(record) = tas_shared::crash::crash_record(shared.state(), pid) {
+            let banner =
+                format!("The game faulted: {record}. It may be showing its own error dialog.");
+            self.push_log(&banner);
+            self.game_exit_banner = Some(banner);
+        }
+    }
+
+    /// Say how game process `pid` ended, from the crash record its DLL left
+    /// in the mapping: a crash or an unexplained exit raises the banner.
+    pub(crate) fn report_game_exit(&mut self, pid: u32, take_saved: bool) {
+        if self.game_exit_reported_pid == Some(pid) {
+            return;
+        }
+        self.game_exit_reported_pid = Some(pid);
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        let saved = if take_saved {
+            " The take in progress was saved to history."
+        } else {
+            ""
+        };
+        let banner = match tas_shared::crash::game_exit(shared.state(), pid) {
+            tas_shared::crash::GameExit::Clean => {
+                self.push_log("The game closed normally");
+                return;
+            }
+            tas_shared::crash::GameExit::Crashed(record) => {
+                format!("The game crashed: {record}.{saved}")
+            }
+            tas_shared::crash::GameExit::Unexplained => format!(
+                "The game closed without a crash record: it was killed, or it crashed \
+                 where the TAS could not see.{saved}"
+            ),
+        };
+        self.push_log(&banner);
+        self.game_exit_banner = Some(banner);
     }
 
     /// The 1 Hz identity sample. A new PID is a relaunch; no PID during a
@@ -385,8 +394,12 @@ impl TasApp {
                 self.game_pid_seen = Some(pid);
             }
             None => {
-                if self.game_pid_seen.is_some() && self.active_recording_session.is_some() {
-                    self.capture_take_from_mapping("Game exited during a recording");
+                let Some(dead) = self.game_pid_seen else {
+                    return;
+                };
+                let mut take_saved = false;
+                if self.active_recording_session.is_some() {
+                    take_saved = self.capture_take_from_mapping("Game exited during a recording");
                     // The frozen section still reads REC; the memset or the
                     // disconnect must not turn that into a phantom session.
                     self.last_mode = self
@@ -394,6 +407,7 @@ impl TasApp {
                         .as_ref()
                         .map_or(TasMode::Off as u32, |shared| shared.mode_volatile());
                 }
+                self.report_game_exit(dead, take_saved);
             }
         }
     }
@@ -406,7 +420,6 @@ impl TasApp {
         self.connect_error =
             Some("Supreme.exe has exited. Inject TAS_Helper.dll after restarting the game.".into());
         self.stale_frame_ticks = 0;
-        self.stale_protection_since = None;
         self.log_read_cursor = 0;
         // A fresh Supreme.exe gets a different PID, so the global-shortcut
         // foreground gate would otherwise stay stale.

@@ -54,6 +54,8 @@ fn replay_turn_swing(
         let s = client.state_mut();
         s.test_arg4_override = override_arg4;
         s.arg4_source = 0; // cleared so this run's injections re-stamp it
+                           // Stamps only matter to an injected take; a held take writes the keys.
+        s.input_model = tas_shared::TAS_INPUT_MODEL_INJECTED;
         for i in 0..TOTAL as usize {
             s.input_log[i] = if (STEER_START..STEER_END).contains(&i) {
                 input_bits::RIGHT

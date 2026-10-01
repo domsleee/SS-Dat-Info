@@ -275,6 +275,11 @@ impl transport::TransportPort for TasSharedMemoryClient {
             std::ptr::write_volatile(&mut self.state_mut().gate_align_rec as *mut u32, frame);
         }
     }
+    fn set_input_model(&mut self, model: u32) {
+        unsafe {
+            std::ptr::write_volatile(&mut self.state_mut().input_model as *mut u32, model);
+        }
+    }
     fn set_playback_speed(&mut self, speed: f32) {
         unsafe {
             std::ptr::write_volatile(&mut self.state_mut().playback_speed as *mut f32, speed);
@@ -293,6 +298,16 @@ impl transport::TransportPort for TasSharedMemoryClient {
         unsafe {
             std::ptr::write_volatile(&mut s.cont_splice_approved as *mut u32, 1);
         }
+    }
+    fn request_ownership(&mut self, kind: u32) -> u32 {
+        crate::owner::owner_request_submit(
+            self.state_mut(),
+            kind,
+            crate::owner::current_process_identity(),
+        )
+    }
+    fn ownership_answer(&self, seq: u32) -> Option<crate::owner::OwnerAnswer> {
+        crate::owner::owner_request_answer(self.state(), seq, std::process::id())
     }
 }
 

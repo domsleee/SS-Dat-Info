@@ -154,10 +154,6 @@ impl TasApp {
             }
         };
 
-        if kind == RecordingSessionKind::Rec && self.last_mode == 0 {
-            self.segment_tracker.clear();
-        }
-        self.segment_tracker.on_rec_start(start_tick);
         self.active_recording_session = Some(ActiveRecordingSession {
             kind,
             start_tick,
@@ -184,9 +180,7 @@ impl TasApp {
         // take into durable history and then clears it. Best-effort: a failed
         // write only leaves a slightly staler recovery file.
         let job = match self.recovery_store.as_mut() {
-            Some(store) => {
-                store.take_write_job(snapshot, &self.segment_tracker.segments, session, force)
-            }
+            Some(store) => store.take_write_job(snapshot, session, force),
             None => None,
         };
         if let Some(job) = job {
@@ -229,7 +223,8 @@ impl TasApp {
         if let Some(session_context) = maybe_session {
             let session_context = session_context
                 .with_level(level.as_deref())
-                .with_stamps(live_stamps);
+                .with_stamps(live_stamps)
+                .with_input_model(self.shared.as_ref().map(|s| s.state().input_model));
             self.persist_recovery_snapshot_if_needed(snapshot, &session_context, false);
         }
     }

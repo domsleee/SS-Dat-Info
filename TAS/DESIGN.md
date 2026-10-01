@@ -99,7 +99,9 @@ explain the machinery.
 ### Recording
 
 In REC the DLL logs, every tick, one byte of input (LEFT, RIGHT, UP, DOWN,
-jump, SHIFT) and the boarder's position. Up to 65,536 ticks fit, about 10 min
+jump, SHIFT) and the boarder's position. The input is the keys the game
+itself held for that tick's physics, read from its keyboard observer (see
+"REC observes, PLAY writes" below). Up to 65,536 ticks fit, about 10 min
 55 s. The positions aren't needed to replay the run; they are the reference
 a replay is checked against.
 
@@ -117,20 +119,26 @@ position differs from the spawn (`gate_alignment.hpp`,
 
 - Before arming, the controller finds the recording's gate from its positions
   and writes it to the DLL (`gate_align_rec`).
-- The DLL notes the live replay's gate (`gate_index`) at the end of the tick
-  where the boarder first moves.
-- From then on, replay tick `p` plays recorded input
-  `p - gate_index + gate_align_rec`.
-- Before the live gate, the replay plays the recording's own inputs, up to 8
-  ticks before the recording's gate. From there until the live gate fires,
-  it holds whatever input the recording had at its gate. The input for the
-  gate tick has to be chosen before anyone knows it's the gate tick, and
-  holding it early makes it land wherever the gate falls.
+- The live gate is known before it happens. The countdown is a float on the
+  rider (`[player+0x154]`) that starts at 0 when the rider is reset and grows
+  by 0.01 every tick; the rider is released on the 302nd tick, and that tick
+  is exactly the gate, with or without ghosts (`tas_test countdown-anchor`:
+  the arm lands 4-5 ticks after the reset without ghosts and 14-15 with, and
+  the gate is the release tick every time). On an aligned replay's first
+  tick the DLL reads the countdown and predicts the gate.
+- Replay tick `p` plays recorded input `p - gate + gate_align_rec` from the
+  first tick, countdown included. A tick before the recording started plays
+  no input.
+- The DLL still notes the observed gate (`gate_index`) where the boarder first
+  moves. If it ever differs from the prediction, that is an error: it is
+  logged and the capture is marked failed.
 
-The hold has a cost: any key changes the recording made in those 8 ticks
-reached the game's key observer during recording but are replaced during
-replay, which can cause divergence. The UI warns when a recording has such
-changes.
+If the countdown cannot be read (the rider is already released when the
+replay arms), the DLL falls back to the observed gate: before it fires, the
+replay holds the recording's gate input from 8 ticks before the recording's
+gate, which can replace key changes the recording made in that window.
+Recordings need no conversion: a recording's gate is its release tick, found
+from its positions as before.
 
 A recording that never moves has no gate. It's replayed from the arm, with no
 alignment and no check.
@@ -141,8 +149,12 @@ The gate fixes timing, but not everything about the spawn is visible. So the
 controller watches: it compares the replay's positions to the recording's,
 gate-relative, bit for bit, for up to 1,024 ticks after the gate (fewer if the
 recording or the CONT prefix is shorter). If they differ, or a position read
-failed, it restarts and tries again (a **reroll**), up to 30 times, then
-gives up. After 1,024 matching ticks the replay is accepted. Later
+failed, the cycle aborts: a replay must match, so a divergence is a TAS bug,
+not bad luck to retry. The abort names the first differing tick and both
+positions, and the UI saves both trajectories over the window to
+`diagnostics/divergence-<unix time>.json`. (Aligned replays used to be
+retried up to 30 times; 84 watched replays in `live-full` needed none.)
+After 1,024 matching ticks the replay is accepted. Later
 divergence isn't caught by the watcher. The UI's drift banner compares X/Z
 positions as a separate diagnostic.
 
@@ -172,25 +184,27 @@ restart resets it. The UI abandons a cycle after 180 s.
 CONT is restart → replay the prefix fast and check it → resume recording at
 the splice. For a recording with a gate:
 
-1. The UI saves the current speed and switches to the catch-up speed. It sets
-   `cont_suppress_input`, which makes the DLL ignore every live key except
-   Escape until the cycle ends, including through the restart and countdown.
-   A key held during the restart would otherwise change the spawn. (Aligned
-   PLAY sets it too.)
+1. The UI saves the current speed and switches to the catch-up speed. The
+   transport cycle registers the UI as the TAS's owner (see "Controller
+   ownership"), then stops with `STOP_FOR_RESTART`, which sets
+   `cont_suppress_input`: the DLL ignores every live key except Escape until
+   the cycle ends, including through the restart and countdown. A key held
+   during the restart would otherwise change the spawn. (Aligned PLAY does
+   the same.)
 2. The transport cycle restarts and arms CONT. The DLL replays the prefix,
    gate-aligned. It trims fast-forward tick batches so they stop exactly at
    the splice. If the splice is past the gate, then until the live gate
-   fires, batches stop at the start of the 8-tick pre-gate window and then
-   run at most one tick per frame, so a batch can't overshoot a splice just
-   past the gate.
+   fires (only without a countdown prediction), batches stop at the start
+   of the 8-tick pre-gate window and then run at most one tick per frame, so
+   a batch can't overshoot a splice just past the gate.
 3. **The splice waits for approval.** If playback reaches the splice before
    the watcher has approved, the DLL runs zero ticks per frame ("parks")
    until the controller sets `cont_splice_approved`. The controller approves
    when the watcher's check passes (or, for a splice inside the countdown,
    when the spawn position matches). A slow or crashed controller delays the
    splice; it can't let an unchecked prefix through.
-4. On approval the transport cycle is done and the UI clears
-   `cont_suppress_input`. For a splice far into the run, the watcher approves
+4. On approval the transport cycle is done and releases ownership, which
+   clears `cont_suppress_input`. For a splice far into the run, the watcher approves
    long before playback gets there; PLAY mode keeps live keys out until then.
 5. At the splice, the DLL cuts the recording to the splice tick, switches to
    the saved normal speed, marks a segment boundary and switches to REC. The
@@ -202,10 +216,9 @@ the splice. For a recording with a gate:
    burst (`tas_test cont-resume-pace`).
 7. The UI sees REC, starts a new session, and the player carries on live.
 
-If anything goes wrong, `cont_suppress_input` is also cleared on abort,
-cancel and disconnect. As backstops, the DLL clears it after 5 s with the
-game loop frozen, and the UI clears it if it's been left set for 10 s with
-nothing armed (a check it skips while `tas_test` is running).
+The block belongs to the owner, with no timeout: it ends when the cycle
+releases ownership (done, abort or cancel) or when the owning process exits,
+which also stops the TAS.
 
 Only a successful CONT arm can splice. The permission flag lives inside the
 DLL, so a stray splice value in shared memory can't turn a plain replay into
@@ -222,9 +235,11 @@ them:
   precision, OpenGL at 53-bit, so every calculation rounds differently.
 
 The UI's status card shows a mismatch between the loaded recording and the
-live game, and starting PLAY or CONT also logs advice on a rider mismatch.
-The UI can't fix a mismatch: stance and character are chosen in the game's
-menus, and the renderer at launch.
+live game. PLAY and CONT refuse a take whose rider or x87 precision is known
+to differ, naming the menu screen or the renderer setting that fixes it;
+armed anyway, the watcher would report the divergence as a TAS bug. The UI
+can't fix a mismatch: stance and character are chosen in the game's menus,
+and the renderer at launch.
 
 Separately, the DLL's own hooks must not disturb the x87 registers, or they
 would change the physics themselves. The per-tick hooks save and restore
@@ -238,51 +253,103 @@ The code calls its patches "caves" (code caves).
 
 A real keypress travels: Windows message → the game's key handlers (key down
 at `+3940`, key up at `+3980`), which set a byte in the game's key buffer →
-`BB3B10`, the keyboard **observer**, which must be told about the change for
-steering to work.
+`BB3B10`, which notifies the keyboard **observer**, which must be told about
+the change for steering to work. The observer is the EXE's `TC_Kbd_Impl`
+(`[[[Supreme.exe+0x889C4]+0x14]+0x1AC]`): `BB3B10` only queues the event, and
+the race loop applies queued events once per tick into a held-key array at
+`+0x38`, which is what steering reads. The key buffer alone does not steer.
+The array is cleared at every race (re)start. `tas_test`'s `gamemem` reads
+both arrays from outside the process.
 
-Each key event carries a game timestamp, and the observer silently ignores
-events stamped before the current race. So the DLL stamps injected events
-with the game's own current time. It zeroes the low half of the stamp, which
-the observer doesn't check, so a recording and its replay produce identical
-stamps (as long as both fall in the same roughly 7-minute window of the high
-half).
+Each key event carries a game timestamp, and the observer applies an event
+only once the tick's clock has reached its stamp; an event stamped in the
+future holds back everything queued behind it. The stamp is one 64-bit QPC
+count, and the tick's clock trails wall time. So the DLL stamps injected
+events one whole window of the high half (2^32 counts, about 7 minutes)
+before the game's current time, with the low half zero
+(`injection_stamp.hpp`): always in the past, even just after the high half
+rolls over, when a stamp of the current high half would be ahead of the
+trailing clock and land a tick or more late. The observer also applies at
+most one event per key per tick, and skips the event right after one it
+applies until the next tick, so two keys changed on the same tick reach
+steering one tick apart.
 
 ### The hooks
 
 | Hook | Where | Job |
 | --- | --- | --- |
 | **Cycle cave** | `Supreme::Cycle` | Runs once per tick. Applies commands and records or replays that tick's input. |
-| **Key-handler cave** | key handlers | Blocks real key events during REC and PLAY, so input only enters through the cycle cave, and whenever a CONT is in flight (`cont_suppress_input`), even with the mode OFF. |
-| **Observer cave** | observer `BB3B10` | Blocks real observer calls during REC and while a CONT is in flight. |
+| **Key-handler cave** | key handlers | Blocks real key events during PLAY, so input only comes from the recording, and whenever a CONT is in flight (`cont_suppress_input`), even with the mode OFF. |
+| **Observer cave** | observer `BB3B10` | Blocks real observer calls while a CONT is in flight. |
 | **Tick cave** | tick loop in `Supreme.exe` | Decides how many ticks run each rendered frame: speed control, pause catch-up, parking at a splice. |
 | **Replay capture** | the game's replay recorder | Finds the human player's object so the cycle cave can read its position. Ignores AI and ghost riders. |
 
 Each tick, the cycle cave:
 
-1. Applies a pending command (arm, stop, restart), steps an in-progress F5
-   restart, and stops an armed mode if the level has been replaced.
+1. Applies a pending command (arm, stop, restart) and steps an in-progress F5
+   restart. An arm first releases whatever keys the DLL is holding, even when
+   it arrives over a live REC or PLAY without a STOP, or is refused.
 2. In a CONT whose approved splice is already due, switches to REC before
    this tick's input is chosen, so this tick is recorded, not replayed.
-3. In REC, reads the keyboard; in PLAY, reads the logged input for this tick.
-4. Writes that input into the key buffer and calls the observer for each
-   key that changed.
+3. In REC, reads the keys the observer holds for this tick; in PLAY, reads
+   the logged input for this tick.
+4. In PLAY, writes that input into the key buffer and the observer's held
+   keys (a take from before v56: calls the observer for each key that
+   changed instead).
 5. Logs the input (REC) and the position (REC and PLAY).
 6. After a PLAY tick, checks again whether a CONT splice can complete.
 
 (`tas_test`'s `play-pace` check confirms playback advances 100 ticks per
 second at 1x, i.e. one cycle-cave call per tick.)
 
-**REC injects too.** You might expect REC to just watch the game. It
-doesn't: real key events are blocked during REC as well, and the cycle cave reads the
-keyboard itself (`GetAsyncKeyState`) and injects the result exactly as PLAY
-would. REC and PLAY then deliver input at the same point in the same tick,
-so there's no one-tick difference between recording and replaying.
+**REC observes, PLAY writes** (`held_keys.hpp`). The race loop runs the
+observer's Update and then `Supreme::Cycle` each tick, so at the cycle cave
+the observer's held-key array is exactly what this tick's physics will read.
+REC lets real key events through and records that array; the game handles
+the keys as it always would (pause menu included), and the take holds what
+steering saw, taps shorter than a tick and all. PLAY writes the recorded
+keys into the same array at the same point, after that tick's Update, so no
+queue, stamp or one-event-per-tick rule stands between the recording and the
+physics. Nothing listens to the observer's events; gameplay polls the array
+(`Is_Pressed`), and for jump and shift it ORs three key codes each
+(0x27..0x29, 0x24..0x26), so a bit reads as held when any of them is and
+PLAY sets all three.
 
-Exceptions to the blocking: Escape always gets through (pause menu, abort).
-The REC/PLAY block lifts after the game loop has been still for 250 ms
-(paused, or in a dialog) so menus stay usable. The CONT block
-(`cont_suppress_input`) doesn't lift when paused.
+A fresh REC only observes: after its restart the game holds what real key
+events have given it since, as it would without the TAS (in a race the game
+ignores Windows' key repeats, so a key held through the restart counts once
+it is pressed again). At a CONT splice the replay's keys are still held and
+the player's were blocked, so the first REC tick applies the observer's
+queue (the game's own flush), then sets the held keys and the key buffer to
+the physical keyboard (`GetAsyncKeyState`, only while the game has focus)
+using the codes real key events set (either Ctrl is 0x27, either Shift
+0x24), so the player's key-ups release them. REC passes only the six
+recorded keys (plus Escape, and menus while paused); a key the take could
+not hold could change the run. Releases of other keys always pass (one
+pressed in a menu must come back up); during a running PLAY such a release
+is applied to the held array directly rather than queued, since a queued
+event among the replay's would push one of them a tick later. Escape is the
+exception: its press always gets through, and the pause menu must see it
+come up (`tas_test pause-resume`).
+
+Releasing the DLL's keys (STOP, an arm over a live session, the end of
+PLAY) applies the observer's queue first and then clears, in the held array
+and the key buffer, every key PLAY pressed since its arm (an injected take
+can still have a press queued for a key its last mask no longer holds), so
+no queued event can leave a key down (`tas_test release-pending`).
+
+Takes carry their model (`input_model`: file header, history entry,
+recovery checkpoint; absent = injected). Takes made before v56 were
+recorded by injecting the keyboard through the observer's queue, so their
+masks take effect a tick later and two keys changed together land a tick
+apart; PLAY replays them that way unchanged. A CONT from such a take
+converts the replayed prefix to the held model at the splice, from the held
+keys its replay actually produced, so every new take is one model.
+
+PLAY blocks real key events. Escape always gets through (pause menu,
+abort), and the block lifts while a menu runs over a stalled race so menus
+stay usable. The CONT block (`cont_suppress_input`) doesn't lift when
+paused.
 
 **Position capture.** Each tick the cycle cave copies the boarder's X/Y/Z into
 `rec_coords` (REC) or `play_coords` (PLAY). If a read fails, the tick still
@@ -304,7 +371,9 @@ the game runs at 2x; at 0.04 it runs at 0.25x.
   At 1x and slower the original 20 still applies.
 - After a pause the game would run the whole paused time as a burst of
   ticks. The tick cave runs one tick that absorbs the gap instead (this path
-  bypasses the 20-tick limit).
+  bypasses the 20-tick limit). That tick is physics-neutral: physics steps a
+  constant dt per tick whatever the advance, and the only thing the drain
+  changes is the input-gate time of that one tick.
 
 ### F5 restart
 
@@ -325,13 +394,20 @@ Until Done, the cycle cave keeps F5 down, so a restart the game refused is taken
 its next poll. A STOP lets go of the key. `tas_test restart-stress` runs
 hundreds of restarts in one session.
 
+A RESTART abandons an armed session: it applies a STOP first, keeping any
+input protection (`cont_suppress_input`). Left armed, a CONT would splice into
+REC on the rebuilt level. During a race the message pump also consumes
+RESTART, because a CONT parked at its splice runs no ticks and the cycle cave
+never sees the command (`tas_test restart-while-parked`).
+
 ### Stopping
 
 A STOP command ends either mode. PLAY also stops at the end of the
 recording, and REC when the buffer is full. Leaving the race (quitting to the
 menu, switching track) stops an armed mode too. Every stop releases the keys
-the DLL was holding, so the boarder doesn't keep steering; pausing doesn't
-stop anything.
+the DLL was holding, so the boarder doesn't keep steering; so does every arm
+and a RESTART (`tas_test arm-over-live-release`, `cont-refuse-release`).
+Pausing doesn't stop anything.
 
 ### The race lifecycle
 
@@ -342,7 +418,7 @@ game thread:
 | --- | --- | --- |
 | **Launch** | `Supreme.exe+0x25BD7`, after the race loop enters the level | Identifies the track and publishes it; `game_in_game` = 1. Rider and renderer stamps refresh on the race's first tick. |
 | **Stop** | `Supreme::Stop` (`Supreme_Game+0x1408F0`) | Stops an armed mode while the level still exists; publishes "no race"; `game_in_game` = 0. |
-| **Pump** | the game's message pump (`Supreme.exe+0x55920`) | Runs in every state, including the menus, the pause menu and dialogs where `Supreme::Cycle` doesn't. Consumes STOP there, clears a stale input block, expires menu commands and writes the DLL's queued log lines. |
+| **Pump** | the game's message pump (`Supreme.exe+0x55920`) | Runs in every state, including the menus, the pause menu and dialogs where `Supreme::Cycle` doesn't. Checks the owning controller is alive and answers ownership requests, consumes STOP there (and RESTART during a race), expires menu commands, keeps the crash record's module table current and writes the DLL's queued log lines. |
 
 The level is the area from the game's level resource path plus the
 difficulty from the game's setup object (`level_context.hpp`), because some
@@ -358,7 +434,34 @@ the race's first tick.
 Two more readers:
 
 - **Race timer** (`race_timer_cave.hpp`): hooks the HUD text renderer and reads the
-  on-screen race time, so the UI shows exactly what the game shows.
+  on-screen race time, so the UI shows exactly what the game shows. It also
+  publishes the game's own race clock every clock tick: the player's timer
+  object at `[player+0xB8]` holds the elapsed time as a float at `+0x0C`
+  (0.01f added per Player update from the start line to the finish line)
+  and started/finished bytes at `+0x10`/`+0x11`. The HUD formats that float
+  as `MM:SS:CC` with truncating conversions, so the float, not a tick count,
+  is the official time: it drifts (60,000 ticks read 600.27 s), and the tick
+  count is recovered by replaying the float sum (`tas_shared::race_clock`).
+  Each HUD player-line time is published together with the clock read in the
+  same call; `tas_test race-clock` checks the HUD formula applied to the
+  clock equals every scraped time, at 1x and 8x, through the finish, with
+  and without ghosts. The UI shows the clock's time; the scraper stays only
+  as that test's reference.
+- **Finish line** (`finish_cave.hpp`): the game's Finish_Point crossing
+  callback calls the rider's race timer finish (`SG+0x7F9D0`), which decides
+  whether the finish counts (a missed checkpoint voids the time) and latches
+  it once. A hook right after that decision (`SG+0x7FA33`: `bl` = counts,
+  `esi` = the timer, `[esi+0x1C]` = its Player) publishes, for the human
+  rider only (ghosts and AI finish through the same code), the tick it
+  finished in (the recorded index in REC, the playback index in PLAY), the
+  mode, whether it counts and the final time (`race_finish_*`). It runs in
+  that tick's physics, inside `Supreme::Cycle`. The UI stops a REC on a
+  finish that happened in REC, and labels the take with that time; it no
+  longer tests positions against level geometry, which differs between
+  tracks and game versions. `tas_test finish-line` checks the tick is the
+  same at 1x and 8x, the time is the race clock's, the replay's positions are
+  past FE's finish plane on the next tick, and a CONT's REC reports its own
+  finish.
 - **Menu reader** (`menu_cave.hpp`): publishes the current menu page as a
   small JSON document (items, labels, ids) and carries out commands (focus,
   activate, up/down) through the game's own menu code, on the menu's own
@@ -400,9 +503,9 @@ Two processes share this memory without locks, so it relies on conventions:
 - The controller writes commands and their parameters; the DLL writes
   status. The UI writes the recording arrays and `recorded_count` only while
   the DLL is stopped. A few flags are written by both sides: the controller
-  sets the alignment fields and the DLL clears them, and
-  `cont_suppress_input` is set and cleared by the UI and also by the DLL
-  (`STOP_FOR_RESTART` sets it, a plain STOP clears it).
+  sets the alignment fields and the DLL clears them. `cont_suppress_input`
+  is set by `STOP_FOR_RESTART` from the owning controller and cleared by a
+  plain STOP, by the owner's release and by the owner's exit.
 - The command word is written last. The controller writes the parameters
   first and the command last; the DLL writes all resulting status first and
   resets the command last. The command is written and read with atomic
@@ -423,17 +526,75 @@ Two processes share this memory without locks, so it relies on conventions:
   race ticks and the message-pump hook everywhere else; both run on the game
   thread, so all DLL-side state has a single writer thread.
 
-Nothing stops the UI and the harness driving the same game at once; the
-harness closes any running `tas_ui` before it starts. (`tas_ui` does refuse
-a second instance of itself.) The menu reader uses a separate command channel
-of its own (sequence, target, acknowledgement, result).
+A transport cycle registers its process as the owner first, and a second
+controller's cycle is refused while the owner lives. Commands sent outside
+a cycle aren't checked, so the harness still closes any running `tas_ui`
+before it starts. (`tas_ui` refuses a second instance of itself.) The menu
+reader uses a separate command channel of its own (sequence, target,
+acknowledgement, result).
+
+### Controller ownership
+
+A controller that dies mid-cycle would otherwise leave the TAS armed, keys
+held and live input blocked, with nothing to notice. So the DLL tracks which
+process owns the TAS (`controller_owner.hpp`, `caves/owner_cave.hpp`):
+
+- Before its first command, a transport cycle writes its pid and process
+  creation time and bumps `owner_request_seq`. On the next pump pass the
+  DLL opens a handle to that process, checks the creation time (so a reused
+  pid can't pass) and answers in `owner_result` / `owner_ack_seq`. A live
+  owner is never displaced: another process gets BUSY. The same process may
+  acquire again.
+- Every pump pass the DLL polls the handle. When the owner has exited (or
+  the handle stops answering), it runs the full STOP transition (keys
+  released, F5 let go, splice approval and alignment cleared, protection
+  lifted), drops the owner's unconsumed command and logs the stop. The handle
+  identifies the process object itself, so this is exact, not a timeout.
+- A cycle releases ownership when it finishes, aborts or is cancelled; the
+  release clears `cont_suppress_input`. A block found set with no owner is
+  cleared and logged.
+- A controller that is alive but hung keeps ownership; that isn't detected.
+
+`tas_test owner-death` kills a real owning process mid-restart, in the
+countdown and mid-replay with keys held, and checks the stop; it also checks
+that a reader's death changes nothing, that a second controller is refused,
+and that a living owner's block holds for 12 s.
+
+### Crashes
+
+DLL calls into game code (`Kernel::Time::Current`, the menu's
+Trigger/Up/Down/Left/Right, Request_Focus, Want_Focus, Get_Active_Component,
+Get_Modal) are not wrapped in `__try`: a fault there is a bug, so it crashes
+the game rather than being swallowed. Plain memory reads of game objects
+that an F5 restart may have freed stay guarded; they leave nothing half done.
+
+Each such call sets `game_call` for its duration (`crash_report.hpp`). A
+vectored exception handler records a fault raised while one is in flight;
+it has to be first-chance, because the game's own handler catches the fault
+and holds the process open behind its kernel-error dialog. An
+unhandled-exception filter, re-installed from the pump and chained to any
+later one, records the rest. The record (code, module + offset from a module
+table the pump refreshes every 2 s, the call, the thread) goes into shared
+memory, which `tas_ui` still maps after the game dies. `game_exit_clean` is
+set on a normal exit.
+
+`tas_ui` shows a red banner with the fault as soon as a record appears, and
+when the game process goes away it says how: crashed (with the record), or
+gone without a clean exit and without a record (killed, or a fault nothing
+saw). A `__fastfail` bypasses every handler, and nothing here writes a dump
+file. `tas_test crash-report` sends a test-only command that faults inside
+`Kernel::Time::Current` and checks the record.
 
 ## SSB Inspect (tas_ui)
 
 The UI's responsibilities:
 
 - **Transport**: REC, PLAY, CONT and STOP buttons, also on F9 to F12 while
-  the game has focus. Each start runs the transport cycle above.
+  the game has focus. Each start runs the transport cycle above. CONT from
+  frame 0, or with nothing recorded, has nothing to replay and records a
+  fresh take. PLAY and CONT refuse a take recorded on another track (its
+  level stamp, else its spawn position), rider or x87 precision; unknown on
+  either side is allowed.
 - **Sessions**: when REC starts it opens a session; when REC stops, including
   when the DLL stops it because the race was left, it saves the take to
   history.
@@ -441,7 +602,9 @@ The UI's responsibilities:
   (`panels/timeline.rs`), or in a TMInterface-style text script
   (`324-372 press left`, ticks, end exclusive) that reloads on save
   (`panels/input_script.rs`). Edits apply only while stopped; the UI stops a
-  running session first.
+  running session first. The timeline opens on a 60 s window until the user
+  zooms, pans or fits. A click on open lane space sets the CONT frame; a
+  click or drag on an input span never does.
 - **Finish line**: start and finish trigger planes come from level data
   (`start_line.rs`) for the nine main tracks and Practice. While recording on a known track, the UI sends STOP once the run
   crosses the finish, since the run-out is never wanted. The STOP lands a few
@@ -454,10 +617,12 @@ The UI's responsibilities:
 - **History, crash recovery and relaunch**, below.
 
 **Editing changes inputs, not positions.** The stored positions stay those
-of the original take, and the watcher keeps comparing against them. An edit
-that changes the run within the first 1,024 ticks after the gate makes PLAY
-reroll until it gives up. A CONT is only affected by edits in the prefix it
-replays (including the 8 ticks before the gate).
+of the original take, so past the first changed tick they are stale. The take
+carries that tick (`trajectory_ticks` in the file header and the history
+entry's stamps; later edits only move it earlier), and the watcher and the
+drift banner compare only up to it. An edit inside the countdown leaves only
+the spawn to check. A CONT takes the replayed prefix as the new take's
+positions at the splice, so the take it records is whole again.
 
 ### Recording files (`.tasrec`)
 
@@ -466,8 +631,9 @@ replays (including the 8 ticks before the gate).
 ```
 
 All numbers are little-endian. The JSON header holds `recorded_count` (which
-sets both body lengths), segments, and the rider and physics stamps. Loaders
-ignore unknown header fields. `tas_codec` owns the format: it rejects
+sets both body lengths) and the rider and physics stamps. Loaders ignore
+unknown header fields, such as the `segments` list older files carry (it
+was never read, and overlapped after a CONT). `tas_codec` owns the format: it rejects
 oversized headers (over 1 MiB), truncated bodies and non-finite positions,
 and writes files atomically. Old input-only files still load in the UI
 (positions zeroed); the test harness requires positions.
@@ -521,9 +687,8 @@ few seconds.
 If the game dies or restarts while the UI stays open (`relaunch.rs`), the UI
 still has the old shared memory mapped. If it still holds the dead game's
 data, the UI saves the take from it. If the new DLL has already reset it, the
-UI falls back to the checkpoint. It releases an input block its own cycle
-left set; a block left by another controller that died mid-cycle is cleared
-by the 10 s backstop.
+UI falls back to the checkpoint. If the game crashed, or vanished without a
+clean exit, the UI says so in a banner (see "Crashes").
 
 A relaunch usually produces two signals, in either order: the game's process
 id changes, and the DLL's tick counter goes backwards. The UI handles them as
@@ -558,9 +723,9 @@ protection, level sequence, save and reload, menu dialogs and more.
 `just test_live_soak` repeats the same checks more times. Live tests replace
 the game's current recording, so save your run first.
 
-**Why a Pico.** REC reads the keyboard with `GetAsyncKeyState`, which reports
-physical key state. Messages posted to the game window don't change it, so a
-test of REC needs real key presses. A Raspberry Pi Pico 2 acting as a USB
+**Why a Pico.** REC records the keys the game received from Windows, so a
+test of REC needs real key presses; messages posted to the game window
+aren't the same path. A Raspberry Pi Pico 2 acting as a USB
 keyboard provides them: its keys reach Windows and the game exactly like a
 person's. Normal use doesn't need one, since PLAY injects inside the game
 and the DLL presses F5 itself.
@@ -617,5 +782,7 @@ splice.
   in the pause menu or a dialog; the controller's timeout then gives up.
 - The watcher checks the first 1,024 ticks after the gate; later divergence
   is only visible in the drift banner.
-- Editing inputs keeps the original take's positions, so an edit inside the
-  watched window makes PLAY reroll until it gives up.
+- An edited take is watched only up to its first edited tick until a CONT
+  re-records its positions. A UI reopened on a buffer the DLL kept takes the
+  stamps (edit limit included) of the selected history entry when that entry
+  holds the same input; otherwise it knows none and watches the whole take.

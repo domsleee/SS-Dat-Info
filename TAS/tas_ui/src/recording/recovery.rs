@@ -2,8 +2,7 @@
 //! debounce, and the background writer that keeps checkpoint writes off the UI thread.
 
 use super::{
-    completed_session_label, IdentityStamps, RecordingFile, RecordingSessionKind,
-    RecordingSnapshot, Segment,
+    completed_session_label, IdentityStamps, RecordingFile, RecordingSessionKind, RecordingSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -53,6 +52,10 @@ pub struct RecoverySessionContext {
     pub rider_character: Option<u32>,
     #[serde(default)]
     pub rider_stance: Option<u32>,
+    /// TAS_INPUT_MODEL_* the take was recorded in; `None` = before the held
+    /// model (injected).
+    #[serde(default)]
+    pub input_model: Option<u32>,
 }
 
 impl RecoverySessionContext {
@@ -68,7 +71,13 @@ impl RecoverySessionContext {
             renderer_id: None,
             rider_character: None,
             rider_stance: None,
+            input_model: None,
         })
+    }
+
+    pub fn with_input_model(mut self, model: Option<u32>) -> Self {
+        self.input_model = model;
+        self
     }
 
     /// Carry the live physics / rider stamps: `(fpu_control_word, renderer_id,
@@ -100,6 +109,9 @@ impl RecoverySessionContext {
         if let Some(v) = self.rider_stance {
             state.rider_stance = v;
         }
+        state.input_model = self
+            .input_model
+            .unwrap_or(tas_shared::TAS_INPUT_MODEL_INJECTED);
     }
 
     /// The rider stamp as the history entry shows it ("Keith · goofy").
@@ -185,7 +197,6 @@ impl RecoveryStore {
     pub fn take_write_job(
         &mut self,
         snapshot: &RecordingSnapshot,
-        segments: &[Segment],
         session: &RecoverySessionContext,
         force: bool,
     ) -> Option<RecoveryWriteJob> {
@@ -206,7 +217,6 @@ impl RecoveryStore {
         self.last_write_at = Some(Instant::now());
         Some(RecoveryWriteJob {
             snapshot: snapshot.clone(),
-            segments: segments.to_vec(),
             session: session.clone(),
             recording_path: self.recording_path.clone(),
         })
@@ -218,7 +228,6 @@ impl RecoveryStore {
 /// REC snappy on the UI thread.
 pub struct RecoveryWriteJob {
     snapshot: RecordingSnapshot,
-    segments: Vec<Segment>,
     session: RecoverySessionContext,
     recording_path: PathBuf,
 }
@@ -239,13 +248,10 @@ impl RecoveryWriteJob {
             fpu_control_word: self.session.fpu_control_word,
             rider_character: self.session.rider_character,
             rider_stance: self.session.rider_stance,
+            input_model: self.session.input_model,
+            trajectory_ticks: None,
         };
-        let bytes = RecordingFile::encode_with_segments(
-            &state,
-            &self.segments,
-            Some(&identity),
-            Some(self.session),
-        )?;
+        let bytes = RecordingFile::encode(&state, Some(&identity), Some(self.session))?;
         tas_codec::save_atomic(&self.recording_path, &bytes)
     }
 }
@@ -364,12 +370,11 @@ mod tests {
     fn persist_checkpoint(
         store: &mut RecoveryStore,
         state: &TasSharedState,
-        segments: &[Segment],
         session: &RecoverySessionContext,
         force: bool,
     ) -> Result<bool, String> {
         let snapshot = RecordingSnapshot::from_state(state);
-        let Some(job) = store.take_write_job(&snapshot, segments, session, force) else {
+        let Some(job) = store.take_write_job(&snapshot, session, force) else {
             return Ok(false);
         };
         job.write()?;
@@ -386,15 +391,9 @@ mod tests {
             state.input_log[i] = (i as u8) + 1;
             state.rec_coords[i] = [i as f32, 0.0, i as f32 * 1.5];
         }
-        let segments = vec![Segment {
-            name: "Segment 1".to_string(),
-            start_tick: 0,
-            end_tick: 5,
-            timestamp: "2026-01-01T00:00:00Z".to_string(),
-        }];
         let session = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 5).unwrap();
 
-        assert!(persist_checkpoint(&mut store, &state, &segments, &session, true).unwrap());
+        assert!(persist_checkpoint(&mut store, &state, &session, true).unwrap());
         let pending = store.load_pending().unwrap().expect("expected checkpoint");
         assert_eq!(pending.snapshot.recorded_count, 5);
         assert_eq!(pending.session.label, "Recorded 0:00.05");
@@ -411,7 +410,7 @@ mod tests {
         let mut state = tas_shared::zeroed_boxed();
         state.recorded_count = 2;
         state.input_log[0] = 8;
-        RecordingFile::save_with_segments(&state, &store.recording_path, &[], None).unwrap();
+        RecordingFile::save(&state, &store.recording_path, None).unwrap();
         for sidecar in [None, Some(r#"{"session":{"level":"FE"}}"#)] {
             if let Some(json) = sidecar {
                 std::fs::write(&store.metadata_path, json).unwrap();
@@ -436,7 +435,7 @@ mod tests {
         let old = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 2)
             .unwrap()
             .with_level(Some("FE"));
-        persist_checkpoint(&mut store, &state, &[], &old, true).unwrap();
+        persist_checkpoint(&mut store, &state, &old, true).unwrap();
         let lock = std::fs::OpenOptions::new()
             .read(true)
             .share_mode(1)
@@ -449,7 +448,7 @@ mod tests {
         let writer = RecoveryWriter::new();
         assert!(writer.submit(
             store
-                .take_write_job(&RecordingSnapshot::from_state(&state), &[], &new, true)
+                .take_write_job(&RecordingSnapshot::from_state(&state), &new, true)
                 .unwrap()
         ));
         assert!(writer.flush().is_err());
@@ -459,7 +458,7 @@ mod tests {
         assert_eq!(loaded.snapshot.input_log[0], 1);
         assert_eq!(loaded.session.level.as_deref(), Some("FE"));
         store.retry_failed_write();
-        persist_checkpoint(&mut store, &state, &[], &new, false).unwrap();
+        persist_checkpoint(&mut store, &state, &new, false).unwrap();
         let loaded = store.load_pending().unwrap().unwrap();
         assert_eq!(loaded.snapshot.input_log[0], 8);
         assert_eq!(loaded.session.level.as_deref(), Some("AM"));
@@ -503,9 +502,7 @@ mod tests {
         state.input_log[0] = 9;
         let snap = RecordingSnapshot::from_state(&state);
         let session = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 3).unwrap();
-        let job = store
-            .take_write_job(&snap, &[], &session, true)
-            .expect("job");
+        let job = store.take_write_job(&snap, &session, true).expect("job");
 
         let writer = RecoveryWriter::new();
         writer.submit(job);
@@ -531,13 +528,13 @@ mod tests {
         state.input_log[2] = 0x04;
         let session3 = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 3).unwrap();
 
-        assert!(persist_checkpoint(&mut store, &state, &[], &session3, true).unwrap());
-        assert!(!persist_checkpoint(&mut store, &state, &[], &session3, false).unwrap());
+        assert!(persist_checkpoint(&mut store, &state, &session3, true).unwrap());
+        assert!(!persist_checkpoint(&mut store, &state, &session3, false).unwrap());
 
         state.recorded_count = 4;
         state.input_log[3] = 0x08;
         let session4 = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 4).unwrap();
-        assert!(persist_checkpoint(&mut store, &state, &[], &session4, false).unwrap());
+        assert!(persist_checkpoint(&mut store, &state, &session4, false).unwrap());
 
         let pending = store.load_pending().unwrap().expect("expected checkpoint");
         assert_eq!(pending.snapshot.recorded_count, 4);
@@ -555,14 +552,14 @@ mod tests {
         state.input_log[0] = 0x01;
         state.input_log[1] = 0x02;
         let session2 = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 2).unwrap();
-        assert!(persist_checkpoint(&mut store, &state, &[], &session2, true).unwrap());
+        assert!(persist_checkpoint(&mut store, &state, &session2, true).unwrap());
 
         state.recorded_count = 6;
         for i in 2..6 {
             state.input_log[i] = 0x08;
         }
         let session6 = RecoverySessionContext::from_ticks(RecordingSessionKind::Rec, 0, 6).unwrap();
-        assert!(persist_checkpoint(&mut store, &state, &[], &session6, true).unwrap());
+        assert!(persist_checkpoint(&mut store, &state, &session6, true).unwrap());
 
         let metadata =
             RecordingFile::read_metadata(&root.join("recovery_checkpoint.tasrec")).unwrap();
@@ -599,7 +596,7 @@ mod tests {
                 (tas_shared::TAS_CHARACTER_KEITH, 0),
             )));
         store
-            .take_write_job(&snap, &[], &session, true)
+            .take_write_job(&snap, &session, true)
             .unwrap()
             .write()
             .unwrap();
@@ -634,6 +631,8 @@ mod tests {
                 fpu_control_word: cp.session.fpu_control_word,
                 rider_character: cp.session.rider_character,
                 rider_stance: cp.session.rider_stance,
+                input_model: cp.session.input_model,
+                trajectory_ticks: None,
             },
         );
         history.set_pinned(id, true);
@@ -652,6 +651,8 @@ mod tests {
                 fpu_control_word: Some(0x027F),
                 rider_character: Some(tas_shared::TAS_CHARACTER_KEITH),
                 rider_stance: Some(0),
+                input_model: None,
+                trajectory_ticks: None,
             },
             "all three checkpoint stamps survive recovery"
         );

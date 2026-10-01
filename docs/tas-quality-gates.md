@@ -74,6 +74,7 @@ safety release, so a hold lasts as long as the pattern says.
 | `live-full` | yes | `Live suite report: .../summary.json`, every stage `passed` | Full ordered regression plan: short live suite plus replay/cycles, timing, CONT races, pause/resume, save/reload and dialog/menu navigation. `just test_live_full`. |
 | `live-soak` | yes | `Live suite report: .../summary.json`, every stage `passed` | Same functional contracts with extended repetition counts. `just test_live_soak`. |
 | `live [--recording PATH] [--splice N] [--iterations N]` | yes | `Live suite report: .../summary.json`, every stage `passed` | Runs `cont-ui-left-spam`, then `acceptance`, then `regression` as child processes; a failing stage stops the rest. `just test_live [splice] [iterations]`. |
+| `ui-f12-from-zero` | no | `*** UI F12 FROM ZERO PASSED: ...` | Launches an isolated `tas_ui` with From at 0 and presses the real F12: the UI must record a fresh take (DLL in REC, a new take growing). |
 | `cont-ui-left-spam [--recording PATH] [--splice N] [--iterations N]` | yes | `CONT UI LEFT-SPAM PASSED` | Launches an isolated `tas_ui.exe`, loads the captured 4500 recording, sends F12 and physical LEFT taps, checks first-attempt resume and zero splice mismatch on each of N splices, stops with F11. `just test_cont_ui_left_spam`. |
 | `acceptance [N]` | yes | `*** ACCEPTANCE TEST PASSED ***` per run, `=== Acceptance: N/N runs passed ===` | Three phases: unsteered baseline REC, Pico-steered REC that must differ from it, PLAY that must match the steered REC. `just test_acceptance`. |
 | `regression` | yes | `=== Regression Summary: 7/7 passed ===` | Seven distinct input contracts: captured edges must match the intended schedule, then REC/PLAY must have zero drift; writes the CSV and certificate. `just test_regression`. |
@@ -82,7 +83,7 @@ safety release, so a hold lasts as long as the pattern says.
 
 | Mode | Pico | Pass signature | What it checks |
 |---|---|---|---|
-| `segment` | yes | `*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***` | Product-aligned CONT at frame 500 while LEFT is held, then RIGHT steering. Requires two exact segment boundaries, released tail and complete gate-relative zero drift; covers approval arriving at the parked splice. |
+| `segment` | yes | `*** MULTI-SEGMENT ZERO-DRIFT TEST PASSED ***` | Product-aligned CONT at frame 500 while LEFT is held, then RIGHT steering. Requires the DLL's two splice boundaries in shared memory, released tail and complete gate-relative zero drift; covers approval arriving at the parked splice. |
 | `replay <file.tasrec> [--iterations N] [--verbose]` | no | `Result: ZERO DRIFT in all N iterations` | Loads a `.tasrec` and replays it N times through aligned PLAY; gate-relative drift, incomplete playback or a rejected alignment fails. `just test_replay FILE`. |
 | `reliability [--iterations N] [--speed X]` | yes | `*** RELIABILITY TEST PASSED ***` | N consecutive steered REC+PLAY cycles at one speed (default 10 at 12x). Shares its procedure with drift-speed but uses a 50-tick neutral tail (drift-speed: 100) and mandatory movement gates (drift-speed: optional). |
 | `drift-speed` | yes | `*** DRIFT-AT-SPEED TEST PASSED ***` | REC 2x/PLAY 2x and REC 1x/PLAY 2x both replay with zero drift. |
@@ -116,6 +117,18 @@ safety release, so a hold lasts as long as the pattern says.
 | `cont-hijack` | no | `*** BUG #2 PASSED: replay crossed frame N still in PLAY — no REC hijack ***` | A `continue_from_frame` written during a plain PLAY leaves it in PLAY. |
 | `cont-restart-race` | no | `*** PASS: serialised Stop→Restart is accepted by the cycle cave ***` | The product controller serializes STOP/restart/arm and the DLL acknowledges CONT. Command-overwrite behavior is tested deterministically offline. |
 | `cont-input-protection` | no | every `PASS:` line, ending `PASS: ordinary STOP releases input protection (cont_suppress_input=0)` | Live input stays blocked through the CONT restart and STOP releases it, driven through the real transport controller. |
+| `cont-refuse-release` | no | `*** CONT-REFUSE-RELEASE PASSED: ...` | An ARM_CONTINUE refused during PLAY leaves no replayed key held in the game's key buffer or keyboard observer (read from the game's memory, not shared memory). |
+| `arm-over-live-release` | no | `*** ARM-OVER-LIVE-RELEASE PASSED: ...` | ARM_REC and ARM_PLAY sent over a live PLAY, with no STOP, release the keys the old session held. |
+| `restart-while-parked` | no | `*** RESTART-WHILE-PARKED PASSED: ...` | A RESTART sent while an aligned CONT is parked at its unapproved splice is consumed, completes, and leaves the DLL OFF rather than splicing into REC on the rebuilt level. |
+| `cont-convert` | yes | `*** CONT-CONVERT PASSED ***` | A CONT from a pre-v56 (injected) take converts the prefix to held keys at the splice; the new take, prefix and a Pico-recorded suffix, replays bit for bit under the held model over its whole length. |
+| `finish-line` | Enter/RIGHT for the post-race prompt | `*** FINISH-LINE PASSED ***` | The finish from the game's Finish_Point: the same tick at 1x and 8x, valid, the race clock's final time, FE's finish plane passed on the next tick; a CONT's REC reports its own finish after the splice. |
+| `ui-finish-autostop` | Enter/RIGHT for the post-race prompt | `*** UI FINISH AUTO-STOP PASSED: ... ***` | The deployed tas_ui CONTs FE-decent-done over the line (F12) and stops the take at the game's own finish, a tick after it. |
+| `release-pending` | no | `*** RELEASE-PENDING PASSED ***` | Takes whose last ticks leave a press queued behind others (found by brute force over the observer's rules) end with nothing held in the observer or the key buffer, injected and held alike. |
+| `release-on-arm` | no | `*** RELEASE-ON-ARM PASSED ***` | A refused CONT and an ARM_REC land on the tick an injected replay still has a press queued (0.05x around it); nothing may stay held. |
+| `play-enter-spam` | yes | `*** PLAY-ENTER-SPAM PASSED ***` | Enter tapped on the real keyboard throughout a replay of an injected take: its releases pass but stay out of the observer's queue, so the replay stays bit for bit. |
+| `owner-death` | no | `*** OWNER-DEATH PASSED ***` | A child controller that owns a cycle is killed mid-restart, in the countdown and mid-replay with keys held: the DLL stops the TAS, releases the keys and lifts the input block within 2 s. A reader's death changes nothing, a second controller is refused while the owner lives, and a living owner's block holds 12 s. |
+| `countdown-anchor` | no | `*** COUNTDOWN-ANCHOR PASSED: the gate is always N tick(s) after release ... ***` | Over 15 aligned restarts the gate sits a fixed distance from the rider's countdown release, and the DLL's countdown prediction never misses the observed gate. |
+| `crash-report` | no | `*** CRASH-REPORT PASSED ***` | Not in the suites: crashes and relaunches the game. A test-only command faults inside `Kernel::Time::Current`; the crash record names the call, the fault and the module, and the relaunched game starts with no record. Backs up and restores the FE replay files around the crash. |
 
 ### Diagnostics
 

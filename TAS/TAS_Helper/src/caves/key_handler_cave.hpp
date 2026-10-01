@@ -4,15 +4,25 @@
 #include "../shared_state.hpp"
 #include "../game_addresses.hpp"
 #include "../input_gate.hpp"
+#include "cycle_cave.hpp"
+#include "menu_cave.hpp"
 #include <safetyhook.hpp>
 
 // The key-handler cave: inline hooks on HMG+3940 (keyDown) and HMG+3980 (keyUp).
-// During REC and PLAY, real key events are blocked (input_gate.hpp) so only the
-// cycle cave writes the buffer, and REC and PLAY see input on the same tick.
+// During PLAY and a CONT, real key events are blocked (input_gate.hpp) so only
+// the cycle cave drives the keys. REC lets the six recorded keys through and
+// records the result; other keys stay blocked, as they would not be in the take.
 // The handlers are __thiscall with 3 stack args (ret 000C); the __fastcall
 // detours take a dummy EDX.
 
 inline TasSharedState* g_keyHandlerCaveState = nullptr;
+
+// Shared with the observer cave; see IsMenuPause.
+inline bool MenuPauseNow() {
+    const uint64_t last_menu = menustate::g_lastExecuteMs;
+    return IsMenuPause(GetTickCount() - g_lastCycleMs, last_menu != 0,
+                       GetTickCount64() - last_menu);
+}
 
 static SafetyHookInline keyDownHook{};
 static SafetyHookInline keyUpHook{};
@@ -35,8 +45,10 @@ void __fastcall KeyDown_Detour(void* ecx, void* edx, uint32_t a1, uint32_t a2, u
             s->mode,
             s->cont_suppress_input != 0,
             IsTasInjectionThread(),
-            (GetTickCount() - g_lastCycleMs) > 250,
+            MenuPauseNow(),
             a1 == VK_ESCAPE,
+            IsTasVirtualKey(a1),
+            false,
         })) {
         s->handler_block_count++;
         return;
@@ -54,8 +66,10 @@ void __fastcall KeyUp_Detour(void* ecx, void* edx, uint32_t a1, uint32_t a2, uin
             s->mode,
             s->cont_suppress_input != 0,
             IsTasInjectionThread(),
-            (GetTickCount() - g_lastCycleMs) > 250,
+            MenuPauseNow(),
             a1 == VK_ESCAPE,
+            IsTasVirtualKey(a1),
+            true,
         })) {
         s->handler_block_count++;
         return;

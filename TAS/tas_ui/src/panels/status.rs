@@ -93,7 +93,8 @@ pub fn status_card(ui: &mut egui::Ui, state: &TasSharedState, props: &StatusProp
         let live_physics =
             tas_shared::physics_mode_label(state.renderer_id, state.fpu_control_word);
         let live_rider = tas_shared::rider_label(state.rider_character, state.rider_stance);
-        let (race_cs, race_start) = tas_shared::race_pair(state);
+        let race_clock = tas_shared::race_clock::race_clock(state);
+        let race_cs = tas_shared::race_clock::hud_time_cs(state).unwrap_or(u32::MAX);
 
         // Transport on the left, race clock on the right.
         ui.horizontal(|ui| {
@@ -122,11 +123,18 @@ pub fn status_card(ui: &mut egui::Ui, state: &TasSharedState, props: &StatusProp
                 };
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new(t).color(clock_color).size(12.0))
-                        .on_hover_text(format!(
-                            "Exact race time (from the HUD). start_ts={} — the gate \
-                             clock value",
-                            race_start
-                        ));
+                        .on_hover_text(
+                            match race_clock
+                                .and_then(|c| tas_shared::race_clock::ticks(c.seconds, 70_000))
+                            {
+                                Some(ticks) => format!(
+                                    "Race time from the game's own clock, as the HUD shows it \
+                                 ({ticks} race ticks)"
+                                ),
+                                None => "Race time from the game's own clock, as the HUD shows it"
+                                    .to_string(),
+                            },
+                        );
                 });
             }
         });

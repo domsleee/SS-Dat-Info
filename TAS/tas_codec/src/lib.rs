@@ -4,8 +4,8 @@
 //!
 //! Layout: `[u32le meta_len][JSON metadata][input_log bytes][f32le xyz …]`.
 //! This crate owns the byte layout, every length bound, and atomic writing.
-//! Metadata *schemas* stay with the callers (the UI stamps identity +
-//! segments; the harness preserves unknown fields raw). Whether coordinates
+//! Metadata *schemas* stay with the callers (the UI stamps identity; the
+//! harness preserves unknown fields raw). Whether coordinates
 //! are required is an explicit caller decision (`require_coords`), not a
 //! property of the format.
 
@@ -16,7 +16,7 @@ use tas_shared::TAS_MAX_TICKS;
 /// Bytes per recorded tick: 1 input byte + 3 little-endian f32s.
 pub const BLOB_BYTES_PER_TICK: usize = 1 + 3 * 4;
 /// Upper bound on the JSON metadata header. Real headers are pure metadata
-/// (tens of KB with segments); anything past this is treated as corrupt
+/// (tens of KB in old files with segment lists); anything past this is treated as corrupt
 /// rather than read into memory.
 pub const MAX_TASREC_METADATA_BYTES: usize = 1024 * 1024;
 

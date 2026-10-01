@@ -47,6 +47,8 @@ fn serialised_stop_then_restart(client: &mut TasSharedMemoryClient) -> bool {
         continue_from_frame: SPLICE_FRAME,
         gate_align_rec: 0,
         max_retries: 0,
+        input_model: client.state().input_model,
+        trajectory_ticks: u32::MAX,
     });
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -80,6 +82,8 @@ pub fn run_input_protection() -> bool {
         continue_from_frame: 4705,
         gate_align_rec: 299,
         max_retries: 30,
+        input_model: client.state().input_model,
+        trajectory_ticks: u32::MAX,
     };
     let mut controller = TransportController::new(config);
     // Same setup as tas_ui's restart queue, immediately before stepping.

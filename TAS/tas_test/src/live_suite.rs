@@ -48,6 +48,20 @@ const FULL_CASES: &[(&str, &[&str])] = &[
     ("cont-resume-pace", &[]),
     ("cont-restart-race", &[]),
     ("cont-input-protection", &[]),
+    ("cont-refuse-release", &[]),
+    ("arm-over-live-release", &[]),
+    ("ui-f12-from-zero", &[]),
+    ("hitch-input-leak", &[]),
+    ("restart-while-parked", &[]),
+    ("owner-death", &[]),
+    ("cont-convert", &[]),
+    ("release-pending", &[]),
+    ("release-on-arm", &[]),
+    ("play-enter-spam", &[]),
+    ("finish-line", &[]),
+    ("ui-finish-autostop", &[]),
+    ("countdown-anchor", &[]),
+    ("race-clock", &[]),
     ("level-seq", &[]),
     ("save-reload", &[]),
     ("dialog-e2e", &[]),
@@ -76,6 +90,12 @@ const EXCLUDED: &[(&str, &str)] = &[
     ("shm", "manual diagnostics"),
     ("menu", "navigation exercised by dialog-e2e"),
     ("gamestate", "manual diagnostics"),
+    ("take-check", "manual diagnostics"),
+    ("owner-child", "child process of owner-death"),
+    (
+        "crash-report",
+        "crashes and relaunches the game; run on demand",
+    ),
     ("video-rate", "screen sampling exercised by dialog-e2e"),
 ];
 
@@ -213,7 +233,9 @@ fn preflight(stages: &mut [Stage], full: bool, executable: &Path) -> Result<(), 
             return Err("Live suite requires a resolved Forest Easy race".into());
         }
     }
-    crate::harness::PicoKeys::open_checked()?;
+    // A launch through Supreme.exe starts a tas_ui that holds the Pico port.
+    crate::harness::stop_competing_tas_ui_writer();
+    crate::harness::open_pico_after_release(Duration::from_secs(5))?;
     Ok(())
 }
 
@@ -363,7 +385,9 @@ fn cleanup_stage() -> Result<(), String> {
         return Err("Stage cleanup: input protection remained set after STOP".into());
     }
     client.state_mut().playback_speed = 1.0;
-    let mut pico = crate::harness::PicoKeys::open_checked()?;
+    // A stage that relaunched the game also started a tas_ui holding the port.
+    crate::harness::stop_competing_tas_ui_writer();
+    let mut pico = crate::harness::open_pico_after_release(Duration::from_secs(5))?;
     if !pico.send(255) {
         return Err("Stage cleanup: Pico key release failed".into());
     }

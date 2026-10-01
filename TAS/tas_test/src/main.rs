@@ -8,30 +8,40 @@ mod acceptance;
 mod catchup_speed;
 mod certificate;
 mod cli;
+mod command_edges;
 mod cont_cases;
+mod cont_convert;
 mod cont_hijack;
 mod cont_reliability;
 mod cont_restart_race;
 mod cont_resume_pace;
 mod cont_ui;
+mod countdown_anchor;
+mod crash_report;
 mod cycles;
 mod dialog_e2e;
 mod drift;
 mod drift_speed;
+mod finish_line;
+mod gamemem;
 mod gates;
 mod harness;
+mod hitch_leak;
 mod level_seq;
 mod live_suite;
 mod load;
 mod menu;
+mod owner_death;
 mod patterns;
 mod pause_resume;
 mod pico;
 mod play_pace;
+mod race_clock;
 mod rec_repro;
 mod rec_start;
 mod refresh_recording;
 mod regression;
+mod release_edges;
 mod reliability;
 mod replay;
 mod restart_stress;
@@ -42,6 +52,7 @@ mod speed;
 mod speed_reset;
 mod steer_impact;
 mod stop_play_flake;
+mod take_check;
 mod timing;
 mod video_rate;
 mod win32;
@@ -282,6 +293,36 @@ const MODES: &[Mode] = &[
         run: |args| no_args(args) && cont_restart_race::run_input_protection(),
     },
     Mode {
+        name: "cont-refuse-release",
+        usage: "",
+        summary: "An ARM_CONTINUE refused during PLAY releases the keys the replay held",
+        run: |args| no_args(args) && command_edges::run_cont_refuse_release(),
+    },
+    Mode {
+        name: "ui-f12-from-zero",
+        usage: "",
+        summary: "F12 through the UI with From at 0 records a fresh take",
+        run: |args| no_args(args) && report(cont_ui::run_from_zero(), "UI F12 FROM ZERO FAILED"),
+    },
+    Mode {
+        name: "arm-over-live-release",
+        usage: "",
+        summary: "ARM_REC and ARM_PLAY over a live PLAY release the keys it held",
+        run: |args| no_args(args) && command_edges::run_arm_over_live_release(),
+    },
+    Mode {
+        name: "hitch-input-leak",
+        usage: "",
+        summary: "A frozen frame during PLAY does not let a live Pico key reach the game",
+        run: |args| no_args(args) && hitch_leak::run(),
+    },
+    Mode {
+        name: "restart-while-parked",
+        usage: "",
+        summary: "A RESTART sent while a CONT is parked at its splice is consumed and completes",
+        run: |args| no_args(args) && command_edges::run_restart_while_parked(),
+    },
+    Mode {
         name: "shm",
         usage: "[--command record|play|stop|restart]",
         summary: "Version-checked shared-memory diagnostics; read-only by default",
@@ -310,6 +351,12 @@ const MODES: &[Mode] = &[
         },
     },
     Mode {
+        name: "take-check",
+        usage: "",
+        summary: "Compare the replay in shared memory with its recording over the whole length (reads only)",
+        run: |args| no_args(args) && take_check::run(),
+    },
+    Mode {
         name: "gamestate",
         usage: "",
         summary: "Launch or reuse the game and print the status six times (any track)",
@@ -324,6 +371,83 @@ const MODES: &[Mode] = &[
                 true
             }
         },
+    },
+    Mode {
+        name: "finish-line",
+        usage: "",
+        summary: "The finish from the game's Finish_Point: same tick at 1x and 8x, valid, the race clock's time, FE's plane; and in REC after a CONT",
+        run: |args| no_args(args) && finish_line::run(),
+    },
+    Mode {
+        name: "ui-finish-autostop",
+        usage: "",
+        summary: "The deployed UI stops a REC at the game's own finish (F12 CONT of FE-decent-done over the line)",
+        run: |args| {
+            no_args(args)
+                && cont_ui::run_finish()
+                    .map_err(|e| eprintln!("*** UI FINISH AUTO-STOP FAILED: {e} ***"))
+                    .is_ok()
+        },
+    },
+    Mode {
+        name: "release-pending",
+        usage: "",
+        summary: "A replay that ends with presses still queued leaves nothing held (injected and held takes)",
+        run: |args| no_args(args) && release_edges::run_pending(),
+    },
+    Mode {
+        name: "release-on-arm",
+        usage: "",
+        summary: "An arm on the tick an injected replay still has a press queued leaves nothing held",
+        run: |args| no_args(args) && release_edges::run_on_arm(),
+    },
+    Mode {
+        name: "play-enter-spam",
+        usage: "",
+        summary: "Real Enter taps during a replay of an injected take leave it bit for bit",
+        run: |args| no_args(args) && release_edges::run_enter_spam(),
+    },
+    Mode {
+        name: "cont-convert",
+        usage: "",
+        summary: "CONT from an injected (pre-v56) take: the converted take replays bit for bit over its whole length",
+        run: |args| no_args(args) && cont_convert::run(),
+    },
+    Mode {
+        name: "owner-death",
+        usage: "",
+        summary: "Kill a controller mid-cycle: the DLL stops the TAS, releases keys and lifts the input block",
+        run: |args| no_args(args) && owner_death::run(),
+    },
+    Mode {
+        name: "owner-child",
+        usage: "<restart|countdown|replay|reader|hold>",
+        summary: "owner-death's child process: own the TAS up to a point, then wait to be killed",
+        run: |args| {
+            let flags = parse(args, &[], 1);
+            match flags.positional.first() {
+                Some(point) => owner_death::child(point),
+                None => usage_error("owner-child needs a point"),
+            }
+        },
+    },
+    Mode {
+        name: "race-clock",
+        usage: "",
+        summary: "The game's race clock, put through the HUD formula, equals every scraped HUD time (1x and 8x)",
+        run: |args| no_args(args) && race_clock::run(),
+    },
+    Mode {
+        name: "crash-report",
+        usage: "",
+        summary: "Fault inside a DLL call into game code: the game dies and the crash record names the call",
+        run: |args| no_args(args) && crash_report::run(),
+    },
+    Mode {
+        name: "countdown-anchor",
+        usage: "",
+        summary: "Measure the gate against the Player's reset countdown over repeated restarts",
+        run: |args| no_args(args) && countdown_anchor::run(),
     },
     Mode {
         name: "level-seq",

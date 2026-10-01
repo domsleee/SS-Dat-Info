@@ -14,6 +14,9 @@ pub struct RecordingMetadata {
     pub recorded_count: u32,
     #[serde(default)]
     pub notes: String,
+    /// TAS_INPUT_MODEL_*; absent in takes from before the held model.
+    #[serde(default)]
+    pub input_model: Option<u32>,
 }
 
 pub struct LoadedRecording {
@@ -76,6 +79,10 @@ pub fn write_to_shared(client: &mut TasSharedMemoryClient, rec: &LoadedRecording
     }
 
     state.recorded_count = rec.count;
+    state.input_model = rec
+        .meta
+        .input_model
+        .unwrap_or(tas_shared::TAS_INPUT_MODEL_INJECTED);
 }
 
 pub struct ReplayResult {

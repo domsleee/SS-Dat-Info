@@ -29,9 +29,14 @@ impl TasApp {
         self.pending_session_kind = None;
         self.pending_continue_start_tick = None;
         self.cycle_deadline = None;
+        self.finish_baseline_armed = false;
         // Cancel any in-flight restart/arm/watch cycle; otherwise the
         // controller would keep stepping and start REC/PLAY after the restart.
-        self.cycle = None;
+        if let Some(mut cycle) = self.cycle.take() {
+            if let Some(shared) = self.shared.as_mut() {
+                cycle.release(shared);
+            }
+        }
         // A cancelled CONT must not leave live input blocked.
         self.set_cont_suppress_input(false);
     }
@@ -47,6 +52,140 @@ impl TasApp {
             if shared.state().cont_suppress_input != want {
                 shared.state_mut().cont_suppress_input = want;
             }
+        }
+    }
+
+    /// The model of the take in the buffer: the loaded take's stamp, or,
+    /// with nothing loaded in this session (a UI opened on a buffer the DLL
+    /// kept), the model the DLL holds for it.
+    pub(crate) fn buffer_input_model(&self) -> u32 {
+        match self.loaded_identity.as_ref() {
+            Some(identity) => identity.input_model_or_injected(),
+            None => self
+                .shared
+                .as_ref()
+                .map_or(tas_shared::TAS_INPUT_MODEL_INJECTED, |s| {
+                    s.state().input_model
+                }),
+        }
+    }
+
+    /// The track of the take in the buffer: its stamp, else its spawn
+    /// position when that is unambiguous. None = unknown.
+    pub(crate) fn buffer_level(&self) -> Option<String> {
+        self.loaded_level.clone().or_else(|| {
+            let state = self.shared.as_ref()?.state();
+            (state.recorded_count > 0)
+                .then(|| crate::start_line::level_code_from_spawn(&state.rec_coords[0]))
+                .flatten()
+                .map(Into::into)
+        })
+    }
+
+    /// Why the take in the buffer cannot replay in the live game, when both
+    /// sides are known: another track, rider or x87 precision.
+    pub(crate) fn replay_mismatch(&self) -> Option<String> {
+        let state = self.shared.as_ref()?.state();
+        let live_level =
+            tas_shared::resolved_level_id(state).and_then(tas_shared::level::code_from_id);
+        if let (Some(take), Some(live)) = (self.buffer_level(), live_level) {
+            if take != live {
+                return Some(format!(
+                    "this take was recorded on {take} but the game is on {live}. Restore or \
+                     load a {live} take, or go back to {take}."
+                ));
+            }
+        }
+        // Character and stance are set when the level is entered from the
+        // menu, so the advice names the screen; a restart does not change them.
+        if let Some(advice) = tas_shared::rider_mismatch_advice(
+            self.loaded_rider.as_deref(),
+            self.history.live_rider(),
+        ) {
+            return Some(advice);
+        }
+        let take_bits = self
+            .loaded_identity
+            .as_ref()
+            .and_then(|i| i.fpu_control_word)
+            .map(tas_shared::fpu_precision_bits)
+            .filter(|&bits| bits != 0);
+        let live_bits =
+            Some(tas_shared::fpu_precision_bits(state.fpu_control_word)).filter(|&bits| bits != 0);
+        if let (Some(take), Some(live)) = (take_bits, live_bits) {
+            if take != live {
+                return Some(format!(
+                    "this take was recorded at {take}-bit x87 precision but the game runs at \
+                     {live}-bit: the physics round differently. Pick the take's renderer in \
+                     Display_Config and relaunch."
+                ));
+            }
+        }
+        None
+    }
+
+    /// At a CONT splice, take the replayed prefix as the new take's
+    /// trajectory. Past an input edit the recorded one is stale, and the
+    /// replay is what the take's input produces; before it they are equal.
+    pub(crate) fn adopt_replayed_prefix(&mut self, splice: u32) {
+        let rec_gate = self.recording_gate();
+        let Some(shared) = self.shared.as_mut() else {
+            return;
+        };
+        let state = shared.state_mut();
+        let live_gate = state.gate_index;
+        if rec_gate == 0 || live_gate == 0 {
+            return;
+        }
+        let (dst, src) = (rec_gate as usize, live_gate as usize);
+        let n = (splice.saturating_sub(rec_gate) as usize)
+            .min(state.rec_coords.len().saturating_sub(dst))
+            .min(state.play_coords.len().saturating_sub(src));
+        state.rec_coords[dst..dst + n].copy_from_slice(&state.play_coords[src..src + n]);
+    }
+
+    /// Save both trajectories over the watcher window, gate-aligned, with the
+    /// physics stamps, so a divergence can be diagnosed after the fact.
+    fn save_divergence_report(&mut self, reason: &str) {
+        let rec_gate = self.recording_gate();
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        let state = shared.state();
+        let live_gate = state.gate_index;
+        let window = |coords: &[[f32; 3]], from: u32| -> Vec<[f32; 3]> {
+            coords
+                .iter()
+                .skip(from as usize)
+                .take(tas_shared::align::ALIGN_VERIFY_FRAMES as usize)
+                .copied()
+                .collect()
+        };
+        let report = serde_json::json!({
+            "reason": reason,
+            "recording_gate": rec_gate,
+            "live_gate": live_gate,
+            "recorded_count": state.recorded_count,
+            "playback_pos": state.playback_pos,
+            "physics_mode": shared.physics_mode(),
+            "rider": shared.rider(),
+            "recorded_from_gate": window(&state.rec_coords[..], rec_gate),
+            "replayed_from_gate": window(&state.play_coords[..], live_gate),
+        });
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let dir = crate::settings::data_root_dir().join("diagnostics");
+        let path = dir.join(format!("divergence-{stamp}.json"));
+        let written = std::fs::create_dir_all(&dir).and_then(|_| {
+            std::fs::write(
+                &path,
+                serde_json::to_vec_pretty(&report).unwrap_or_default(),
+            )
+        });
+        match written {
+            Ok(()) => self.push_log(&format!("Divergence report saved to {}", path.display())),
+            Err(e) => self.push_log(&format!("Divergence report could not be saved: {e}")),
         }
     }
 
@@ -95,26 +234,24 @@ impl TasApp {
             ));
             return;
         }
-        // Refuse CONT requests with nothing to splice (no recording, or frame
-        // 0, which is just PLAY). They would never reach the PLAY→REC
-        // transition that calls clear_cont_catchup, leaving the app stuck at
-        // catch-up speed.
+        // CONT with nothing to replay (no recording, or From 0) is a fresh
+        // REC. Armed as CONT it would never reach the PLAY→REC transition that
+        // calls clear_cont_catchup, leaving the app stuck at catch-up speed.
+        let recorded = self
+            .shared
+            .as_ref()
+            .map(|s| s.state().recorded_count)
+            .unwrap_or(0);
+        let command = if command == TasCommand::ArmContinue
+            && (recorded == 0 || self.continue_from_frame == 0)
+        {
+            self.log_lines
+                .push("CONT from frame 0: nothing to replay, recording a fresh take");
+            TasCommand::ArmRec
+        } else {
+            command
+        };
         if command == TasCommand::ArmContinue {
-            let recorded = self
-                .shared
-                .as_ref()
-                .map(|s| s.state().recorded_count)
-                .unwrap_or(0);
-            if recorded == 0 {
-                self.log_lines
-                    .push("CONT ignored: no recording loaded (recorded_count=0)");
-                return;
-            }
-            if self.continue_from_frame == 0 {
-                self.log_lines
-                    .push("CONT ignored: continue_from_frame=0 — press PLAY instead");
-                return;
-            }
             // continue_from_frame == recorded_count is valid (play it all,
             // then REC). It is the normal state after a CONT, since
             // recorded_count caps at the splice frame, so pressing CONT again
@@ -127,16 +264,19 @@ impl TasApp {
                 return;
             }
         }
-        // A take recorded as another character or stance cannot replay, and
-        // no restart changes that (both are set when the level is entered
-        // from the menu), so name the screen that fixes it. The arm still
-        // goes ahead. REC keeps whatever the player chose.
+        // A take from another track, rider or x87 precision can never match,
+        // so refuse it rather than arm and report the divergence as a TAS
+        // bug. Unknown on either side cannot prove a mismatch and is allowed.
+        // REC keeps whatever the player chose.
         if command != TasCommand::ArmRec {
-            if let Some(advice) = tas_shared::rider_mismatch_advice(
-                self.loaded_rider.as_deref(),
-                self.history.live_rider(),
-            ) {
-                self.log_lines.push(format!("WARNING: {}", advice));
+            if let Some(reason) = self.replay_mismatch() {
+                let verb = if command == TasCommand::ArmPlay {
+                    "PLAY"
+                } else {
+                    "CONT"
+                };
+                self.log_lines.push(format!("{verb} refused: {reason}"));
+                return;
             }
         }
         let arm = match command {
@@ -228,20 +368,22 @@ impl TasApp {
             } else {
                 0
             },
+            input_model: self.buffer_input_model(),
+            trajectory_ticks: self
+                .loaded_identity
+                .as_ref()
+                .map_or(u32::MAX, crate::recording::IdentityStamps::trajectory_limit),
         };
+        // Only a finish from here on can stop the take this cycle records;
+        // taken now, so one that comes before the UI sees REC still counts.
+        self.finish_seq_seen = self.live_finish_seq();
+        self.finish_baseline_armed = true;
+        // The controller registers this process as the TAS owner first; an
+        // aligned cycle's StopForRestart then blocks live input across each
+        // OFF-mode spawn countdown, until `Done` releases the ownership.
         self.cycle = Some(tas_shared::transport::TransportController::new(cfg));
         self.cycle_deadline = Some(std::time::Instant::now() + CYCLE_BUDGET);
         self.cycle_arm = arm;
-        // Block live input for a replay cycle's restarts. Set before the
-        // controller's first command so it covers each OFF-mode spawn
-        // countdown, which the mode-based handler block misses; a live key
-        // there would alter the state being replayed. Cleared at `Done`, after
-        // which PLAY is blocked by mode and post-splice REC needs live input.
-        if gate_align_rec > 0 {
-            if let Some(shared) = self.shared.as_mut() {
-                shared.state_mut().cont_suppress_input = 1;
-            }
-        }
         let resume_at = if command == TasCommand::ArmContinue {
             format!(" @frame {}", continue_from_frame)
         } else {
@@ -351,6 +493,9 @@ impl TasApp {
                 }
                 StepOutcome::Aborted { reason } => {
                     self.push_log(&format!("{} aborted: {}", self.cycle_label(), reason));
+                    if reason.contains("diverged") {
+                        self.save_divergence_report(&reason);
+                    }
                     self.clear_cont_catchup();
                     // Push the restored speed through: an aborted PLAY must not
                     // leave the game fast-forwarding at the catch-up speed.
