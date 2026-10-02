@@ -12,7 +12,7 @@
 // Supreme_Game.dll goes. Enabled only when call_trace_sites.txt sits next to
 // TAS_Helper.dll (one site RVA per line, first hex token; '#' lines ignored).
 // Writes call_trace.txt beside it every 5 s and at exit:
-//   site_rva module target_rva count     (hex RVAs, count decimal)
+//   site_rva module target_rva count     (hex RVAs, count = sampled hits)
 //
 // Each site gets a one-byte INT3 rather than a 5-byte mid-hook: most of these
 // calls are 2-3 bytes and are often followed by a branch target (the end of an
@@ -20,11 +20,16 @@
 // handler records the target and resumes in a per-site thunk holding a copy of
 // the call plus a jmp back. Registers are untouched and the handler body runs
 // between FSAVE and FRSTOR like every other hook (fpu_safe_hook.hpp).
-// ponytail: one exception per traced call; hot sites cost ~µs each. Promote hot
-// sites to mid-hooks if the game can't keep up.
+// A trap costs ~7 us under WOW64 and one site alone fired 130k/s (SG+0x24CC,
+// the vector constructor iterator), so each site traps at most kBudget times
+// per second: it disarms itself at zero and the flush thread re-arms it.
+// ponytail: hot polymorphic sites are sampled (kBudget consecutive calls per
+// second, at a wall-clock phase); a target used only between samples is missed.
+// Promote hot sites to mid-hooks if that matters.
 namespace calltrace {
 
 constexpr int kSlots = 16;
+constexpr LONG kBudget = 100;
 struct Slot {
     volatile LONG target;
     volatile LONG count;
@@ -38,6 +43,8 @@ struct Site {
     uint8_t scale;
     int32_t disp;
     uint8_t* thunk;
+    uint8_t orig;              // the call's first byte, restored while disarmed
+    volatile LONG budget;      // traps left before disarming
     Slot slots[kSlots];
     volatile LONG overflow;
 };
@@ -122,6 +129,7 @@ static void Body(CONTEXT* c, Site* s) {
     const uint32_t regs[8] = { c->Eax, c->Ecx, c->Edx, c->Ebx, c->Esp, c->Ebp, c->Esi, c->Edi };
     uint32_t t;
     if (Target(*s, regs, &t)) Record(*s, t);
+    if (InterlockedDecrement(&s->budget) == 0) *(volatile uint8_t*)(uintptr_t)s->va = s->orig;
 }
 
 static LONG CALLBACK OnException(EXCEPTION_POINTERS* ep) {
@@ -172,6 +180,13 @@ inline void Flush() {
 static DWORD WINAPI FlushThread(LPVOID) {
     for (int n = 1;; n++) {
         Sleep(1000);
+        for (size_t i = 0; i < g_count; i++) {
+            Site& s = g_sites[i];
+            if (s.budget > 0) continue;
+            s.budget = kBudget;
+            MemoryBarrier();
+            *(volatile uint8_t*)(uintptr_t)s.va = 0xCC;
+        }
         if (n % 5) NoteModules(); else Flush();
     }
 }
@@ -261,10 +276,12 @@ inline void Install(const GameAddresses& addr) {
     for (size_t i = 0; i < g_count; i++) {
         auto* p = (uint8_t*)(uintptr_t)g_sites[i].va;
         DWORD old;
+        // Left writable: arming and disarming are then plain byte stores.
         if (!VirtualProtect(p, 1, PAGE_EXECUTE_READWRITE, &old)) continue;
+        g_sites[i].orig = *p;
+        g_sites[i].budget = kBudget;
         *p = 0xCC;
         armed++;
-        VirtualProtect(p, 1, old, &old);
     }
     FlushInstructionCache(GetCurrentProcess(), nullptr, 0);
     CloseHandle(CreateThread(nullptr, 0, &FlushThread, nullptr, 0, nullptr));
