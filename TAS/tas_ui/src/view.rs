@@ -227,7 +227,7 @@ impl TasApp {
             // Refusals and aborts are only logged: with the log hidden, its
             // latest line still shows here.
             egui::TopBottomPanel::bottom("last_log_line").show(ctx, |ui| {
-                ui.add(egui::Label::new(egui::RichText::new(last).weak()).truncate());
+                ui.add(egui::Label::new(egui::RichText::new(last).monospace().weak()).truncate());
             });
         }
     }
