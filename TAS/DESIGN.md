@@ -562,6 +562,18 @@ countdown and mid-replay with keys held, and checks the stop; it also checks
 that a reader's death changes nothing, that a second controller is refused,
 and that a living owner's block holds for 12 s.
 
+### ssb-recomp harness (opt-in)
+
+Two research features for the Rust rewrite (`ssb-recomp/re/harness.md`), each
+off unless its file sits next to `TAS_Helper.dll`. With
+`ssb_trace_regions.txt`, every PLAY arm writes `traces\*.ssbtrace`: per tick,
+the listed memory regions at the cycle cave and at the human Player tick's
+return (`Supreme_Game+0x84C43`), plus the x87 control word and MXCSR
+(`trace.hpp`). With `ssb_hook.dll`, its detours are installed as SafetyHook
+inline hooks at initialization (`ssb_hook.hpp`); a detour that fails to
+install fails `TAS_Initialize`. `fpu_safe_hook.hpp` also saves and restores
+MXCSR, which SafetyHook doesn't.
+
 ### Crashes
 
 DLL calls into game code (`Kernel::Time::Current`, the menu's

@@ -11,6 +11,8 @@
 #include "caves/menu_cave.hpp"
 #include "caves/lifecycle_cave.hpp"
 #include "caves/finish_cave.hpp"
+#include "ssb_hook.hpp"
+#include "trace.hpp"
 
 static TasSharedMemory g_sharedMem;
 static GameAddresses g_addr;
@@ -19,6 +21,8 @@ static volatile LONG g_initState = 0; // 0=not started, 1=running, 2=ready, 3=fa
 // Remove everything run() may have installed, newest first, while the
 // mapping the hooks write to still exists. Idempotent.
 static void RollbackAll() {
+    trace::Uninstall();
+    ssbhook::Unload();
     finishline::Uninstall();
     menustate::Disable();
     racetimer::Uninstall();
@@ -78,6 +82,15 @@ bool run() {
         Log("  Finish line: unavailable");
     }
 
+    // ssb-recomp harness, each on only when its file sits next to this DLL:
+    // ssb_hook.dll's detours, then the per-tick trace (ssb_trace_regions.txt).
+    if (!ssbhook::Load(&trace::Flush)) {
+        Log("FATAL: ssb_hook.dll is present but its detours could not be installed");
+        RollbackAll();
+        return false;
+    }
+    trace::Install(g_addr, state);
+
     // Deferred until Main_Menu.dll loads.
     menustate::Install(g_addr, state);
 
@@ -134,6 +147,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
     // Non-null reserved: ExitProcess, not a crash or a kill.
     if (reason == DLL_PROCESS_DETACH && reserved) {
         crash::MarkCleanExit();
+        trace::Flush();
     }
     return TRUE;
 }

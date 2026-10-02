@@ -14,6 +14,7 @@
 #include "../fpu_safe_hook.hpp"
 #include "../crash_report.hpp"
 #include "tick_cave.hpp"
+#include "../trace.hpp"
 
 // The cycle cave: Supreme::Cycle hook (SG+0x13FE40), the REC/PLAY engine.
 // Fires once per physics tick. The game does fld/fmul right after the hook
@@ -776,12 +777,23 @@ static void __declspec(noinline) CycleCave_Logic() {
 }
 
 static void CycleCave_Callback(SafetyHookContext&) {
+    // Before the body: hooks it reaches (BB3B10) overwrite g_hookFpuControlWord.
+    const uint16_t cw = g_hookFpuControlWord;
+    const uint32_t csr = g_hookMxcsr;
     if (auto* s = g_cycleCaveState) {
         // The physics precision the renderer set (0x007F DirectX 6/7 = 24-bit,
         // OpenGL = 53/64), from the saved image: the hook re-initialises the FPU.
-        s->fpu_control_word = g_hookFpuControlWord;
+        s->fpu_control_word = cw;
     }
     CycleCave_Logic();
+    if (auto* s = g_cycleCaveState) {
+        const uint32_t gate = LiveGate(s);
+        const uint32_t pos = g_execTick;
+        const int32_t recTick = s->gate_align_rec && gate
+                                    ? (int32_t)(pos - gate + s->gate_align_rec)
+                                    : (int32_t)pos;
+        trace::OnCycle(s, g_execMode == MODE_PLAY, pos, recTick, g_prevMask, cw, csr);
+    }
 }
 
 bool InstallCycleCave(GameAddresses& addr, TasSharedState* state) {
