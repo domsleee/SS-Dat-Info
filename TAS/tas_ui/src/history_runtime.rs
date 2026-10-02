@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::recording::{self, RecordingHistory, RecordingSessionKind};
 use crate::ui_log::UiLog;
 use crate::{history_store, start_line};
+use tas_shared::{TasMode, TasSharedState};
 
 /// The session a recovery checkpoint must belong to (see
 /// [`HistoryRuntime::recover_pending_checkpoint_matching`]).
@@ -268,6 +269,20 @@ impl HistoryRuntime {
     /// (same kind and start tick, and no longer than the session ever was): a
     /// rejected finalize must not resurrect an older take's checkpoint as a
     /// pinned duplicate of an entry already in history.
+    /// The checkpoint's take is the one the game is still recording (a UI
+    /// reopened mid-REC): it reaches history when that REC stops, so
+    /// recovering it now would pin a partial duplicate.
+    pub(crate) fn pending_checkpoint_is_live(&self, live: &TasSharedState) -> bool {
+        let Some(Ok(Some(cp))) = self.recovery_store.as_ref().map(|s| s.load_pending()) else {
+            return false;
+        };
+        let n = cp.session.end_tick as usize;
+        live.mode == TasMode::Rec as u32
+            && live.recorded_count as usize >= n
+            && n <= cp.snapshot.input_log.len()
+            && cp.snapshot.input_log[..n] == live.input_log[..n]
+    }
+
     pub(crate) fn recover_pending_checkpoint_matching(
         &mut self,
         owner: Option<CheckpointOwner>,

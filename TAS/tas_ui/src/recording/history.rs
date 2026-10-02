@@ -707,7 +707,23 @@ impl RecordingHistory {
     /// recorded on; the live level is unknown at startup. `None` leaves the
     /// entry untagged, i.e. visible on every track.
     pub fn set_level(&mut self, entry_id: u64, level: Option<String>) -> bool {
-        self.update_entry(entry_id, level, |e| &mut e.level)
+        if !self.update_entry(entry_id, level, |e| &mut e.level) {
+            return false;
+        }
+        // A recovered entry learns its track after the push, so the push
+        // could not find where the race clock started.
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            if e.clock_start.is_none() {
+                e.clock_start = e.snapshot.loaded().and_then(|s| {
+                    crate::start_line::start_cross_tick(
+                        s.rec_coords.as_ref(),
+                        s.recorded_count,
+                        e.level.as_deref(),
+                    )
+                });
+            }
+        }
+        true
     }
 
     /// Stamp the rider a recovered entry was recorded as (the checkpoint
@@ -1641,6 +1657,23 @@ mod tests {
         // Back on FE it is reachable again.
         h.set_live_level(Some("FE"));
         assert_eq!(h.undo_depth(), 1);
+    }
+
+    /// A recovered entry is pushed before its track is known; stamping the
+    /// track afterwards also finds where its race clock started.
+    #[test]
+    fn stamping_a_recovered_entrys_track_finds_its_clock_start() {
+        let mut state = tas_shared::zeroed_boxed();
+        state.recorded_count = 3;
+        state.rec_coords[0] = [519.2, -1401.6, 53.6];
+        state.rec_coords[1] = [519.2, -1401.1, 99.0];
+        state.rec_coords[2] = [519.2, -1400.6, 100.0];
+        let mut h = RecordingHistory::new(4);
+        h.push_snapshot_data(RecordingSnapshot::from_state(&state), "Recovered");
+        let id = h.entries()[0].entry_id;
+        assert_eq!(h.entries()[0].clock_start, None, "no track yet");
+        assert!(h.set_level(id, Some("FE".into())));
+        assert_eq!(h.entries()[0].clock_start, Some(2));
     }
 
     #[test]

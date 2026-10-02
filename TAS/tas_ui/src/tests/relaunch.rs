@@ -64,6 +64,30 @@ fn finalize_with_an_empty_buffer_recovers_the_checkpoint_into_history() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// A UI reopened while the game still records the checkpoint's take leaves
+/// it to that REC's STOP: recovering it now would pin a partial duplicate.
+#[test]
+fn a_checkpoint_of_the_take_still_recording_is_not_recovered() {
+    let (root, store) = checkpoint_store("still_live", 300);
+    let mut app = test_app();
+    app.history.recovery_store = Some(store);
+    let mut live = state_with_recorded_count(450);
+    live.mode = TasMode::Rec as u32;
+    assert!(app.history.pending_checkpoint_is_live(&live));
+    live.input_log[100] = 0x02;
+    assert!(
+        !app.history.pending_checkpoint_is_live(&live),
+        "another take"
+    );
+    live.input_log[100] = 0x01;
+    live.mode = TasMode::Off as u32;
+    assert!(
+        !app.history.pending_checkpoint_is_live(&live),
+        "a stopped game means the take is unsaved: recover it"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 #[test]
 fn recovery_drains_queued_checkpoint_writes_before_reading() {
     // Checkpoint A is on disk; checkpoint B (longer) is still queued in the

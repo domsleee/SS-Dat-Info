@@ -103,9 +103,20 @@ impl TasApp {
         // Recovery-as-history (no banner): an existing checkpoint means an
         // unsaved recording that never reached history (STOP clears it), i.e.
         // the app crashed/closed mid-recording. Bring it back as a PINNED entry.
-        let recovered_checkpoint = app
-            .history
-            .recover_pending_checkpoint_matching(None, &mut app.log_lines);
+        let still_recording = app
+            .conn
+            .shared
+            .as_ref()
+            .is_some_and(|s| app.history.pending_checkpoint_is_live(s.state()));
+        if still_recording {
+            app.log_lines.push(
+                "The game is still recording the unsaved take; it reaches history when it stops",
+            );
+        }
+        let recovered_checkpoint = !still_recording
+            && app
+                .history
+                .recover_pending_checkpoint_matching(None, &mut app.log_lines);
         app.history
             .persist_if_needed(app.host.now(), &mut app.log_lines);
 
