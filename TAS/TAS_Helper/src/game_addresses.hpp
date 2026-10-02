@@ -203,6 +203,18 @@ struct GameAddresses {
     static constexpr uint32_t OBSERVER_VTABLE_RVA = 0x6D8E8;
     static constexpr uint32_t OBSERVER_FLUSH_RVA = 0xFA40;
     static constexpr uint32_t OBSERVER_FLUSH_SLOT = 0x24;
+    // Structure::Game [[EXE+0x889C4]+0x30] (vtable 0x46D6EC): +0x0C results
+    // timer (float s since the finish), +0x04 race state whose +0x74 byte is
+    // "finished". [[EXE+0x889C4]+0x04] = Supreme; Get_Game_Mode = 2 if
+    // +0x94 == 1, else +0x00 (1 = replay).
+    static constexpr uint32_t APP_SUPREME_OFFSET = 0x04;
+    static constexpr uint32_t APP_STRUCTURE_GAME_OFFSET = 0x30;
+    static constexpr uint32_t STRUCTURE_GAME_VTABLE_RVA = 0x6D6EC;
+    static constexpr uint32_t GAME_RESULTS_TIMER_OFFSET = 0x0C;
+    static constexpr uint32_t GAME_RACE_STATE_OFFSET = 0x04;
+    static constexpr uint32_t RACE_STATE_FINISHED_OFFSET = 0x74;
+    static constexpr uint32_t SUPREME_MODE_OFFSET = 0x00;
+    static constexpr uint32_t SUPREME_MODE_OVERRIDE_OFFSET = 0x94;
     static constexpr uint32_t PLAYER_X = 0xF8;
     static constexpr uint32_t PLAYER_Y = 0xFC;
     static constexpr uint32_t PLAYER_Z = 0x100;

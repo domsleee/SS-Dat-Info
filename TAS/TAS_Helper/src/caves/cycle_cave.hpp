@@ -710,6 +710,28 @@ static void PlayTick(TasSharedState* s, GameAddresses* addr, uint32_t kbobj) {
     CompleteContinueSplice(s);
 }
 
+// One tick's worth on the results timer, under the game's own condition
+// (finished, not in replay mode); see RESULTS_TIMER_OPERAND. Runs at
+// Supreme::Cycle entry, before EXE+0x26570 compares the timer with 3.0.
+static void StepResultsTimer() {
+    using GA = GameAddresses;
+    const uint32_t app = SafeRead32(ExeBase() + GA::APP_STATE_PTR_RVA);
+    const uint32_t game = SafeRead32(app + GA::APP_STRUCTURE_GAME_OFFSET);
+    if (!game || SafeRead32(game) != ExeBase() + GA::STRUCTURE_GAME_VTABLE_RVA) return;
+    uint8_t finished = 0;
+    const uint32_t race = SafeRead32(game + GA::GAME_RACE_STATE_OFFSET);
+    if (!SafeCopy(race + GA::RACE_STATE_FINISHED_OFFSET, &finished, 1) || !finished) return;
+    const uint32_t supreme = SafeRead32(app + GA::APP_SUPREME_OFFSET);
+    if (SafeRead32(supreme + GA::SUPREME_MODE_OVERRIDE_OFFSET) != 1 &&
+        SafeRead32(supreme + GA::SUPREME_MODE_OFFSET) == 1) {
+        return;
+    }
+    __try {
+        *(volatile float*)(uintptr_t)(game + GA::GAME_RESULTS_TIMER_OFFSET) += g_nativeTickAdvance;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 static void __declspec(noinline) CycleCave_Logic() {
     auto* s = g_cycleCaveState;
     auto* addr = g_cycleCaveAddr;
@@ -729,6 +751,8 @@ static void __declspec(noinline) CycleCave_Logic() {
     }
 
     PublishLivePosition(s);
+
+    StepResultsTimer();
 
     g_execMode = MODE_OFF;
     g_execTick = 0xFFFFFFFFu;

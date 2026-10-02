@@ -41,6 +41,19 @@ static constexpr uint32_t TICK_ADVANCE_OPERANDS[] = {
     0x25CE2, 0x25D8B, 0x25DB4, 0x25E2D,
 };
 
+// The results timer (seconds since the finish; past 3.0 the per-tick function
+// EXE+0x26570 brings up the results and the auto replay) got wall-time demand
+// once per frame, so they came up on a frame-pacing tick and every replay
+// past a finish drifted from its recording. Its fmul reads this zero instead;
+// the cycle cave adds one tick per tick (StepResultsTimer).
+static constexpr uint32_t RESULTS_TIMER_OPERAND = 0x25E2D;
+inline float g_resultsTimerFrameAdvance = 0.0f;
+
+static LONG TickAdvanceTarget(uint32_t rva) {
+    return (LONG)(uintptr_t)(rva == RESULTS_TIMER_OPERAND ? &g_resultsTimerFrameAdvance
+                                                          : &g_privateTickAdvance);
+}
+
 // Every patch (the clamp immediates and the four fmul operands) lies in
 // EXE+0x25C83..0x26002, all on .text pages of one protection.
 static constexpr uint32_t TICK_CAVE_PATCH_FIRST = 0x25C83;
@@ -258,9 +271,8 @@ bool InstallTickCave(GameAddresses& addr, TasSharedState* state) {
     // (none crosses a cache line). Old and new addresses hold the same value.
     g_tickCaveExeBase = exeBase;
     if (!PatchTickCaveCode(exeBase, [&] {
-            const LONG target = (LONG)(uintptr_t)&g_privateTickAdvance;
             for (uint32_t rva : TICK_ADVANCE_OPERANDS) {
-                InterlockedExchange((volatile LONG*)(exeBase + rva), target);
+                InterlockedExchange((volatile LONG*)(exeBase + rva), TickAdvanceTarget(rva));
             }
             g_tickCaveRedirectApplied = true;
             if (clampOk) {
