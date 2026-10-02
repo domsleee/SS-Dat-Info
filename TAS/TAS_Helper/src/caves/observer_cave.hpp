@@ -15,11 +15,19 @@
 //
 // Injected calls always pass. Real calls are blocked during a CONT; ESC always
 // passes. (PLAY's block is in the key-handler cave; REC blocks nothing.)
+//
+// The key-queue hook (EXE+0x10950) keeps a real ESC out of TC_Kbd_Impl's queue
+// during PLAY: the queue is insertion-ordered and applies one event per Update,
+// so an ESC queued among an injected take's events pushed one of them a tick
+// later (a CONT diverged when paused during its catch-up). The pause menu hears
+// ESC through its own listener (0x453760), which BB3B10 still calls.
 
 inline TasSharedState* g_observerCaveState = nullptr;
 static SafetyHookInline observerHook{};
+static SafetyHookInline keyQueueHook{};
 
 inline void UninstallObserverCave() {
+    keyQueueHook = {};
     observerHook = {};
     if (g_observerCaveState) g_observerCaveState->observer_cave_hooked = 0;
     g_observerCaveState = nullptr;
@@ -60,6 +68,17 @@ void __fastcall Observer_Detour(void* ecx, void* edx, uint32_t keyIndex,
     observerHook.thiscall<void>(ecx, keyIndex, pressed, unk, arg4);
 }
 
+// __fastcall(this, &{keyIndex, pressed}, &stamp), ret 4.
+void __fastcall KeyQueue_Detour(void* ecx, const uint32_t* event, const void* stamp) {
+    auto* s = g_observerCaveState;
+    if (s && s->mode == MODE_PLAY && event[0] == GameAddresses::KEY_ESC && !IsTasInjectionThread()) {
+        const uint8_t pressed = (uint8_t)event[1];
+        WithHeld([=](volatile uint8_t* held) { held[GameAddresses::KEY_ESC] = pressed; });
+        return;
+    }
+    keyQueueHook.fastcall<void>(ecx, event, stamp);
+}
+
 bool InstallObserverCave(GameAddresses& addr, TasSharedState* state) {
     if (!addr.bb3b10) {
         Log("Observer cave: hook site not resolved");
@@ -73,6 +92,13 @@ bool InstallObserverCave(GameAddresses& addr, TasSharedState* state) {
     if (!observerHook) {
         Log("Observer cave: SafetyHook create_inline FAILED on BB3B10 (+3B10)");
         g_observerCaveState = nullptr;
+        return false;
+    }
+
+    keyQueueHook = safetyhook::create_inline(addr.key_queue_site, KeyQueue_Detour);
+    if (!keyQueueHook) {
+        Log("Observer cave: SafetyHook create_inline FAILED on the key queue (EXE+0x10950)");
+        UninstallObserverCave();
         return false;
     }
 

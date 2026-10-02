@@ -146,6 +146,9 @@ struct GameAddresses {
     std::uint8_t* key_down_site = nullptr;    // HMG+0x3940: key handler (down)
     std::uint8_t* key_up_site = nullptr;      // HMG+0x3980: key handler (up)
     std::uint8_t* bb3b10 = nullptr;         // HMG+0x3B10: BB3B10 observer
+    // EXE+0x10950: TC_Kbd_Impl's queue listener (vtable 0x46D918 slot +4),
+    // one of BB3B10's listeners; appends {key, pressed, stamp} to the queue.
+    std::uint8_t* key_queue_site = nullptr;
 
     // Game key codes: both the DI-buffer index and BB3B10's keyIndex.
     static constexpr uint32_t KEY_UP     = 0x38;
@@ -261,6 +264,7 @@ struct GameAddresses {
         key_down_site = hmgBase + 0x3940;
         key_up_site = hmgBase + 0x3980;
         bb3b10 = hmgBase + 0x3B10;
+        key_queue_site = exeBase + 0x10950;
 
         // Verify every required hook site before installing any hook; this also
         // catches a locally modified v1.035 image. Optional features validate
@@ -275,6 +279,8 @@ struct GameAddresses {
             { 0x83, 0xEC, 0x08, 0x56, 0x8B, 0xF1 };
         static constexpr uint8_t kKeyUp[] =
             { 0x83, 0xEC, 0x08, 0x56, 0x8B, 0xF1 };
+        static constexpr uint8_t kKeyQueue[] =                    // mov eax,fs:[0]; push -1
+            { 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x6A, 0xFF };
         static constexpr uint8_t kBb3b10[] =                      // push -1; push HMG+0x583A (relocated)
             { 0x6A, 0xFF, 0x68, 0x3A, 0x58, 0x00, 0x10 };
         // Player::Player (SG+0x83DF0) at +0x5F: mov [esi+1C4],ebx;
@@ -310,6 +316,7 @@ struct GameAddresses {
             !ValidateCode("Supreme_Game.dll+0x9E8F0", replay_capture_site, kReplay) ||
             !ValidateCodeOrHooked("HMG_Cetsup_Win32.dll+0x3940", key_down_site, kKeyDown) ||
             !ValidateCodeOrHooked("HMG_Cetsup_Win32.dll+0x3980", key_up_site, kKeyUp) ||
+            !ValidateCode("Supreme.exe+0x10950 (key queue)", key_queue_site, kKeyQueue) ||
             !ValidateCodeAbs<3>("HMG_Cetsup_Win32.dll+0x3B10", bb3b10, kBb3b10, hmgBase, 0x583A) ||
             !ValidateCodeAbs<8>("Supreme_Game.dll+0x83E4F (Player ctor)", sgBase + 0x83E4F, kPlayerCtor,
                                 sgBase, PLAYER_VTABLE_RVA)) {
