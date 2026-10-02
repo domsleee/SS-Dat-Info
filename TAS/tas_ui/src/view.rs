@@ -217,6 +217,18 @@ impl TasApp {
                 .show(ctx, |ui| {
                     log_panel::show(ui, &mut self.log_lines);
                 });
+        } else if let Some(last) = self
+            .log_lines
+            .lines()
+            .iter()
+            .rev()
+            .find(|line| !line.contains("] [DLL"))
+        {
+            // Refusals and aborts are only logged: with the log hidden, its
+            // latest line still shows here.
+            egui::TopBottomPanel::bottom("last_log_line").show(ctx, |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(last).weak()).truncate());
+            });
         }
     }
 

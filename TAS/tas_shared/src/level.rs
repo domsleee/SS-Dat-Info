@@ -48,9 +48,8 @@ pub fn check_recording_matches_live(
         Ok(())
     } else {
         Err(format!(
-            "recording is for track {} but the game is on {} (level_id={}). \
-                 Replaying it here can never match the recorded spawn — the start \
-                 matcher would exhaust its retries and time out. Navigate to {} first.",
+            "recording is for track {} but the game is on {} (level_id={}): \
+                 navigate to {} first.",
             want, live, live_level_id, want
         ))
     }
