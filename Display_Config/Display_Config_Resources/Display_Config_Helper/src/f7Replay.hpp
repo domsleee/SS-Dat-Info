@@ -28,27 +28,22 @@ namespace f7 {
 
     // AI learning mode gives Supreme's AI controller a text line that ~Supreme would
     // destroy after the renderer is gone, crashing sr.dll. Its next reset recreates it.
-    // 1: released; 0: none; -1: unavailable; -2: destructor faulted.
+    // 1: released; 0: none; -1: unavailable or destructor faulted.
     static int ReleaseAiText(void* supreme) {
         constexpr size_t AI_CONTROLLER_OFFSET = 0x40;
         constexpr size_t TEXT_OFFSET = 0x10;
         using DeletingDestructor = void* (__fastcall*)(void*, void*, int);
-        void** text = nullptr;
         __try {
             auto controller = *(uint8_t**)((uint8_t*)supreme + AI_CONTROLLER_OFFSET);
             if (!controller) return 0;
             auto slot = (void***)(controller + TEXT_OFFSET);
-            text = *slot;
+            auto text = *slot;
             if (!text) return 0;
             *slot = nullptr;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return -1;
-        }
-        __try {
             ((DeletingDestructor)((void**)*text)[0])(text, nullptr, 1);
             return 1;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return -2;
+            return -1;
         }
     }
 
@@ -74,15 +69,11 @@ namespace f7 {
         }
         g_exitHook = safetyhook::create_mid(exitAddress, [](safetyhook::Context& ctx) {
             const int result = ReleaseAiText((void*)ctx.ecx);
-            if (result == 1) Log("Supreme::Exit: AI controller text released");
-            if (result == -1) Log("Supreme::Exit: AI controller unavailable");
-            if (result == -2) Log("Supreme::Exit: releasing the AI controller text faulted");
+            if (result) Log(result == 1 ? "Supreme::Exit: AI controller text released"
+                                        : "Supreme::Exit: AI controller text unavailable or faulted");
         });
-        if (!g_exitHook) {
-            Log("DoCustomInput: Supreme::Exit hook failed - F7 can crash on game exit");
-            return;
-        }
-        Log("DoCustomInput: Supreme::Exit hook installed");
+        Log(g_exitHook ? "DoCustomInput: Supreme::Exit hook installed"
+                       : "DoCustomInput: Supreme::Exit hook failed - F7 can crash on game exit");
     }
 
     // 1: guide/TOP5 or finished-run ghost exists; 0: empty; -1: unavailable.
