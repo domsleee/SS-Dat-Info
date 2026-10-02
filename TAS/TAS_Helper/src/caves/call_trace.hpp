@@ -11,7 +11,8 @@
 // Opt-in research mode: records where every listed indirect call in
 // Supreme_Game.dll goes. Enabled only when call_trace_sites.txt sits next to
 // TAS_Helper.dll (one site RVA per line, first hex token; '#' lines ignored).
-// Writes call_trace.txt beside it every 5 s and at exit:
+// Writes call_trace_<pid>.txt beside it every 5 s and at exit (one file per
+// game process, so a harness relaunch never overwrites an earlier run):
 //   site_rva module target_rva count     (hex RVAs, count = sampled hits)
 //
 // Each site gets a one-byte INT3 rather than a 5-byte mid-hook: most of these
@@ -202,7 +203,7 @@ inline void Install(const GameAddresses& addr) {
     if (!list) return;  // off: normal TAS use
 
     g_sg = (uint32_t)(uintptr_t)addr.sg;
-    g_outPath = dir + "call_trace.txt";
+    g_outPath = dir + std::format("call_trace_{}.txt", GetCurrentProcessId());
 
     // The pristine file image (sections at their RVAs, no relocations): a site
     // already patched by another hook must not be touched.
