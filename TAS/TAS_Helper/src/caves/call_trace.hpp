@@ -24,7 +24,7 @@
 // sites to mid-hooks if the game can't keep up.
 namespace calltrace {
 
-constexpr int kSlots = 8;
+constexpr int kSlots = 16;
 struct Slot {
     volatile LONG target;
     volatile LONG count;
@@ -50,8 +50,7 @@ inline volatile LONG64 g_hits = 0;
 
 struct Mod { uint32_t base; char name[64]; };
 inline Mod g_mods[128];
-inline volatile LONG g_modCount = 0;
-inline SRWLOCK g_modLock = SRWLOCK_INIT;
+inline LONG g_modCount = 0;  // flush side only: no locks or loader calls in the handler
 
 static int8_t RegIndex(ZydisRegister r) {
     if (r >= ZYDIS_REGISTER_EAX && r <= ZYDIS_REGISTER_EDI) return (int8_t)(r - ZYDIS_REGISTER_EAX);
@@ -64,22 +63,25 @@ static uint32_t ImageBase(uint32_t va) {
     return (uint32_t)(uintptr_t)mbi.AllocationBase;
 }
 
-// Remember the module's name the first time it is seen: it may unload before a flush.
-static void NoteModule(uint32_t base) {
-    if (!base) return;
-    AcquireSRWLockExclusive(&g_modLock);
-    bool known = false;
-    for (LONG i = 0; i < g_modCount && !known; i++) known = g_mods[i].base == base;
-    if (!known && g_modCount < (LONG)std::size(g_mods)) {
-        Mod& m = g_mods[g_modCount];
-        char path[MAX_PATH] = "?";
-        GetModuleFileNameA((HMODULE)(uintptr_t)base, path, MAX_PATH);
-        const char* slash = strrchr(path, '\\');
-        strncpy_s(m.name, slash ? slash + 1 : path, _TRUNCATE);
-        m.base = base;
-        g_modCount++;
+// Flush side: names each module base once. A module that unloads before the
+// next pass (1 s) is written as "?".
+static void NoteModules() {
+    for (size_t i = 0; i < g_count; i++) {
+        for (const Slot& sl : g_sites[i].slots) {
+            const uint32_t base = sl.base;
+            if (!sl.target || !base) continue;
+            bool known = false;
+            for (LONG m = 0; m < g_modCount && !known; m++) known = g_mods[m].base == base;
+            if (known || g_modCount >= (LONG)std::size(g_mods)) continue;
+            Mod& mod = g_mods[g_modCount];
+            char path[MAX_PATH] = "?";
+            GetModuleFileNameA((HMODULE)(uintptr_t)base, path, MAX_PATH);
+            const char* slash = strrchr(path, '\\');
+            strncpy_s(mod.name, slash ? slash + 1 : path, _TRUNCATE);
+            mod.base = base;
+            g_modCount++;
+        }
     }
-    ReleaseSRWLockExclusive(&g_modLock);
 }
 
 static void Record(Site& s, uint32_t t) {
@@ -90,7 +92,6 @@ static void Record(Site& s, uint32_t t) {
             cur = InterlockedCompareExchange(&sl.target, (LONG)t, 0);
             if (cur == 0) {
                 sl.base = ImageBase(t);
-                NoteModule(sl.base);
                 cur = (LONG)t;
             }
         }
@@ -130,18 +131,21 @@ static LONG CALLBACK OnException(EXCEPTION_POINTERS* ep) {
     }
     const uint32_t at = (uint32_t)(uintptr_t)ep->ExceptionRecord->ExceptionAddress;
     Site* s = Find(at);
-    if (!s) s = Find(at - 1);  // in case the reported address is past the INT3
     if (!s) return EXCEPTION_CONTINUE_SEARCH;
+    // Continuation restores the CONTEXT, not the TEB's last error.
+    const DWORD lastError = GetLastError();
     uint8_t fpu[108];
     __asm { fsave [fpu] }
     Body(ep->ContextRecord, s);
     __asm { frstor [fpu] }
+    SetLastError(lastError);
     ep->ContextRecord->Eip = (DWORD)(uintptr_t)s->thunk;  // the call, then back to site+len
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
 inline void Flush() {
     if (!g_sites) return;
+    NoteModules();
     std::ostringstream out;
     size_t hit = 0;
     for (size_t i = 0; i < g_count; i++) {
@@ -151,9 +155,7 @@ inline void Flush() {
             if (!sl.target) break;
             const uint32_t t = (uint32_t)sl.target;
             std::string name = "?";
-            AcquireSRWLockShared(&g_modLock);
             for (LONG m = 0; m < g_modCount; m++) if (g_mods[m].base == sl.base) name = g_mods[m].name;
-            ReleaseSRWLockShared(&g_modLock);
             out << std::format("{:x} {} {:x} {}\n", s.va - g_sg, name, t - sl.base, (uint32_t)sl.count);
         }
         if (s.overflow) out << std::format("{:x} OVERFLOW 0 {}\n", s.va - g_sg, (uint32_t)s.overflow);
@@ -168,9 +170,9 @@ inline void Flush() {
 }
 
 static DWORD WINAPI FlushThread(LPVOID) {
-    for (;;) {
-        Sleep(5000);
-        Flush();
+    for (int n = 1;; n++) {
+        Sleep(1000);
+        if (n % 5) NoteModules(); else Flush();
     }
 }
 
@@ -209,6 +211,7 @@ inline void Install(const GameAddresses& addr) {
     ZydisDecoderInit(&dec, ZYDIS_MACHINE_MODE_LEGACY_32, ZYDIS_STACK_WIDTH_32);
     g_sites = new Site[rvas.size()]{};
     auto* thunks = (uint8_t*)VirtualAlloc(nullptr, rvas.size() * 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!thunks) { Log("Call trace: VirtualAlloc failed; off"); FreeLibrary(fileImg); return; }
     size_t skipped = 0;
     for (uint32_t rva : rvas) {
         if (rva + 16 > imageSize) { skipped++; continue; }
@@ -253,17 +256,19 @@ inline void Install(const GameAddresses& addr) {
     FreeLibrary(fileImg);
     FlushInstructionCache(GetCurrentProcess(), thunks, rvas.size() * 16);
 
-    AddVectoredExceptionHandler(1, &OnException);
+    if (!AddVectoredExceptionHandler(1, &OnException)) { Log("Call trace: no VEH; off"); return; }
+    size_t armed = 0;
     for (size_t i = 0; i < g_count; i++) {
         auto* p = (uint8_t*)(uintptr_t)g_sites[i].va;
         DWORD old;
-        VirtualProtect(p, 1, PAGE_EXECUTE_READWRITE, &old);
+        if (!VirtualProtect(p, 1, PAGE_EXECUTE_READWRITE, &old)) continue;
         *p = 0xCC;
+        armed++;
         VirtualProtect(p, 1, old, &old);
     }
     FlushInstructionCache(GetCurrentProcess(), nullptr, 0);
     CloseHandle(CreateThread(nullptr, 0, &FlushThread, nullptr, 0, nullptr));
-    Log(std::format("Call trace: armed {} of {} sites ({} skipped), writing {}", g_count, rvas.size(),
+    Log(std::format("Call trace: armed {} of {} sites ({} skipped), writing {}", armed, rvas.size(),
                     skipped, g_outPath));
 }
 
