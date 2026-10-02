@@ -5,7 +5,7 @@ use eframe::egui;
 use tas_shared::{TasMode, TasSharedState};
 
 use crate::drift_scan::DriftTracker;
-use crate::recording::format_recording_duration;
+use crate::panels::timeline::format_game_time;
 
 /// Fixed so the card does not resize as the level / rider / clock text
 /// changes underneath it.
@@ -220,11 +220,18 @@ pub fn drift_banner(ui: &mut egui::Ui, state: &TasSharedState, tracker: &DriftTr
 
 /// "Input Timeline" with the human time at a glance and the text-script route
 /// as a primary action. Returns `true` when the Text Script button was clicked.
-pub fn timeline_header(ui: &mut egui::Ui, state: &TasSharedState, watching_script: bool) -> bool {
-    let total_time = format_recording_duration(state.recorded_count);
+pub fn timeline_header(
+    ui: &mut egui::Ui,
+    state: &TasSharedState,
+    timer_anchor: u32,
+    watching_script: bool,
+) -> bool {
+    // Race-clock time, like the timeline and history.
+    let total_time = format_game_time(state.recorded_count, timer_anchor);
     let current_time = match state.mode_enum() {
-        TasMode::Play => Some(format_recording_duration(
+        TasMode::Play => Some(format_game_time(
             state.playback_pos.min(state.recorded_count),
+            timer_anchor,
         )),
         TasMode::Rec => Some(total_time.clone()),
         TasMode::Off => None,

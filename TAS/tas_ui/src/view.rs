@@ -444,8 +444,6 @@ impl TasApp {
 
                 status::drift_banner(ui, state, &self.view.drift.tracker);
 
-                let open_text_script =
-                    status::timeline_header(ui, state, self.editor.script_watch.is_some());
                 // The game-clock origin is the take's track, which can differ
                 // from the live one. The selected history entry and the last
                 // known track are fallbacks once the course unloads.
@@ -458,6 +456,12 @@ impl TasApp {
                         .and_then(|i| self.history.list.entries().get(i))
                         .and_then(|entry| entry.level.as_deref()))
                     .or(self.conn.last_resolved_level.as_deref());
+                let open_text_script = status::timeline_header(
+                    ui,
+                    state,
+                    timeline::game_timer_anchor(state, timeline_level),
+                    self.editor.script_watch.is_some(),
+                );
                 let tl_outcome = timeline::show(
                     ui,
                     state,
