@@ -97,6 +97,37 @@ fn an_edit_during_play_stops_the_run_at_once() {
     );
 }
 
+/// CONT pressed while a PLAY is still being watched replaces it rather than
+/// being dropped (it is allowed during a PLAY); CONT pressed again during its
+/// own cycle is a double tap and changes nothing.
+#[test]
+fn cont_during_a_watched_play_replaces_it() {
+    let mut h = Harness::with_standard_take();
+    h.click("transport.play");
+    h.run_until("PLAY replaying", 2000, |h| h.mode() == TasMode::Play);
+    assert!(h.app.transport.is_running(), "the watcher is still judging");
+    h.click("transport.from");
+    h.clear_field();
+    h.type_text("150");
+    h.click("transport.cont");
+    assert_eq!(
+        h.app.transport.running_command(),
+        Some(TasCommand::ArmContinue),
+        "{}",
+        h.log()
+    );
+    h.click("transport.cont");
+    assert_eq!(
+        h.log_count("ArmContinue ignored: it is already in progress"),
+        1
+    );
+    assert_eq!(h.log_count("replaces"), 1, "{}", h.log());
+    h.run_until("CONT approved", 2000, |h| !h.app.transport.is_running());
+    assert!(!h.aborted(), "{}", h.log());
+    assert_eq!(h.taken().last(), Some(&TasCommand::ArmContinue));
+    assert_eq!(h.state().continue_from_frame, 150);
+}
+
 /// A click is handled after the frame applied the pending edit.
 #[test]
 fn play_clicked_right_after_an_edit_replays_the_edit() {

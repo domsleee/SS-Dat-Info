@@ -70,15 +70,21 @@ impl TasApp {
     }
 
     pub(crate) fn queue_restart_then(&mut self, command: TasCommand) {
-        // Ignore a second transport request while a cycle is in flight: it
-        // would clobber the single-u32 command slot mid-sequence and could arm
-        // the wrong thing.
-        if self.transport.is_running() {
-            self.log_lines.push(format!(
-                "{:?} ignored: a restart/arm cycle is already in progress",
-                command
-            ));
-            return;
+        // A different request replaces the cycle in flight (a 1x PLAY is
+        // watched for its first ~10 s); cancelling first keeps the two from
+        // sharing the command slot. The same request again is a double tap.
+        match self.transport.running_command() {
+            Some(running) if running == command => {
+                self.log_lines
+                    .push(format!("{command:?} ignored: it is already in progress"));
+                return;
+            }
+            Some(running) => {
+                self.log_lines
+                    .push(format!("{command:?} replaces the {running:?} in progress"));
+                self.reset_continue_runtime_state();
+            }
+            None => {}
         }
         // A native file dialog can block UI updates for seconds while the game
         // keeps running, so refresh the heartbeat before the menu gate.
