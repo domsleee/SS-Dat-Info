@@ -25,19 +25,25 @@ struct Host {
     uint32_t version;
     void(__cdecl* log)(const char*);
     void(__cdecl* flush_trace)();
+    uint32_t expect_cw;      // the x87 control word every detour entry must see (ssb_trace_env.txt)
+    uint32_t expect_mxcsr;   // MXCSR control bits (the low six sticky flags are not compared)
 };
-static_assert(sizeof(Detour) == 28 && sizeof(Host) == 12);
-constexpr uint32_t ABI_VERSION = 1;
+static_assert(sizeof(Detour) == 28 && sizeof(Host) == 20);
+constexpr uint32_t ABI_VERSION = 2;
 using InitFn = int(__cdecl*)(const Host*, const Detour**, uint32_t*);
 using CallsFn = uint32_t(__cdecl*)();
 
 inline CallsFn g_calls = nullptr;
+inline CallsFn g_violations = nullptr;
 inline std::vector<SafetyHookInline> g_hooks;
 inline std::string g_summary = "none";  // for trace headers
 inline Host g_host{};
 
 // ssb-hook detour calls so far; 0 without it.
 inline uint32_t Calls() { return g_calls ? g_calls() : 0; }
+// Detour entries that saw an FPU environment other than the expected one;
+// latched by ssb-hook, recorded per tick, fatal to the checker.
+inline uint32_t FpuViolations() { return g_violations ? g_violations() : 0; }
 
 // The folder holding TAS_Helper.dll, with a trailing backslash.
 inline std::string DllDir() {
@@ -55,21 +61,28 @@ static void __cdecl HostLog(const char* m) { Log(std::string("ssb-hook: ") + (m 
 inline void Unload() {
     g_hooks.clear();   // each destructor restores the original bytes
     g_calls = nullptr;
+    g_violations = nullptr;
 }
 
-// False only when ssb_hook.dll is present and could not be installed.
-inline bool Load(void(__cdecl* flushTrace)()) {
+// False only when ssb_hook.dll is present and could not be installed. It
+// needs the expected FPU environment (`haveEnv`: ssb_trace_env.txt).
+inline bool Load(void(__cdecl* flushTrace)(), bool haveEnv, uint16_t cw, uint32_t mxcsr) {
     const std::string path = DllDir() + "ssb_hook.dll";
     if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) return true;
+    if (!haveEnv) {
+        Log("ssb-hook: ssb_hook.dll needs ssb_trace_env.txt (the expected FPU environment)");
+        return false;
+    }
 
     HMODULE mod = LoadLibraryA(path.c_str());
     auto init = mod ? (InitFn)GetProcAddress(mod, "ssb_hook_init") : nullptr;
     auto calls = mod ? (CallsFn)GetProcAddress(mod, "ssb_hook_calls") : nullptr;
-    if (!init || !calls) {
+    auto violations = mod ? (CallsFn)GetProcAddress(mod, "ssb_hook_fpu_violations") : nullptr;
+    if (!init || !calls || !violations) {
         Log(std::format("ssb-hook: FAILED to load {} (error {})", path, GetLastError()));
         return false;
     }
-    g_host = {ABI_VERSION, &HostLog, flushTrace};
+    g_host = {ABI_VERSION, &HostLog, flushTrace, cw, mxcsr};
     const Detour* table = nullptr;
     uint32_t count = 0;
     if (init(&g_host, &table, &count) != 0 || (count && !table)) {
@@ -106,6 +119,7 @@ inline bool Load(void(__cdecl* flushTrace)()) {
         }
     }
     g_calls = calls;
+    g_violations = violations;
     g_summary = summary;
     Log(std::format("ssb-hook: loaded, {} detour(s): {}", count, summary));
     return true;

@@ -83,13 +83,24 @@ bool run() {
     }
 
     // ssb-recomp harness, each on only when its file sits next to this DLL:
-    // ssb_hook.dll's detours, then the per-tick trace (ssb_trace_regions.txt).
-    if (!ssbhook::Load(&trace::Flush)) {
+    // the expected FPU environment (ssb_trace_env.txt), ssb_hook.dll's
+    // detours, then the per-tick trace (ssb_trace_regions.txt). Requested but
+    // not installable is fatal: a run without them must not pass for one with.
+    if (!trace::LoadEnv()) {
+        Log("FATAL: ssb_trace_env.txt is malformed");
+        RollbackAll();
+        return false;
+    }
+    if (!ssbhook::Load(&trace::Flush, trace::g_env.have, trace::g_env.cw, trace::g_env.mxcsr)) {
         Log("FATAL: ssb_hook.dll is present but its detours could not be installed");
         RollbackAll();
         return false;
     }
-    trace::Install(g_addr, state);
+    if (!trace::Install(g_addr, state)) {
+        Log("FATAL: ssb_trace_regions.txt is present but the trace could not be installed");
+        RollbackAll();
+        return false;
+    }
 
     // Deferred until Main_Menu.dll loads.
     menustate::Install(g_addr, state);

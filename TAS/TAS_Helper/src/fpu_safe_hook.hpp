@@ -2,7 +2,9 @@
 #include <cstdint>
 #include <cstring>
 #include <intrin.h>
+#ifndef FPU_SAFE_HOOK_NO_SAFETYHOOK  // tests/test_fpu_safe_hook.cpp builds without SafetyHook
 #include <safetyhook.hpp>
+#endif
 
 // Every mid-hook body runs between FSAVE and FRSTOR, because SafetyHook saves
 // the general registers but not the x87 state (DESIGN.md "Pitfalls"). Always
@@ -12,11 +14,12 @@
 // bodies run at that precision. g_hookFpuControlWord holds the game's control
 // word for the current call. SafetyHook does not save MXCSR either, so it is
 // saved and restored too; g_hookMxcsr holds the game's value for the call.
+// SafetyHook's mid-hook stub saves XMM0-7 itself (safetyhook.hpp Context32).
 inline volatile uint16_t g_hookFpuControlWord = 0;
 inline volatile uint32_t g_hookMxcsr = 0;
 
-template <void (*Body)(SafetyHookContext&)>
-static void FpuSafeHook(SafetyHookContext& ctx) {
+template <typename Ctx, void (*Body)(Ctx&)>
+static void FpuSafeCall(Ctx& ctx) {
     uint8_t fpu[108];
     const uint32_t csr = _mm_getcsr();
     __asm { fsave [fpu] }
@@ -29,7 +32,14 @@ static void FpuSafeHook(SafetyHookContext& ctx) {
     _mm_setcsr(csr);
 }
 
+#ifndef FPU_SAFE_HOOK_NO_SAFETYHOOK
+template <void (*Body)(SafetyHookContext&)>
+static void FpuSafeHook(SafetyHookContext& ctx) {
+    FpuSafeCall<SafetyHookContext, Body>(ctx);
+}
+
 template <void (*Body)(SafetyHookContext&)>
 inline SafetyHookMid CreateMidHook(void* site) {
     return safetyhook::create_mid(site, FpuSafeHook<Body>);
 }
+#endif

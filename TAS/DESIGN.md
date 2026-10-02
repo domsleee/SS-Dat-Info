@@ -565,14 +565,18 @@ and that a living owner's block holds for 12 s.
 ### ssb-recomp harness (opt-in)
 
 Two research features for the Rust rewrite (`ssb-recomp/re/harness.md`), each
-off unless its file sits next to `TAS_Helper.dll`. With
-`ssb_trace_regions.txt`, every PLAY arm writes `traces\*.ssbtrace`: per tick,
-the listed memory regions at the cycle cave and at the human Player tick's
-return (`Supreme_Game+0x84C43`), plus the x87 control word and MXCSR
-(`trace.hpp`). With `ssb_hook.dll`, its detours are installed as SafetyHook
-inline hooks at initialization (`ssb_hook.hpp`); a detour that fails to
-install fails `TAS_Initialize`. `fpu_safe_hook.hpp` also saves and restores
-MXCSR, which SafetyHook doesn't.
+off unless its file sits next to `TAS_Helper.dll`; both need
+`ssb_trace_env.txt` (the expected x87 CW and MXCSR, optionally a forced
+`srand` seed). With `ssb_trace_regions.txt`, every PLAY arm writes
+`traces\*.ssbtrace`: per tick, the listed memory regions at the cycle cave, at
+the human Body's physics step (`Supreme_Game+0x98360`) and at the human Player
+tick's return (`Supreme_Game+0x84C43`), the x87 control word and MXCSR at
+each, the CRT rand state, the Player's lifecycle (`Player::~Player` hook) and
+provenance (module, msvcrt and opened-file hashes), ending in a completion
+trailer (`trace.hpp`). With `ssb_hook.dll`, its detours are installed as
+SafetyHook inline hooks at initialization (`ssb_hook.hpp`). Requested but not
+installable (either feature) fails `TAS_Initialize`. `fpu_safe_hook.hpp` also
+saves and restores MXCSR, which SafetyHook doesn't (`tests/test_fpu_safe_hook.cpp`).
 
 ### Crashes
 
