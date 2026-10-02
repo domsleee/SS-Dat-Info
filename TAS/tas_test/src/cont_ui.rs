@@ -1,0 +1,579 @@
+//! Live F12 regression through the deployed UI, with real Pico LEFT taps.
+//! CONT always goes through F12. Shared-memory commands are only used for setup
+//! and emergency STOP after the owned UI has exited.
+use std::{
+    io::{Read, Seek, SeekFrom},
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
+struct Options {
+    log: PathBuf,
+    recording: Option<PathBuf>,
+    splice: u32,
+    iterations: u32,
+}
+
+fn options(args: &[String]) -> Result<Options, String> {
+    use crate::cli::flag;
+    let flags = crate::cli::parse(
+        args,
+        &[
+            flag("--recording", None),
+            flag("--splice", None),
+            flag("--iterations", None),
+        ],
+        0,
+    )?;
+    let result = Options {
+        log: PathBuf::new(),
+        recording: flags.value("--recording").map(PathBuf::from),
+        splice: flags.num("--splice", 4500)?,
+        iterations: flags.num("--iterations", 5)?,
+    };
+    if !(1..=65535).contains(&result.splice) || !(1..=100).contains(&result.iterations) {
+        return Err("Use --recording <tasrec> --splice <1..65535> --iterations <1..100>".into());
+    }
+    Ok(result)
+}
+
+// The same original history capture used by the offline banner regression.
+const ORIGINAL_RECORDING: &[u8] =
+    include_bytes!("../../tas_ui/src/tests/data/cont-splice-4500/recording.tasrec");
+
+fn original_recording_file() -> Vec<u8> {
+    let count = u32::from_le_bytes(ORIGINAL_RECORDING[..4].try_into().unwrap());
+    assert_eq!(ORIGINAL_RECORDING.len(), 4 + count as usize * 13);
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    // History blobs have no file metadata. Add the normal file envelope using
+    // the test's standard injection configuration, without inventing a rider
+    // or renderer stamp. Copy the captured inputs and XYZ bytes verbatim.
+    let metadata = serde_json::to_vec(&serde_json::json!({
+        "version": 1, "recorded_count": count, "inject_mode": 6,
+        "force_fixed_tick": 0, "force_direct": 2, "input_source": 0,
+        "timestamp": timestamp.to_string(),
+        "notes": "UI break at 4500: original history entry 2431; metadata envelope added for live UI loading"
+    })).unwrap();
+    let mut file = (metadata.len() as u32).to_le_bytes().to_vec();
+    file.extend_from_slice(&metadata);
+    file.extend_from_slice(&ORIGINAL_RECORDING[4..]);
+    file
+}
+
+fn verdict(log: &str, splice: u32) -> Result<bool, String> {
+    if [
+        "CONT watcher reroll",
+        "CONT aborted",
+        "CONT gave up",
+        "Game process not found",
+        "DRIFT",
+    ]
+    .iter()
+    .any(|text| log.contains(text))
+    {
+        return Err("Retry, drift or runtime failure in UI log".into());
+    }
+    let resumes = log
+        .matches(&format!("CONT resumed at frame {splice} after 1 attempt "))
+        .count();
+    if resumes > 1 {
+        return Err("More than one CONT was triggered".into());
+    }
+    let marker = format!("CONT splice {splice}: ");
+    let mut checked = false;
+    for line in log.lines() {
+        if let Some((_, values)) = line.split_once(&marker) {
+            let numbers: Vec<f32> = values
+                .split_whitespace()
+                .filter_map(|word| {
+                    word.split_once('=')
+                        .and_then(|(_, value)| value.parse().ok())
+                })
+                .collect();
+            if numbers.len() != 2 || numbers.iter().any(|n| !n.is_finite() || *n != 0.0) {
+                return Err(format!("Nonzero or invalid splice verdict: {line}"));
+            }
+            checked = true;
+        }
+    }
+    let shortcut = log.contains("Global F12 (in-game): CONT") || log.contains("Shortcut: F12 CONT");
+    Ok(shortcut && resumes == 1 && checked)
+}
+
+fn new_log(path: &std::path::Path, offset: u64) -> Result<String, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    if file.metadata().map_err(|e| e.to_string())?.len() < offset {
+        return Err("UI log was truncated".into());
+    }
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).map_err(|e| e.to_string())?;
+    // A concurrently appended last line is not a complete verdict yet.
+    if let Some(end) = text.rfind('\n') {
+        text.truncate(end + 1);
+    } else {
+        text.clear();
+    }
+    Ok(text)
+}
+
+pub fn run(args: &[String]) -> Result<(), String> {
+    let mut config = options(args)?;
+    let _ui = live::prepare(&mut config)?;
+    live::run(&config)
+}
+
+/// F12 with From at 0 records a fresh take: there is nothing to replay.
+pub fn run_from_zero() -> Result<(), String> {
+    let mut config = options(&[])?;
+    config.splice = 0;
+    let _ui = live::prepare(&mut config)?;
+    live::run_from_zero(&config)
+}
+
+/// The deployed UI stops a REC at the game's finish by itself: F12 CONTs
+/// FE-decent-done from 150 ticks before its finish line and records over it.
+pub fn run_finish() -> Result<(), String> {
+    let mut config = options(&[])?;
+    config.recording = Some(crate::harness::fixture_path("FE-decent-done.tasrec")?);
+    // The fixture's finish is at recorded tick 6498 (finish-line).
+    config.splice = 6348;
+    let _ui = live::prepare(&mut config)?;
+    live::run_finish(&config)
+}
+
+pub fn validate_options(args: &[String]) -> Result<(), String> {
+    options(args).map(|_| ())
+}
+
+mod live {
+    use super::*;
+    use crate::win32;
+    use std::{os::windows::process::CommandExt, thread};
+    use tas_shared::{TasMode, TasSharedMemoryClient};
+
+    pub(super) struct UiProcess(std::process::Child);
+    impl Drop for UiProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+            // If focus was lost, StopOnExit could not safely send F11. With
+            // our UI gone, no controller can re-arm while we stop the game.
+            if let Ok(mut client) = TasSharedMemoryClient::open() {
+                if client.mode_volatile() != TasMode::Off as u32 || !client.command_idle() {
+                    crate::harness::stop(&mut client);
+                }
+            }
+        }
+    }
+
+    pub(super) fn prepare(config: &mut Options) -> Result<UiProcess, String> {
+        let executable = std::env::current_exe()
+            .map_err(|e| e.to_string())?
+            .with_file_name("tas_ui.exe");
+        if !executable.is_file() {
+            return Err("Build tas_ui beside tas_test before running".into());
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_millis();
+        let root = crate::output_dir().join(format!("cont-ui-{stamp}-{}", std::process::id()));
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let root = root.canonicalize().map_err(|e| e.to_string())?;
+        let recording = match &config.recording {
+            Some(path) => path.canonicalize().map_err(|e| format!("Recording: {e}"))?,
+            None => {
+                let path = root.join("FE-UI-break-at-4500.tasrec");
+                std::fs::write(&path, original_recording_file()).map_err(|e| e.to_string())?;
+                path
+            }
+        };
+        let loaded = crate::replay::load_tasrec(&recording)?;
+        if config.splice > loaded.count {
+            return Err("Splice outside recording".into());
+        }
+        let mut client = crate::harness::ensure_game_running();
+        crate::harness::ensure_exclusive_runtime_ownership(&mut client, "UI LEFT-spam setup");
+        if client.state().level_id != 0 {
+            return Err("UI LEFT-spam requires Forest Easy".into());
+        }
+        println!(
+            "UI fixture: {} ({} ticks)",
+            recording.display(),
+            loaded.count
+        );
+        config.log = root.join("history").join("tas_ui.log");
+        let stderr = std::fs::File::create(root.join("startup.log")).map_err(|e| e.to_string())?;
+        let mut ui = UiProcess(
+            std::process::Command::new(executable)
+                .env("SSB_INSPECT_DATA_DIR", &root)
+                .env("SSB_INSPECT_E2E_RECORDING", &recording)
+                .env("SSB_INSPECT_E2E_SPLICE", config.splice.to_string())
+                .stderr(stderr)
+                .creation_flags(0x08000000)
+                .spawn()
+                .map_err(|e| e.to_string())?,
+        );
+        println!("UI artifacts: {}", root.display());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(status) = ui.0.try_wait().map_err(|e| e.to_string())? {
+                return Err(format!(
+                    "UI setup exited {status}; see {}",
+                    root.join("startup.log").display()
+                ));
+            }
+            if std::fs::read_to_string(&config.log).is_ok_and(|s| s.contains("UI E2E ready")) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("UI setup timed out; see startup.log".into());
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        Ok(ui)
+    }
+    fn press(key: u8) {
+        win32::tap_key(key, Duration::from_millis(100));
+    }
+    /// A trial's timeline of key writes and LEFT samples with the game focus
+    /// and TAS state at each sample, dumped when a transition goes missing.
+    struct Trace<'a> {
+        client: &'a TasSharedMemoryClient,
+        game: win32::Hwnd,
+        start: Instant,
+        lines: Vec<String>,
+        last_down: Option<bool>,
+    }
+    impl<'a> Trace<'a> {
+        fn new(client: &'a TasSharedMemoryClient, game: win32::Hwnd) -> Self {
+            Trace {
+                client,
+                game,
+                start: Instant::now(),
+                lines: Vec::new(),
+                last_down: None,
+            }
+        }
+        fn note(&mut self, event: &str) {
+            let ms = self.start.elapsed().as_secs_f64() * 1000.0;
+            // Bounded: a 3 s trial writes ~150 lines.
+            if self.lines.len() < 2000 {
+                self.lines.push(format!("{ms:8.1} ms  {event}"));
+            }
+        }
+        fn sample(&mut self) -> bool {
+            let raw = win32::async_key_state(win32::VK_LEFT);
+            let down = raw < 0;
+            let s = self.client.state();
+            let event = format!(
+                "LEFT {} (raw {raw:#06x}) game_fg={} mode={} cmd={} restart={} pos={} suppress={}",
+                if down { "down" } else { "up" },
+                win32::is_foreground(self.game),
+                self.client.mode_volatile(),
+                s.command,
+                s.restart_state,
+                s.playback_pos,
+                s.cont_suppress_input
+            );
+            self.note(&event);
+            self.last_down = Some(down);
+            down
+        }
+        fn last_down(&self) -> Option<bool> {
+            self.last_down
+        }
+        fn dump(&self) -> String {
+            self.lines.join("\n")
+        }
+    }
+    struct StopOnExit(win32::Hwnd);
+    impl Drop for StopOnExit {
+        fn drop(&mut self) {
+            if win32::is_foreground(self.0) && win32::is_window(self.0) {
+                press(win32::VK_F11);
+            }
+        }
+    }
+    fn healthy(windows: &[win32::Hwnd; 2]) -> Result<(), String> {
+        if windows.iter().any(|window| !win32::is_window(*window)) {
+            return Err("Game or UI exited".into());
+        }
+        if !win32::is_foreground(windows[0]) {
+            return Err("Game lost focus; trial inconclusive".into());
+        }
+        Ok(())
+    }
+    /// Focus the game with both windows alive; returns them and the UI log's
+    /// current length, where this trial's lines begin.
+    fn begin(config: &Options) -> Result<([win32::Hwnd; 2], u64), String> {
+        let windows = game_and_ui_windows()?;
+        win32::bring_to_front(windows[0]);
+        thread::sleep(Duration::from_millis(300));
+        healthy(&windows)?;
+        let offset = std::fs::metadata(&config.log)
+            .map_err(|e| e.to_string())?
+            .len();
+        Ok((windows, offset))
+    }
+    pub(super) fn run_from_zero(config: &Options) -> Result<(), String> {
+        let client = TasSharedMemoryClient::open()?;
+        let loaded = client.state().recorded_count;
+        if client.mode_volatile() != TasMode::Off as u32 || loaded == 0 {
+            return Err("UI setup did not leave a stopped recording".into());
+        }
+        let (windows, offset) = begin(config)?;
+        let stop = StopOnExit(windows[0]);
+        press(win32::VK_F12);
+        let start = Instant::now();
+        let recorded = loop {
+            healthy(&windows)?;
+            let recorded = client.recorded_count_volatile();
+            if client.mode_volatile() == TasMode::Rec as u32 && recorded > 0 && recorded < loaded {
+                break recorded;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                return Err(format!(
+                    "F12 at From 0 did not start a fresh REC (mode={}, recorded={recorded} of {loaded})\n{}",
+                    client.mode_volatile(),
+                    new_log(&config.log, offset)?
+                ));
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        thread::sleep(Duration::from_millis(500));
+        let grown = client.recorded_count_volatile();
+        let text = new_log(&config.log, offset)?;
+        drop(stop); // F11 through the UI.
+        if grown <= recorded {
+            return Err(format!(
+                "the fresh take is not growing ({recorded} -> {grown})"
+            ));
+        }
+        if !text.contains("CONT from frame 0") {
+            return Err(format!("the UI did not report a fresh take\n{text}"));
+        }
+        println!("{text}");
+        println!("*** UI F12 FROM ZERO PASSED: F12 at From 0 recorded a fresh take ({recorded} -> {grown} ticks) ***");
+        Ok(())
+    }
+
+    pub(super) fn run_finish(config: &Options) -> Result<(), String> {
+        let client = TasSharedMemoryClient::open()?;
+        if client.mode_volatile() != TasMode::Off as u32
+            || client.state().recorded_count < config.splice
+        {
+            return Err("UI setup did not leave a stopped recording past the splice".into());
+        }
+        let before = tas_shared::race_clock::race_finish(client.state()).map_or(0, |f| f.seq);
+        let (windows, offset) = begin(config)?;
+        let stop = StopOnExit(windows[0]);
+        press(win32::VK_F12);
+        // CONT, the splice, then the UI's own stop at the finish.
+        let start = Instant::now();
+        let mut saw_rec = false;
+        loop {
+            let mode = client.mode_volatile();
+            saw_rec |= mode == TasMode::Rec as u32;
+            if saw_rec && mode == TasMode::Off as u32 {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(60) {
+                return Err(format!(
+                    "the UI did not stop the take at the finish (mode={mode}, REC seen={saw_rec})\n{}",
+                    new_log(&config.log, offset)?
+                ));
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        drop(stop);
+        let finish = tas_shared::race_clock::race_finish(client.state())
+            .filter(|f| f.seq != before)
+            .ok_or("the take stopped without a finish from the game")?;
+        let recorded = client.state().recorded_count;
+        let text = new_log(&config.log, offset)?;
+        let _ = crate::harness::dismiss_finish_prompt();
+        if finish.mode != TasMode::Rec as u32 || finish.tick < config.splice {
+            return Err(format!(
+                "the finish was not in the recorded part: {finish:?}"
+            ));
+        }
+        if !text.contains(&format!("Finished at tick {}", finish.tick)) {
+            return Err(format!(
+                "the UI did not report the game's finish tick {}\n{text}",
+                finish.tick
+            ));
+        }
+        // The UI stops within a few frames of seeing the finish.
+        if recorded <= finish.tick || recorded > finish.tick + 100 {
+            return Err(format!(
+                "the take ends at {recorded}, not just after the finish at {}",
+                finish.tick
+            ));
+        }
+        println!("{text}");
+        println!(
+            "*** UI FINISH AUTO-STOP PASSED: the UI stopped the take at the game's finish (tick {}, take ends at {recorded}) ***",
+            finish.tick
+        );
+        Ok(())
+    }
+
+    fn game_and_ui_windows() -> Result<[win32::Hwnd; 2], String> {
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "$ErrorActionPreference='Stop'; $g=@(Get-Process Supreme); $u=@(Get-Process tas_ui); if($g.Count -ne 1 -or $u.Count -ne 1){throw 'Require exactly one game and UI'}; @($g[0].MainWindowHandle.ToInt64(),$u[0].MainWindowHandle.ToInt64()) | ConvertTo-Json -Compress"])
+            .creation_flags(0x08000000).output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into());
+        }
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())
+    }
+
+    pub(super) fn run(config: &Options) -> Result<(), String> {
+        // Setup is complete; the child UI is now the controller under test.
+        let client = TasSharedMemoryClient::open()?;
+        if client.mode_volatile() != TasMode::Off as u32
+            || !client.command_idle()
+            || client.state().recorded_count < config.splice
+            || client.state().level_id != 0
+        {
+            return Err(
+                "Automatic UI setup did not leave a stopped FE recording at the requested splice"
+                    .into(),
+            );
+        }
+        let (windows, _) = begin(config)?;
+        let mut pico = crate::harness::PicoKeys::open_checked()?;
+        println!(
+            "Live UI LEFT-spam: {} iterations, splice {}, Pico {}",
+            config.iterations,
+            config.splice,
+            pico.port_name()
+        );
+        for trial in 1..=config.iterations {
+            healthy(&windows)?;
+            let offset = std::fs::metadata(&config.log)
+                .map_err(|e| e.to_string())?
+                .len();
+            if !pico.send(255) {
+                return Err("Pico release failed".into());
+            }
+            let stop = StopOnExit(windows[0]);
+            let mut trace = Trace::new(&client, windows[0]);
+            trace.note("F12 down");
+            press(win32::VK_F12); // Actual UI F12 shortcut; never ArmContinue from this process.
+            trace.note("F12 up");
+            let start = Instant::now();
+            let mut late_keys = 0;
+            while start.elapsed() < Duration::from_secs(3) {
+                healthy(&windows)?;
+                for (mask, down) in [(1, true), (255, false)] {
+                    let sent = pico.send(mask);
+                    trace.note(&format!("write {mask} ok={sent}"));
+                    if !sent {
+                        return Err(format!("Pico write failed\n{}", trace.dump()));
+                    }
+                    let written = Instant::now();
+                    thread::sleep(Duration::from_millis(40));
+                    if trace.sample() == down {
+                        continue;
+                    }
+                    // Keep the requested state and watch, without resending:
+                    // a late key and a lost one must stay distinguishable.
+                    let edge = if down { "press" } else { "release" };
+                    while written.elapsed() < Duration::from_millis(250) {
+                        thread::sleep(Duration::from_millis(5));
+                        if trace.sample() == down {
+                            break;
+                        }
+                    }
+                    let late = written.elapsed().as_millis();
+                    if trace.last_down() != Some(down) {
+                        return Err(format!(
+                            "LEFT HID {edge} not observed within 250 ms (trial {trial})\n{}",
+                            trace.dump()
+                        ));
+                    }
+                    late_keys += 1;
+                    println!(
+                        "WARNING trial {trial}: LEFT HID {edge} observed {late} ms after its write"
+                    );
+                    if late_keys == 1 {
+                        println!("{}", trace.dump());
+                    }
+                }
+            }
+            loop {
+                healthy(&windows)?;
+                let text = new_log(&config.log, offset)?;
+                if verdict(&text, config.splice).map_err(|error| format!("{error}\n{text}"))? {
+                    println!("{text}");
+                    break;
+                }
+                if start.elapsed() > Duration::from_secs(30) {
+                    return Err(format!("Trial {trial}: missing first-attempt resume or explicit splice verdict\n{text}"));
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            drop(stop); // F11 through the UI.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while client.mode_volatile() != TasMode::Off as u32 || !client.command_idle() {
+                healthy(&windows)?;
+                if Instant::now() >= deadline {
+                    return Err("UI STOP was not acknowledged".into());
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            println!("PASS trial {trial}: physical LEFT taps, first attempt, explicit zero splice mismatch");
+        }
+        println!("CONT UI LEFT-SPAM PASSED");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn default_fixture_is_the_original_4500_capture_without_modified_samples() {
+        assert!(options(&[]).unwrap().recording.is_none());
+        let file = original_recording_file();
+        let header_len = u32::from_le_bytes(file[..4].try_into().unwrap()) as usize;
+        let meta: serde_json::Value = serde_json::from_slice(&file[4..4 + header_len]).unwrap();
+        assert_eq!(meta["recorded_count"], 5032);
+        assert_eq!(&file[4 + header_len..], &ORIGINAL_RECORDING[4..]);
+        assert_eq!(options(&[]).unwrap().splice, 4500);
+    }
+    #[test]
+    fn resume_alone_cannot_pass_and_transients_are_diagnostic() {
+        let resume = "Global F12 (in-game): CONT\nCONT resumed at frame 4500 after 1 attempt — trajectory matched\n";
+        assert!(!verdict(resume, 4500).unwrap());
+        assert!(verdict(&format!("{resume}CONT prefix difference first at tick 1831\nCONT splice 4500: X=0.000000000 Z=0.000000000\n"), 4500).unwrap());
+        for bad in [
+            "CONT splice 4500: X=0.5 Z=0",
+            "CONT splice 4500: X=NaN Z=0",
+            "CONT watcher reroll",
+            "DRIFT",
+        ] {
+            assert!(verdict(&format!("{resume}{bad}"), 4500).is_err());
+        }
+        assert!(!verdict(&format!("{resume}CONT splice 2200: X=0 Z=0"), 4500).unwrap());
+    }
+    #[test]
+    fn cli_has_self_contained_defaults_and_bounded_parameters() {
+        assert!(options(&[]).is_ok());
+        for args in [
+            vec!["--iterations", "0"],
+            vec!["--splice", "65536"],
+            vec!["--unknown", "x"],
+        ] {
+            assert!(options(&args.into_iter().map(str::to_string).collect::<Vec<_>>()).is_err());
+        }
+        assert!(options(&["--recording".into(), "test.tasrec".into()]).is_ok());
+    }
+}

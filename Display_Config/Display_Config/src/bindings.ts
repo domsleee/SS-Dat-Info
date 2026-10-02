@@ -8,6 +8,12 @@ import { invoke as __TAURI_INVOKE, Channel } from "@tauri-apps/api/core";
 export const commands = {
   showWindow: () => __TAURI_INVOKE<void>("show_window"),
   runInject: (trainerSettings: TrainerSettings) => __TAURI_INVOKE<string>("run_inject", { trainerSettings }),
+  /**
+	 *  Inject TAS_Helper.dll into the running Supreme.exe process.
+	 *  Uses the shared Injector.exe in Display_Config_Resources, with TAS payload
+	 *  files located under Display_Config_Resources/TAS/.
+	 */
+  runTasInject: () => __TAURI_INVOKE<string>("run_tas_inject"),
   readRdConfig: () => __TAURI_INVOKE<string>("read_rd_config"),
   writeRdConfig: (rdConfig: RdConfig) => __TAURI_INVOKE<null>("write_rd_config", { rdConfig }),
   openLogFile: () => __TAURI_INVOKE<null>("open_log_file"),

@@ -1,0 +1,1352 @@
+use crate::panels::input_script::{runs_from_log, InputEvent};
+use crate::recording::format_recording_duration;
+use eframe::egui;
+use tas_shared::input_bits::{self, ALL};
+use tas_shared::{TasMode, TasSharedState};
+
+const ROW_COLORS: &[(u8, egui::Color32)] = &[
+    (input_bits::LEFT, egui::Color32::from_rgb(100, 149, 237)), // cornflower blue
+    (input_bits::RIGHT, egui::Color32::from_rgb(255, 165, 0)),  // orange
+    (input_bits::UP, egui::Color32::from_rgb(50, 205, 50)),     // lime green
+    (input_bits::DOWN, egui::Color32::from_rgb(220, 20, 60)),   // crimson
+    (input_bits::JUMP, egui::Color32::from_rgb(186, 85, 211)),  // medium orchid
+    (input_bits::SHIFT, egui::Color32::from_rgb(255, 215, 0)),  // gold
+];
+
+/// Smallest window the timeline will zoom to — keeps blocks grabbable and
+/// stops the brush handle from collapsing to nothing.
+const MIN_WINDOW: u32 = 60;
+
+/// Left brush handle dragged to tick `t`: stays at least MIN_WINDOW before
+/// `end` when there is room, else pins to 0. Not `clamp`, which panics when a
+/// recording shorter than MIN_WINDOW inverts the bounds.
+fn brush_start(t: i32, end: u32) -> u32 {
+    t.min(end as i32 - MIN_WINDOW as i32).max(0) as u32
+}
+
+/// Right brush handle dragged to tick `t`: stays at least MIN_WINDOW past
+/// `start`, but never beyond the recording.
+fn brush_end(t: i32, start: u32, total: u32) -> u32 {
+    t.max((start + MIN_WINDOW) as i32).min(total as i32).max(0) as u32
+}
+
+/// Default window (ticks = 10ms, so 6000 = 60s). Fitting the whole recording
+/// would render multi-minute runs as unreadable slivers.
+const DEFAULT_WINDOW: u32 = 6000;
+
+/// Pixels either side of a block that still belong to it, not to open space.
+const GRAB_MARGIN: f32 = 4.0;
+
+/// Shortest input a drag/box edit will produce (ticks).
+const MIN_LEN: u32 = 1;
+
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(120, 180, 240);
+
+/// Format a recording tick (centiseconds) on the in-game race clock. Inputs
+/// recorded before the start-line trigger deliberately have a negative clock
+/// value.
+pub fn format_game_time(tick: u32, timer_anchor: u32) -> String {
+    if tick < timer_anchor {
+        format!("-{}", format_recording_duration(timer_anchor - tick))
+    } else {
+        format_recording_duration(tick - timer_anchor)
+    }
+}
+
+/// Recording tick where the game's race timer reads zero. Track geometry is
+/// authoritative; first movement is the fallback for recordings on an
+/// unidentified level. `take_level` is the recording's track; the live one
+/// is the fallback.
+pub fn game_timer_anchor(state: &TasSharedState, take_level: Option<&str>) -> u32 {
+    let level = take_level.or(crate::level::resolved_level_code(state));
+    crate::start_line::start_cross_tick(&state.rec_coords, state.recorded_count, level)
+        .or_else(|| tas_shared::align::detect_first_moving(&state.rec_coords, state.recorded_count))
+        .unwrap_or(0)
+}
+
+/// Marker / status colour for the active transport.
+fn mode_color(mode: TasMode) -> egui::Color32 {
+    match mode {
+        TasMode::Rec => egui::Color32::from_rgb(120, 255, 120),
+        TasMode::Play => egui::Color32::from_rgb(255, 235, 120),
+        TasMode::Off => egui::Color32::from_rgb(150, 150, 150),
+    }
+}
+
+fn row_index(bit: u8) -> Option<usize> {
+    ROW_COLORS.iter().position(|(b, _)| *b == bit)
+}
+
+/// Visible tick window `[start, end)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TimelineView {
+    pub start: u32,
+    pub end: u32,
+    /// The user zoomed, panned or fit. Until then the view keeps
+    /// DEFAULT_WINDOW, growing with a recording shorter than that.
+    chosen: bool,
+}
+
+impl TimelineView {
+    #[cfg(test)]
+    pub fn chosen(start: u32, end: u32) -> Self {
+        Self {
+            start,
+            end,
+            chosen: true,
+        }
+    }
+
+    pub fn fit(&mut self, total: u32) {
+        self.start = 0;
+        self.end = total;
+        self.chosen = true;
+    }
+
+    fn span(&self) -> u32 {
+        self.end.saturating_sub(self.start)
+    }
+
+    fn clamp(&mut self, total: u32) {
+        if total == 0 {
+            self.start = 0;
+            self.end = 0;
+            return;
+        }
+        // A new or cut recording shorter than the chosen window starts over.
+        if total < self.span() {
+            self.chosen = false;
+        }
+        if !self.chosen {
+            let want = total.min(DEFAULT_WINDOW);
+            self.end = (self.start + want).min(total);
+            self.start = self.end - want;
+            return;
+        }
+        if self.end > total {
+            self.end = total;
+        }
+        if self.start >= self.end {
+            self.start = 0;
+        }
+        let min_win = MIN_WINDOW.min(total);
+        if self.span() < min_win {
+            self.end = (self.start + min_win).min(total);
+            if self.span() < min_win {
+                self.start = self.end.saturating_sub(min_win);
+            }
+        }
+    }
+
+    pub fn zoom_at(&mut self, cursor_tick: f32, factor: f32, total: u32) {
+        let span = self.span() as f32;
+        if span <= 0.0 {
+            return;
+        }
+        self.chosen = true;
+        let new_span = (span * factor).clamp(MIN_WINDOW.min(total) as f32, total as f32);
+        let frac = ((cursor_tick - self.start as f32) / span).clamp(0.0, 1.0);
+        let mut s = cursor_tick - frac * new_span;
+        if s < 0.0 {
+            s = 0.0;
+        }
+        if s + new_span > total as f32 {
+            s = total as f32 - new_span;
+        }
+        if s < 0.0 {
+            s = 0.0;
+        }
+        self.start = s.round() as u32;
+        self.end = (self.start + new_span.round() as u32).min(total);
+    }
+
+    pub fn zoom_center(&mut self, factor: f32) {
+        let span = self.span() as f32;
+        if span <= 0.0 {
+            return;
+        }
+        self.chosen = true;
+        let center = self.start as f32 + span / 2.0;
+        let new_span = (span * factor).max(MIN_WINDOW as f32);
+        let s = (center - new_span / 2.0).max(0.0);
+        self.start = s.round() as u32;
+        self.end = self.start + new_span.round() as u32;
+    }
+
+    fn pan(&mut self, delta: i64, total: u32) {
+        self.chosen = true;
+        let span = self.span() as i64;
+        let mut s = self.start as i64 + delta;
+        if s + span > total as i64 {
+            s = total as i64 - span;
+        }
+        if s < 0 {
+            s = 0;
+        }
+        self.start = s as u32;
+        self.end = (self.start + span as u32).min(total);
+    }
+
+    fn follow(&mut self, pos: u32, total: u32) {
+        let span = self.span();
+        let max_scroll = total.saturating_sub(span);
+        let new_start = auto_scroll_position(
+            pos as usize,
+            self.start as usize,
+            span as usize,
+            max_scroll as usize,
+        ) as u32;
+        self.start = new_start;
+        self.end = (new_start + span).min(total);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum DragMode {
+    Start,
+    End,
+    Move,
+}
+
+struct BlockDrag {
+    idx: usize,
+    mode: DragMode,
+    /// The event as it was when the drag began — used to describe the edit.
+    orig: InputEvent,
+    pointer_start_x: f32,
+}
+
+fn dragged_event(drag: &BlockDrag, pointer_x: f32, px_per_tick: f32, total: u32) -> InputEvent {
+    let dt = ((pointer_x - drag.pointer_start_x) / px_per_tick).round() as i64;
+    let mut event = drag.orig;
+    match drag.mode {
+        DragMode::Start => {
+            event.start =
+                (event.start as i64 + dt).clamp(0, event.end as i64 - MIN_LEN as i64) as u32;
+        }
+        DragMode::End => {
+            event.end = (event.end as i64 + dt)
+                .clamp(event.start as i64 + MIN_LEN as i64, total as i64)
+                as u32;
+        }
+        DragMode::Move => {
+            let len = event.end - event.start;
+            event.start = (event.start as i64 + dt).clamp(0, (total - len) as i64) as u32;
+            event.end = event.start + len;
+        }
+    }
+    event
+}
+
+/// Persistent edit state for the timeline (selection + active block drag +
+/// the working event list). Lives in the app; defaults to "nothing selected".
+#[derive(Default)]
+pub struct TimelineEdit {
+    pub selected: Option<InputEvent>,
+    work: Vec<InputEvent>,
+    drag: Option<BlockDrag>,
+    /// A Start/End value being dragged: (the selected block, its new
+    /// extent). Applied on release, like a block drag; applied per frame, a
+    /// value passing another block of the same key would merge into it.
+    field: Option<(InputEvent, InputEvent)>,
+}
+
+/// What `show` wants the app to do this frame.
+#[derive(Default)]
+pub struct TimelineOutcome {
+    pub continue_changed: bool,
+    /// New full event list to write into `input_log` (Some when edited).
+    pub events: Option<Vec<InputEvent>>,
+    /// A gesture finished — push one undo snapshot.
+    pub commit_undo: bool,
+    /// Human-readable description of the committed edit, for the history
+    /// entry (e.g. "Moved L 324→372t"). Set only when `commit_undo`.
+    pub action_label: Option<String>,
+}
+
+/// Describe a block edit for the history panel.
+fn edit_action_label(mode: DragMode, orig: InputEvent, now: InputEvent) -> String {
+    let k = ALL[row_index(orig.bit).unwrap_or(0)].1;
+    match mode {
+        DragMode::Move => format!("Moved {} {} to {}t", k, orig.start, now.start),
+        DragMode::Start => format!("Set {} start {} to {}t", k, orig.start, now.start),
+        DragMode::End => format!("Set {} end {} to {}t", k, orig.end, now.end),
+    }
+}
+
+pub fn show(
+    ui: &mut egui::Ui,
+    state: &TasSharedState,
+    take_level: Option<&str>,
+    view: &mut TimelineView,
+    continue_from: &mut u32,
+    edit: &mut TimelineEdit,
+) -> TimelineOutcome {
+    let mut outcome = TimelineOutcome::default();
+    let total = state.recorded_count;
+    if total == 0 {
+        ui.colored_label(
+            egui::Color32::from_rgb(150, 150, 150),
+            "No recording data yet. Press REC to populate timeline rows.",
+        );
+        return outcome;
+    }
+    view.clamp(total);
+    let timer_anchor = game_timer_anchor(state, take_level);
+
+    let active_tick = active_timeline_tick(state);
+    if let Some((pos, _)) = active_tick {
+        view.follow(pos as u32, total);
+    }
+    let editable = state.mode == TasMode::Off as u32;
+
+    let runs = runs_from_log(&state.input_log, total);
+    // Keep the working event list in sync with the log while not dragging.
+    if editable && edit.drag.is_none() {
+        edit.work = runs.clone();
+    }
+
+    ui.horizontal(|ui| {
+        if ui
+            .button("Fit")
+            .on_hover_text("Show the whole recording")
+            .clicked()
+        {
+            view.fit(total);
+        }
+        let zoom = total as f32 / view.span().max(1) as f32;
+        ui.label(format!(
+            "Showing {} to {} of {}  ({:.2}×)",
+            format_game_time(view.start, timer_anchor),
+            format_game_time(view.end.saturating_sub(1), timer_anchor),
+            format_game_time(total, timer_anchor),
+            zoom
+        ));
+        ui.weak("·  scroll to zoom · drag the bar below to pan");
+    });
+
+    let avail = ui.available_size();
+    let row_height = 12.0;
+    let num_rows = ALL.len();
+    let header_height = 14.0;
+    let axis_height = 27.0;
+    let total_height = header_height + row_height * num_rows as f32 + axis_height + 6.0;
+    let left_margin = 8.0;
+    let right_padding = 20.0;
+    let width = (avail.x.min(900.0) - right_padding - left_margin).max(120.0);
+
+    let (response, painter) = ui.allocate_painter(
+        egui::vec2(width, total_height),
+        egui::Sense::click_and_drag(),
+    );
+    let rect = response.rect;
+    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(30, 30, 40));
+
+    let label_width = 20.0;
+    let bar_left = rect.left() + label_width;
+    let bar_width = width - label_width - 4.0;
+    let rows_top = rect.top() + header_height;
+    let rows_bottom = rows_top + row_height * num_rows as f32;
+    let axis_y = rows_bottom + 2.0;
+
+    // Wheel zoom, centred on the cursor (mutates the view before the snapshot
+    // below). Uses rect.contains rather than `response.hovered()` because the
+    // per-block widgets sit on top of the painter and steal its hover.
+    if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
+        if rect.contains(p) && edit.drag.is_none() {
+            let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
+            if scroll_y.abs() > 0.0 {
+                let frac = ((p.x - bar_left) / bar_width).clamp(0.0, 1.0);
+                let cursor_tick = view.start as f32 + frac * view.span().max(1) as f32;
+                let factor = if scroll_y > 0.0 { 0.85 } else { 1.18 };
+                view.zoom_at(cursor_tick, factor, total);
+            }
+        }
+    }
+
+    // Snapshot the window for this frame's drawing. `to_px` owns copies so
+    // later view mutations (brush pan/zoom) don't alias it.
+    let vs = view.start;
+    let ve = view.end;
+    let span = ve.saturating_sub(vs).max(1);
+    let span_f = span as f32;
+    let to_px = move |t: u32| -> f32 {
+        let p = bar_left + t.saturating_sub(vs) as f32 / span_f * bar_width;
+        p.clamp(bar_left, bar_left + bar_width)
+    };
+
+    // Status text (left) + visible range (right).
+    let marker_status = match active_tick {
+        Some((tick, _)) => format!(
+            "{} {} · {}t",
+            state.mode_str(),
+            format_game_time(tick as u32, timer_anchor),
+            tick
+        ),
+        None if editable => "OFF · editable".to_string(),
+        None => "OFF".to_string(),
+    };
+    painter.text(
+        egui::pos2(bar_left, rect.top() + 1.0),
+        egui::Align2::LEFT_TOP,
+        marker_status,
+        egui::FontId::monospace(9.0),
+        mode_color(active_tick.map_or(TasMode::Off, |(_, mode)| mode)),
+    );
+    painter.text(
+        egui::pos2(rect.right() - 4.0, rect.top() + 1.0),
+        egui::Align2::RIGHT_TOP,
+        format!(
+            "{} · {}t  to  {} · {}t",
+            format_game_time(view.start, timer_anchor),
+            view.start,
+            format_game_time(view.end.saturating_sub(1), timer_anchor),
+            view.end.saturating_sub(1)
+        ),
+        egui::FontId::monospace(9.0),
+        egui::Color32::from_rgb(150, 150, 150),
+    );
+
+    // Active position marker.
+    if let Some((tick, mode)) = active_tick {
+        let tick = tick as u32;
+        if tick >= view.start && tick < view.end {
+            let px = to_px(tick);
+            let color = mode_color(mode);
+            let hi = egui::Rect::from_min_max(
+                egui::pos2((px - 2.0).max(bar_left), rows_top),
+                egui::pos2((px + 2.0).min(bar_left + bar_width), rows_bottom),
+            );
+            painter.rect_filled(hi, 1.0, color.gamma_multiply(0.35));
+            painter.line_segment(
+                [egui::pos2(px, rows_top), egui::pos2(px, rows_bottom)],
+                egui::Stroke::new(2.0_f32, color),
+            );
+        }
+    }
+
+    // Row labels.
+    let y_start = rows_top + 2.0;
+    for (row_idx, (_, label, _)) in ALL.iter().enumerate() {
+        let y = y_start + row_idx as f32 * row_height;
+        painter.text(
+            egui::pos2(rect.left() + 4.0, y + row_height * 0.5),
+            egui::Align2::LEFT_CENTER,
+            *label,
+            egui::FontId::monospace(9.0),
+            egui::Color32::from_rgb(180, 180, 180),
+        );
+    }
+
+    let mut block_rects: Vec<egui::Rect> = Vec::new();
+    if editable {
+        // Editable: draw each run as an interactable block.
+        let pxpt = bar_width / span_f;
+        let work_len = edit.work.len();
+        block_rects.reserve(work_len);
+        let mut edited = false;
+        for i in 0..work_len {
+            let ev = edit.work[i];
+            let Some(row_idx) = row_index(ev.bit) else {
+                continue;
+            };
+            if (ev.end <= view.start || ev.start >= view.end)
+                && !edit.drag.as_ref().is_some_and(|drag| drag.idx == i)
+            {
+                continue;
+            }
+            let color = ROW_COLORS[row_idx].1;
+            let y = y_start + row_idx as f32 * row_height;
+            let x0 = to_px(ev.start);
+            let x1 = to_px(ev.end).max(x0 + 2.0);
+            let block = egui::Rect::from_min_max(
+                egui::pos2(x0, y + 1.0),
+                egui::pos2(x1, y + row_height - 1.0),
+            );
+            painter.rect_filled(block, 1.0, color);
+            block_rects.push(block);
+            if edit.selected == Some(ev) {
+                painter.rect_stroke(block, 1.0, egui::Stroke::new(1.5_f32, egui::Color32::WHITE));
+            }
+
+            let id = ui.id().with(("blk", ev.bit, i));
+            let hw = 4.0_f32.min(block.width() / 3.0);
+            let lh =
+                egui::Rect::from_min_max(block.min, egui::pos2(block.left() + hw, block.bottom()));
+            let rh =
+                egui::Rect::from_min_max(egui::pos2(block.right() - hw, block.top()), block.max);
+            let body = egui::Rect::from_min_max(
+                egui::pos2(block.left() + hw, block.top()),
+                egui::pos2(block.right() - hw, block.bottom()),
+            );
+            let lr = ui
+                .interact(lh, id.with("l"), egui::Sense::click_and_drag())
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+            let rr = ui
+                .interact(rh, id.with("r"), egui::Sense::click_and_drag())
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+            let br = ui
+                .interact(body, id.with("b"), egui::Sense::click_and_drag())
+                .on_hover_cursor(egui::CursorIcon::Grab);
+            crate::probe::tag_with(&br, || {
+                format!("timeline.block.{}.{}", ALL[row_idx].1, ev.start)
+            });
+
+            if lr.clicked() || rr.clicked() || br.clicked() {
+                edit.selected = Some(ev);
+            }
+            let started = [
+                (&lr, DragMode::Start, x0),
+                (&rr, DragMode::End, x1),
+                (&br, DragMode::Move, block.center().x),
+            ]
+            .into_iter()
+            .find(|(r, ..)| r.drag_started());
+            if let Some((_, mode, x)) = started {
+                edit.drag = Some(BlockDrag {
+                    idx: i,
+                    mode,
+                    orig: ev,
+                    pointer_start_x: ui.input(|i| i.pointer.press_origin().map_or(x, |p| p.x)),
+                });
+                edit.selected = Some(ev);
+            }
+
+            if let Some(drag) = &edit.drag {
+                if drag.idx == i {
+                    if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
+                        let e = dragged_event(drag, pointer.x, pxpt, total);
+                        if e != edit.work[i] {
+                            edit.work[i] = e;
+                            edit.selected = Some(e);
+                            edited = true;
+                        }
+                    }
+                    if lr.drag_stopped() || rr.drag_stopped() || br.drag_stopped() {
+                        outcome.action_label =
+                            Some(edit_action_label(drag.mode, drag.orig, edit.work[i]));
+                        edit.drag = None;
+                        outcome.commit_undo = true;
+                        edited = true;
+                    }
+                }
+            }
+        }
+        if edited {
+            outcome.events = Some(edit.work.clone());
+        }
+    } else {
+        // Read-only: cheap painted runs.
+        for (row_idx, &(bit, color)) in ROW_COLORS.iter().enumerate() {
+            let y = y_start + row_idx as f32 * row_height;
+            let lane = egui::Rect::from_min_size(
+                egui::pos2(bar_left, y + 1.0),
+                egui::vec2(bar_width, row_height - 2.0),
+            );
+            paint_runs(&painter, &runs, bit, color, lane, view.start, view.end);
+        }
+    }
+
+    // X-axis labels.
+    painter.line_segment(
+        [
+            egui::pos2(bar_left, axis_y),
+            egui::pos2(bar_left + bar_width, axis_y),
+        ],
+        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(70, 70, 85)),
+    );
+    let end_tick = view.end.saturating_sub(1);
+    let mid_tick = view.start + (end_tick.saturating_sub(view.start) / 2);
+    let mut axis_ticks = vec![view.start, mid_tick, end_tick];
+    axis_ticks.dedup();
+    for tick in axis_ticks {
+        let px = to_px(tick);
+        painter.line_segment(
+            [egui::pos2(px, axis_y), egui::pos2(px, axis_y + 4.0)],
+            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(90, 90, 105)),
+        );
+        let align = if tick == view.start {
+            egui::Align2::LEFT_TOP
+        } else if tick == end_tick {
+            egui::Align2::RIGHT_TOP
+        } else {
+            egui::Align2::CENTER_TOP
+        };
+        painter.text(
+            egui::pos2(px, axis_y + 5.0),
+            align,
+            format_game_time(tick, timer_anchor),
+            egui::FontId::monospace(9.0),
+            egui::Color32::from_rgb(165, 165, 180),
+        );
+        painter.text(
+            egui::pos2(px, axis_y + 15.0),
+            align,
+            format!("{}t", tick),
+            egui::FontId::monospace(8.0),
+            egui::Color32::from_rgb(105, 105, 120),
+        );
+    }
+
+    // CONT marker: a click on open lane space sets continue_from (read-only
+    // lanes also scrub by drag). The block widgets do not reliably take every
+    // press near a thin handle, so open space is decided here.
+    let lanes = egui::Rect::from_min_max(
+        egui::pos2(bar_left, rows_top),
+        egui::pos2(bar_left + bar_width, rows_bottom),
+    );
+    let block_gesture = edit.drag.is_some() || outcome.commit_undo;
+    if !block_gesture && (response.clicked() || (response.dragged() && !editable)) {
+        if let Some(pos) = response.interact_pointer_pos() {
+            if open_lane_space(pos, lanes, &block_rects) {
+                if let Some(tick) = lane_tick(pos, lanes, view.start, span_f) {
+                    let frame = tick.min(total.saturating_sub(1));
+                    if frame != *continue_from {
+                        *continue_from = frame;
+                        outcome.continue_changed = true;
+                    }
+                }
+            }
+        }
+    }
+    let continue_tick = (*continue_from).min(total.saturating_sub(1));
+    if continue_tick >= view.start && continue_tick < view.end {
+        let px = to_px(continue_tick);
+        let cc = egui::Color32::from_rgb(120, 200, 255);
+        painter.line_segment(
+            [egui::pos2(px, rows_top), egui::pos2(px, rows_bottom)],
+            egui::Stroke::new(1.5_f32, cc),
+        );
+        painter.text(
+            egui::pos2(px + 3.0, rows_top + 1.0),
+            egui::Align2::LEFT_TOP,
+            "CONT",
+            egui::FontId::monospace(8.0),
+            cc,
+        );
+    }
+
+    // Overview brush.
+    brush(ui, &runs, view, total, width, bar_left - rect.left());
+
+    // Edit controls row (Start/End/Delete) for the selected input.
+    if editable {
+        edit_controls(ui, edit, total, timer_anchor, &mut outcome);
+    } else {
+        ui.weak("Stop playback/record (mode OFF) to edit inputs.");
+    }
+
+    outcome
+}
+
+/// Inside the lanes and clear of every block by GRAB_MARGIN.
+fn open_lane_space(pos: egui::Pos2, lanes: egui::Rect, blocks: &[egui::Rect]) -> bool {
+    lanes.contains(pos)
+        && !blocks
+            .iter()
+            .any(|b| b.expand2(egui::vec2(GRAB_MARGIN, 0.0)).contains(pos))
+}
+
+fn lane_tick(pos: egui::Pos2, lanes: egui::Rect, view_start: u32, span: f32) -> Option<u32> {
+    lanes.contains(pos).then(|| {
+        let rel = ((pos.x - lanes.left()) / lanes.width()).clamp(0.0, 1.0);
+        view_start + (rel * span) as u32
+    })
+}
+
+/// The selected-input editor: key label, Start/End tick boxes, Delete.
+fn edit_controls(
+    ui: &mut egui::Ui,
+    edit: &mut TimelineEdit,
+    total: u32,
+    timer_anchor: u32,
+    outcome: &mut TimelineOutcome,
+) {
+    let Some(sel) = edit.selected else {
+        ui.weak("Click an input block to edit · drag edges to resize, middle to move.");
+        return;
+    };
+    let Some(idx) = edit.work.iter().position(|e| *e == sel) else {
+        edit.selected = None;
+        return;
+    };
+    let pending = edit
+        .field
+        .filter(|(orig, _)| *orig == sel)
+        .map(|(_, ev)| ev);
+    let mut ev = pending.unwrap_or(edit.work[idx]);
+    let row = row_index(ev.bit).unwrap_or(0);
+    let mut changed = false;
+    let mut dragging = false;
+    let mut released = false;
+    let mut delete = false;
+    // Typed values apply on Enter or focus loss, dragged ones on release:
+    // never an intermediate value (typing "11500" once set a start of 1).
+    let mut field = |ui: &mut egui::Ui, value: &mut u32, name: &str| {
+        let r = ui.add(
+            egui::DragValue::new(value)
+                .speed(1.0)
+                .update_while_editing(false),
+        );
+        crate::probe::tag(&r, name);
+        changed |= r.changed();
+        dragging |= r.dragged();
+        released |= r.drag_stopped();
+    };
+    ui.horizontal(|ui| {
+        ui.colored_label(
+            ROW_COLORS[row].1,
+            format!("{} · press {}", ALL[row].1, ALL[row].2.to_ascii_lowercase()),
+        );
+        ui.label("Start");
+        field(ui, &mut ev.start, "timeline.start");
+        ui.weak("t");
+        ui.monospace(format_game_time(ev.start, timer_anchor));
+        ui.label("End");
+        field(ui, &mut ev.end, "timeline.end");
+        ui.weak("t");
+        ui.monospace(format_game_time(ev.end, timer_anchor));
+        let length = ev.end.saturating_sub(ev.start);
+        ui.weak(format!(
+            "Length {}t · {}",
+            length,
+            format_recording_duration(length)
+        ));
+        let delete_button = ui.button("Delete");
+        crate::probe::tag(&delete_button, "timeline.delete");
+        if delete_button.clicked() {
+            delete = true;
+        }
+    });
+
+    if delete {
+        edit.field = None;
+        let label = format!("Deleted {} {}-{}t", ALL[row].1, sel.start, sel.end);
+        edit.work.remove(idx);
+        edit.selected = None;
+        outcome.events = Some(edit.work.clone());
+        outcome.commit_undo = true;
+        outcome.action_label = Some(label);
+        return;
+    }
+    if changed || released {
+        // Clamp and keep start < end.
+        ev.start = ev.start.min(total.saturating_sub(MIN_LEN));
+        ev.end = ev.end.min(total);
+        if ev.end <= ev.start {
+            ev.end = (ev.start + MIN_LEN).min(total);
+        }
+    }
+    if dragging && !released {
+        edit.field = Some((sel, ev));
+        return;
+    }
+    edit.field = None;
+    if (changed || released) && ev != sel {
+        edit.work[idx] = ev;
+        edit.selected = Some(ev);
+        outcome.events = Some(edit.work.clone());
+        outcome.commit_undo = true;
+        outcome.action_label = Some(format!("Set {} {}-{}t", ALL[row].1, ev.start, ev.end));
+    }
+}
+
+fn brush(
+    ui: &mut egui::Ui,
+    runs: &[InputEvent],
+    view: &mut TimelineView,
+    total: u32,
+    width: f32,
+    inset: f32,
+) {
+    ui.add_space(4.0);
+    let (area, _) = ui.allocate_exact_size(egui::vec2(width, 26.0), egui::Sense::hover());
+    let brush_rect = egui::Rect::from_min_size(
+        egui::pos2(area.left() + inset, area.top()),
+        egui::vec2(width - inset - 4.0, 26.0),
+    );
+    let painter = ui.painter_at(brush_rect);
+    painter.rect_filled(brush_rect, 3.0, egui::Color32::from_rgb(18, 18, 26));
+
+    for (i, &(bit, color)) in ROW_COLORS.iter().enumerate() {
+        let y = brush_rect.top() + 3.0 + i as f32 * 3.2;
+        let lane = egui::Rect::from_min_size(
+            egui::pos2(brush_rect.left() + 3.0, y),
+            egui::vec2(brush_rect.width() - 6.0, 2.4),
+        );
+        paint_runs(
+            &painter,
+            runs,
+            bit,
+            color.gamma_multiply(0.85),
+            lane,
+            0,
+            total,
+        );
+    }
+
+    let inner_left = brush_rect.left() + 3.0;
+    let inner_w = brush_rect.width() - 6.0;
+    let ppt = inner_w / total as f32;
+    let wx0 = inner_left + view.start as f32 * ppt;
+    let wx1 = inner_left + view.end as f32 * ppt;
+    let top = brush_rect.top() + 1.0;
+    let bot = brush_rect.bottom() - 1.0;
+
+    let win_rect = egui::Rect::from_min_max(egui::pos2(wx0, top), egui::pos2(wx1, bot));
+    painter.rect(
+        win_rect,
+        2.0,
+        ACCENT.gamma_multiply(0.18),
+        egui::Stroke::new(1.0_f32, ACCENT),
+    );
+
+    let hw = 8.0;
+    let lh = egui::Rect::from_min_max(egui::pos2(wx0 - 1.0, top), egui::pos2(wx0 + hw, bot));
+    let rh = egui::Rect::from_min_max(egui::pos2(wx1 - hw, top), egui::pos2(wx1 + 1.0, bot));
+    painter.rect_filled(lh, 2.0, ACCENT);
+    painter.rect_filled(rh, 2.0, ACCENT);
+
+    let id = ui.id().with("timeline_brush");
+    let body = egui::Rect::from_min_max(
+        egui::pos2((wx0 + hw).min(wx1), top),
+        egui::pos2((wx1 - hw).max(wx0), bot),
+    );
+    let body_resp = ui
+        .interact(body, id.with("body"), egui::Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::Grab);
+    if body_resp.dragged() {
+        let dt = (body_resp.drag_delta().x / ppt).round() as i64;
+        if dt != 0 {
+            view.pan(dt, total);
+        }
+    }
+    // Brush handles track the absolute cursor position, not the drag delta:
+    // with deltas, a drag past the brush edge clamps and then resizes the
+    // window as soon as the cursor reverses, far outside the brush.
+    let l_resp = ui
+        .interact(lh, id.with("lh"), egui::Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    if l_resp.dragged() {
+        if let Some(p) = l_resp.interact_pointer_pos() {
+            let t = ((p.x - inner_left) / ppt).round() as i32;
+            view.start = brush_start(t, view.end);
+            view.chosen = true;
+        }
+    }
+    let r_resp = ui
+        .interact(rh, id.with("rh"), egui::Sense::drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    if r_resp.dragged() {
+        if let Some(p) = r_resp.interact_pointer_pos() {
+            let t = ((p.x - inner_left) / ppt).round() as i32;
+            view.end = brush_end(t, view.start, total);
+            view.chosen = true;
+        }
+    }
+}
+
+/// Paint `bit`'s runs, clipped to the window `[win_start, win_end)`.
+fn paint_runs(
+    painter: &egui::Painter,
+    runs: &[InputEvent],
+    bit: u8,
+    color: egui::Color32,
+    lane: egui::Rect,
+    win_start: u32,
+    win_end: u32,
+) {
+    let span = (win_end.saturating_sub(win_start)).max(1) as f32;
+    let x = |t: u32| lane.left() + (t - win_start) as f32 / span * lane.width();
+    for run in runs.iter().filter(|r| r.bit == bit) {
+        let (start, end) = (run.start.max(win_start), run.end.min(win_end));
+        if start < end {
+            let sx = x(start);
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(sx, lane.top()),
+                    egui::vec2((x(end) - sx).max(1.0), lane.height()),
+                ),
+                1.0,
+                color,
+            );
+        }
+    }
+}
+
+fn auto_scroll_position(
+    pos: usize,
+    current_scroll: usize,
+    ticks_visible: usize,
+    max_scroll: usize,
+) -> usize {
+    let scroll_end = current_scroll + ticks_visible;
+    let margin = ticks_visible * 4 / 5;
+    if pos >= scroll_end || pos < current_scroll || pos > current_scroll + margin {
+        pos.saturating_sub(margin).min(max_scroll)
+    } else {
+        current_scroll
+    }
+}
+
+fn active_timeline_tick(state: &TasSharedState) -> Option<(usize, TasMode)> {
+    let total = state.recorded_count as usize;
+    if total == 0 {
+        return None;
+    }
+    let mode = state.mode_enum();
+    match mode {
+        TasMode::Play => Some(((state.playback_pos as usize).min(total - 1), mode)),
+        TasMode::Rec => Some((total - 1, mode)),
+        TasMode::Off => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Typing a start applies once, on Enter. Applied per keystroke, the "1"
+    /// of "11500" set a start of 1 and swallowed every block of that key
+    /// before it (the log merges them).
+    #[test]
+    fn a_typed_start_applies_once_on_enter() {
+        let ctx = egui::Context::default();
+        let earlier = InputEvent {
+            bit: 0x02,
+            start: 100,
+            end: 200,
+        };
+        let block = InputEvent {
+            bit: 0x02,
+            start: 11561,
+            end: 11601,
+        };
+        let mut edit = TimelineEdit {
+            selected: Some(block),
+            work: vec![earlier, block],
+            ..Default::default()
+        };
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut outcome = TimelineOutcome::default();
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    edit_controls(ui, &mut edit, 20_000, 0, &mut outcome);
+                });
+            });
+            outcome
+        };
+        frame(vec![]);
+        // Tab focuses the Start field; clear it and type the new value.
+        let mut typing = vec![key(egui::Key::Tab)];
+        typing.extend(std::iter::repeat_with(|| key(egui::Key::Backspace)).take(8));
+        for c in ["1", "1", "5", "0", "0"] {
+            typing.push(egui::Event::Text(c.into()));
+        }
+        for event in typing {
+            let outcome = frame(vec![event]);
+            assert!(outcome.events.is_none(), "applied before Enter");
+        }
+        let outcome = frame(vec![key(egui::Key::Enter)]);
+        let moved = InputEvent {
+            start: 11500,
+            ..block
+        };
+        assert_eq!(outcome.events, Some(vec![earlier, moved]));
+        assert!(outcome.commit_undo);
+        assert_eq!(edit.selected, Some(moved));
+    }
+
+    /// A recording shorter than MIN_WINDOW must not invert the handle bounds.
+    #[test]
+    fn brush_handles_survive_a_recording_shorter_than_the_min_window() {
+        let total = 40;
+        for t in [-10, 0, 20, 40, 100] {
+            assert_eq!(brush_start(t, total), 0);
+            assert_eq!(brush_end(t, 0, total), total);
+        }
+        assert_eq!(brush_start(500, 1000), 500);
+        assert_eq!(brush_start(990, 1000), 940);
+        assert_eq!(brush_end(10, 100, 1000), 160);
+        assert_eq!(brush_end(2000, 100, 1000), 1000);
+    }
+    use tas_shared::{zeroed_boxed, TasMode};
+
+    #[test]
+    fn edit_labels_use_readable_text() {
+        let orig = InputEvent {
+            bit: 1,
+            start: 20,
+            end: 60,
+        };
+        let now = InputEvent {
+            bit: 1,
+            start: 25,
+            end: 65,
+        };
+        assert_eq!(
+            edit_action_label(DragMode::Move, orig, now),
+            "Moved L 20 to 25t"
+        );
+        assert_eq!(
+            edit_action_label(DragMode::Start, orig, now),
+            "Set L start 20 to 25t"
+        );
+        assert_eq!(
+            edit_action_label(DragMode::End, orig, now),
+            "Set L end 60 to 65t"
+        );
+    }
+
+    #[test]
+    fn drag_reverses_without_sticking_after_clamping() {
+        let drag = BlockDrag {
+            idx: 0,
+            mode: DragMode::Move,
+            orig: InputEvent {
+                bit: 1,
+                start: 20,
+                end: 60,
+            },
+            pointer_start_x: 100.0,
+        };
+        assert_eq!(dragged_event(&drag, -100.0, 1.0, 100).start, 0);
+        assert_eq!(dragged_event(&drag, 100.0, 1.0, 100), drag.orig);
+        assert_eq!(dragged_event(&drag, 300.0, 1.0, 100).end, 100);
+    }
+
+    /// The whole timeline in a 900x400 window over a 100-tick recording with
+    /// LEFT held over 20..60, all of it in view.
+    struct Harness {
+        ctx: egui::Context,
+        state: Box<TasSharedState>,
+        view: TimelineView,
+        edit: TimelineEdit,
+        from: u32,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let mut state = zeroed_boxed();
+            state.recorded_count = 100;
+            state.input_log[20..60].fill(1);
+            Self {
+                ctx: egui::Context::default(),
+                state,
+                view: TimelineView::chosen(0, 100),
+                edit: TimelineEdit::default(),
+                from: 0,
+            }
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> (TimelineOutcome, egui::FullOutput) {
+            let Self {
+                ctx,
+                state,
+                view,
+                edit,
+                from,
+            } = self;
+            let mut result = TimelineOutcome::default();
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 400.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        result = show(ui, state, None, view, from, edit);
+                    });
+                },
+            );
+            (result, output)
+        }
+
+        /// The rendered LEFT block, once the layout has settled.
+        fn left_block(&mut self) -> egui::Rect {
+            self.frame(vec![]);
+            let (_, output) = self.frame(vec![]);
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Rect(r)
+                        if r.fill == ROW_COLORS[0].1 && (r.rect.height() - 10.0).abs() < 0.1 =>
+                    {
+                        Some(r.rect)
+                    }
+                    _ => None,
+                })
+                .expect("rendered LEFT block")
+        }
+
+        /// Press and release at `pos`: (CONT moved, where CONT is).
+        fn click(&mut self, pos: egui::Pos2) -> (bool, u32) {
+            self.frame(vec![egui::Event::PointerMoved(pos)]);
+            let (a, _) = self.frame(vec![button(pos, true)]);
+            let (b, _) = self.frame(vec![button(pos, false)]);
+            let from = self.from;
+            self.frame(vec![]);
+            (a.continue_changed || b.continue_changed, from)
+        }
+    }
+
+    fn button(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    #[test]
+    fn block_drag_tracks_total_pointer_motion_and_release() {
+        for mode in [DragMode::Start, DragMode::End, DragMode::Move] {
+            for steps in [1, 40] {
+                let mut h = Harness::new();
+                let block = h.left_block();
+                let mut frame = |events| {
+                    let (result, _) = h.frame(events);
+                    if let Some(events) = &result.events {
+                        super::super::input_script::apply_events_to_log(
+                            &mut h.state.input_log,
+                            100,
+                            events,
+                        );
+                    }
+                    result
+                };
+                let pxpt = block.width() / 40.0;
+                let x = match mode {
+                    DragMode::Start => block.left() + 2.0,
+                    DragMode::End => block.right() - 2.0,
+                    DragMode::Move => block.center().x,
+                };
+                let press = egui::pos2(x, block.center().y);
+                frame(vec![egui::Event::PointerMoved(press)]);
+                assert!(!frame(vec![button(press, true)]).continue_changed);
+                for step in 1..=steps {
+                    let pos = press + egui::vec2(20.0 * step as f32 / steps as f32, 0.0);
+                    let moved = frame(vec![egui::Event::PointerMoved(pos)]);
+                    assert!(!moved.commit_undo);
+                    assert!(!moved.continue_changed, "a block edit must not move CONT");
+                }
+                let end = press + egui::vec2(25.0, 0.0);
+                let result = frame(vec![egui::Event::PointerMoved(end), button(end, false)]);
+                assert!(result.commit_undo, "release must commit exactly once");
+                assert!(
+                    !result.continue_changed,
+                    "releasing a block edit must not move CONT"
+                );
+                let expected = dragged_event(
+                    &BlockDrag {
+                        idx: 0,
+                        mode,
+                        orig: InputEvent {
+                            bit: 1,
+                            start: 20,
+                            end: 60,
+                        },
+                        pointer_start_x: x,
+                    },
+                    end.x,
+                    pxpt,
+                    100,
+                );
+                assert_eq!(result.events.unwrap(), vec![expected]);
+                assert!(!frame(vec![]).commit_undo);
+            }
+        }
+    }
+
+    /// Clicks and drags on an input block (select, resize, move) never move
+    /// the CONT line; a click on open lane space does. Near a block edge the
+    /// grab zone belongs to the block.
+    #[test]
+    fn cont_line_moves_only_on_open_lane_space() {
+        let mut h = Harness::new();
+        let block = h.left_block();
+        // On the block: its body, both resize handles, and just outside an edge.
+        for pos in [
+            block.center(),
+            egui::pos2(block.left() + 1.0, block.center().y),
+            egui::pos2(block.right() - 1.0, block.center().y),
+            egui::pos2(block.right() + 2.0, block.center().y),
+        ] {
+            assert_eq!(
+                h.click(pos),
+                (false, 0),
+                "click at {pos:?} on a block moved CONT"
+            );
+        }
+        // A resize grabbed just past the edge, the usual way an edge is taken.
+        let grab = egui::pos2(block.right() + 2.0, block.center().y);
+        h.frame(vec![egui::Event::PointerMoved(grab)]);
+        let mut moved_cont = h.frame(vec![button(grab, true)]).0.continue_changed;
+        for dx in [5.0, 10.0, 20.0] {
+            moved_cont |= h
+                .frame(vec![egui::Event::PointerMoved(grab + egui::vec2(dx, 0.0))])
+                .0
+                .continue_changed;
+        }
+        let release = grab + egui::vec2(20.0, 0.0);
+        moved_cont |= h.frame(vec![button(release, false)]).0.continue_changed;
+        assert!(
+            !moved_cont,
+            "a drag started at a block edge moved CONT to {}",
+            h.from
+        );
+        h.frame(vec![]);
+        // Open space: the empty RIGHT lane beside the block, and the LEFT lane
+        // well past the block's end.
+        let right_lane = egui::pos2(block.center().x, block.center().y + 12.0);
+        let (changed, at) = h.click(right_lane);
+        assert!(
+            changed && at > 20 && at < 60,
+            "open-space click must move CONT (got {at})"
+        );
+        let past_block = egui::pos2(block.right() + 60.0, block.center().y);
+        let (changed, at) = h.click(past_block);
+        assert!(
+            changed && at > 60,
+            "open-space click must move CONT (got {at})"
+        );
+    }
+
+    #[test]
+    fn game_timer_time_is_relative_to_start_line() {
+        assert_eq!(format_game_time(250, 300), "-0:00.50");
+        assert_eq!(format_game_time(300, 300), "0:00.00");
+        assert_eq!(format_game_time(6_423, 300), "1:01.23");
+    }
+
+    /// The take's track anchors the clock whether the live level is unknown
+    /// or another track: an FE take shown while the game is on VE still
+    /// counts from FE's start line.
+    #[test]
+    fn game_timer_uses_the_take_track() {
+        for live_level in [u32::MAX, 6] {
+            let mut state = zeroed_boxed();
+            state.level_id = live_level;
+            state.recorded_count = 3;
+            state.rec_coords[0] = [519.2, -1401.6, 53.6];
+            state.rec_coords[1] = [519.2, -1401.1, 99.0];
+            state.rec_coords[2] = [519.2, -1400.6, 100.0];
+
+            assert_eq!(
+                game_timer_anchor(&state, Some("FE")),
+                2,
+                "live {live_level}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_scroll_follows_the_position() {
+        // (pos, scroll, visible, max scroll) -> new scroll
+        for (pos, scroll, visible, max, want) in [
+            (50, 0, 100, 1000, 0),   // visible: stays
+            (150, 0, 100, 1000, 70), // past the end: jumps
+            (10, 200, 100, 1000, 0), // before the start: jumps back
+            (85, 0, 100, 1000, 5),   // past the margin: advances
+            (900, 0, 100, 50, 50),   // clamps to the max
+        ] {
+            assert_eq!(
+                auto_scroll_position(pos, scroll, visible, max),
+                want,
+                "pos {pos} scroll {scroll}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_view_grows_with_a_new_recording_until_the_user_zooms() {
+        let mut v = TimelineView::default();
+        v.clamp(10);
+        assert_eq!((v.start, v.end), (0, 10));
+        v.clamp(3000);
+        assert_eq!((v.start, v.end), (0, 3000));
+        v.clamp(10_000);
+        assert_eq!((v.start, v.end), (0, DEFAULT_WINDOW));
+
+        v.zoom_at(500.0, 0.5, 10_000);
+        let zoomed = v;
+        v.clamp(20_000);
+        assert_eq!(v, zoomed, "a chosen zoom stays as the recording grows");
+
+        v.clamp(20);
+        assert_eq!(
+            (v.start, v.end),
+            (0, 20),
+            "a new, shorter recording starts over"
+        );
+    }
+
+    #[test]
+    fn view_clamp_enforces_min_window() {
+        let mut v = TimelineView::chosen(100, 110);
+        v.clamp(1000);
+        assert!(v.span() >= MIN_WINDOW);
+    }
+
+    #[test]
+    fn view_zoom_at_keeps_cursor_and_clamps() {
+        let mut v = TimelineView::chosen(0, 1000);
+        v.zoom_at(500.0, 0.5, 1000);
+        assert!(v.span() < 1000);
+        assert!(v.start < 500 && v.end > 500);
+        v.zoom_at(500.0, 100.0, 1000);
+        assert_eq!(v, TimelineView::chosen(0, 1000));
+    }
+
+    #[test]
+    fn view_zoom_center_shrinks_and_grows() {
+        let mut v = TimelineView::chosen(100, 1100);
+        v.zoom_center(0.8);
+        assert!(v.span() < 1000);
+        let mut v2 = TimelineView::chosen(100, 1100);
+        v2.zoom_center(1.25);
+        assert!(v2.span() > 1000);
+    }
+
+    #[test]
+    fn view_pan_preserves_span_and_clamps() {
+        let mut v = TimelineView::chosen(100, 200);
+        v.pan(-1000, 1000);
+        assert_eq!(v, TimelineView::chosen(0, 100));
+        v.pan(100000, 1000);
+        assert_eq!(v, TimelineView::chosen(900, 1000));
+    }
+
+    /// REC marks the last recorded frame, PLAY the playback frame, OFF none.
+    #[test]
+    fn active_tick_follows_the_mode() {
+        for (mode, recorded, playback, want) in [
+            (TasMode::Rec, 42, 0, Some((41, TasMode::Rec))),
+            (TasMode::Play, 100, 37, Some((37, TasMode::Play))),
+            (TasMode::Off, 20, 7, None),
+        ] {
+            let mut state = zeroed_boxed();
+            state.mode = mode as u32;
+            state.recorded_count = recorded;
+            state.playback_pos = playback;
+            assert_eq!(active_timeline_tick(&state), want, "{mode:?}");
+        }
+    }
+}

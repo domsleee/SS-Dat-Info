@@ -1,0 +1,139 @@
+#include <windows.h>
+#include "log.hpp"
+#include "shared_state.hpp"
+#include "game_addresses.hpp"
+#include "caves/replay_capture_cave.hpp"
+#include "caves/cycle_cave.hpp"
+#include "caves/key_handler_cave.hpp"
+#include "caves/observer_cave.hpp"
+#include "caves/tick_cave.hpp"
+#include "caves/race_timer_cave.hpp"
+#include "caves/menu_cave.hpp"
+#include "caves/lifecycle_cave.hpp"
+#include "caves/finish_cave.hpp"
+
+static TasSharedMemory g_sharedMem;
+static GameAddresses g_addr;
+static volatile LONG g_initState = 0; // 0=not started, 1=running, 2=ready, 3=failed
+
+// Remove everything run() may have installed, newest first, while the
+// mapping the hooks write to still exists. Idempotent.
+static void RollbackAll() {
+    finishline::Uninstall();
+    menustate::Disable();
+    racetimer::Uninstall();
+    lifecycle::Uninstall();
+    f5restart::Uninstall();
+    UninstallTickCave();
+    UninstallCycleCave();
+    UninstallKeyHandlerCave();
+    UninstallObserverCave();
+    UninstallReplayCapture();
+    crash::Uninstall();
+    g_sharedMem.Destroy();
+}
+
+bool run() {
+    Log("=== TAS_Helper.dll loading ===");
+    Log(std::format("  sizeof(TasSharedState) = {}", sizeof(TasSharedState)));
+
+    // Validate the game build before touching shared memory or game code.
+    if (!g_addr.Resolve()) {
+        Log("FATAL: Failed to resolve/validate game addresses");
+        return false;
+    }
+
+    if (!g_sharedMem.Create()) {
+        Log("FATAL: Failed to acquire TAS shared memory. Close any other injected Supreme instance and retry.");
+        return false;
+    }
+    Log(std::format("Shared memory '{}' created ({} bytes)",
+        TAS_SHARED_MEMORY_NAME, sizeof(TasSharedState)));
+
+    auto* state = g_sharedMem.state;
+    crash::Install(state);
+
+    // The observer and key-handler caves must precede the cycle cave, which calls BB3B10.
+    bool replay_ok = InstallReplayCapture(g_addr, state);
+    bool observer_ok = InstallObserverCave(g_addr, state);
+    bool key_handler_ok = InstallKeyHandlerCave(g_addr, state);
+    bool cycle_ok = InstallCycleCave(g_addr, state);
+    bool tick_ok = InstallTickCave(g_addr, state);
+    bool f5_ok = f5restart::Install(g_addr);
+    bool lifecycle_ok = lifecycle::Install(g_addr, state);
+
+    // These hooks work only as a unit: on any failure, roll all back in
+    // reverse order while shared state is still mapped.
+    if (!(replay_ok && observer_ok && key_handler_ok && cycle_ok && tick_ok && f5_ok && lifecycle_ok)) {
+        Log("FATAL: required TAS hook installation failed; rolling back all core hooks");
+        RollbackAll();
+        return false;
+    }
+
+    Log("Core hooks installed: replay capture, observer, key handler, cycle, tick, F5 restart, lifecycle");
+
+    racetimer::Install(g_addr, state);
+
+    if (!finishline::Install(g_addr, state)) {
+        Log("  Finish line: unavailable");
+    }
+
+    // Deferred until Main_Menu.dll loads.
+    menustate::Install(g_addr, state);
+
+    Log(std::format("  Renderer plugin at init: {} (the x87 precision is logged when a race starts)",
+        renderer::Name(renderer::Detect())));
+    Log("=== TAS_Helper.dll ready ===");
+    return true;
+}
+
+// Injector.exe calls this after LoadLibrary returns, so none of this runs under
+// the loader lock.
+extern "C" __declspec(dllexport) DWORD WINAPI TAS_Initialize(LPVOID) {
+    LONG previous = InterlockedCompareExchange(&g_initState, 1, 0);
+    if (previous == 2) return 1;
+    if (previous != 0) return 0;
+    try {
+        if (!run()) {
+            InterlockedExchange(&g_initState, 3);
+            return 0;
+        }
+    }
+    catch (...) {
+        RollbackAll();  // hooks may already be live
+        InterlockedExchange(&g_initState, 3);
+        try {
+            throw;
+        } catch (const std::exception& e) {
+            Log(std::format("FATAL exception: {}; all hooks rolled back", e.what()));
+        } catch (...) {
+            Log("FATAL: unknown exception; all hooks rolled back");
+        }
+        return 0;
+    }
+
+    // Pin the DLL: the game jumps into our hooks, so it must never be unloaded.
+    HMODULE pinned = nullptr;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCSTR>(&TAS_Initialize), &pinned)) {
+        Log(std::format("WARNING: failed to pin TAS_Helper.dll (error {})", GetLastError()));
+    }
+    InterlockedExchange(&g_initState, 2);
+    return 1;
+}
+
+#if defined(_M_IX86)
+#pragma comment(linker, "/EXPORT:TAS_Initialize=_TAS_Initialize@4")
+#endif
+
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
+    if (reason == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(module);
+    }
+    // Non-null reserved: ExitProcess, not a crash or a kill.
+    if (reason == DLL_PROCESS_DETACH && reserved) {
+        crash::MarkCleanExit();
+    }
+    return TRUE;
+}

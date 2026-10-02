@@ -9,6 +9,7 @@ Tools for Supreme Snowboarding:
 | [Dat-Info][dat-info-link] ([docs][dat-info-docs]) | Parses `*.dat` replay files.                |
 | [Display_Config][display-config-docs]             | Launcher that adds features and QoL tweaks. |
 | [CircleTool][circle-tool]                         | Visualizes the checkpoint radius (90 m).    |
+| [TAS development](TAS/README.md)                  | Recording UI, game harness and inspection tools. |
 
 [dat-info-link]: https://domsleee.github.io/SS-Dat-Info/
 [dat-info-docs]: https://github.com/domsleee/SS-Dat-Info/wiki/Dat%E2%80%90Info

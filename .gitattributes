@@ -1,0 +1,5 @@
+# TAS sources are edited on Windows and Linux CI; keep the tree LF so a
+# checkout never shows line-ending-only churn. TAS/pico keeps its own file.
+TAS/** text=auto eol=lf
+*.tasrec binary
+*.bin binary
