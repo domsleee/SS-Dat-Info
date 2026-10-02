@@ -355,9 +355,7 @@ impl TasApp {
     pub(crate) fn apply_pending_input_edit(&mut self) {
         // Peek without consuming — if a run is active we keep the edit queued
         // and apply it once the game stops.
-        // A cycle in flight armed (or will arm) with the take as it was; the
-        // edit waits for it rather than changing the take mid-restart.
-        if !self.editor.has_pending() || self.transport.is_running() {
+        if !self.editor.has_pending() {
             return;
         }
         let mode = match self.conn.shared.as_ref() {
@@ -369,7 +367,8 @@ impl TasApp {
             }
         };
         // Never mutate the buffer the game is replaying or recording. Auto-STOP
-        // the run once (latched) and keep the edit queued until mode is Off.
+        // the run once (latched; it also cancels its cycle) and keep the edit
+        // queued until mode is Off.
         if mode != TasMode::Off as u32 {
             if self.editor.wait_for_stop() {
                 self.log_lines.push("[script] stopping run to apply edit…");
@@ -384,6 +383,12 @@ impl TasApp {
             .is_some_and(|shared| !shared.command_idle())
         {
             return;
+        }
+        // A cycle still restarting would arm the take as it was: cancel it,
+        // apply the edit, and arm the same command again with the edited take.
+        let rearm = self.transport.running_command();
+        if rearm.is_some() {
+            self.reset_continue_runtime_state();
         }
         let Some(editor::Edit {
             events,
@@ -414,6 +419,11 @@ impl TasApp {
                 0,
                 self.take.stamps().cloned(),
             );
+        }
+        if let Some(command) = rearm {
+            self.log_lines
+                .push(format!("{command:?} re-armed with the edited take"));
+            self.queue_restart_then(command);
         }
     }
 

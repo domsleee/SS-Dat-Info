@@ -200,6 +200,14 @@ impl TransportRuntime {
         matches!(self.state, TransportState::Running { .. })
     }
 
+    /// The command the cycle in flight arms.
+    pub(crate) fn running_command(&self) -> Option<TasCommand> {
+        match &self.state {
+            TransportState::Running { request, .. } => Some(request.command),
+            TransportState::Idle => None,
+        }
+    }
+
     /// The speed to return to after a catch-up, else the live one.
     pub(crate) fn resume_or_playback_speed(&self) -> f32 {
         self.resume_speed.unwrap_or(self.playback_speed)

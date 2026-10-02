@@ -71,6 +71,32 @@ fn edit_then_play(press: Press) {
     );
 }
 
+/// A script edit saved during a PLAY stops the run at once, while its
+/// watcher is still judging, then applies; it does not wait out the cycle.
+#[test]
+fn an_edit_during_play_stops_the_run_at_once() {
+    let mut h = Harness::with_standard_take();
+    h.click("transport.play");
+    h.run_until("PLAY replaying", 2000, |h| h.mode() == TasMode::Play);
+    assert!(h.app.transport.is_running(), "the watcher is still judging");
+    let edited = shortened(&h.input());
+    let events = crate::panels::input_script::runs_from_log(&edited, edited.len() as u32);
+    h.app.editor.pending = crate::editor::PendingEdit::Ready(crate::editor::Edit {
+        events,
+        commit: true,
+        label: "Loaded inputs from script".into(),
+    });
+    h.run_until("edit applied", 2000, |h| {
+        h.mode() == TasMode::Off && !h.app.editor.has_pending()
+    });
+    assert_eq!(h.input(), edited);
+    assert_eq!(
+        h.taken().last(),
+        Some(&TasCommand::Stop),
+        "stopped, not left to end on its own"
+    );
+}
+
 /// A click is handled after the frame applied the pending edit.
 #[test]
 fn play_clicked_right_after_an_edit_replays_the_edit() {
