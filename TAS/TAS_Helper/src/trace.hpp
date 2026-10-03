@@ -7,6 +7,7 @@
 #include "fpu_safe_hook.hpp"
 #include "renderer_info.hpp"
 #include "ssb_hook.hpp"
+#include "trace_file.hpp"
 #include <bcrypt.h>
 #include <intrin.h>
 #include <psapi.h>
@@ -104,6 +105,7 @@ inline std::vector<Region> g_regions;
 inline std::string g_regionsText;
 inline std::string g_dir;
 inline FILE* g_file = nullptr;
+inline std::string g_tracePath, g_pendingPath;
 inline uint32_t g_gen = 0, g_triedGen = 0xFFFFFFFFu;
 inline std::vector<uint8_t> g_rec;  // TickRecord + bases + regions, being filled
 inline bool g_pending = false;      // g_rec holds a pre not yet written
@@ -338,8 +340,7 @@ static void Close() {
     WritePending();
     Trailer tr{{'S', 'S', 'B', 'T', 'E', 'N', 'D', '\n'}, g_ticks, g_writeStatus};
     Put(&tr, sizeof tr);
-    if (fflush(g_file)) g_writeStatus |= 2;
-    if (fclose(g_file)) g_writeStatus |= 4;
+    g_writeStatus = tracefile::CloseAndPublish(g_file, g_writeStatus, g_pendingPath.c_str(), g_tracePath.c_str());
     g_file = nullptr;
     Log(std::format("trace: closed g{}: {} ticks, {} without the post point, max {} other rider(s), "
                     "ssb-hook calls {}, FPU violations {}, write status {}{}",
@@ -347,7 +348,7 @@ static void Close() {
                     g_writeStatus, g_writeStatus ? " (FAILED: the trace is incomplete)" : ""));
 }
 
-static void Open(TasSharedState* s, uint16_t cw) {
+static void Open(TasSharedState* s, uint16_t cw, uint32_t firstPreCalls) {
     g_gen = (uint32_t)s->arm_generation;
     g_triedGen = g_gen;
     g_ticks = g_noPost = g_maxOthers = g_writeStatus = 0;
@@ -363,9 +364,11 @@ static void Open(TasSharedState* s, uint16_t cw) {
     GetSystemTimeAsFileTime(&ft);
     const uint64_t ms = ((uint64_t(ft.dwHighDateTime) << 32 | ft.dwLowDateTime) - 116444736000000000ull) / 10000;
     const std::string path = std::format("{}traces\\{}-g{}.ssbtrace", g_dir, ms, g_gen);
-    if (fopen_s(&g_file, path.c_str(), "wb") || !g_file) {
+    g_tracePath = path;
+    g_pendingPath = path + ".pending";
+    if (fopen_s(&g_file, g_pendingPath.c_str(), "wb") || !g_file) {
         g_file = nullptr;
-        Log("trace: FAILED to create " + path);
+        Log("trace: FAILED to create " + g_pendingPath);
         return;
     }
     setvbuf(g_file, nullptr, _IOFBF, 1 << 22);
@@ -374,6 +377,7 @@ static void Open(TasSharedState* s, uint16_t cw) {
     std::string h;
     h += std::format("record_size {}\n", g_rec.size());
     h += std::format("tick_size {}\n", sizeof(TickRecord));
+    h += std::format("hook_calls_before_first_record {}\n", firstPreCalls);
     h += std::format("created_unix_ms {}\n", ms);
     h += std::format("arm_generation {}\n", g_gen);
     h += std::format("recorded_count {}\n", count);
@@ -396,7 +400,7 @@ static void Open(TasSharedState* s, uint16_t cw) {
     Put("SSBTRACE 2\n", 11);
     Put(&n, 4);
     Put(h.data(), n);
-    Log("trace: writing " + path);
+    Log("trace: writing " + g_pendingPath);
 }
 
 static void Capture(Point point, uint32_t player) {
@@ -425,7 +429,9 @@ inline void OnCycle(TasSharedState* s, bool played, uint32_t pos, int32_t recTic
     if (!g_on) return;
     if (!played || (g_file && g_gen != s->arm_generation)) Close();
     if (!played) return;
-    if (!g_file && g_triedGen != s->arm_generation) Open(s, cw);
+    // A real cumulative sample at this arm's first PRE, before Player work.
+    // Do not reset the DLL counter or manufacture a preceding physics record.
+    if (!g_file && g_triedGen != s->arm_generation) Open(s, cw, ssbhook::Calls());
     if (!g_file) return;
     WritePending();   // the previous tick's record
     memset(g_rec.data(), 0, g_rec.size());

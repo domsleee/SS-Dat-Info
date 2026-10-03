@@ -573,7 +573,11 @@ the human Body's physics step (`Supreme_Game+0x98360`) and at the human Player
 tick's return (`Supreme_Game+0x84C43`), the x87 control word and MXCSR at
 each, the CRT rand state, the Player's lifecycle (`Player::~Player` hook) and
 provenance (module, msvcrt and opened-file hashes), ending in a completion
-trailer (`trace.hpp`). With `ssb_hook.dll`, its detours are installed as
+trailer (`trace.hpp`). Recording uses `.ssbtrace.pending`; only a successful
+flush and close publish `.ssbtrace`, without replacing an existing trace.
+The header's `hook_calls_before_first_record` samples the cumulative detour
+counter at the first real PRE, before Player work; it does not reset that
+counter or add a synthetic tick. With `ssb_hook.dll`, its detours are installed as
 SafetyHook inline hooks at initialization (`ssb_hook.hpp`). Requested but not
 installable (either feature) fails `TAS_Initialize`. `fpu_safe_hook.hpp` also
 saves and restores MXCSR, which SafetyHook doesn't (`tests/test_fpu_safe_hook.cpp`).
