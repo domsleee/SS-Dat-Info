@@ -3,7 +3,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -478,14 +478,37 @@ pub(crate) fn required_env(name: &str) -> Result<String, String> {
 fn launch_game(supreme_folder: &str) -> bool {
     let exe = format!(r"{}\Supreme.exe", supreme_folder);
     println!("Launching {}...", exe);
-    if !win32::shell_open(&exe, supreme_folder) {
-        eprintln!("  Failed to start Supreme.exe");
-        return false;
-    }
+    // Direct parentage lets the outer recorder journal this specific child.
+    // Null streams keep the game from holding tas_test's redirected pipes open.
+    let mut child = match Command::new(&exe)
+        .current_dir(supreme_folder)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("  Failed to start Supreme.exe: {error}");
+            return false;
+        }
+    };
+    println!("  Launched owned Supreme.exe PID {}", child.id());
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(15) {
-        if win32::find_game_window().is_some() {
-            return true;
+        if let Some(hwnd) = win32::find_game_window() {
+            let mut pid = 0;
+            unsafe { win32::GetWindowThreadProcessId(hwnd, &mut pid) };
+            if pid == child.id() {
+                return true;
+            }
+        }
+        match child.try_wait() {
+            Ok(None) => {}
+            result => {
+                eprintln!("  Owned game exited or could not be inspected: {result:?}");
+                return false;
+            }
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -747,7 +770,7 @@ fn wait_for_cycle(client: &TasSharedMemoryClient, timeout: Duration) -> bool {
 
 /// Ensure the game is running with hooks active.
 ///
-/// If the game is already live, reuse it. Otherwise kill stale instances and
+/// If the game is already live, reuse it. Otherwise require an idle session and
 /// launch `Supreme.exe` from `SUPREME_FOLDER`, inject its `TAS_Helper.dll`
 /// and drive the menu into the race. `NO_REVIVE=1` refuses to launch and
 /// exits instead.
@@ -784,7 +807,10 @@ pub fn ensure_game_running() -> TasSharedMemoryClient {
             std::process::exit(1);
         }
     };
-    kill_game();
+    if win32::find_game_window().is_some() || TasSharedMemoryClient::open().is_ok() {
+        eprintln!("ERROR: An existing game or TAS mapping remains; close that session before launching. Nothing was stopped.");
+        std::process::exit(1);
+    }
     if !launch_game(&supreme_folder) {
         std::process::exit(1);
     }

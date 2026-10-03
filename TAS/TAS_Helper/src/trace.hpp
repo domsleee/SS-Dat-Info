@@ -7,15 +7,12 @@
 #include "fpu_safe_hook.hpp"
 #include "renderer_info.hpp"
 #include "ssb_hook.hpp"
-#include "trace_file.hpp"
-#include <bcrypt.h>
+#include "trace_provenance.hpp"
 #include <intrin.h>
 #include <psapi.h>
 #include <cstdio>
 #include <map>
-#include <set>
 #include <vector>
-#pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "version.lib")
 
 // Per-tick state trace for the bit-exact rewrite (ssb-recomp re/harness.md;
@@ -177,27 +174,8 @@ inline void __cdecl Flush() {
 }
 
 // ---- provenance --------------------------------------------------------------
-static std::string Sha256Bytes(const void* data, size_t n) {
-    uint8_t h[32];
-    if (!BCRYPT_SUCCESS(BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0, (PUCHAR)data, (ULONG)n, h, sizeof h)))
-        return "unhashable";
-    std::string out;
-    for (uint8_t b : h) out += std::format("{:02x}", b);
-    return out;
-}
-
-static std::string Sha256File(const std::wstring& path) {
-    std::string out = "unreadable";
-    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           nullptr, OPEN_EXISTING, 0, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return out;
-    std::vector<uint8_t> data;
-    uint8_t buf[65536];
-    DWORD n = 0;
-    while (ReadFile(f, buf, sizeof buf, &n, nullptr) && n) data.insert(data.end(), buf, buf + n);
-    CloseHandle(f);
-    return Sha256Bytes(data.data(), data.size());
-}
+using traceprovenance::Sha256Bytes;
+using traceprovenance::Sha256File;
 
 static std::wstring Widen(const std::string& s) {
     std::wstring w(MAX_PATH * 2, L'\0');
@@ -219,8 +197,7 @@ static std::wstring GameRoot() {
 
 // Files the game opened for reading under its folder since injection, with
 // the content hash at each open (tuning, terrain, meshes, ...).
-inline SRWLOCK g_openedLock = SRWLOCK_INIT;
-inline std::map<std::string, std::set<std::string>> g_opened;
+inline traceprovenance::OpenedFiles g_opened;
 inline thread_local bool t_inOpen = false;
 
 static void NoteOpened(const std::wstring& name) {
@@ -230,9 +207,7 @@ static void NoteOpened(const std::wstring& name) {
     if (!n || n >= MAX_PATH * 2 || n <= root.size() || _wcsnicmp(full, root.c_str(), root.size())) return;
     const std::string rel = Utf8(full + root.size());
     const std::string sha = Sha256File(full);
-    AcquireSRWLockExclusive(&g_openedLock);
-    g_opened[rel].insert(sha);
-    ReleaseSRWLockExclusive(&g_openedLock);
+    g_opened.Note(rel, sha);
 }
 
 constexpr DWORD kWriteAccess = GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA;
@@ -267,15 +242,6 @@ static HANDLE WINAPI OpenWHook(LPCWSTR name, DWORD access, DWORD share, LPSECURI
     if (outer && name) AfterOpen(h, name, access, flags);
     if (outer) t_inOpen = false;
     return h;
-}
-
-static std::string FileLines() {
-    std::string out;
-    AcquireSRWLockShared(&g_openedLock);
-    for (auto& [path, shas] : g_opened)
-        for (auto& sha : shas) out += std::format("file {} {}\n", sha, path);
-    ReleaseSRWLockShared(&g_openedLock);
-    return out;
 }
 
 static std::string CpuName() {
@@ -340,7 +306,7 @@ static void Close() {
     WritePending();
     Trailer tr{{'S', 'S', 'B', 'T', 'E', 'N', 'D', '\n'}, g_ticks, g_writeStatus};
     Put(&tr, sizeof tr);
-    g_writeStatus = tracefile::CloseAndPublish(g_file, g_writeStatus, g_pendingPath.c_str(), g_tracePath.c_str());
+    g_writeStatus = g_opened.CloseAndPublish(g_file, g_writeStatus, g_pendingPath.c_str(), g_tracePath.c_str());
     g_file = nullptr;
     Log(std::format("trace: closed g{}: {} ticks, {} without the post point, max {} other rider(s), "
                     "ssb-hook calls {}, FPU violations {}, write status {}{}",
@@ -394,7 +360,7 @@ static void Open(TasSharedState* s, uint16_t cw, uint32_t firstPreCalls) {
     h += std::format("cpu {}\n", CpuName());
     h += std::format("ssb_hook {}\n", ssbhook::g_summary);
     h += ModuleLines();
-    h += FileLines();
+    h += g_opened.Snapshot();
     h += "regions\n" + g_regionsText;
     const uint32_t n = (uint32_t)h.size();
     Put("SSBTRACE 2\n", 11);
