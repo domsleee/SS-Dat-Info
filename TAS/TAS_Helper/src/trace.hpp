@@ -21,10 +21,12 @@
 // ssb_trace_env.txt must too (the expected FPU environment, optional forced
 // rand seed). Every PLAY arm (a CONT prefix too) writes
 // traces\<unix ms>-g<arm generation>.ssbtrace beside it:
-//   "SSBTRACE 2\n", u32 header length, header text ("key value" lines, then a
+//   "SSBTRACE 3\n", u32 header length, header text ("key value" lines, then a
 //   "regions" line and the regions file verbatim), then per PLAY tick one
 //   TickRecord, u32 base address per region (0 = unreadable) and every
-//   region's bytes in file order, then a Trailer once the arm ends cleanly.
+//   region's bytes in file order, then, once the arm ends cleanly, the late
+//   file section ("SSBLATE\n", u32 length, a "file <sha256> <record index>
+//   <path>" line per identity first opened after the header) and the trailer.
 // Region line: name point chain len [classes...]. point: pre = the cycle cave,
 // after PLAY wrote this tick's input and before its physics; post = the human
 // Player tick (SG+0x849E0) returning, at SG+0x84C43; entry = the human Body's
@@ -58,13 +60,10 @@ struct TickRecord {
     uint32_t hook_fpu_bad;      // ssb-hook detour entries off the expected FPU environment, so far
     uint32_t srand_calls;       // msvcrt srand calls since injection
 };
-struct Trailer {
-    char magic[8];              // "SSBTEND\n"
-    uint32_t records;
-    uint32_t status;            // 0 = every write succeeded
-};
 #pragma pack(pop)
-static_assert(sizeof(TickRecord) == 64 && sizeof(Trailer) == 16);
+static_assert(sizeof(TickRecord) == 64);
+// The Trailer, "SSBTEND\n", u32 records, u32 status (0 = every write
+// succeeded), is written by traceprovenance::OpenedFiles::CloseAndPublish.
 constexpr uint8_t FLAG_POST = 1;            // the post point was captured
 constexpr uint8_t FLAG_ENTRY = 2;           // the entry point was captured
 constexpr uint8_t FLAG_PLAYER_FREED = 4;    // the trace's Player was destroyed (SG+0x84160) by now
@@ -207,8 +206,12 @@ static void NoteOpened(const std::wstring& name) {
     if (!n || n >= MAX_PATH * 2 || n <= root.size() || _wcsnicmp(full, root.c_str(), root.size())) return;
     const std::string rel = Utf8(full + root.size());
     const std::string sha = Sha256File(full);
-    // A new identity while a trace is open invalidates it (status 32); name it.
-    if (g_opened.Note(rel, sha) && g_file) Log("trace: new file during the trace: " + sha + " " + rel);
+    // A new identity while a trace is open goes into its late section. `at`:
+    // the record being filled (after its PRE), or the record count once the
+    // last record is written.
+    const uint32_t at = g_ticks;
+    if (g_opened.Note(rel, sha, at) && g_file)
+        Log("trace: late file at record " + std::to_string(at) + ": " + sha + " " + rel);
 }
 
 constexpr DWORD kWriteAccess = GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA;
@@ -306,9 +309,9 @@ static void Close() {
     if (!g_file) return;
     WritePending();
     ssbhook::Arm(nullptr);
-    Trailer tr{{'S', 'S', 'B', 'T', 'E', 'N', 'D', '\n'}, g_ticks, g_writeStatus};
-    Put(&tr, sizeof tr);
-    g_writeStatus = g_opened.CloseAndPublish(g_file, g_writeStatus, g_pendingPath.c_str(), g_tracePath.c_str());
+    // The late file section and the trailer, then checked publication.
+    g_writeStatus =
+        g_opened.CloseAndPublish(g_file, g_writeStatus, g_ticks, g_pendingPath.c_str(), g_tracePath.c_str());
     g_file = nullptr;
     Log(std::format("trace: closed g{}: {} ticks, {} without the post point, max {} other rider(s), "
                     "ssb-hook calls {}, FPU violations {}, write status {}{}",
@@ -365,7 +368,7 @@ static void Open(TasSharedState* s, uint16_t cw, uint32_t firstPreCalls) {
     h += g_opened.Snapshot();
     h += "regions\n" + g_regionsText;
     const uint32_t n = (uint32_t)h.size();
-    Put("SSBTRACE 2\n", 11);
+    Put("SSBTRACE 3\n", 11);
     Put(&n, 4);
     Put(h.data(), n);
     Log("trace: writing " + g_pendingPath);

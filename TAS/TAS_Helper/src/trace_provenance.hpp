@@ -35,18 +35,23 @@ inline std::string Sha256File(const std::wstring& path) {
     return read ? Sha256Bytes(data.data(), data.size()) : "unreadable";
 }
 
-// The header is fixed once PLAY starts. Any new identity until publication
-// invalidates that trace; a repeat read of identical content is harmless.
+// Every identity (path, content) opened since injection. The header lists them
+// all as of PLAY. Each identity first seen after that goes into the trace's
+// late section with the record index it was first observed at. The section is
+// written, closed and published under the same lock as Note, so an identity is
+// either in this trace or observed after its publication (then in the next
+// header). A repeat read of identical content is not a new identity.
 class OpenedFiles {
     std::mutex mutex;
     std::map<std::string, std::set<std::string>> files;
-    uint64_t generation = 0, snapshot = 0;
+    std::string late;   // "file <sha> <at> <path>\n" per identity since Snapshot
 public:
     // True when this is a new identity (a new path, or new content for a path).
-    bool Note(const std::string& path, const std::string& sha) {
+    // `at`: the open trace's record index (Snapshot discards earlier lines).
+    bool Note(const std::string& path, const std::string& sha, uint32_t at) {
         const std::lock_guard<std::mutex> guard(mutex);
         if (!files[path].insert(sha).second) return false;
-        ++generation;
+        late += "file " + sha + " " + std::to_string(at) + " " + path + "\n";
         return true;
     }
 
@@ -55,15 +60,24 @@ public:
         std::string out;
         for (const auto& [path, shas] : files)
             for (const auto& sha : shas) out += "file " + sha + " " + path + "\n";
-        snapshot = generation;
+        late.clear();
         return out;
     }
 
-    uint32_t CloseAndPublish(FILE* file, uint32_t status, const char* pending, const char* complete) {
-        // Serialize the final check AND publication with Note. An open whose
-        // observation waits here cannot return to game code until we finish.
+    // "SSBLATE\n", u32 length, the late lines; the 16-byte trailer ("SSBTEND\n",
+    // u32 records, u32 status); then checked close and publication.
+    uint32_t CloseAndPublish(FILE* file, uint32_t status, uint32_t records, const char* pending,
+                             const char* complete) {
+        // An open whose observation waits here cannot return to game code
+        // until the trace is published.
         const std::lock_guard<std::mutex> guard(mutex);
-        if (generation != snapshot) status |= 32;
+        const uint32_t n = (uint32_t)late.size();
+        if (fwrite("SSBLATE\n", 1, 8, file) != 8 || fwrite(&n, 4, 1, file) != 1 ||
+            fwrite(late.data(), 1, n, file) != n)
+            status |= 1;
+        const uint32_t tail[2] = {records, status};
+        if (fwrite("SSBTEND\n", 1, 8, file) != 8 || fwrite(tail, 4, 2, file) != 2) status |= 1;
+        late.clear();
         return tracefile::CloseAndPublish(file, status, pending, complete);
     }
 };
