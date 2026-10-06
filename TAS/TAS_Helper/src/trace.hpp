@@ -304,6 +304,7 @@ static std::string ModuleLines() {
 static void Close() {
     if (!g_file) return;
     WritePending();
+    ssbhook::Arm(nullptr);
     Trailer tr{{'S', 'S', 'B', 'T', 'E', 'N', 'D', '\n'}, g_ticks, g_writeStatus};
     Put(&tr, sizeof tr);
     g_writeStatus = g_opened.CloseAndPublish(g_file, g_writeStatus, g_pendingPath.c_str(), g_tracePath.c_str());
@@ -367,6 +368,8 @@ static void Open(TasSharedState* s, uint16_t cw, uint32_t firstPreCalls) {
     Put(&n, 4);
     Put(h.data(), n);
     Log("trace: writing " + g_pendingPath);
+    // ssb-hook's per-call files follow the trace: <stem>.ssbcalls.
+    ssbhook::Arm((path.substr(0, path.size() - strlen(".ssbtrace")) + ".ssbcalls").c_str());
 }
 
 static void Capture(Point point, uint32_t player) {
@@ -400,6 +403,7 @@ inline void OnCycle(TasSharedState* s, bool played, uint32_t pos, int32_t recTic
     if (!g_file && g_triedGen != s->arm_generation) Open(s, cw, ssbhook::Calls());
     if (!g_file) return;
     WritePending();   // the previous tick's record
+    ssbhook::Tick(g_ticks);   // this cycle's record index
     memset(g_rec.data(), 0, g_rec.size());
     TickRecord& t = Rec();
     t.pos = pos;

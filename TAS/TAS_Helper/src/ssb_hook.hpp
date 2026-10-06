@@ -29,12 +29,18 @@ struct Host {
     uint32_t expect_mxcsr;   // MXCSR control bits (the low six sticky flags are not compared)
 };
 static_assert(sizeof(Detour) == 28 && sizeof(Host) == 20);
-constexpr uint32_t ABI_VERSION = 2;
+// 3: ssb_hook_arm/ssb_hook_tick tell ssb-hook when a trace opens/closes and
+// which trace record each cycle is (its per-call recorders follow the trace).
+constexpr uint32_t ABI_VERSION = 3;
 using InitFn = int(__cdecl*)(const Host*, const Detour**, uint32_t*);
 using CallsFn = uint32_t(__cdecl*)();
+using ArmFn = void(__cdecl*)(const char*);
+using TickFn = void(__cdecl*)(uint32_t);
 
 inline CallsFn g_calls = nullptr;
 inline CallsFn g_violations = nullptr;
+inline ArmFn g_arm = nullptr;
+inline TickFn g_tick = nullptr;
 inline std::vector<SafetyHookInline> g_hooks;
 inline std::string g_summary = "none";  // for trace headers
 inline Host g_host{};
@@ -44,6 +50,11 @@ inline uint32_t Calls() { return g_calls ? g_calls() : 0; }
 // Detour entries that saw an FPU environment other than the expected one;
 // latched by ssb-hook, recorded per tick, fatal to the checker.
 inline uint32_t FpuViolations() { return g_violations ? g_violations() : 0; }
+// A trace opened (`callsPath`: where ssb-hook may write its per-call file) or,
+// with nullptr, closed.
+inline void Arm(const char* callsPath) { if (g_arm) g_arm(callsPath); }
+// The trace record index of the cycle starting now (before Player work).
+inline void Tick(uint32_t index) { if (g_tick) g_tick(index); }
 
 // The folder holding TAS_Helper.dll, with a trailing backslash.
 inline std::string DllDir() {
@@ -62,6 +73,8 @@ inline void Unload() {
     g_hooks.clear();   // each destructor restores the original bytes
     g_calls = nullptr;
     g_violations = nullptr;
+    g_arm = nullptr;
+    g_tick = nullptr;
 }
 
 // False only when ssb_hook.dll is present and could not be installed. It
@@ -78,7 +91,9 @@ inline bool Load(void(__cdecl* flushTrace)(), bool haveEnv, uint16_t cw, uint32_
     auto init = mod ? (InitFn)GetProcAddress(mod, "ssb_hook_init") : nullptr;
     auto calls = mod ? (CallsFn)GetProcAddress(mod, "ssb_hook_calls") : nullptr;
     auto violations = mod ? (CallsFn)GetProcAddress(mod, "ssb_hook_fpu_violations") : nullptr;
-    if (!init || !calls || !violations) {
+    auto arm = mod ? (ArmFn)GetProcAddress(mod, "ssb_hook_arm") : nullptr;
+    auto tick = mod ? (TickFn)GetProcAddress(mod, "ssb_hook_tick") : nullptr;
+    if (!init || !calls || !violations || !arm || !tick) {
         Log(std::format("ssb-hook: FAILED to load {} (error {})", path, GetLastError()));
         return false;
     }
@@ -120,6 +135,8 @@ inline bool Load(void(__cdecl* flushTrace)(), bool haveEnv, uint16_t cw, uint32_
     }
     g_calls = calls;
     g_violations = violations;
+    g_arm = arm;
+    g_tick = tick;
     g_summary = summary;
     Log(std::format("ssb-hook: loaded, {} detour(s): {}", count, summary));
     return true;
