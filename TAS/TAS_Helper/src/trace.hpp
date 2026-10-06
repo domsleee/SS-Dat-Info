@@ -207,7 +207,8 @@ static void NoteOpened(const std::wstring& name) {
     if (!n || n >= MAX_PATH * 2 || n <= root.size() || _wcsnicmp(full, root.c_str(), root.size())) return;
     const std::string rel = Utf8(full + root.size());
     const std::string sha = Sha256File(full);
-    g_opened.Note(rel, sha);
+    // A new identity while a trace is open invalidates it (status 32); name it.
+    if (g_opened.Note(rel, sha) && g_file) Log("trace: new file during the trace: " + sha + " " + rel);
 }
 
 constexpr DWORD kWriteAccess = GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA;

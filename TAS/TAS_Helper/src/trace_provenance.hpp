@@ -42,9 +42,12 @@ class OpenedFiles {
     std::map<std::string, std::set<std::string>> files;
     uint64_t generation = 0, snapshot = 0;
 public:
-    void Note(const std::string& path, const std::string& sha) {
+    // True when this is a new identity (a new path, or new content for a path).
+    bool Note(const std::string& path, const std::string& sha) {
         const std::lock_guard<std::mutex> guard(mutex);
-        if (files[path].insert(sha).second) ++generation;
+        if (!files[path].insert(sha).second) return false;
+        ++generation;
+        return true;
     }
 
     std::string Snapshot() {
