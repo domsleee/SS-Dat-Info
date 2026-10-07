@@ -198,8 +198,11 @@ static void CallBB3B10OnTransitions(TasSharedState* s, GameAddresses* addr,
     }
 
     ++g_tasInjectionDepth;
-    for (const auto& k : heldkeys::kRealKeys) {
-        if (transitions & k.bit) bb3b10(thisPtr, k.code, (mask & k.bit) ? 1 : 0, t.lo, t.hi);
+    {
+        GameFpuScope fpu;
+        for (const auto& k : heldkeys::kRealKeys) {
+            if (transitions & k.bit) bb3b10(thisPtr, k.code, (mask & k.bit) ? 1 : 0, t.lo, t.hi);
+        }
     }
     --g_tasInjectionDepth;
 
@@ -777,7 +780,6 @@ static void __declspec(noinline) CycleCave_Logic() {
 }
 
 static void CycleCave_Callback(SafetyHookContext&) {
-    // Before the body: hooks it reaches (BB3B10) overwrite g_hookFpuControlWord.
     const uint16_t cw = g_hookFpuControlWord;
     const uint32_t csr = g_hookMxcsr;
     if (auto* s = g_cycleCaveState) {

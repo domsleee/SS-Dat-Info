@@ -3,6 +3,7 @@
 #include <psapi.h>
 #include "shared_state.hpp"
 #include "crash_record.hpp"
+#include "fpu_safe_hook.hpp"
 
 // Crash record (DESIGN.md "Crashes"). Calls into game code are not guarded:
 // a fault there crashes the game, and the UI says where. Nothing here
@@ -20,8 +21,9 @@ inline crashrecord::ModuleTable g_modules[2];
 inline volatile LONG g_liveModules = 0;
 inline ULONGLONG g_lastRefreshMs = 0;
 
-// The DLL call into game code in flight, for the crash record. Not usable in a
-// function that also holds a __try (MSVC forbids unwinding objects there).
+// The DLL call into game code in flight, for the crash record. The call runs
+// in the game's FPU environment (GameFpuScope). Not usable in a function that
+// also holds a __try (MSVC forbids unwinding objects there).
 class ScopedGameCall {
 public:
     explicit ScopedGameCall(uint32_t call) {
@@ -37,6 +39,7 @@ public:
     ScopedGameCall& operator=(const ScopedGameCall&) = delete;
 
 private:
+    GameFpuScope fpu_;
     uint32_t previous_ = TAS_GAME_CALL_NONE;
 };
 

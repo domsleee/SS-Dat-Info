@@ -816,7 +816,11 @@ splice.
   precision; FRSTOR puts the game's own precision back before its physics
   continues. The game's control word is read from the saved image, not with
   `fnstcw` inside the hook. Injected input was checked against native keys on
-  a precision-sensitive fence hit on Village Medium: bit-identical.
+  a precision-sensitive fence hit on Village Medium: bit-identical. Game code
+  a hook body calls (menu commands, BB3B10, `Kernel::Time::Current`) must run
+  at the game's control word and MXCSR, not 64-bit: wrap it in
+  `crash::ScopedGameCall`, which holds a `GameFpuScope`
+  (docs/fpu-cw-menu-channel.md).
 - **`Supreme::Cycle` doesn't run at the menus, the pause menu or dialogs.**
   Anything that must work there belongs in the message-pump hook.
 - **The decompiled source mislabels arguments and control flow.** Ghidra
