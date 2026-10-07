@@ -565,7 +565,7 @@ static void ProbeQuery(SafetyHookContext& ctx) {
     if (!g_probeBody || ctx.ebx != g_probeBody) return;
     const uint32_t finder = SafeRead32(ctx.ebx + 0x4DC);
     g_probeText += std::format(
-        "probe_query {:#x} epoch {} queries {} requeries {} finder_box {} finder [{}] body [{}]\n", Site,
+        "probe_query SG+{:#x} epoch {} queries {} requeries {} finder_box {} finder [{}] body [{}]\n", Site,
         SafeRead32(SafeRead32(finder) + 0x2C), SafeRead32(finder + 0x28), SafeRead32(finder + 0x24),
         Words(finder + 8, 6), Entries(SafeRead32(finder + 4)), Entries((uint32_t)ctx.eax));
 }
