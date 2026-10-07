@@ -68,6 +68,9 @@ int main() {
     check(o.summary == "every 100;readset;readset_ticks 1695-1710,1800;max_exceptions 5000;guard body+0xC0 0xC0;"
                        "hw body+0xC0;hw body>0xB8+0x4;hw_ticks 1695-1710",
           "options_summary");
+    check(census::ParseOptions("probe_ticks 1695-1710\n", &o, &err) && o.probe_ticks.size() == 1 && !o.readset &&
+              census::WantsReadset(o),
+          "options_probe");
     check(census::ParseOptions("readset_first 0\n", &o, &err) && o.readset && o.rs_first == 0, "options_readset_key_enables");
     check(!census::ParseOptions("hw body+0xC0\n", &o, &err), "options_hw_needs_ticks");
     check(!census::ParseOptions("hw body+2\nhw_ticks 1\n", &o, &err), "options_hw_aligned");

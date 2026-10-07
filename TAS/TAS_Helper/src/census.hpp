@@ -108,13 +108,14 @@ struct Options {
     std::vector<Spec> guards;
     std::vector<Spec> hw;
     std::vector<TickRange> hw_ticks;
+    std::vector<TickRange> probe_ticks;  // contact probe at SG+0x9972E (trace.hpp)
     std::string summary;             // the accepted lines, `;`-joined, for headers
 };
 
 // Lines: `every N`, `readset`, `readset_first N`, `readset_every N`,
 // `readset_ticks A-B,C`, `max_exceptions N`, `guard CHAIN LEN`, `hw CHAIN`
-// (at most 4), `hw_ticks A-B,C`. Any readset_* or guard line turns the
-// read-set on. False with *err set on anything else.
+// (at most 4), `hw_ticks A-B,C`, `probe_ticks A-B,C`. Any readset_* or guard
+// line turns the read-set on. False with *err set on anything else.
 inline bool ParseOptions(const std::string& text, Options* o, std::string* err) {
     *o = Options{};
     size_t i = 0;
@@ -141,6 +142,7 @@ inline bool ParseOptions(const std::string& text, Options* o, std::string* err) 
         else if (k == "readset_ticks" && n == 2) o->readset = true, ok = ParseRanges(a, &o->rs_ticks);
         else if (k == "max_exceptions" && num && v) o->max_exceptions = v;
         else if (k == "hw_ticks" && n == 2) ok = ParseRanges(a, &o->hw_ticks);
+        else if (k == "probe_ticks" && n == 2) ok = ParseRanges(a, &o->probe_ticks);
         else if ((k == "guard" && n == 3) || (k == "hw" && n == 2)) {
             Spec s;
             s.text = a;
@@ -181,6 +183,9 @@ inline bool CensusAt(const Options& o, uint32_t record, uint32_t firstEntry, boo
 
 // Read-set windows, by physics entry index (0 = the first tick the human Body
 // stepped) and rec_tick.
+// Anything that writes <stem>.readset.
+inline bool WantsReadset(const Options& o) { return o.readset || !o.hw.empty() || !o.probe_ticks.empty(); }
+
 inline bool ReadsetAt(const Options& o, uint32_t entry, int32_t recTick) {
     return o.readset && (entry < o.rs_first || (o.rs_every && entry % o.rs_every == 0) || InRanges(o.rs_ticks, recTick));
 }

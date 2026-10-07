@@ -174,9 +174,11 @@ static void WritePending() {
 // For ssb-hook's panic hook too: the tick it died in becomes the last record.
 static void CloseWindow();
 static void CloseHw();
+static void CloseProbe();
 inline void __cdecl Flush() {
     CloseWindow();
     CloseHw();
+    CloseProbe();
     WritePending();
     if (g_file && fflush(g_file)) g_writeStatus |= 2;
 }
@@ -508,11 +510,137 @@ static bool LoadCensus() {
     return true;
 }
 
+// ---- contact probe (`probe_ticks`) -----------------------------------------------
+// On the listed rec_ticks, from the human Body's step entry to the Player
+// tick's return, the step's obstacle path is logged into <stem>.readset (all
+// floats as IEEE hex, bit-exact). ebx is the Body throughout the step
+// SG+0x98360. Listing: capstone of ssb-decomp/bin/Supreme_Game.dll.
+//   SG+0x9877D/0x9959B/0x99D68, after each `call SG+0x9BEF0` (candidate query;
+//     eax = the Body's candidate vector [Body+0x1E4]): `probe_query` with the
+//     finder [Body+0x4DC] (query count +0x28, re-query count +0x24, cached box
+//     +0x8, result vector [+0x4]), the octree's visit epoch [[finder]+0x2C]
+//     and both vectors' entries entry:object:mark(+0xC):dynamic(+0x10):class.
+//   SG+0x9972E, `call SG+0x3570`: `probe_call` with Body+0x10, the candidate
+//     ([ebp-0x24] iterator), the current slot [esp] and previous slot [esp+0xC],
+//     8 points (24 floats) each.
+//   SG+0x99733, after it: `probe_box`, the swept box [ebp-0xC90] (6 floats).
+//   SG+0x9974D, SG+0x4010 returned nonzero: `probe_broadphase_hit`.
+//   SG+0x9976D, after `call SG+0x3A40`: `probe_contact` point [ebp-0x384],
+//     normal [ebp-0x1D8], depth [ebp-0x1CC].
+inline uint32_t g_probeBody = 0;
+inline std::string g_probeText;
+static SafetyHookMid g_probeHooks[7]{};
+
+static std::string Words(uint32_t a, uint32_t n) {
+    std::string s;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t v = 0;
+        s += SafeCopy(a + 4 * i, &v, 4) ? std::format("{}{:08x}", i ? "," : "", v) : std::string(i ? ",?" : "?");
+    }
+    return s;
+}
+
+static std::string ClassOf(uint32_t obj) {
+    const std::string c = census::ObjectClass(census::LiveMem{}, obj);
+    return c.empty() ? "-" : c;
+}
+
+// A std::vector of octree entries (begin +4, end +8).
+static std::string Entries(uint32_t vec) {
+    const uint32_t b = SafeRead32(vec + 4), e = SafeRead32(vec + 8);
+    if (e < b || e - b > 4 * 1024 || (e - b) & 3) return "?";
+    std::string s;
+    for (uint32_t p = b; p < e; p += 4) {
+        const uint32_t entry = SafeRead32(p), obj = SafeRead32(entry + 8);
+        uint8_t dyn = 0xFF;
+        SafeCopy(entry + 0x10, &dyn, 1);
+        s += std::format("{}{:#x}:{:#x}:{}:{}:{}", p == b ? "" : " ", entry, obj, SafeRead32(entry + 0xC), dyn,
+                         ClassOf(obj));
+    }
+    return s;
+}
+
+template <uint32_t Site>
+static void ProbeQuery(SafetyHookContext& ctx) {
+    if (!g_probeBody || ctx.ebx != g_probeBody) return;
+    const uint32_t finder = SafeRead32(ctx.ebx + 0x4DC);
+    g_probeText += std::format(
+        "probe_query {:#x} epoch {} queries {} requeries {} finder_box {} finder [{}] body [{}]\n", Site,
+        SafeRead32(SafeRead32(finder) + 0x2C), SafeRead32(finder + 0x28), SafeRead32(finder + 0x24),
+        Words(finder + 8, 6), Entries(SafeRead32(finder + 4)), Entries((uint32_t)ctx.eax));
+}
+
+static void ProbeCall(SafetyHookContext& ctx) {
+    if (!g_probeBody || ctx.ebx != g_probeBody) return;
+    const uint32_t cur = SafeRead32((uint32_t)ctx.esp), prev = SafeRead32((uint32_t)ctx.esp + 0xC);
+    const uint32_t entry = SafeRead32(SafeRead32((uint32_t)ctx.ebp - 0x24)), obj = SafeRead32(entry + 8);
+    g_probeText += std::format("probe_call f10 {} entry {:#x} obj {:#x} class {} cur {:#x} {} prev {:#x} {}\n",
+                               SafeRead32(ctx.ebx + 0x10), entry, obj, ClassOf(obj), cur, Words(cur, 24), prev,
+                               Words(prev, 24));
+}
+
+static void ProbeBox(SafetyHookContext& ctx) {
+    if (g_probeBody && ctx.ebx == g_probeBody)
+        g_probeText += "probe_box " + Words((uint32_t)ctx.ebp - 0xC90, 6) + "\n";
+}
+
+static void ProbeHit(SafetyHookContext& ctx) {
+    if (g_probeBody && ctx.ebx == g_probeBody) g_probeText += "probe_broadphase_hit\n";
+}
+
+static void ProbeContact(SafetyHookContext& ctx) {
+    if (!g_probeBody || ctx.ebx != g_probeBody) return;
+    const uint32_t bp = (uint32_t)ctx.ebp;
+    g_probeText += std::format("probe_contact point {} normal {} depth {}\n", Words(bp - 0x384, 3),
+                               Words(bp - 0x1D8, 3), Words(bp - 0x1CC, 1));
+}
+
+static void OpenProbe(uint32_t body) {
+    g_probeBody = body;
+    g_probeText = std::format("probe_window {} {} body {:#x}\n", g_ticks, Rec().rec_tick, body);
+}
+
+static void CloseProbe() {
+    if (!g_probeBody) return;
+    g_probeBody = 0;
+    g_readsetFile.Put(g_probeText);
+    g_probeText.clear();
+}
+
+static bool InstallProbe(uint8_t* sg) {
+    static constexpr uint8_t kQ1[] = {0x50, 0x8B, 0xCB, 0xE8};               // push eax; mov ecx,ebx; call
+    static constexpr uint8_t kQ2[] = {0x8B, 0xC8, 0x89, 0x85};               // mov ecx,eax; mov [ebp-..],eax
+    static constexpr uint8_t kQ3[] = {0xC7, 0x83, 0x74, 0x03, 0x00, 0x00};   // mov dword [ebx+0x374],0
+    static constexpr uint8_t kCall[] = {0xE8, 0x3D, 0x9E, 0xF6, 0xFF};       // call SG+0x3570
+    static constexpr uint8_t kBox[] = {0x8B, 0x55, 0xEC, 0x8B, 0x4A, 0x08};  // mov edx,[ebp-14h]; mov ecx,[edx+8]
+    static constexpr uint8_t kHit[] = {0x8D, 0x8D, 0x34, 0xFE, 0xFF, 0xFF};  // lea ecx,[ebp-1CCh]
+    static constexpr uint8_t kCt[] = {0x8B, 0x8D, 0x28, 0xFE, 0xFF, 0xFF};   // mov ecx,[ebp-1D8h]
+    if (!GameAddresses::ValidateCode("Supreme_Game.dll+0x9877D (probe)", sg + 0x9877D, kQ1) ||
+        !GameAddresses::ValidateCode("Supreme_Game.dll+0x9959B (probe)", sg + 0x9959B, kQ2) ||
+        !GameAddresses::ValidateCode("Supreme_Game.dll+0x99D68 (probe)", sg + 0x99D68, kQ3) ||
+        !GameAddresses::ValidateCode("Supreme_Game.dll+0x9972E (probe)", sg + 0x9972E, kCall) ||
+        !GameAddresses::ValidateCode("Supreme_Game.dll+0x99733 (probe)", sg + 0x99733, kBox) ||
+        !GameAddresses::ValidateCode("Supreme_Game.dll+0x9974D (probe)", sg + 0x9974D, kHit) ||
+        !GameAddresses::ValidateCode("Supreme_Game.dll+0x9976D (probe)", sg + 0x9976D, kCt))
+        return false;
+    g_probeHooks[0] = CreateMidHook<ProbeQuery<0x9877D>>(sg + 0x9877D);
+    g_probeHooks[1] = CreateMidHook<ProbeQuery<0x9959B>>(sg + 0x9959B);
+    g_probeHooks[2] = CreateMidHook<ProbeQuery<0x99D68>>(sg + 0x99D68);
+    g_probeHooks[3] = CreateMidHook<ProbeCall>(sg + 0x9972E);
+    g_probeHooks[4] = CreateMidHook<ProbeBox>(sg + 0x99733);
+    g_probeHooks[5] = CreateMidHook<ProbeHit>(sg + 0x9974D);
+    g_probeHooks[6] = CreateMidHook<ProbeContact>(sg + 0x9976D);
+    for (auto& h : g_probeHooks)
+        if (!h) return false;
+    return true;
+}
+
 // ---- the trace file ----------------------------------------------------------
 static void Close() {
     if (!g_file) return;
     CloseWindow();
     CloseHw();
+    CloseProbe();
     WritePending();
     ssbhook::Arm(nullptr);
     // The late file section and the trailer, then checked publication.
@@ -584,7 +712,7 @@ static void Open(TasSharedState* s, uint16_t cw, uint32_t firstPreCalls) {
         const std::string meta = std::format("trace {}\ncensus_options {}\n", path.substr(path.find_last_of('\\') + 1),
                                              g_census.summary) + h;
         if (!g_censusFile.Open(stem + ".census", "SSBCENSUS 1\n" + meta)) Log("trace: FAILED to create the census file");
-        if ((g_census.readset || !g_census.hw.empty()) && !g_readsetFile.Open(stem + ".readset", "SSBREADSET 1\n" + meta))
+        if (census::WantsReadset(g_census) && !g_readsetFile.Open(stem + ".readset", "SSBREADSET 1\n" + meta))
             Log("trace: FAILED to create the read-set file");
     }
     h += "regions\n" + g_regionsText;
@@ -623,6 +751,7 @@ inline void OnCycle(TasSharedState* s, bool played, uint32_t pos, int32_t recTic
     if (!g_on) return;
     CloseWindow();   // the post point did not come
     CloseHw();
+    CloseProbe();
     if (!played || (g_file && g_gen != s->arm_generation)) Close();
     if (!played) return;
     // A real cumulative sample at this arm's first PRE, before Player work.
@@ -664,6 +793,7 @@ static void PostHook(SafetyHookContext& ctx) {
     if (t.human_ticks < 255) t.human_ticks++;
     CloseWindow();
     CloseHw();
+    CloseProbe();
     if (t.flags & FLAG_POST) return;   // a second human tick in one cycle: the checker rejects it
     t.flags |= FLAG_POST;
     t.cw_post = g_hookFpuControlWord;
@@ -690,6 +820,7 @@ static void EntryHook(SafetyHookContext& ctx) {
     const uint32_t entry = g_entries++;
     if (g_readsetFile.on() && census::ReadsetAt(g_census, entry, t.rec_tick)) OpenWindow(ctx.ecx, t.player);
     if (g_readsetFile.on() && census::InRanges(g_census.hw_ticks, t.rec_tick)) OpenHw(ctx.ecx, t.player);
+    if (g_readsetFile.on() && census::InRanges(g_census.probe_ticks, t.rec_tick)) OpenProbe(ctx.ecx);
 }
 
 // SG+0x84160, Player::~Player (stores the Player vtables first): ecx = this.
@@ -725,6 +856,7 @@ inline void Uninstall() {
     g_entryHook = {};
     g_dtorHook = {};
     g_srandHook = {};
+    for (auto& h : g_probeHooks) h = {};
     g_openA = {};
     g_openW = {};
     Close();
@@ -848,6 +980,11 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
     if (openA && openW) {
         g_openA = safetyhook::create_inline(openA, (void*)&OpenAHook);
         g_openW = safetyhook::create_inline(openW, (void*)&OpenWHook);
+    }
+    if (!g_census.probe_ticks.empty() && !InstallProbe(sg)) {
+        Log("trace: the contact probe could not be installed");
+        Uninstall();
+        return false;
     }
     if (!g_postHook || !g_entryHook || !g_dtorHook || !g_srandHook || !g_openA || !g_openW) {
         Log("trace: a trace hook could not be installed");
