@@ -13,6 +13,7 @@
 #include "caves/finish_cave.hpp"
 #include "ssb_hook.hpp"
 #include "trace.hpp"
+#include "caves/call_trace.hpp"
 
 static TasSharedMemory g_sharedMem;
 static GameAddresses g_addr;
@@ -101,6 +102,8 @@ bool run() {
         RollbackAll();
         return false;
     }
+    // Research only: on when call_trace_sites.txt sits next to the DLL.
+    calltrace::Install(g_addr);
 
     // Deferred until Main_Menu.dll loads.
     menustate::Install(g_addr, state);
@@ -159,6 +162,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_DETACH && reserved) {
         crash::MarkCleanExit();
         trace::Flush();
+        calltrace::Flush();
     }
     return TRUE;
 }
