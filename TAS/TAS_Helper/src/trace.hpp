@@ -51,7 +51,7 @@ struct TickRecord {
     uint8_t flags;              // FLAG_*
     uint8_t cheat;              // Cheat_Flags::game_cheat [SG+0x1D5394] at pre
     uint32_t hook_calls;        // ssb-hook detour calls so far (0 without it)
-    uint32_t region_ok;         // bit i: region i was readable
+    uint32_t region_ok;         // bit i: region i (< 32) was readable; past 32 only bases[i] != 0 says so
     uint32_t player;            // the human Player at pre ([replayObj+0x84])
     uint8_t human_ticks;        // human Player ticks (post hook hits) this cycle
     uint8_t entry_calls;        // SG+0x98360 entries with the human Body this cycle
@@ -69,6 +69,10 @@ struct TickRecord {
 static_assert(sizeof(TickRecord) == 64);
 // The Trailer, "SSBTEND\n", u32 records, u32 status (0 = every write
 // succeeded), is written by traceprovenance::OpenedFiles::CloseAndPublish.
+// Region lines per trace. region_ok has bits for the first 32 only; every
+// region's base (0 = unreadable or not captured this tick; the record is
+// zeroed per tick) is the readability record, so ssb-trace reads both formats.
+constexpr size_t kMaxRegions = 64;
 constexpr uint8_t FLAG_POST = 1;            // the post point was captured
 constexpr uint8_t FLAG_ENTRY = 2;           // the entry point was captured
 constexpr uint8_t FLAG_PLAYER_FREED = 4;    // the trace's Player was destroyed (SG+0x84160) by now
@@ -116,7 +120,12 @@ inline uint32_t g_tracePlayer = 0;  // the human Player at the trace's first tic
 inline volatile bool g_playerFreed = false;
 inline volatile uint32_t g_srandCalls = 0;
 inline std::vector<std::string> g_srandLog;
-static SafetyHookMid g_postHook{}, g_entryHook{}, g_dtorHook{}, g_srandHook{};
+// msvcrt rand state at each Fence2 constructor entry (SG+0x1D2B0). Fence2
+// jitters every segment with rand() (SG+0x1F6D0), so fence placement follows
+// the launch's rand state; the header's `fence2_rand` line records it
+// (ssb-recomp re/m0-census-classes.md, contact verdict).
+inline std::vector<uint32_t> g_fenceRand;
+static SafetyHookMid g_postHook{}, g_entryHook{}, g_dtorHook{}, g_srandHook{}, g_fenceHook{};
 static SafetyHookInline g_openA{}, g_openW{};
 
 inline TickRecord& Rec() { return *reinterpret_cast<TickRecord*>(g_rec.data()); }
@@ -360,7 +369,7 @@ static void CensusSample(Point point) {
     std::vector<census::View> views;
     for (size_t i = 0; i < g_regions.size(); i++) {
         const Region& r = g_regions[i];
-        if (r.point == point && (Rec().region_ok >> i & 1)) views.push_back({r.name.c_str(), Block() + r.at, r.len});
+        if (r.point == point && Bases()[i]) views.push_back({r.name.c_str(), Block() + r.at, r.len});
     }
     const std::string tag = std::format("{} {} {}", g_ticks, Rec().rec_tick, kPointName[point]);
     const uint32_t n = census::Scan(g_censusFile, g_heaps, tag, views);
@@ -702,6 +711,9 @@ static void Open(TasSharedState* s, uint16_t cw, uint32_t firstPreCalls) {
     h += std::format("expect_mxcsr {:#06x}\n", g_env.mxcsr);
     h += g_env.force_seed ? std::format("srand_forced {}\n", g_env.seed) : std::string("srand_forced none\n");
     for (auto& l : g_srandLog) h += "srand_call " + l + "\n";
+    h += std::format("fence2_rand {}", g_fenceRand.size());
+    for (size_t i = 0; i < g_fenceRand.size(); i++) h += std::format("{}{:#010x}", i ? "," : " ", g_fenceRand[i]);
+    h += "\n";
     h += std::format("sg_base {:#010x}\n", (uint32_t)(uintptr_t)g_sg);
     h += std::format("cpu {}\n", CpuName());
     h += std::format("ssb_hook {}\n", ssbhook::g_summary);
@@ -735,7 +747,7 @@ static void Capture(Point point, uint32_t player) {
         const uint32_t p = RegionAddr(r, player);
         uint8_t* dst = block + r.at;
         if (p && SafeCopy(p, dst, r.len)) {
-            t.region_ok |= 1u << i;
+            if (i < 32) t.region_ok |= 1u << i;
             bases[i] = p;
         } else {
             memset(dst, 0, r.len);
@@ -851,7 +863,12 @@ static void SrandHook(SafetyHookContext& ctx) {
     Log("trace: srand " + line);
 }
 
+static void FenceHook(SafetyHookContext&) {
+    if (g_fenceRand.size() < 256) g_fenceRand.push_back(*HoldRand());
+}
+
 inline void Uninstall() {
+    g_fenceHook = {};
     g_postHook = {};
     g_entryHook = {};
     g_dtorHook = {};
@@ -944,8 +961,8 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
         regions.push_back(r);
     }
     fclose(f);
-    if (!ok || regions.empty() || regions.size() > 32) {
-        Log("trace: ssb_trace_regions.txt unusable (bad lines, none, or over 32)");
+    if (!ok || regions.empty() || regions.size() > kMaxRegions) {
+        Log(std::format("trace: ssb_trace_regions.txt unusable (bad lines, none, or over {})", kMaxRegions));
         return false;
     }
     if (!g_env.have) {
@@ -961,7 +978,8 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
     if (!GameAddresses::ValidateCode("Supreme_Game.dll+0x84C43 (player tick epilogue)", sg + 0x84C43, kEpilogue) ||
         !GameAddresses::ValidateCode("Supreme_Game.dll+0x98360 (physics step)", sg + 0x98360, kStep) ||
         !GameAddresses::ValidateCode("Supreme_Game.dll+0x84160 (Player::~Player)", sg + 0x84160, kDtor) ||
-        !GameAddresses::ValidateCode("Supreme_Game.dll+0x84167 (Player::~Player)", sg + 0x84167, kDtorTail)) {
+        !GameAddresses::ValidateCode("Supreme_Game.dll+0x84167 (Player::~Player)", sg + 0x84167, kDtorTail) ||
+        !GameAddresses::ValidateCode("Supreme_Game.dll+0x1D2B0 (Fence2 ctor)", sg + 0x1D2B0, kDtor)) {
         return false;
     }
     g_state = state;
@@ -977,6 +995,7 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
     g_entryHook = CreateMidHook<EntryHook>(sg + 0x98360);
     g_dtorHook = CreateMidHook<DtorHook>(sg + 0x84160);
     g_srandHook = CreateMidHook<SrandHook>(g_srand);
+    g_fenceHook = CreateMidHook<FenceHook>(sg + 0x1D2B0);
     if (openA && openW) {
         g_openA = safetyhook::create_inline(openA, (void*)&OpenAHook);
         g_openW = safetyhook::create_inline(openW, (void*)&OpenWHook);
@@ -986,7 +1005,7 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
         Uninstall();
         return false;
     }
-    if (!g_postHook || !g_entryHook || !g_dtorHook || !g_srandHook || !g_openA || !g_openW) {
+    if (!g_postHook || !g_entryHook || !g_dtorHook || !g_srandHook || !g_fenceHook || !g_openA || !g_openW) {
         Log("trace: a trace hook could not be installed");
         Uninstall();
         return false;

@@ -573,7 +573,11 @@ the human Body's physics step (`Supreme_Game+0x98360`) and at the human Player
 tick's return (`Supreme_Game+0x84C43`), the x87 control word and MXCSR at
 each, the CRT rand state, the Player's lifecycle (`Player::~Player` hook) and
 provenance (module, msvcrt and opened-file hashes), ending in a completion
-trailer (`trace.hpp`). Recording uses `.ssbtrace.pending`; only a successful
+trailer (`trace.hpp`). Up to 64 regions: `region_ok` has bits for the first
+32, every region's base (0 = unreadable) records the rest. The header's
+`fence2_rand` line lists the CRT rand state at each `Fence2` constructor
+(`Supreme_Game+0x1D2B0`): fence segments are rand-jittered at load, so their
+placement is per-launch input. Recording uses `.ssbtrace.pending`; only a successful
 flush and close publish `.ssbtrace`, without replacing an existing trace.
 The header's `hook_calls_before_first_record` samples the cumulative detour
 counter at the first real PRE, before Player work; it does not reset that
