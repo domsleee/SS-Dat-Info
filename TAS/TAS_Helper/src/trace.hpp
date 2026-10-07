@@ -8,6 +8,8 @@
 #include "renderer_info.hpp"
 #include "ssb_hook.hpp"
 #include "trace_provenance.hpp"
+#include "census.hpp"
+#include "readset.hpp"
 #include <intrin.h>
 #include <psapi.h>
 #include <cstdio>
@@ -33,6 +35,9 @@
 // physics step (SG+0x98360) entered. chain: base[>off]...[+off], base
 // `player`, `exe` or a module name; each >off follows the pointer at +off, a
 // final +off is added. The byte classes after len are read by the diff only.
+// With ssb_census.txt too, the pointer census and physics read-set sidecars
+// (<stem>.census, <stem>.readset) are written beside each trace; see the
+// "census" section below. Without it nothing here changes.
 namespace trace {
 
 #pragma pack(push, 1)
@@ -167,7 +172,11 @@ static void WritePending() {
 }
 
 // For ssb-hook's panic hook too: the tick it died in becomes the last record.
+static void CloseWindow();
+static void CloseHw();
 inline void __cdecl Flush() {
+    CloseWindow();
+    CloseHw();
     WritePending();
     if (g_file && fflush(g_file)) g_writeStatus |= 2;
 }
@@ -304,9 +313,206 @@ static std::string ModuleLines() {
     return out;
 }
 
+// The region's first byte now, or 0.
+static uint32_t RegionAddr(const Region& r, uint32_t player) {
+    uint32_t p = r.player ? player : r.base_va;
+    for (uint32_t d : r.derefs) p = p ? SafeRead32(p + d) : 0;
+    return p ? p + r.add : 0;
+}
+
+// ---- census (census.hpp, readset.hpp) ------------------------------------------
+// ssb_census.txt turns it on. Census: at record 0, every `every`th record and
+// the first tick the human Body steps, each point's regions as captured go
+// through census::Scan into <stem>.census. Read-set: on the selected physics
+// entries, the heap blocks the regions point at (live, at ENTRY), minus blocks
+// holding a captured region, plus `guard` ranges, are page-guarded until the
+// human Player tick returns (or, failing that, the next cycle); `hw` watches
+// do the same with data breakpoints on `hw_ticks`. Output: <stem>.readset.
+inline census::Options g_census;
+inline bool g_censusWanted = false;
+inline census::Sidecar g_censusFile, g_readsetFile;
+inline census::HeapIndex g_heaps;
+inline uint32_t g_firstEntry = UINT32_MAX, g_entries = 0, g_samples = 0, g_ptrs = 0, g_windows = 0;
+inline bool g_window = false, g_hwWindow = false;
+inline uint32_t g_windowRecord = 0;
+inline int32_t g_windowTick = 0;
+inline std::string g_windowText, g_hwText;
+inline LARGE_INTEGER g_windowStart{};
+inline uint64_t g_windowSetupUs = 0;
+inline readset::ArmResult g_armResult;
+constexpr const char* kPointName[] = {"pre", "post", "entry"};
+
+static uint64_t MicrosSince(LARGE_INTEGER from) {
+    static LARGE_INTEGER f{};
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (uint64_t)((now.QuadPart - from.QuadPart) * 1000000 / f.QuadPart);
+}
+
+static void CensusSample(Point point) {
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+    g_heaps.Build();
+    const uint64_t walk = MicrosSince(t0);
+    std::vector<census::View> views;
+    for (size_t i = 0; i < g_regions.size(); i++) {
+        const Region& r = g_regions[i];
+        if (r.point == point && (Rec().region_ok >> i & 1)) views.push_back({r.name.c_str(), Block() + r.at, r.len});
+    }
+    const std::string tag = std::format("{} {} {}", g_ticks, Rec().rec_tick, kPointName[point]);
+    const uint32_t n = census::Scan(g_censusFile, g_heaps, tag, views);
+    g_censusFile.Line(std::format("sample {} regions {} heap_blocks {}{} walk_us {} us {} ptrs {}", tag, views.size(),
+                                  g_heaps.blocks.size(), g_heaps.truncated ? " truncated" : "", walk,
+                                  MicrosSince(t0), n));
+    g_samples++;
+    g_ptrs += n;
+}
+
+// The base of a `guard`/`hw` chain.
+static uint32_t SpecBase(const census::Spec& s, uint32_t body, uint32_t player) {
+    if (s.chain.base == "body") return body;
+    if (s.chain.base == "player") return player;
+    return (uint32_t)(uintptr_t)GetModuleHandleA(s.chain.base == "exe" ? nullptr : s.chain.base.c_str());
+}
+
+// At the human Body's physics step entry, on the game thread.
+static void OpenWindow(uint32_t body, uint32_t player) {
+    QueryPerformanceCounter(&g_windowStart);
+    g_windowRecord = g_ticks;
+    g_windowTick = Rec().rec_tick;
+    g_heaps.Build();
+    std::vector<std::pair<uint32_t, uint32_t>> captured;   // [a, b) of every region now
+    for (const Region& r : g_regions)
+        if (const uint32_t a = RegionAddr(r, player)) captured.push_back({a, a + r.len});
+    std::vector<readset::Span> spans;
+    std::map<uint32_t, uint32_t> spanOf;   // block base -> span
+    std::string text;
+    const census::LiveMem mem;
+    std::vector<uint8_t> buf;
+    for (const Region& r : g_regions) {
+        const uint32_t a = RegionAddr(r, player);
+        buf.assign(r.len, 0);
+        if (!a || !SafeCopy(a, buf.data(), r.len)) continue;
+        for (uint32_t off = 0; off + 4 <= r.len; off += 4) {
+            uint32_t v;
+            memcpy(&v, &buf[off], 4);
+            const census::Block* b = v >= 0x10000 ? g_heaps.Find(v) : nullptr;
+            if (!b) continue;
+            const uint32_t end = b->base + (b->size ? b->size : 1);
+            bool holdsRegion = false;
+            for (const auto& [lo, hi] : captured) holdsRegion |= lo < end && b->base < hi;
+            if (holdsRegion) continue;   // its target is captured: nothing to learn
+            auto [it, fresh] = spanOf.try_emplace(b->base, (uint32_t)spans.size());
+            if (fresh) {
+                spans.push_back({b->base, end});
+                const std::string cls = census::ObjectClass(mem, b->base);
+                text += std::format("span {} {:#x} {:#x} {} {}\n", it->second, b->base, b->size, g_heaps.Name(b->heap),
+                                    cls.empty() ? "-" : cls);
+            }
+            text += std::format("ref {} {} {:#x} {:#x}\n", it->second, r.name, off, v);
+        }
+    }
+    for (const census::Spec& g : g_census.guards) {
+        const uint32_t a = census::Resolve(g.chain, SpecBase(g, body, player));
+        if (!a) {
+            text += "guard_unresolved " + g.text + "\n";
+            continue;
+        }
+        text += std::format("span {} {:#x} {:#x} guard {}\n", spans.size(), a, g.len, g.text);
+        spans.push_back({a, a + g.len});
+    }
+    g_windowText = text;
+    g_windowSetupUs = MicrosSince(g_windowStart);
+    QueryPerformanceCounter(&g_windowStart);
+    g_armResult = readset::Arm(spans, g_census.max_exceptions);
+    g_window = true;
+}
+
+// At the human Player tick's return, or on any other way out. Never leaves a
+// page guarded.
+static void CloseWindow() {
+    if (!g_window) return;
+    readset::Disarm();
+    g_window = false;
+    const uint64_t us = MicrosSince(g_windowStart);
+    g_windows++;
+    g_readsetFile.Line(std::format(
+        "window {} {} pages {} skipped {}{} exceptions {} hits {} ignored {} other_thread {} site_overflow {} "
+        "bailed {} setup_us {} us {}",
+        g_windowRecord, g_windowTick, g_armResult.pages, g_armResult.skipped,
+        g_armResult.truncated ? " truncated" : "", (uint32_t)readset::g_exceptions, (uint32_t)readset::g_hits,
+        (uint32_t)readset::g_ignored, (uint32_t)readset::g_other, (uint32_t)readset::g_siteOverflow,
+        (uint32_t)readset::g_bailed, g_windowSetupUs, us));
+    g_readsetFile.Put(g_windowText);
+    for (const readset::Site& s : readset::Sites()) {
+        g_readsetFile.Line(std::format("site {} {} {} {} {} {:#x} {}", s.span,
+                                       s.tid == readset::g_gameTid ? "game" : "other", s.tid,
+                                       census::ModRva(s.eip), s.write ? "w" : "r", s.addr, s.count));
+    }
+    if (readset::g_bailed)
+        Log(std::format("trace: read-set window at record {} bailed out after {} guard exceptions", g_windowRecord,
+                        (uint32_t)readset::g_exceptions));
+}
+
+static void OpenHw(uint32_t body, uint32_t player) {
+    uint32_t addrs[4] = {};
+    const uint32_t n = (uint32_t)g_census.hw.size();
+    std::string text;
+    bool ok = true;
+    for (uint32_t i = 0; i < n; i++) {
+        const census::Spec& s = g_census.hw[i];
+        addrs[i] = census::Resolve(s.chain, SpecBase(s, body, player));
+        ok &= addrs[i] && !(addrs[i] & 3);
+        text += std::format("hwwatch {} {} {:#x}\n", i, s.text, addrs[i]);
+    }
+    g_hwWindow = ok && readset::HwArm(addrs, n);
+    g_hwText = std::format("hwwindow {} {} armed {}\n", g_ticks, Rec().rec_tick, g_hwWindow ? 1 : 0) + text;
+    if (!g_hwWindow) {
+        g_readsetFile.Put(g_hwText);
+        Log(std::format("trace: data breakpoints not armed at record {}", g_ticks));
+    }
+}
+
+static void CloseHw() {
+    if (!g_hwWindow) return;
+    readset::HwDisarm();
+    g_hwWindow = false;
+    g_readsetFile.Put(g_hwText);
+    for (const readset::HwHit& h : readset::HwHits()) {
+        g_readsetFile.Line(std::format("hw {} {} {} {:#x} {:#x} {}", h.dr, h.tid, census::ModRva(h.eip), h.addr,
+                                       h.value, h.unread ? "unread" : h.changed ? "changed" : "same"));
+    }
+    if (readset::g_hwOverflow) g_readsetFile.Line(std::format("hw_overflow {}", (uint32_t)readset::g_hwOverflow));
+}
+
+// ssb_census.txt; false when present but malformed.
+static bool LoadCensus() {
+    FILE* f = nullptr;
+    g_censusWanted = !fopen_s(&f, (ssbhook::DllDir() + "ssb_census.txt").c_str(), "rb") && f;
+    if (!g_censusWanted) return true;
+    std::string text;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f))) text.append(buf, n);
+    fclose(f);
+    std::string err;
+    if (!census::ParseOptions(text, &g_census, &err)) {
+        Log("trace: ssb_census.txt: " + err);
+        return false;
+    }
+    if ((g_census.readset || !g_census.hw.empty()) && !readset::Install()) {
+        Log("trace: the read-set exception handler could not be installed");
+        return false;
+    }
+    return true;
+}
+
 // ---- the trace file ----------------------------------------------------------
 static void Close() {
     if (!g_file) return;
+    CloseWindow();
+    CloseHw();
     WritePending();
     ssbhook::Arm(nullptr);
     // The late file section and the trailer, then checked publication.
@@ -317,6 +523,11 @@ static void Close() {
                     "ssb-hook calls {}, FPU violations {}, write status {}{}",
                     g_gen, g_ticks, g_noPost, g_maxOthers, ssbhook::Calls(), ssbhook::FpuViolations(),
                     g_writeStatus, g_writeStatus ? " (FAILED: the trace is incomplete)" : ""));
+    if (g_censusFile.on() || g_readsetFile.on()) {
+        const uint32_t cs = g_censusFile.Close(), rs = g_readsetFile.Close();
+        Log(std::format("trace: census {} samples, {} pointers, status {}; read-set {} windows, status {}", g_samples,
+                        g_ptrs, cs, g_windows, rs));
+    }
 }
 
 static void Open(TasSharedState* s, uint16_t cw, uint32_t firstPreCalls) {
@@ -326,6 +537,8 @@ static void Open(TasSharedState* s, uint16_t cw, uint32_t firstPreCalls) {
     g_pending = false;
     g_tracePlayer = s->player_ptr;
     g_playerFreed = false;
+    g_firstEntry = UINT32_MAX;
+    g_entries = g_samples = g_ptrs = g_windows = 0;
     for (Region& r : g_regions) {
         r.base_va = r.player ? 0
                   : (uint32_t)(uintptr_t)GetModuleHandleA(r.base == "exe" ? nullptr : r.base.c_str());
@@ -366,6 +579,14 @@ static void Open(TasSharedState* s, uint16_t cw, uint32_t firstPreCalls) {
     h += std::format("ssb_hook {}\n", ssbhook::g_summary);
     h += ModuleLines();
     h += g_opened.Snapshot();
+    if (g_censusWanted) {
+        const std::string stem = path.substr(0, path.size() - strlen(".ssbtrace"));
+        const std::string meta = std::format("trace {}\ncensus_options {}\n", path.substr(path.find_last_of('\\') + 1),
+                                             g_census.summary) + h;
+        if (!g_censusFile.Open(stem + ".census", "SSBCENSUS 1\n" + meta)) Log("trace: FAILED to create the census file");
+        if ((g_census.readset || !g_census.hw.empty()) && !g_readsetFile.Open(stem + ".readset", "SSBREADSET 1\n" + meta))
+            Log("trace: FAILED to create the read-set file");
+    }
     h += "regions\n" + g_regionsText;
     const uint32_t n = (uint32_t)h.size();
     Put("SSBTRACE 3\n", 11);
@@ -383,23 +604,25 @@ static void Capture(Point point, uint32_t player) {
     for (size_t i = 0; i < g_regions.size(); i++) {
         const Region& r = g_regions[i];
         if (r.point != point) continue;
-        uint32_t p = r.player ? player : r.base_va;
-        for (uint32_t d : r.derefs) p = p ? SafeRead32(p + d) : 0;
+        const uint32_t p = RegionAddr(r, player);
         uint8_t* dst = block + r.at;
-        if (p && SafeCopy(p + r.add, dst, r.len)) {
+        if (p && SafeCopy(p, dst, r.len)) {
             t.region_ok |= 1u << i;
-            bases[i] = p + r.add;
+            bases[i] = p;
         } else {
             memset(dst, 0, r.len);
             bases[i] = 0;
         }
     }
+    if (g_censusFile.on() && census::CensusAt(g_census, g_ticks, g_firstEntry, point == PRE)) CensusSample(point);
 }
 
 // The cycle cave, every tick, last. `played`: this cycle ran a PLAY tick.
 inline void OnCycle(TasSharedState* s, bool played, uint32_t pos, int32_t recTick, uint8_t mask,
                     uint16_t cw, uint32_t csr) {
     if (!g_on) return;
+    CloseWindow();   // the post point did not come
+    CloseHw();
     if (!played || (g_file && g_gen != s->arm_generation)) Close();
     if (!played) return;
     // A real cumulative sample at this arm's first PRE, before Player work.
@@ -439,6 +662,8 @@ static void PostHook(SafetyHookContext& ctx) {
         return;
     }
     if (t.human_ticks < 255) t.human_ticks++;
+    CloseWindow();
+    CloseHw();
     if (t.flags & FLAG_POST) return;   // a second human tick in one cycle: the checker rejects it
     t.flags |= FLAG_POST;
     t.cw_post = g_hookFpuControlWord;
@@ -460,7 +685,11 @@ static void EntryHook(SafetyHookContext& ctx) {
     t.flags |= FLAG_ENTRY;
     t.cw_entry = g_hookFpuControlWord;
     t.mxcsr_entry = g_hookMxcsr;
+    if (g_firstEntry == UINT32_MAX) g_firstEntry = g_ticks;
     Capture(ENTRY, t.player);
+    const uint32_t entry = g_entries++;
+    if (g_readsetFile.on() && census::ReadsetAt(g_census, entry, t.rec_tick)) OpenWindow(ctx.ecx, t.player);
+    if (g_readsetFile.on() && census::InRanges(g_census.hw_ticks, t.rec_tick)) OpenHw(ctx.ecx, t.player);
 }
 
 // SG+0x84160, Player::~Player (stores the Player vtables first): ecx = this.
@@ -499,6 +728,7 @@ inline void Uninstall() {
     g_openA = {};
     g_openW = {};
     Close();
+    readset::Uninstall();
     g_on = false;
     g_regions.clear();
     g_state = nullptr;
@@ -517,22 +747,12 @@ static bool ParseRegion(const std::string& line, Region* r) {
     else if (!strcmp(point, "post")) r->point = POST;
     else if (!strcmp(point, "entry")) r->point = ENTRY;
     else return false;
-    std::string c = chain;
-    size_t i = c.find_first_of(">+");
-    r->base = c.substr(0, i);
+    census::Chain c;
+    if (!census::ParseChain(chain, &c)) return false;   // +off comes last
+    r->base = c.base;
     r->player = r->base == "player";
-    while (i != std::string::npos) {
-        const char op = c[i];
-        const size_t j = c.find_first_of(">+", i + 1);
-        const uint32_t v = ParseNum(c.substr(i + 1, j == std::string::npos ? j : j - i - 1));
-        if (op == '>') {
-            if (r->add) return false;   // +off comes last
-            r->derefs.push_back(v);
-        } else {
-            r->add = v;
-        }
-        i = j;
-    }
+    r->derefs = c.derefs;
+    r->add = c.add;
     r->len = ParseNum(len);
     return r->len > 0 && !r->base.empty();
 }
@@ -566,7 +786,11 @@ inline bool LoadEnv() {
 inline bool Install(GameAddresses& addr, TasSharedState* state) {
     g_dir = ssbhook::DllDir();
     FILE* f = nullptr;
-    if (fopen_s(&f, (g_dir + "ssb_trace_regions.txt").c_str(), "rb") || !f) return true;
+    if (fopen_s(&f, (g_dir + "ssb_trace_regions.txt").c_str(), "rb") || !f) {
+        if (GetFileAttributesA((g_dir + "ssb_census.txt").c_str()) == INVALID_FILE_ATTRIBUTES) return true;
+        Log("trace: ssb_census.txt needs ssb_trace_regions.txt");
+        return false;
+    }
     char line[512];
     std::vector<Region> regions;
     std::string text;
@@ -596,7 +820,7 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
         Log("trace: ssb_trace_env.txt (the expected FPU environment) is missing");
         return false;
     }
-    if (!ResolveMsvcrt()) return false;
+    if (!ResolveMsvcrt() || !LoadCensus()) return false;
     auto sg = (uint8_t*)addr.sg;
     static constexpr uint8_t kEpilogue[] = {0x5F, 0x5E, 0x5B, 0x83, 0xC4, 0x18, 0xC3};   // pop edi/esi/ebx; add esp,18; ret
     static constexpr uint8_t kStep[] = {0x55, 0x8B, 0xEC, 0x6A, 0xFF, 0x68};             // push ebp; mov ebp,esp; push -1; push imm
@@ -631,6 +855,7 @@ inline bool Install(GameAddresses& addr, TasSharedState* state) {
         return false;
     }
     g_on = true;
+    if (g_censusWanted) Log("trace: census on: " + g_census.summary);
     Log(std::format("trace: on, {} regions, {} bytes per tick, expect CW {:#06x} MXCSR {:#06x}, srand {}, into {}traces",
                     g_regions.size(), g_rec.size(), g_env.cw, g_env.mxcsr,
                     g_env.force_seed ? std::format("forced {}", g_env.seed) : std::string("free"), g_dir));

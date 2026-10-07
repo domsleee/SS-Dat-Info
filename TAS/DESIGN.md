@@ -582,6 +582,24 @@ SafetyHook inline hooks at initialization (`ssb_hook.hpp`). Requested but not
 installable (either feature) fails `TAS_Initialize`. `fpu_safe_hook.hpp` also
 saves and restores MXCSR, which SafetyHook doesn't (`tests/test_fpu_safe_hook.cpp`).
 
+A third, diagnostic file, `ssb_census.txt` (needs the trace), adds two
+sidecars per trace, published like it (`.pending`, then rename). `.census`
+(`census.hpp`): on record 0, every Nth record and the first physics tick,
+every pointer-looking dword of the captured regions with its target: module,
+RVA, section and vtable; heap (msvcrt's or another), block base and size from
+`HeapWalk`; other private memory; mapped; the game thread's stack; plus the
+MSVC RTTI class there. `.readset` (`readset.hpp`): on chosen physics ticks,
+from the human Body's step entry to the human Player tick's return, the heap
+blocks those pointers reach (blocks holding a captured region excluded) and
+any `guard` ranges get `PAGE_GUARD`; a vectored handler logs each hit by
+thread, EIP and span, re-arms through the trap flag, bails out past
+`max_exceptions` and never leaves a page guarded. `hw` lines put up to four
+read/write data breakpoints on the game thread (set by raising a private
+exception whose handler edits DR0-3/DR7). The handler allocates nothing: it
+can run inside the heap manager. `tests/test_census.cpp` and
+`tests/test_readset.cpp` exercise all of it in-process. Timing changes
+(about 13 us per guard hit) are the cost; the trace itself is unchanged.
+
 ### Crashes
 
 DLL calls into game code (`Kernel::Time::Current`, the menu's
